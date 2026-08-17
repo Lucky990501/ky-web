@@ -36,6 +36,8 @@ $branch = Get-ConfigValue 'GITHUB_BRANCH' 'main'
 $releaseRoot = Get-ConfigValue 'SERVER_RELEASE_ROOT' (Get-ConfigValue 'SERVER_SITE_ROOT' "/var/www/$projectName")
 $siteHost = Get-ConfigValue 'HEALTHCHECK_HOST' (Get-ConfigValue 'SERVER_SITE_HOST')
 $healthUrl = Get-ConfigValue 'HEALTHCHECK_URL' $(if ($siteHost) { "https://$siteHost/" } else { '' })
+$originHealthUrl = Get-ConfigValue 'ORIGIN_HEALTHCHECK_URL'
+$originHealthHost = Get-ConfigValue 'ORIGIN_HEALTHCHECK_HOST' $siteHost
 
 $required = @{
   SERVER_HOST = $serverHost; SERVER_USER = $serverUser; SERVER_PORT = $serverPort
@@ -47,7 +49,7 @@ if ($missing) { throw "Deploy config is missing: $($missing -join ', ')" }
 
 $commit = (git -C $ProjectRoot rev-parse --verify HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the current Git commit.' }
-foreach ($shellValue in @($projectName, $branch, $commit, $stageDir, $githubRemote, $releaseRoot, $siteHost, $healthUrl)) {
+foreach ($shellValue in @($projectName, $branch, $commit, $stageDir, $githubRemote, $releaseRoot, $siteHost, $healthUrl, $originHealthUrl, $originHealthHost)) {
   if ($shellValue -match "['`r`n]") { throw 'Deployment settings cannot contain quotes or line breaks.' }
 }
 
@@ -85,6 +87,8 @@ github_remote='__GITHUB_REMOTE__'
 release_root='__RELEASE_ROOT__'
 health_url='__HEALTH_URL__'
 health_host='__HEALTH_HOST__'
+origin_health_url='__ORIGIN_HEALTH_URL__'
+origin_health_host='__ORIGIN_HEALTH_HOST__'
 repo="$stage_dir/__PROJECT_NAME__.git"
 release="$release_root/releases/$commit"
 previous_release="$(readlink -f "$release_root/current" 2>/dev/null || true)"
@@ -107,10 +111,24 @@ rollback() {
 
 if ! nginx -t; then rollback; exit 1; fi
 systemctl reload nginx
-if [ -n "$health_host" ]; then
-  status="$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve "$health_host:443:127.0.0.1" "$health_url")"
+if [ -n "$origin_health_url" ]; then
+  if ! status="$(curl -k -sS -o /dev/null -w '%{http_code}' -H "Host: $origin_health_host" "$origin_health_url")"; then
+    rollback
+    echo 'Origin health check connection failed.' >&2
+    exit 1
+  fi
+elif [ -n "$health_host" ]; then
+  if ! status="$(curl -k -sS -o /dev/null -w '%{http_code}' --resolve "$health_host:443:127.0.0.1" "$health_url")"; then
+    rollback
+    echo 'Health check connection failed.' >&2
+    exit 1
+  fi
 else
-  status="$(curl -k -sS -o /dev/null -w '%{http_code}' "$health_url")"
+  if ! status="$(curl -k -sS -o /dev/null -w '%{http_code}' "$health_url")"; then
+    rollback
+    echo 'Health check connection failed.' >&2
+    exit 1
+  fi
 fi
 if [ "$status" != "200" ]; then
   rollback
@@ -123,7 +141,8 @@ echo "Published commit $commit and deployed $health_url (HTTP $status)"
 $values = @{
   '__STAGE_DIR__' = $stageDir; '__BUNDLE_NAME__' = $bundleName; '__BRANCH__' = $branch
   '__COMMIT__' = $commit; '__GITHUB_REMOTE__' = $githubRemote; '__RELEASE_ROOT__' = $releaseRoot
-  '__HEALTH_URL__' = $healthUrl; '__HEALTH_HOST__' = $siteHost; '__PROJECT_NAME__' = $projectName
+  '__HEALTH_URL__' = $healthUrl; '__HEALTH_HOST__' = $siteHost; '__ORIGIN_HEALTH_URL__' = $originHealthUrl
+  '__ORIGIN_HEALTH_HOST__' = $originHealthHost; '__PROJECT_NAME__' = $projectName
 }
 foreach ($token in $values.Keys) { $serverScript = $serverScript.Replace($token, $values[$token]) }
 $encodedServerScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($serverScript))

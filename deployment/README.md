@@ -12,6 +12,6 @@
 ## 约定
 
 - 每次发布用 commit SHA 创建独立目录，避免覆盖线上版本。
-- `HEALTHCHECK_HOST` 会让服务器本机以 HTTPS 校验指定虚拟主机；不设置时直接访问 `HEALTHCHECK_URL`。
+- `HEALTHCHECK_URL` 是公开访问地址。若 HTTPS 由 CDN、负载均衡或反向代理终止，设置 `ORIGIN_HEALTHCHECK_URL=http://127.0.0.1/` 与 `ORIGIN_HEALTHCHECK_HOST`，发布时会校验服务器本机的 Nginx，而不会错误依赖本机 443 端口。
 - `SERVER_SITE_ROOT`、`SERVER_SITE_HOST` 是旧项目兼容字段；新项目使用 `SERVER_RELEASE_ROOT`、`HEALTHCHECK_HOST`。
 - 本框架管理静态 Nginx 发布。Node、Docker、后端服务可沿用 Git 中转，但应另行定义服务重启与健康检查策略。
