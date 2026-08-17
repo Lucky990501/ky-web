@@ -74,7 +74,7 @@ previous_release="$(readlink -f "$site_root/current" 2>/dev/null || true)"
 
 mkdir -p "$stage_dir" "$site_root/releases" "$release"
 git init --bare "$repo" >/dev/null 2>&1 || true
-git --git-dir="$repo" fetch "$bundle_name" "$branch:refs/heads/$branch"
+git --git-dir="$repo" fetch "$stage_dir/$bundle_name" "$branch:refs/heads/$branch"
 git --git-dir="$repo" push "$github_remote" "refs/heads/$branch:refs/heads/$branch"
 git --work-tree="$release" --git-dir="$repo" checkout -f "$branch" -- .
 
