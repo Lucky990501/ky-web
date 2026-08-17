@@ -1,0 +1,190 @@
+/* Logo and Chinese typography corrections. */
+.brand { gap: 0; }
+.brand img { display: block; width: 104px; height: auto; }
+header[data-theme="light"] .brand img,
+header[data-theme="dark"] .brand img { filter: none; }
+
+h1, h2, h3 { letter-spacing: -0.035em; }
+.path-title { width: 46%; max-width: 540px; }
+.arch-copy { width: 48%; max-width: 590px; }
+.path-title h2 {
+  max-inline-size: 9em;
+  font-size: clamp(44px, 3.7vw, 64px);
+  text-wrap: balance;
+  white-space: normal;
+}
+.arch-copy h2 {
+  max-inline-size: 9.3em;
+  font-size: clamp(44px, 3.55vw, 62px);
+  text-wrap: balance;
+  white-space: normal;
+}
+.industry-copy h2 { max-inline-size: 540px; text-wrap: balance; }
+
+.meta { font-size: 11px; }
+.kicker { font-size: 11px; }
+.steps small, .layers span, .industry-core i { font-size: 11px; }
+.steps p, .days span { font-size: 13px; }
+.problems p { font-size: 16px; }
+
+@media (max-width: 840px) {
+  .brand img { width: 92px; }
+  .path-title, .arch-copy, .industry-copy { width: 100%; max-width: none; }
+  .path-title h2, .arch-copy h2 { white-space: normal; font-size: clamp(41px, 12vw, 66px); }
+  .industry-copy h2 { max-inline-size: none; }
+}
+
+/* A fixed black navigation bar and a shared vertical baseline for content. */
+header {
+  background: #07111f;
+  color: #fff;
+  border-bottom: 0;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .20);
+}
+header[data-theme="dark"] { background: #07111f; }
+header::after { display: none; }
+header > * { position: relative; z-index: 1; }
+
+/* The hero map uses the same central alignment as the chapter-two text/list pair. */
+.visible .map { transform: translateY(-45%); }
+
+.steps { top: calc(50vh + 25px); bottom: auto; }
+.days, .layers { top: calc(50vh + 25px); }
+.orbit { top: calc(50vh + 25px); }
+.visible .steps, .visible .days, .visible .layers, .visible .orbit {
+  transform: translateY(-50%);
+}
+
+@media (max-width: 840px) {
+  .visible .map { transform: none; }
+  .steps, .days, .layers, .orbit { top: auto; transform: none; }
+  .visible .steps, .visible .days, .visible .layers, .visible .orbit { transform: none; }
+}
+
+/* Hover labels: a restrained colour block sweeps in behind the active label. */
+nav a, .meta, .kicker, .tag,
+.problems article, .steps article, .days li, .layers div, .industry {
+  background-image: linear-gradient(90deg, rgba(81, 190, 229, .22), rgba(81, 190, 229, .07));
+  background-position: left center;
+  background-repeat: no-repeat;
+  background-size: 0 100%;
+  transition: background-size .34s cubic-bezier(.2, .75, .2, 1), color .24s ease, transform .24s ease;
+}
+nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
+.problems article:hover, .steps article:hover, .days li:hover, .layers div:hover, .industry:hover {
+  background-size: 100% 100%;
+}
+.problems article:hover, .steps article:hover, .days li:hover, .layers div:hover { transform: translateX(8px); }
+.dark .problems article:hover, .dark .steps article:hover, .dark .layers div:hover { color: #fff; }
+
+/* Remove the old permanent selection fills; the hover sweep is now the single colour state. */
+.steps .selected {
+  margin: 0;
+  padding-left: 55px;
+  background-color: transparent;
+  background-image: linear-gradient(90deg, rgba(81, 190, 229, .22), rgba(81, 190, 229, .07));
+  background-position: left center;
+  background-repeat: no-repeat;
+  background-size: 0 100%;
+}
+.steps .selected b { left: 0; }
+.layers .hot {
+  margin: 0;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(214, 236, 245, .2);
+  background-color: transparent;
+  background-image: linear-gradient(90deg, rgba(81, 190, 229, .22), rgba(81, 190, 229, .07));
+  background-position: left center;
+  background-repeat: no-repeat;
+  background-size: 0 100%;
+}
+.steps .selected:hover, .layers .hot:hover { background-size: 100% 100%; }
+.industry.active {
+  background-color: rgba(255, 255, 255, .80);
+  box-shadow: none;
+  transform: none;
+}
+.industry.active:hover { transform: translateY(-3px); box-shadow: 0 11px 23px rgba(18, 87, 115, .12); }
+
+/* Final chapter: a business-diagnosis signal, replacing the decorative countdown. */
+.cta {
+  background:
+    radial-gradient(circle at 76% 49%, rgba(38, 131, 168, .32), transparent 17%),
+    radial-gradient(circle at 69% 55%, rgba(27, 107, 143, .18), transparent 31%),
+    #07111f;
+}
+.cta-copy h2 { font-size: clamp(46px, 4.5vw, 70px); }
+.contact-signal {
+  position: absolute;
+  top: calc(50vh + 25px);
+  right: max(50px, calc((100vw - 1180px) / 2));
+  width: min(38vw, 500px);
+  aspect-ratio: 1;
+  color: #a9e5fa;
+  transform: translateY(-50%);
+}
+.visible .contact-signal { transform: translateY(-50%); }
+.signal-ring, .signal-orbit { position: absolute; border: 1px solid rgba(122, 207, 237, .26); }
+.signal-ring { border-radius: 50%; }
+.ring-one { inset: 5%; animation: signal-pulse 4.5s ease-in-out infinite; }
+.ring-two { inset: 20%; border-color: rgba(122, 207, 237, .18); animation: signal-pulse 4.5s 1s ease-in-out infinite; }
+.ring-three { inset: 34%; border-color: rgba(122, 207, 237, .15); animation: signal-pulse 4.5s 2s ease-in-out infinite; }
+.signal-orbit { left: 50%; top: 50%; width: 78%; height: 35%; border-left: 0; border-right: 0; border-radius: 50%; transform: translate(-50%, -50%) rotate(-24deg); }
+.orbit-two { width: 60%; height: 68%; transform: translate(-50%, -50%) rotate(43deg); opacity: .52; }
+.signal-core {
+  position: absolute;
+  inset: 37%;
+  display: grid;
+  place-content: center;
+  border: 1px solid rgba(154, 225, 247, .68);
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, rgba(83, 192, 230, .62), rgba(13, 77, 107, .88));
+  box-shadow: 0 0 48px rgba(42, 177, 224, .25), inset 0 0 32px rgba(190, 239, 255, .12);
+  text-align: center;
+}
+.signal-core small { font-size: 8px; font-weight: 800; letter-spacing: .12em; }
+.signal-core strong { margin: 3px 0; color: #fff; font-size: clamp(28px, 3vw, 48px); letter-spacing: -.08em; }
+.signal-core i { color: #d8f4fc; font-size: 10px; font-style: normal; white-space: nowrap; }
+.signal-note { position: absolute; padding: 8px 10px; border: 1px solid rgba(162, 222, 241, .3); background: rgba(6, 28, 43, .46); color: #b9e9f8; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+.note-one { left: 0; top: 20%; }
+.note-two { right: 0; top: 30%; }
+.note-three { bottom: 17%; left: 12%; }
+@keyframes signal-pulse { 50% { opacity: .42; transform: scale(.96); } }
+
+.back-top {
+  position: fixed;
+  z-index: 12;
+  right: 30px;
+  bottom: 28px;
+  display: grid;
+  width: 48px;
+  min-height: 48px;
+  place-content: center;
+  border: 1px solid rgba(139, 211, 237, .45);
+  border-radius: 4px;
+  background: rgba(7, 17, 31, .86);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, .18);
+  color: #fff;
+  opacity: 0;
+  pointer-events: none;
+  text-align: center;
+  text-decoration: none;
+  transform: translateY(12px);
+  transition: opacity .25s ease, transform .25s ease, background .25s ease;
+}
+.back-top span { font-size: 17px; line-height: 1; }
+.back-top small { margin-top: 2px; font-size: 8px; font-weight: 800; letter-spacing: .08em; }
+.back-top.is-visible { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.back-top:hover { background: #167ca4; }
+.back-top:focus-visible { opacity: 1; pointer-events: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ring-one, .ring-two, .ring-three { animation: none; }
+  .back-top, nav a, .meta, .kicker, .tag, .problems article, .steps article, .days li, .layers div, .industry { transition: none; }
+}
+
+@media (max-width: 840px) {
+  .contact-signal { position: relative; top: auto; right: auto; width: min(86vw, 430px); margin: 42px auto 16px; transform: none; }
+  .visible .contact-signal { transform: none; }
+  .back-top { right: 18px; bottom: 18px; }
+}
