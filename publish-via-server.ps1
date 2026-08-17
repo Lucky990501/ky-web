@@ -31,6 +31,7 @@ $bundleDir = Join-Path $projectRoot '.deploy-bridge'
 $bundlePath = Join-Path $bundleDir "ky-web-$commit.bundle"
 $remote = "$($deployConfig.SERVER_USER)@$($deployConfig.SERVER_HOST)"
 $sshBase = @('-i', $deployConfig.SERVER_SSH_KEY_PATH, '-p', $deployConfig.SERVER_PORT)
+$scpBase = @('-i', $deployConfig.SERVER_SSH_KEY_PATH, '-P', $deployConfig.SERVER_PORT)
 
 Write-Host "Bridge commit: $commit"
 Write-Host "Route: local Git bundle -> ${remote}:$($deployConfig.SERVER_STAGE_DIR) -> GitHub"
@@ -48,7 +49,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Unable to create the Git bundle.' }
 
 & ssh @sshBase $remote "mkdir -p '$($deployConfig.SERVER_STAGE_DIR)'"
 if ($LASTEXITCODE -ne 0) { throw 'Unable to create the server bridge directory.' }
-& scp @sshBase $bundlePath "${remote}:$($deployConfig.SERVER_STAGE_DIR)/"
+& scp @scpBase $bundlePath "${remote}:$($deployConfig.SERVER_STAGE_DIR)/"
 if ($LASTEXITCODE -ne 0) { throw 'Unable to upload the Git bundle to the server.' }
 
 $serverCommand = "set -e; cd '$($deployConfig.SERVER_STAGE_DIR)'; git init --bare ky-web.git >/dev/null 2>&1 || true; git --git-dir=ky-web.git fetch '$($bundlePath | Split-Path -Leaf)' '$branch':refs/heads/'$branch'; git --git-dir=ky-web.git push '$($deployConfig.GITHUB_REMOTE)' refs/heads/'$branch':refs/heads/'$branch'"
