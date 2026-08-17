@@ -1,0 +1,4 @@
+# Local deployment credentials and transient release artifacts
+.deploy-secrets.local
+.deploy-bridge/
+*.bundle
