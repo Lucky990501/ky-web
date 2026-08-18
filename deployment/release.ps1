@@ -180,10 +180,11 @@ ln -sfn "$release" "$release_root/current"
 if [ ! -f "$admin_auth_file" ]; then
   admin_password="$(openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 24)"
   printf 'admin:%s\n' "$(openssl passwd -6 "$admin_password")" > "$admin_auth_file"
-  chmod 640 "$admin_auth_file"
   printf '%s\n' "$admin_password" > "$admin_initial_password"
   chmod 600 "$admin_initial_password"
 fi
+chown root:www-data "$admin_auth_file"
+chmod 640 "$admin_auth_file"
 
 if [ -f "$release/admin_backend/server.py" ]; then
   mkdir -p /var/lib/kunyuan-admin
