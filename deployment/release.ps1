@@ -38,11 +38,19 @@ $siteHost = Get-ConfigValue 'HEALTHCHECK_HOST' (Get-ConfigValue 'SERVER_SITE_HOS
 $healthUrl = Get-ConfigValue 'HEALTHCHECK_URL' $(if ($siteHost) { "https://$siteHost/" } else { '' })
 $originHealthUrl = Get-ConfigValue 'ORIGIN_HEALTHCHECK_URL'
 $originHealthHost = Get-ConfigValue 'ORIGIN_HEALTHCHECK_HOST' $siteHost
+$nginxSiteName = Get-ConfigValue 'NGINX_SITE_NAME' $projectName
+$nginxServerName = Get-ConfigValue 'NGINX_SERVER_NAME' $siteHost
+$nginxCertificate = Get-ConfigValue 'NGINX_TLS_CERTIFICATE'
+$nginxCertificateKey = Get-ConfigValue 'NGINX_TLS_CERTIFICATE_KEY'
+$nginxSslOptions = Get-ConfigValue 'NGINX_SSL_OPTIONS' '/etc/letsencrypt/options-ssl-nginx.conf'
+$nginxDhParam = Get-ConfigValue 'NGINX_SSL_DHPARAM' '/etc/letsencrypt/ssl-dhparams.pem'
 
 $required = @{
   SERVER_HOST = $serverHost; SERVER_USER = $serverUser; SERVER_PORT = $serverPort
   SERVER_SSH_KEY_PATH = $keyPath; GITHUB_REMOTE = $githubRemote; GITHUB_BRANCH = $branch
-  SERVER_RELEASE_ROOT = $releaseRoot; HEALTHCHECK_URL = $healthUrl
+  SERVER_RELEASE_ROOT = $releaseRoot; HEALTHCHECK_URL = $healthUrl; NGINX_SITE_NAME = $nginxSiteName
+  NGINX_SERVER_NAME = $nginxServerName; NGINX_TLS_CERTIFICATE = $nginxCertificate
+  NGINX_TLS_CERTIFICATE_KEY = $nginxCertificateKey
 }
 $missing = @($required.GetEnumerator() | Where-Object { [string]::IsNullOrWhiteSpace($_.Value) } | ForEach-Object Key)
 if ($missing) { throw "Deploy config is missing: $($missing -join ', ')" }
@@ -51,6 +59,11 @@ $commit = (git -C $ProjectRoot rev-parse --verify HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the current Git commit.' }
 foreach ($shellValue in @($projectName, $branch, $commit, $stageDir, $githubRemote, $releaseRoot, $siteHost, $healthUrl, $originHealthUrl, $originHealthHost)) {
   if ($shellValue -match "['`r`n]") { throw 'Deployment settings cannot contain quotes or line breaks.' }
+}
+if ($nginxSiteName -notmatch '^[A-Za-z0-9_-]+$') { throw 'NGINX_SITE_NAME may contain only letters, numbers, hyphens, and underscores.' }
+if ($nginxServerName -notmatch '^[A-Za-z0-9.-]+( [A-Za-z0-9.-]+)*$') { throw 'NGINX_SERVER_NAME must contain valid domain names separated by spaces.' }
+foreach ($nginxPath in @($nginxCertificate, $nginxCertificateKey, $nginxSslOptions, $nginxDhParam)) {
+  if ($nginxPath -notmatch '^/[A-Za-z0-9._/-]+$') { throw 'Nginx file paths must be absolute paths without special characters.' }
 }
 
 $bundleDir = Join-Path $ProjectRoot '.deploy-bridge'
@@ -77,6 +90,40 @@ if ($LASTEXITCODE -ne 0) { throw 'Unable to create the server bridge directory.'
 & scp @scpBase $bundlePath "${remote}:$stageDir/"
 if ($LASTEXITCODE -ne 0) { throw 'Unable to upload the Git bundle to the server.' }
 
+$nginxConfig = @'
+server {
+    listen 80;
+    server_name __NGINX_SERVER_NAME__;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name __NGINX_SERVER_NAME__;
+    root __RELEASE_ROOT__/current;
+    index index.html;
+
+    ssl_certificate __NGINX_CERTIFICATE__;
+    ssl_certificate_key __NGINX_CERTIFICATE_KEY__;
+    include __NGINX_SSL_OPTIONS__;
+    ssl_dhparam __NGINX_DHPARAM__;
+
+    location / { try_files $uri $uri/ /index.html; }
+    location ~* \.(?:css|js|png|jpg|jpeg|gif|svg|ico|webp|woff2?) {
+        expires 7d;
+        add_header Cache-Control "public";
+        try_files $uri =404;
+    }
+}
+'@
+$nginxConfig = $nginxConfig.Replace('__NGINX_SERVER_NAME__', $nginxServerName)
+$nginxConfig = $nginxConfig.Replace('__RELEASE_ROOT__', $releaseRoot)
+$nginxConfig = $nginxConfig.Replace('__NGINX_CERTIFICATE__', $nginxCertificate)
+$nginxConfig = $nginxConfig.Replace('__NGINX_CERTIFICATE_KEY__', $nginxCertificateKey)
+$nginxConfig = $nginxConfig.Replace('__NGINX_SSL_OPTIONS__', $nginxSslOptions)
+$nginxConfig = $nginxConfig.Replace('__NGINX_DHPARAM__', $nginxDhParam)
+$encodedNginxConfig = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($nginxConfig))
+
 $serverScript = @'
 set -e
 stage_dir='__STAGE_DIR__'
@@ -89,9 +136,14 @@ health_url='__HEALTH_URL__'
 health_host='__HEALTH_HOST__'
 origin_health_url='__ORIGIN_HEALTH_URL__'
 origin_health_host='__ORIGIN_HEALTH_HOST__'
+nginx_site_name='__NGINX_SITE_NAME__'
+nginx_config_b64='__NGINX_CONFIG_B64__'
 repo="$stage_dir/__PROJECT_NAME__.git"
 release="$release_root/releases/$commit"
 previous_release="$(readlink -f "$release_root/current" 2>/dev/null || true)"
+nginx_config="/etc/nginx/sites-available/$nginx_site_name.conf"
+nginx_enabled="/etc/nginx/sites-enabled/$nginx_site_name.conf"
+nginx_backup=''
 
 mkdir -p "$stage_dir" "$release_root/releases" "$release"
 git init --bare "$repo" >/dev/null 2>&1 || true
@@ -102,6 +154,22 @@ find "$release_root" -type d -exec chmod 755 {} \;
 find "$release_root" -type f -exec chmod 644 {} \;
 ln -sfn "$release" "$release_root/current"
 
+restore_nginx_config() {
+  if [ -n "$nginx_backup" ] && [ -f "$nginx_backup" ]; then
+    cp -a "$nginx_backup" "$nginx_config"
+  else
+    rm -f "$nginx_config" "$nginx_enabled"
+  fi
+  nginx -t >/dev/null && systemctl reload nginx || true
+}
+
+if [ -f "$nginx_config" ]; then
+  nginx_backup="$(mktemp)"
+  cp -a "$nginx_config" "$nginx_backup"
+fi
+echo "$nginx_config_b64" | base64 -d > "$nginx_config"
+ln -sfn "../sites-available/$nginx_site_name.conf" "$nginx_enabled"
+
 rollback() {
   if [ -n "$previous_release" ] && [ -d "$previous_release" ]; then
     ln -sfn "$previous_release" "$release_root/current"
@@ -109,7 +177,7 @@ rollback() {
   fi
 }
 
-if ! nginx -t; then rollback; exit 1; fi
+if ! nginx -t; then restore_nginx_config; rollback; exit 1; fi
 systemctl reload nginx
 if [ -n "$origin_health_url" ]; then
   if ! status="$(curl -k -sS -o /dev/null -w '%{http_code}' -H "Host: $origin_health_host" "$origin_health_url")"; then
@@ -143,6 +211,7 @@ $values = @{
   '__COMMIT__' = $commit; '__GITHUB_REMOTE__' = $githubRemote; '__RELEASE_ROOT__' = $releaseRoot
   '__HEALTH_URL__' = $healthUrl; '__HEALTH_HOST__' = $siteHost; '__ORIGIN_HEALTH_URL__' = $originHealthUrl
   '__ORIGIN_HEALTH_HOST__' = $originHealthHost; '__PROJECT_NAME__' = $projectName
+  '__NGINX_SITE_NAME__' = $nginxSiteName; '__NGINX_CONFIG_B64__' = $encodedNginxConfig
 }
 foreach ($token in $values.Keys) { $serverScript = $serverScript.Replace($token, $values[$token]) }
 $encodedServerScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($serverScript))
