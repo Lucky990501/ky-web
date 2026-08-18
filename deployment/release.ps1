@@ -109,6 +109,27 @@ server {
     ssl_dhparam __NGINX_DHPARAM__;
 
     location / { try_files $uri $uri/ /index.html; }
+
+    location = /api/site-content {
+        proxy_pass http://127.0.0.1:18780;
+        proxy_set_header Host $host;
+    }
+    location = /api/leads {
+        client_max_body_size 32k;
+        proxy_pass http://127.0.0.1:18780;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+    location = /admin { return 301 /admin/; }
+    location ^~ /admin/ {
+        auth_basic "Kunyuan AI Admin";
+        auth_basic_user_file /etc/nginx/.htpasswd-kunyuan-admin;
+        proxy_pass http://127.0.0.1:18780;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
     location ~* \.(?:css|js|png|jpg|jpeg|gif|svg|ico|webp|woff2?) {
         expires 7d;
         add_header Cache-Control "public";
@@ -144,6 +165,8 @@ previous_release="$(readlink -f "$release_root/current" 2>/dev/null || true)"
 nginx_config="/etc/nginx/sites-available/$nginx_site_name.conf"
 nginx_enabled="/etc/nginx/sites-enabled/$nginx_site_name.conf"
 nginx_backup=''
+admin_auth_file='/etc/nginx/.htpasswd-kunyuan-admin'
+admin_initial_password='/root/.kunyuan-admin-initial-password'
 
 mkdir -p "$stage_dir" "$release_root/releases" "$release"
 git init --bare "$repo" >/dev/null 2>&1 || true
@@ -153,6 +176,61 @@ git --work-tree="$release" --git-dir="$repo" checkout -f "$branch" -- .
 find "$release_root" -type d -exec chmod 755 {} \;
 find "$release_root" -type f -exec chmod 644 {} \;
 ln -sfn "$release" "$release_root/current"
+
+if [ ! -f "$admin_auth_file" ]; then
+  admin_password="$(openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 24)"
+  printf 'admin:%s\n' "$(openssl passwd -6 "$admin_password")" > "$admin_auth_file"
+  chmod 640 "$admin_auth_file"
+  printf '%s\n' "$admin_password" > "$admin_initial_password"
+  chmod 600 "$admin_initial_password"
+fi
+
+if [ -f "$release/admin_backend/server.py" ]; then
+  mkdir -p /var/lib/kunyuan-admin
+  cat > /etc/systemd/system/kunyuan-admin.service <<'SERVICE'
+[Unit]
+Description=Kunyuan AI administration service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/kunyuan-ai/current/admin_backend
+Environment=KUNYUAN_ADMIN_DB=/var/lib/kunyuan-admin/admin.db
+Environment=KUNYUAN_ADMIN_DEPLOY_SCRIPT=/usr/local/sbin/kunyuan-admin-deploy
+Environment=KUNYUAN_ADMIN_PORT=18780
+ExecStart=/usr/bin/python3 /var/www/kunyuan-ai/current/admin_backend/server.py
+Restart=always
+RestartSec=3
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+  cat > /usr/local/sbin/kunyuan-admin-deploy <<'ADMIN_DEPLOY'
+#!/usr/bin/env bash
+set -euo pipefail
+repo='__STAGE_DIR__/__PROJECT_NAME__.git'
+release_root='__RELEASE_ROOT__'
+branch='__BRANCH__'
+commit="$(git --git-dir="$repo" rev-parse "refs/heads/$branch")"
+release="$release_root/releases/$commit"
+mkdir -p "$release"
+git --work-tree="$release" --git-dir="$repo" checkout -f "$branch" -- .
+find "$release_root" -type d -exec chmod 755 {} \;
+find "$release_root" -type f -exec chmod 644 {} \;
+ln -sfn "$release" "$release_root/current"
+systemctl restart kunyuan-admin
+nginx -t
+systemctl reload nginx
+curl -k -sS -o /dev/null -w 'HTTP %{http_code}\n' -H 'Host: __HEALTH_HOST__' https://127.0.0.1/
+ADMIN_DEPLOY
+  chmod 700 /usr/local/sbin/kunyuan-admin-deploy
+  systemctl daemon-reload
+  systemctl enable kunyuan-admin >/dev/null
+  systemctl restart kunyuan-admin
+fi
 
 restore_nginx_config() {
   if [ -n "$nginx_backup" ] && [ -f "$nginx_backup" ]; then
