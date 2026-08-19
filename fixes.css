@@ -188,3 +188,36 @@ nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
   .visible .contact-signal { transform: none; }
   .back-top { right: 18px; bottom: 18px; }
 }
+
+/* Public account and support concierge. */
+.header-actions { display: flex; align-items: center; gap: 12px; }
+.account-button { min-height: 42px; padding: 0 12px; border: 1px solid rgba(163, 222, 243, .36); border-radius: 7px; background: transparent; color: inherit; font: 700 12px inherit; cursor: pointer; transition: .2s background, .2s border-color; }
+.account-button:hover { border-color: #73c8e8; background: rgba(118, 204, 236, .13); }
+.chat-widget { position: fixed; z-index: 14; right: 30px; bottom: 96px; }
+.chat-trigger { display: inline-flex; min-height: 48px; align-items: center; gap: 9px; padding: 0 15px; border: 1px solid rgba(139, 211, 237, .5); border-radius: 4px; background: #0b2436; box-shadow: 0 14px 32px rgba(0, 0, 0, .22); color: #fff; font: 800 12px inherit; cursor: pointer; transition: transform .2s ease, background .2s ease; }
+.chat-trigger:hover { background: #12688d; transform: translateY(-2px); }
+.chat-trigger b { color: #8edff8; font-size: 15px; font-weight: 500; }
+.chat-dot { width: 7px; height: 7px; border-radius: 50%; background: #6be0a8; box-shadow: 0 0 0 4px rgba(107, 224, 168, .12); }
+.chat-panel { position: absolute; right: 0; bottom: 60px; display: grid; width: min(380px, calc(100vw - 32px)); overflow: hidden; border: 1px solid rgba(151, 215, 239, .35); border-radius: 12px; background: #081827; box-shadow: 0 24px 72px rgba(0, 0, 0, .4); color: #eaf7fb; }
+.chat-panel[hidden] { display: none; }
+.chat-panel header { position: static; display: flex; height: auto; align-items: flex-start; padding: 18px; background: linear-gradient(135deg, #0d6e96, #0b2940); box-shadow: none; }
+.chat-panel header small, .chat-panel header em { display: block; color: #b6e5f5; font-size: 9px; font-style: normal; letter-spacing: .1em; }
+.chat-panel header strong { display: block; margin: 4px 0; font-size: 16px; }
+.chat-close { width: 36px; height: 36px; margin-left: auto; border: 1px solid rgba(214, 244, 254, .3); border-radius: 50%; background: transparent; color: #fff; font-size: 21px; cursor: pointer; }
+.chat-messages { display: grid; max-height: 330px; min-height: 190px; gap: 10px; overflow: auto; padding: 16px; }
+.chat-message { max-width: 86%; padding: 10px 12px; border-radius: 5px 12px 12px; background: #143149; color: #dff3fa; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+.chat-message.user { justify-self: end; border-radius: 12px 5px 12px 12px; background: #1179a3; color: #fff; }
+.chat-suggestions { display: flex; gap: 8px; overflow: auto; padding: 0 16px 12px; }
+.chat-suggestions button { flex: 0 0 auto; border: 1px solid rgba(133, 209, 238, .3); border-radius: 999px; background: transparent; color: #bdeafb; font: 700 10px inherit; padding: 7px 9px; cursor: pointer; }
+.chat-panel form { display: grid; grid-template-columns: 1fr 42px; gap: 8px; padding: 13px 16px 16px; border-top: 1px solid rgba(168, 222, 242, .16); }
+.chat-panel textarea { min-height: 42px; max-height: 100px; padding: 10px; border-color: rgba(170, 222, 242, .25); background: #0d2538; color: #fff; resize: none; }
+.chat-panel form button { border: 0; border-radius: 7px; background: #68c8e8; color: #062033; font-size: 19px; cursor: pointer; }
+.auth-modal { width: min(510px, calc(100% - 32px)); }
+.auth-modal h2 { font-size: 31px; }
+.auth-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 4px; margin: 22px 0 14px; border-radius: 8px; background: #eaf2f5; }
+.auth-switch button { border: 0; border-radius: 5px; background: transparent; color: #5b6c78; font: 800 12px inherit; padding: 9px; cursor: pointer; }
+.auth-switch button.active { background: #fff; box-shadow: 0 2px 6px rgba(26, 61, 78, .13); color: #0b628b; }
+.auth-modal[data-mode="login"] .auth-profile { display: none; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (prefers-reduced-motion: reduce) { .chat-trigger, .account-button { transition: none; } }
+@media (max-width: 840px) { .header-actions { gap: 7px; } .account-button { min-height: 40px; padding: 0 9px; } .header-actions .button { padding: 10px 11px; font-size: 11px; } .chat-widget { right: 18px; bottom: 78px; } .chat-panel { bottom: 58px; } }

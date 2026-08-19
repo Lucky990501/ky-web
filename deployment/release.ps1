@@ -110,15 +110,12 @@ server {
 
     location / { try_files $uri $uri/ /index.html; }
 
-    location = /api/site-content {
-        proxy_pass http://127.0.0.1:18780;
-        proxy_set_header Host $host;
-    }
-    location = /api/leads {
-        client_max_body_size 32k;
+    location ^~ /api/ {
+        client_max_body_size 64k;
         proxy_pass http://127.0.0.1:18780;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
     location ^~ /api/auth/ {
         client_max_body_size 32k;
@@ -215,7 +212,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/var/www/kunyuan-ai/current/admin_backend
+WorkingDirectory=__RELEASE_ROOT__/current/admin_backend
 Environment=KUNYUAN_ADMIN_DB=/var/lib/kunyuan-admin/admin.db
 EnvironmentFile=/etc/kunyuan-admin/database.env
 Environment=KUNYUAN_LEGACY_SQLITE_DB=/var/lib/kunyuan-admin/admin.db
@@ -223,7 +220,7 @@ Environment=KUNYUAN_MIGRATE_LEGACY_SQLITE=1
 Environment=KUNYUAN_DATABASE_MIGRATION_MARKER=/var/lib/kunyuan-admin/postgres-migration.done
 Environment=KUNYUAN_ADMIN_DEPLOY_SCRIPT=/usr/local/sbin/kunyuan-admin-deploy
 Environment=KUNYUAN_ADMIN_PORT=18780
-ExecStart=/usr/bin/python3 /var/www/kunyuan-ai/current/admin_backend/server.py
+ExecStart=/usr/bin/python3 __RELEASE_ROOT__/current/admin_backend/server.py
 Restart=always
 RestartSec=3
 PrivateTmp=true
@@ -254,6 +251,18 @@ ADMIN_DEPLOY
   systemctl daemon-reload
   systemctl enable kunyuan-admin >/dev/null
   systemctl restart kunyuan-admin
+  if ! systemctl is-active --quiet kunyuan-admin; then
+    echo 'Admin service did not start.' >&2
+    exit 1
+  fi
+  if ! admin_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:18780/api/site-content)"; then
+    echo 'Admin API health check connection failed.' >&2
+    exit 1
+  fi
+  if [ "$admin_status" != "200" ]; then
+    echo "Admin API health check failed with HTTP $admin_status" >&2
+    exit 1
+  fi
 fi
 
 restore_nginx_config() {

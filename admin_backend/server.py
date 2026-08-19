@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("KUNYUAN_ADMIN_DB", "/var/lib/kunyuan-admin/admin.db"))
@@ -23,6 +23,7 @@ DEPLOY_SCRIPT = os.environ.get("KUNYUAN_ADMIN_DEPLOY_SCRIPT", "/usr/local/sbin/k
 MAX_BODY = 32 * 1024
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+CHAT_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 DEFAULT_CONTENT = {
     "hero_summary": "从员工 AI 能力、业务场景重构，到 Agent、Ontology 与企业级 AI 系统建设，陪伴企业完成 AI 原生化转型。",
     "cta_summary": "一次 30–60 分钟的初步沟通，帮助您判断当前阶段、优先场景与下一步行动。",
@@ -103,6 +104,15 @@ def initialize():
               expires_at BIGINT NOT NULL, revoked_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_user_sessions_active ON user_sessions(token_hash, expires_at);
+            CREATE TABLE IF NOT EXISTS chat_messages (
+              id BIGSERIAL PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+              role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);
             """
             for statement in schema.split(";"):
                 if statement.strip():
@@ -146,6 +156,16 @@ def initialize():
             );
             CREATE INDEX IF NOT EXISTS idx_user_sessions_active
               ON user_sessions(token_hash, expires_at);
+            CREATE TABLE IF NOT EXISTS chat_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id TEXT NOT NULL,
+              user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+              role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+              ON chat_messages(session_id, id);
             """)
         for key, value in DEFAULT_CONTENT.items():
             conn.execute("INSERT INTO content(content_key, content_value, updated_at) VALUES (?, ?, ?) ON CONFLICT (content_key) DO NOTHING", (key, value, now()))
@@ -239,6 +259,30 @@ def authenticated_user(handler):
     return dict(row) if row else None
 
 
+def support_reply(message):
+    """Safe first-line concierge until a dedicated LLM provider is configured."""
+    text = message.lower()
+    if any(word in text for word in ("预约", "诊断", "沟通", "咨询")):
+        return "可以。您可以点击页面中的“预约诊断”，留下企业情况；我们会在 1 个工作日内联系您。"
+    if any(word in text for word in ("制造", "供应链", "物流", "法务", "客服", "营销")):
+        return "锟元AI可从真实业务场景切入。我们会先梳理目标、流程、知识与系统边界，再判断最值得优先投入的方向。"
+    if any(word in text for word in ("agent", "rag", "知识", "ontology", "大模型")):
+        return "技术只是实现路径的一部分。建议先明确业务价值和人机边界，再规划知识、Workflow、Agent 与工程治理。"
+    return "我可以协助您了解 AI 转型诊断、行业场景和组织能力建设。您目前最想解决哪类业务问题？"
+
+
+def chat_session(data):
+    value = str(data.get("session_id", ""))
+    if not CHAT_SESSION_PATTERN.fullmatch(value):
+        raise ValueError("会话标识无效。")
+    return value
+
+
+def is_unique_violation(exc):
+    """Recognize the duplicate-key errors raised by the supported databases."""
+    return isinstance(exc, sqlite3.IntegrityError) or getattr(exc, "pgcode", None) == "23505"
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "KunyuanAdmin/1.0"
 
@@ -261,7 +305,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         try:
             if path in ("/admin", "/admin/"):
                 return self.serve_file("admin.html", "text/html; charset=utf-8")
@@ -278,6 +323,23 @@ class Handler(BaseHTTPRequestHandler):
                 if not user:
                     return json_response(self, {"error": "登录已失效或未登录。"}, HTTPStatus.UNAUTHORIZED)
                 return json_response(self, {"user": user})
+            if path == "/api/chat/history":
+                session_id = parse_qs(parsed.query).get("session", [""])[0]
+                if not CHAT_SESSION_PATTERN.fullmatch(session_id):
+                    return json_response(self, {"items": []})
+                user = authenticated_user(self)
+                with db() as conn:
+                    if user:
+                        rows = conn.execute(
+                            "SELECT role, content, created_at FROM chat_messages WHERE session_id=? AND (user_id=? OR user_id IS NULL) ORDER BY id DESC LIMIT 50",
+                            (session_id, user["id"]),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT role, content, created_at FROM chat_messages WHERE session_id=? AND user_id IS NULL ORDER BY id DESC LIMIT 50",
+                            (session_id,),
+                        ).fetchall()
+                return json_response(self, {"items": [dict(row) for row in reversed(rows)]})
             if path == "/admin/api/leads":
                 with db() as conn:
                     rows = conn.execute("SELECT * FROM leads ORDER BY id DESC LIMIT 200").fetchall()
@@ -308,7 +370,8 @@ class Handler(BaseHTTPRequestHandler):
                         "INSERT INTO leads(name, company, contact, challenge, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
                         (*fields.values(), stamp, stamp),
                     )
-                return json_response(self, {"id": cursor.fetchone()["id"], "message": "已收到，我们将在 1 个工作日内联系您。"}, HTTPStatus.CREATED)
+                    lead_id = cursor.fetchone()["id"]
+                return json_response(self, {"id": lead_id, "message": "已收到，我们将在 1 个工作日内联系您。"}, HTTPStatus.CREATED)
             if path == "/api/auth/register":
                 email, password = read_credentials(data)
                 profile = profile_values(data, require_name=True)
@@ -328,8 +391,10 @@ class Handler(BaseHTTPRequestHandler):
                             (user_id, *profile.values(), stamp, stamp),
                         )
                         token = issue_session(conn, user_id)
-                except sqlite3.IntegrityError:
-                    return json_response(self, {"error": "该邮箱已注册，请直接登录。"}, HTTPStatus.CONFLICT)
+                except Exception as exc:
+                    if is_unique_violation(exc):
+                        return json_response(self, {"error": "该邮箱已注册，请直接登录。"}, HTTPStatus.CONFLICT)
+                    raise
                 return json_response(self, {"token": token, "message": "注册成功。"}, HTTPStatus.CREATED)
             if path == "/api/auth/login":
                 email, password = read_credentials(data)
@@ -341,6 +406,24 @@ class Handler(BaseHTTPRequestHandler):
                     conn.execute("UPDATE users SET last_login_at=?, updated_at=? WHERE id=?", (stamp, stamp, user["id"]))
                     token = issue_session(conn, user["id"])
                 return json_response(self, {"token": token, "message": "登录成功。"})
+            if path == "/api/chat":
+                session_id = chat_session(data)
+                message = str(data.get("message", "")).strip()
+                if not message or len(message) > 1200:
+                    return json_response(self, {"error": "请输入不超过 1200 字的问题。"}, HTTPStatus.BAD_REQUEST)
+                user = authenticated_user(self)
+                stamp = now()
+                reply = support_reply(message)
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO chat_messages(session_id, user_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)",
+                        (session_id, user["id"] if user else None, message, stamp),
+                    )
+                    conn.execute(
+                        "INSERT INTO chat_messages(session_id, user_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)",
+                        (session_id, user["id"] if user else None, reply, now()),
+                    )
+                return json_response(self, {"reply": reply})
             if path == "/admin/api/deploy":
                 result = subprocess.run([DEPLOY_SCRIPT], text=True, capture_output=True, timeout=90, check=False)
                 status = HTTPStatus.OK if result.returncode == 0 else HTTPStatus.BAD_GATEWAY
