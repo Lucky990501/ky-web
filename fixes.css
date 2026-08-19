@@ -151,6 +151,27 @@ nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
 .note-three { bottom: 17%; left: 12%; }
 @keyframes signal-pulse { 50% { opacity: .42; transform: scale(.96); } }
 
+/* Keep the final CTA copy and its diagnostic visual in two independent columns.
+   This prevents long Chinese headlines from entering the signal's label area on wide screens. */
+@media (min-width: 841px) {
+  .cta-copy {
+    position: relative;
+    z-index: 2;
+    width: min(43vw, 630px);
+    max-width: 630px;
+  }
+  .cta-copy h2 {
+    max-width: 9.2em;
+    font-size: clamp(44px, 3.9vw, 64px);
+    text-wrap: balance;
+  }
+  .cta-copy > p:not(.kicker) { max-width: 510px; }
+  .contact-signal {
+    right: max(40px, calc((100vw - 1220px) / 2));
+    width: min(34vw, 460px);
+  }
+}
+
 .back-top {
   position: fixed;
   z-index: 12;
