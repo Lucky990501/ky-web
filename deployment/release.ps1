@@ -120,6 +120,14 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
+    location ^~ /api/auth/ {
+        client_max_body_size 32k;
+        proxy_pass http://127.0.0.1:18780;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
     location = /admin { return 301 /admin/; }
     location ^~ /admin/ {
         auth_basic "Kunyuan AI Admin";
@@ -187,7 +195,18 @@ chown root:www-data "$admin_auth_file"
 chmod 640 "$admin_auth_file"
 
 if [ -f "$release/admin_backend/server.py" ]; then
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql python3-psycopg2
   mkdir -p /var/lib/kunyuan-admin
+  install -d -m 700 /etc/kunyuan-admin
+  database_env='/etc/kunyuan-admin/database.env'
+  if [ ! -f "$database_env" ]; then
+    database_password="$(openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 32)"
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c "CREATE USER kunyuan_app WITH LOGIN PASSWORD '$database_password';" || true
+    runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='kunyuan'" | grep -q 1 || runuser -u postgres -- createdb -O kunyuan_app kunyuan
+    printf 'KUNYUAN_DATABASE_URL=postgresql://kunyuan_app:%s@127.0.0.1:5432/kunyuan\n' "$database_password" > "$database_env"
+    chmod 600 "$database_env"
+  fi
   cat > /etc/systemd/system/kunyuan-admin.service <<'SERVICE'
 [Unit]
 Description=Kunyuan AI administration service
@@ -198,6 +217,10 @@ Type=simple
 User=root
 WorkingDirectory=/var/www/kunyuan-ai/current/admin_backend
 Environment=KUNYUAN_ADMIN_DB=/var/lib/kunyuan-admin/admin.db
+EnvironmentFile=/etc/kunyuan-admin/database.env
+Environment=KUNYUAN_LEGACY_SQLITE_DB=/var/lib/kunyuan-admin/admin.db
+Environment=KUNYUAN_MIGRATE_LEGACY_SQLITE=1
+Environment=KUNYUAN_DATABASE_MIGRATION_MARKER=/var/lib/kunyuan-admin/postgres-migration.done
 Environment=KUNYUAN_ADMIN_DEPLOY_SCRIPT=/usr/local/sbin/kunyuan-admin-deploy
 Environment=KUNYUAN_ADMIN_PORT=18780
 ExecStart=/usr/bin/python3 /var/www/kunyuan-ai/current/admin_backend/server.py

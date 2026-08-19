@@ -2,3 +2,5 @@
 .deploy-secrets.local
 .deploy-bridge/
 *.bundle
+__pycache__/
+*.py[cod]
