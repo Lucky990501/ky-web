@@ -239,8 +239,8 @@ def normalize_phone(value):
 def read_credentials(data):
     identity_type = str(data.get("identity_type", "email"))
     password = data.get("password", "")
-    if not isinstance(password, str) or not 10 <= len(password) <= 128:
-        raise ValueError("密码长度应为 10–128 个字符。")
+    if not isinstance(password, str) or not 9 <= len(password) <= 128:
+        raise ValueError("密码至少需要 9 个字符。")
     if identity_type == "email":
         email = str(data.get("email", "")).strip().lower()
         if not valid_email(email) or email.endswith(PHONE_EMAIL_SUFFIX):
@@ -263,8 +263,8 @@ def read_registration_credentials(data):
         raise ValueError("请输入有效的邮箱地址。")
     if not PHONE_PATTERN.fullmatch(phone):
         raise ValueError("请输入有效的中国大陆手机号。")
-    if not isinstance(password, str) or not 10 <= len(password) <= 128:
-        raise ValueError("密码长度应为 10–128 个字符。")
+    if not isinstance(password, str) or not 9 <= len(password) <= 128:
+        raise ValueError("密码至少需要 9 个字符。")
     if len(referral_code) > 64:
         raise ValueError("推荐码不能超过 64 个字符。")
     return email, phone, password, referral_code

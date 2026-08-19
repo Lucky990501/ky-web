@@ -40,6 +40,7 @@ header.querySelector('.header-actions .open')?.remove();
 
 const emailInput = authForm.elements.email;
 const emailField = emailInput.closest('label');
+authForm.elements.password.minLength = 9;
 const phoneInput = authForm.elements.phone;
 const phoneField = phoneInput.closest('label');
 phoneField.firstChild.textContent = '手机号 *';
