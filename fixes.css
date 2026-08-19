@@ -314,3 +314,65 @@ nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
   .node-core { left: 47%; width: 24px; height: 24px; }
   .graph-node:not(.node-core)::after { font-size: 8px; }
 }
+
+/* Desktop graph journey: the first scroll expands the semantic network instead of
+   treating it as a static illustration. JavaScript only updates transform-safe
+   custom properties; the no-JS and mobile states remain fully readable. */
+@media (min-width: 841px) {
+  .hero-graph { min-height: 135svh; }
+  .hero-graph::after {
+    content: "SCROLL TO UNFOLD THE GRAPH ↓";
+    position: absolute;
+    bottom: 28px;
+    left: max(50px, calc((100vw - 1180px) / 2));
+    color: #617781;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: .13em;
+    pointer-events: none;
+  }
+  .hero-graph .scroll { display: none; }
+  .hero-graph.graph-scroll-ready .knowledge-graph {
+    --graph-scale: .74;
+    transform: translate3d(var(--graph-x), calc(-45% + var(--graph-y)), 0) scale(var(--graph-scale));
+    transform-origin: 50% 50%;
+    transition: transform .18s linear;
+  }
+  .hero-graph.graph-scroll-ready.visible .knowledge-graph {
+    transform: translate3d(var(--graph-x), calc(-45% + var(--graph-y)), 0) scale(var(--graph-scale));
+  }
+  .hero-graph.graph-scroll-ready .graph-lines path {
+    stroke-dasharray: 1;
+    stroke-dashoffset: calc(1 - var(--line-progress, 0));
+    opacity: var(--line-opacity, 0);
+    animation: none;
+    transition: stroke .2s ease, stroke-width .2s ease;
+  }
+  .hero-graph.graph-scroll-ready .graph-node:not(.node-core) {
+    opacity: var(--node-reveal, 0);
+    transform: translateY(var(--node-y, 28px)) scale(var(--node-scale, .78));
+    animation: none;
+    transition: border-color .2s ease, box-shadow .2s ease;
+  }
+  .hero-graph.graph-scroll-ready .node-core {
+    transform: scale(var(--core-scale, .82));
+    animation: none;
+    transition: transform .2s ease, box-shadow .2s ease;
+  }
+  .hero-graph.graph-scroll-ready .graph-node:hover {
+    border-color: #1786ad;
+    box-shadow: 0 0 0 7px rgba(23, 134, 173, .13), 0 0 26px rgba(23, 134, 173, .32);
+  }
+  .hero-graph.graph-scroll-ready .graph-node:hover::after { color: #08749b; opacity: 1; }
+  .hero-graph.graph-scroll-ready .knowledge-graph[data-active] .graph-lines path { opacity: .13; }
+  .hero-graph.graph-scroll-ready .knowledge-graph[data-active="knowledge"] .graph-lines path[data-link="knowledge"],
+  .hero-graph.graph-scroll-ready .knowledge-graph[data-active="process"] .graph-lines path[data-link="process"],
+  .hero-graph.graph-scroll-ready .knowledge-graph[data-active="rule"] .graph-lines path[data-link="rule"],
+  .hero-graph.graph-scroll-ready .knowledge-graph[data-active="data"] .graph-lines path[data-link="data"],
+  .hero-graph.graph-scroll-ready .knowledge-graph[data-active="agent"] .graph-lines path[data-link="agent"],
+  .hero-graph.graph-scroll-ready .knowledge-graph[data-active="eval"] .graph-lines path[data-link="eval"] {
+    stroke: #1786ad;
+    stroke-width: 1.9;
+    opacity: 1;
+  }
+}

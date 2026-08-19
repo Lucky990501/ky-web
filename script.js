@@ -160,22 +160,54 @@ const activate = section => { header.dataset.theme = section.dataset.theme; dots
 if (reduced) sections.forEach(section => section.classList.add('visible'));
 else { const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (entry.isIntersecting) { entry.target.classList.add('visible'); activate(entry.target); } }), { threshold: .55 }); sections.forEach(section => observer.observe(section)); }
 const heroGraph = $('.hero-graph'), knowledgeGraph = $('.knowledge-graph');
-if (!reduced && heroGraph && knowledgeGraph) {
-  heroGraph.addEventListener('pointermove', event => {
+if (!reduced && heroGraph && knowledgeGraph && matchMedia('(min-width: 841px)').matches) {
+  const clamp = value => Math.max(0, Math.min(1, value));
+  const ease = value => value * value * (3 - 2 * value);
+  const paths = [...knowledgeGraph.querySelectorAll('.graph-lines path')];
+  const terminals = [...knowledgeGraph.querySelectorAll('.graph-node:not(.node-core)')];
+  const keys = ['knowledge', 'process', 'rule', 'data', 'agent', 'eval'];
+  let frame = 0;
+
+  heroGraph.classList.add('graph-scroll-ready');
+  paths.forEach((path, index) => {
+    path.setAttribute('pathLength', '1');
+    if (index < keys.length) path.dataset.link = keys[index];
+  });
+  terminals.forEach((node, index) => {
+    node.dataset.graphNode = keys[index];
+    node.addEventListener('pointerenter', () => { knowledgeGraph.dataset.active = keys[index]; });
+    node.addEventListener('pointerleave', () => { delete knowledgeGraph.dataset.active; });
+  });
+
+  const renderGraph = () => {
+    frame = 0;
     const rect = heroGraph.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width - .5) * 8;
-    const y = ((event.clientY - rect.top) / rect.height - .5) * 8;
-    knowledgeGraph.style.setProperty('--graph-x', `${x}px`);
-    knowledgeGraph.style.setProperty('--graph-y', `${y}px`);
-    knowledgeGraph.style.setProperty('--graph-tilt-x', `${-y * .22}deg`);
-    knowledgeGraph.style.setProperty('--graph-tilt-y', `${x * .22}deg`);
-  });
-  heroGraph.addEventListener('pointerleave', () => {
-    knowledgeGraph.style.setProperty('--graph-x', '0px');
-    knowledgeGraph.style.setProperty('--graph-y', '0px');
-    knowledgeGraph.style.setProperty('--graph-tilt-x', '0deg');
-    knowledgeGraph.style.setProperty('--graph-tilt-y', '0deg');
-  });
+    const travel = Math.max(window.innerHeight * .9, rect.height - window.innerHeight * .25);
+    const progress = ease(clamp(-rect.top / travel));
+    const graphScale = .74 + progress * .26;
+    knowledgeGraph.style.setProperty('--graph-scale', graphScale.toFixed(3));
+    knowledgeGraph.style.setProperty('--graph-x', `${(progress - .5) * 10}px`);
+    knowledgeGraph.style.setProperty('--graph-y', `${(1 - progress) * 12}px`);
+    knowledgeGraph.style.setProperty('--core-scale', (.82 + progress * .18).toFixed(3));
+
+    paths.forEach((path, index) => {
+      const delay = index < keys.length ? .10 + index * .075 : .46 + (index - keys.length) * .1;
+      const draw = ease(clamp((progress - delay) / .36));
+      path.style.setProperty('--line-progress', draw.toFixed(3));
+      path.style.setProperty('--line-opacity', (index < keys.length ? draw * .86 : draw * .38).toFixed(3));
+    });
+    terminals.forEach((node, index) => {
+      const reveal = ease(clamp((progress - (.27 + index * .07)) / .25));
+      node.style.setProperty('--node-reveal', reveal.toFixed(3));
+      node.style.setProperty('--node-y', `${(1 - reveal) * 28}px`);
+      node.style.setProperty('--node-scale', (.78 + reveal * .22).toFixed(3));
+      node.style.pointerEvents = reveal > .88 ? 'auto' : 'none';
+    });
+  };
+  const scheduleGraph = () => { if (!frame) frame = requestAnimationFrame(renderGraph); };
+  addEventListener('scroll', scheduleGraph, { passive: true });
+  addEventListener('resize', scheduleGraph, { passive: true });
+  renderGraph();
 }
 document.querySelectorAll('.industry').forEach(button => button.onclick = () => { document.querySelectorAll('.industry').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('.industry-core strong').textContent = button.dataset.name; $('.industry-core i').textContent = button.dataset.desc; });
 setAuthMode('login'); syncAccount();
