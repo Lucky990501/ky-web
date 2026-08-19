@@ -407,6 +407,23 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     rows = conn.execute("SELECT * FROM leads ORDER BY id DESC LIMIT 200").fetchall()
                 return json_response(self, {"items": [dict(row) for row in rows]})
+            if path == "/admin/api/users":
+                with db() as conn:
+                    rows = conn.execute(
+                        """SELECT u.id, u.email, u.phone AS login_phone, u.created_at, u.last_login_at,
+                                  p.name, p.phone, p.company, p.job_title, p.consent_at
+                           FROM users u
+                           LEFT JOIN user_profiles p ON p.user_id=u.id
+                           ORDER BY u.id DESC LIMIT 200"""
+                    ).fetchall()
+                    total = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
+                items = []
+                for row in rows:
+                    user = dict(row)
+                    if user.get("email", "").endswith(PHONE_EMAIL_SUFFIX):
+                        user["email"] = None
+                    items.append(user)
+                return json_response(self, {"items": items, "total": total})
             if path == "/admin/api/content":
                 with db() as conn:
                     rows = conn.execute("SELECT content_key, content_value, updated_at FROM content ORDER BY content_key").fetchall()

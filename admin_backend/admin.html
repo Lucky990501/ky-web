@@ -1,1 +1,36 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>锟元AI｜管理后台</title><link rel="stylesheet" href="/admin/app.css"></head><body><main><header><div><p>KY / CONTROL ROOM</p><h1>锟元AI 管理后台</h1></div><a href="/" target="_blank" rel="noreferrer">查看官网 ↗</a></header><section class="metrics" aria-label="后台概览"><article><small>预约线索</small><strong id="lead-count">—</strong><span>待跟进与历史记录</span></article><article><small>线上版本</small><strong id="release">—</strong><span>当前已发布版本</span></article><article><small>网站状态</small><strong class="ok">ONLINE</strong><span>HTTPS 已受保护</span></article></section><section class="grid"><article class="card wide"><div class="card-head"><div><p>LEADS</p><h2>预约诊断线索</h2></div><button class="secondary" id="refresh-leads">刷新</button></div><div class="table-wrap"><table><thead><tr><th>客户</th><th>联系方式</th><th>需求</th><th>提交时间</th><th>状态</th></tr></thead><tbody id="leads"></tbody></table></div></article><article class="card"><div class="card-head"><div><p>CONTENT</p><h2>官网核心文案</h2></div></div><form id="content-form"><label>首屏介绍<textarea name="hero_summary" rows="5"></textarea></label><label>末屏说明<textarea name="cta_summary" rows="5"></textarea></label><button>保存并同步官网</button><output id="content-message" aria-live="polite"></output></form></article><article class="card"><div class="card-head"><div><p>RELEASE</p><h2>服务器发布</h2></div></div><p class="hint">仅发布服务器已接收的最新 Git 版本。常规发布仍建议使用本地“提交并部署官网”流程。</p><button id="deploy" class="danger">部署服务器最新版本</button><pre id="deploy-output" aria-live="polite"></pre></article></section></main><script src="/admin/app.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>锟元AI｜管理后台</title>
+  <link rel="stylesheet" href="/admin/app.css">
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div><p>KY / CONTROL ROOM</p><h1>锟元AI 管理后台</h1><span class="subline">运营、用户与内容管理</span></div>
+      <a href="/" target="_blank" rel="noreferrer">查看官网 <span aria-hidden="true">↗</span></a>
+    </header>
+    <section class="metrics" aria-label="后台概览">
+      <article><small>注册用户</small><strong id="user-count">—</strong><span>账户与资料留存</span></article>
+      <article><small>预约线索</small><strong id="lead-count">—</strong><span>待跟进与历史记录</span></article>
+      <article><small>线上版本</small><strong id="release">—</strong><span>当前已发布版本</span></article>
+      <article><small>网站状态</small><strong class="ok">ONLINE</strong><span>HTTPS 已受保护</span></article>
+    </section>
+    <section class="grid">
+      <article class="card users-card">
+        <div class="card-head"><div><p>USERS</p><h2>注册用户档案</h2><span>最近注册的 200 位用户，含账户与联系方式</span></div><button class="secondary" id="refresh-users" type="button">刷新用户</button></div>
+        <div class="table-wrap" tabindex="0" aria-label="注册用户列表，可横向滚动"><table><thead><tr><th>用户</th><th>联系方式</th><th>企业与职位</th><th>注册时间</th><th>最近登录</th></tr></thead><tbody id="users"></tbody></table></div>
+      </article>
+      <article class="card leads-card">
+        <div class="card-head"><div><p>LEADS</p><h2>预约诊断线索</h2><span>来自官网的咨询提交</span></div><button class="secondary" id="refresh-leads" type="button">刷新线索</button></div>
+        <div class="table-wrap" tabindex="0" aria-label="预约线索列表，可横向滚动"><table><thead><tr><th>客户</th><th>联系方式</th><th>需求</th><th>提交时间</th><th>状态</th></tr></thead><tbody id="leads"></tbody></table></div>
+      </article>
+      <article class="card"><div class="card-head"><div><p>CONTENT</p><h2>官网核心文案</h2></div></div><form id="content-form"><label>首屏介绍<textarea name="hero_summary" rows="5"></textarea></label><label>末屏说明<textarea name="cta_summary" rows="5"></textarea></label><button type="submit">保存并同步官网</button><output id="content-message" aria-live="polite"></output></form></article>
+      <article class="card"><div class="card-head"><div><p>RELEASE</p><h2>服务器发布</h2></div></div><p class="hint">仅发布服务器已接收的最新 Git 版本。常规发布仍建议使用本地“提交并部署官网”流程。</p><button id="deploy" class="danger" type="button">部署服务器最新版本</button><pre id="deploy-output" aria-live="polite"></pre></article>
+    </section>
+  </main>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

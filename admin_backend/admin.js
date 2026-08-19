@@ -1,3 +1,35 @@
-const $=s=>document.querySelector(s),api=(path,options={})=>fetch(path,{headers:{'Content-Type':'application/json'},...options}).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.error||'操作失败');return d});const stamp=s=>s?new Date(s).toLocaleString('zh-CN',{hour12:false}):'—';
-async function refresh(){const [leads,status,content]=await Promise.all([api('/admin/api/leads'),api('/admin/api/status'),api('/admin/api/content')]);$('#lead-count').textContent=leads.items.length;$('#release').textContent=status.release.split('/').pop().slice(0,8);$('#leads').innerHTML=leads.items.map(x=>`<tr><td>${escapeHtml(x.name)}<small>${escapeHtml(x.company)}</small></td><td>${escapeHtml(x.contact)}</td><td><small>${escapeHtml(x.challenge)}</small></td><td>${stamp(x.created_at)}</td><td><select data-id="${x.id}"><option value="new">待跟进</option><option value="contacted">已联系</option><option value="closed">已完成</option></select></td></tr>`).join('')||'<tr><td colspan="5">暂未收到预约。</td></tr>';document.querySelectorAll('select[data-id]').forEach(el=>{el.value=leads.items.find(x=>x.id==el.dataset.id).status;el.onchange=()=>api(`/admin/api/leads/${el.dataset.id}`,{method:'PUT',body:JSON.stringify({status:el.value})})});content.items.forEach(x=>{const el=document.querySelector(`[name="${x.content_key}"]`);if(el)el.value=x.content_value})}function escapeHtml(v){const d=document.createElement('div');d.textContent=v;return d.innerHTML}
-$('#refresh-leads').onclick=refresh;$('#content-form').onsubmit=async e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));try{await api('/admin/api/content',{method:'PUT',body:JSON.stringify({values})});$('#content-message').textContent='已保存，官网刷新后生效。'}catch(err){$('#content-message').textContent=err.message}};$('#deploy').onclick=async()=>{if(!confirm('确认部署服务器已接收的最新版本？'))return;$('#deploy').disabled=true;try{const r=await api('/admin/api/deploy',{method:'POST',body:'{}'});$('#deploy-output').textContent=r.output;await refresh()}catch(err){$('#deploy-output').textContent=err.message}finally{$('#deploy').disabled=false}};refresh().catch(err=>$('#deploy-output').textContent=err.message);
+const $=selector=>document.querySelector(selector);
+const api=(path,options={})=>fetch(path,{headers:{'Content-Type':'application/json',...(options.headers||{})},...options}).then(async response=>{const data=await response.json();if(!response.ok)throw Error(data.error||'操作失败');return data});
+const stamp=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—';
+const escapeHtml=value=>{const element=document.createElement('div');element.textContent=value??'';return element.innerHTML};
+const initials=value=>(value||'用户').trim().slice(0,2).toUpperCase();
+
+function renderUsers(users){
+  $('#user-count').textContent=users.total;
+  $('#users').innerHTML=users.items.map(user=>{
+    const name=user.name||'未设置昵称';
+    const phone=user.phone||user.login_phone||'未留手机号';
+    const email=user.email||'未留邮箱';
+    const company=[user.company,user.job_title].filter(Boolean).join(' · ')||'暂未补充企业信息';
+    return `<tr><td><div class="person"><span class="avatar" aria-hidden="true">${escapeHtml(initials(name))}</span><div><strong>${escapeHtml(name)}</strong><small>用户 #${escapeHtml(user.id)}</small></div></div></td><td>${escapeHtml(phone)}<small>${escapeHtml(email)}</small></td><td>${escapeHtml(company)}</td><td>${stamp(user.created_at)}</td><td>${stamp(user.last_login_at)}</td></tr>`;
+  }).join('')||'<tr><td class="empty" colspan="5">暂未有注册用户。</td></tr>';
+}
+
+function renderLeads(leads){
+  $('#lead-count').textContent=leads.items.length;
+  $('#leads').innerHTML=leads.items.map(lead=>`<tr><td>${escapeHtml(lead.name)}<small>${escapeHtml(lead.company)}</small></td><td>${escapeHtml(lead.contact)}</td><td><small>${escapeHtml(lead.challenge)}</small></td><td>${stamp(lead.created_at)}</td><td><select data-id="${escapeHtml(lead.id)}" aria-label="${escapeHtml(lead.name)}的线索状态"><option value="new">待跟进</option><option value="contacted">已联系</option><option value="closed">已完成</option></select></td></tr>`).join('')||'<tr><td class="empty" colspan="5">暂未收到预约。</td></tr>';
+  document.querySelectorAll('select[data-id]').forEach(select=>{const lead=leads.items.find(item=>String(item.id)===select.dataset.id);select.value=lead.status;select.onchange=async()=>{select.disabled=true;try{await api(`/admin/api/leads/${select.dataset.id}`,{method:'PUT',body:JSON.stringify({status:select.value})})}catch(error){select.value=lead.status;alert(error.message)}finally{select.disabled=false}}});
+}
+
+async function refresh(){
+  const [users,leads,status,content]=await Promise.all([api('/admin/api/users'),api('/admin/api/leads'),api('/admin/api/status'),api('/admin/api/content')]);
+  renderUsers(users);renderLeads(leads);
+  $('#release').textContent=status.release.split('/').pop().slice(0,8);
+  content.items.forEach(item=>{const field=document.querySelector(`[name="${item.content_key}"]`);if(field)field.value=item.content_value});
+}
+
+$('#refresh-users').onclick=()=>refresh().catch(error=>$('#deploy-output').textContent=error.message);
+$('#refresh-leads').onclick=()=>refresh().catch(error=>$('#deploy-output').textContent=error.message);
+$('#content-form').onsubmit=async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(event.currentTarget));try{await api('/admin/api/content',{method:'PUT',body:JSON.stringify({values})});$('#content-message').textContent='已保存，官网刷新后生效。'}catch(error){$('#content-message').textContent=error.message}};
+$('#deploy').onclick=async()=>{if(!confirm('确认部署服务器已接收的最新版本？'))return;$('#deploy').disabled=true;try{const result=await api('/admin/api/deploy',{method:'POST',body:'{}'});$('#deploy-output').textContent=result.output;await refresh()}catch(error){$('#deploy-output').textContent=error.message}finally{$('#deploy').disabled=false}};
+refresh().catch(error=>$('#deploy-output').textContent=error.message);
