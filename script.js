@@ -159,5 +159,23 @@ chatForm.onsubmit = async event => {
 const activate = section => { header.dataset.theme = section.dataset.theme; dots.classList.toggle('dark', section.dataset.theme === 'dark'); links.forEach(link => link.classList.toggle('active', link.getAttribute('href') === `#${section.id}`)); };
 if (reduced) sections.forEach(section => section.classList.add('visible'));
 else { const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (entry.isIntersecting) { entry.target.classList.add('visible'); activate(entry.target); } }), { threshold: .55 }); sections.forEach(section => observer.observe(section)); }
+const heroGraph = $('.hero-graph'), knowledgeGraph = $('.knowledge-graph');
+if (!reduced && heroGraph && knowledgeGraph) {
+  heroGraph.addEventListener('pointermove', event => {
+    const rect = heroGraph.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width - .5) * 8;
+    const y = ((event.clientY - rect.top) / rect.height - .5) * 8;
+    knowledgeGraph.style.setProperty('--graph-x', `${x}px`);
+    knowledgeGraph.style.setProperty('--graph-y', `${y}px`);
+    knowledgeGraph.style.setProperty('--graph-tilt-x', `${-y * .22}deg`);
+    knowledgeGraph.style.setProperty('--graph-tilt-y', `${x * .22}deg`);
+  });
+  heroGraph.addEventListener('pointerleave', () => {
+    knowledgeGraph.style.setProperty('--graph-x', '0px');
+    knowledgeGraph.style.setProperty('--graph-y', '0px');
+    knowledgeGraph.style.setProperty('--graph-tilt-x', '0deg');
+    knowledgeGraph.style.setProperty('--graph-tilt-y', '0deg');
+  });
+}
 document.querySelectorAll('.industry').forEach(button => button.onclick = () => { document.querySelectorAll('.industry').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('.industry-core strong').textContent = button.dataset.name; $('.industry-core i').textContent = button.dataset.desc; });
 setAuthMode('login'); syncAccount();
