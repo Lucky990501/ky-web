@@ -424,13 +424,16 @@ class Handler(BaseHTTPRequestHandler):
                     rows = conn.execute("SELECT * FROM leads ORDER BY id DESC LIMIT 200").fetchall()
                 return json_response(self, {"items": [dict(row) for row in rows]})
             if path == "/admin/api/users":
+                page = max(1, int(parse_qs(parsed.query).get("page", ["1"])[0]))
+                page_size = 20
+                offset = (page - 1) * page_size
                 with db() as conn:
                     rows = conn.execute(
                         """SELECT u.id, u.email, u.phone AS login_phone, u.created_at, u.last_login_at,
                                   p.name, p.phone, p.company, p.job_title, p.consent_at
                            FROM users u
                            LEFT JOIN user_profiles p ON p.user_id=u.id
-                           ORDER BY u.id DESC LIMIT 200"""
+                           ORDER BY u.id DESC LIMIT ? OFFSET ?""", (page_size, offset)
                     ).fetchall()
                     total = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
                 items = []
@@ -439,7 +442,7 @@ class Handler(BaseHTTPRequestHandler):
                     if user.get("email", "").endswith(PHONE_EMAIL_SUFFIX):
                         user["email"] = None
                     items.append(user)
-                return json_response(self, {"items": items, "total": total})
+                return json_response(self, {"items": items, "total": total, "page": page, "page_size": page_size})
             if path == "/admin/api/content":
                 with db() as conn:
                     rows = conn.execute("SELECT content_key, content_value, updated_at FROM content ORDER BY content_key").fetchall()
