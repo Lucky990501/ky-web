@@ -255,10 +255,12 @@ ADMIN_DEPLOY
     echo 'Admin service did not start.' >&2
     exit 1
   fi
-  if ! admin_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:18780/api/site-content)"; then
-    echo 'Admin API health check connection failed.' >&2
-    exit 1
-  fi
+  admin_status=''
+  for _ in $(seq 1 20); do
+    admin_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:18780/api/site-content 2>/dev/null || true)"
+    [ "$admin_status" = "200" ] && break
+    sleep 1
+  done
   if [ "$admin_status" != "200" ]; then
     echo "Admin API health check failed with HTTP $admin_status" >&2
     exit 1
