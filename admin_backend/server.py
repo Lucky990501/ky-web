@@ -107,7 +107,6 @@ def initialize():
               expires_at BIGINT NOT NULL, revoked_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_user_sessions_active ON user_sessions(token_hash, expires_at);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone);
             CREATE TABLE IF NOT EXISTS chat_messages (
               id BIGSERIAL PRIMARY KEY,
               session_id TEXT NOT NULL,
