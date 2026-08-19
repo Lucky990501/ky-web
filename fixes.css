@@ -250,6 +250,13 @@ nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
 .node-data { right: 14%; bottom: 18%; animation-delay: -2s; }
 .node-agent { left: 54%; top: 7%; animation-delay: -5.4s; }
 .node-eval { left: 45%; bottom: 7%; animation-delay: -.5s; }
+.graph-node:not(.node-core)::after { position: absolute; display: block; width: max-content; color: rgba(7, 25, 35, .75); font-family: Georgia, "Times New Roman", serif; font-size: clamp(10px, .95vw, 15px); font-style: italic; font-weight: 700; letter-spacing: -.04em; line-height: 1; white-space: nowrap; transform-origin: left center; animation: terminal-warp 5.5s ease-in-out infinite; }
+.node-knowledge::after { content: "KNOWLEDGE / 知识"; left: 15px; top: -5px; transform: rotate(-13deg) skewX(-14deg) scaleX(1.22); animation-delay: -.4s; }
+.node-process::after { content: "PROCESS / 流程"; right: 15px; top: -4px; transform: rotate(11deg) skewX(12deg) scaleX(.92); transform-origin: right center; animation-delay: -1.2s; }
+.node-rule::after { content: "RULES / 规则"; left: 15px; bottom: -4px; transform: rotate(8deg) skewX(-18deg) scaleX(1.15); animation-delay: -2.1s; }
+.node-data::after { content: "LIVE DATA / 数据"; right: 15px; bottom: -4px; transform: rotate(-9deg) skewX(16deg) scaleX(.88); transform-origin: right center; animation-delay: -3.2s; }
+.node-agent::after { content: "AGENT"; left: 11px; top: 14px; transform: rotate(83deg) skewX(-15deg) scaleX(1.3); animation-delay: -4.1s; }
+.node-eval::after { content: "EVAL / 演进"; left: 12px; bottom: 14px; transform: rotate(-14deg) skewX(-12deg) scaleX(1.12); animation-delay: -4.8s; }
 .graph-pulse { position: absolute; z-index: 3; width: 6px; height: 6px; border-radius: 50%; background: #58c7e9; box-shadow: 0 0 0 5px rgba(83, 196, 232, .13), 0 0 18px #5ccdec; animation: graph-pulse 2.8s ease-in-out infinite; }
 .pulse-a { left: 29%; top: 34%; animation-delay: -.6s; }
 .pulse-b { right: 22%; top: 31%; animation-delay: -1.4s; }
@@ -265,8 +272,9 @@ nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
 @keyframes graph-drift { 50% { transform: translateY(-8px); } }
 @keyframes graph-core { 50% { transform: scale(1.12); box-shadow: 0 0 0 17px rgba(23, 134, 173, .07), 0 0 58px rgba(23, 134, 173, .38); } }
 @keyframes graph-pulse { 50% { opacity: .4; transform: scale(.72); } }
+@keyframes terminal-warp { 50% { opacity: .56; } }
 @media (prefers-reduced-motion: reduce) {
-  .graph-surface::after, .graph-lines path, .graph-node, .graph-pulse, .graph-caption span { animation: none; }
+  .graph-surface::after, .graph-lines path, .graph-node, .graph-node::after, .graph-pulse, .graph-caption span { animation: none; }
 }
 @media (max-width: 840px) {
   .hero-graph { display: block; padding-top: 135px; }
@@ -276,10 +284,12 @@ nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
   .graph-caption { bottom: -26px; right: 2px; }
   .node-core { width: 27px; height: 27px; }
   .graph-node { min-width: 0; padding: 0; }
+  .graph-node:not(.node-core)::after { font-size: 9px; }
   .graph-coordinate { display: none; }
 }
 @media (max-width: 480px) {
   .hero-facts { gap: 5px; }
   .hero-facts span { padding: 6px 7px; font-size: 9px; }
   .node-core { left: 47%; width: 24px; height: 24px; }
+  .graph-node:not(.node-core)::after { font-size: 8px; }
 }
