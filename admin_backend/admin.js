@@ -6,6 +6,7 @@ const initials=value=>(value||'用户').trim().slice(0,2).toUpperCase();
 let contentState={items:[],groups:{},active:'hero'};
 let usersById={};
 let usersPage=1;
+let leadsPage=1;
 function renderContent(){const group=contentState.active;$('#content-groups').innerHTML=Object.entries(contentState.groups).map(([id,label])=>`<button type="button" class="${id===group?'active':''}" data-content-group="${id}">${escapeHtml(label)}</button>`).join('');$('#content-fields').innerHTML=contentState.items.filter(item=>item.group===group).map(item=>`<label>${escapeHtml(item.label)}<textarea name="${escapeHtml(item.content_key)}" rows="${item.content_value.length>60?4:2}">${escapeHtml(item.content_value)}</textarea></label>`).join('');document.querySelectorAll('[data-content-group]').forEach(button=>button.onclick=()=>{contentState.active=button.dataset.contentGroup;renderContent()})}
 function showPanel(panel){document.querySelectorAll('.panel').forEach(element=>{element.hidden=element.dataset.panel!==panel});document.querySelectorAll('[data-panel-target]').forEach(button=>button.classList.toggle('active',button.dataset.panelTarget===panel))}
 
@@ -28,13 +29,15 @@ async function editUser(user){const name=prompt('昵称',user.name||'');if(name=
 async function editUserField(user,field){const labels={name:'昵称',phone:'手机号',email:'邮箱'};const current=field==='phone'?(user.phone||user.login_phone||''):(user[field]||'');const value=prompt(`修改${labels[field]}`,current);if(value===null)return;const name=field==='name'?value:(user.name||'未设置昵称');const phone=field==='phone'?value:(user.phone||user.login_phone||'');const email=field==='email'?value:(user.email||'');try{await api(`/admin/api/users/${user.id}`,{method:'PUT',body:JSON.stringify({email,phone,profile:{name,phone,company:user.company||'',job_title:user.job_title||''}})});await refresh()}catch(error){alert(error.message)}}
 
 function renderLeads(leads){
-  $('#lead-count').textContent=leads.items.length;
-  $('#leads').innerHTML=leads.items.map(lead=>`<tr><td>${escapeHtml(lead.name)}<small>${escapeHtml(lead.company)}</small></td><td>${escapeHtml(lead.contact)}</td><td><small>${escapeHtml(lead.challenge)}</small></td><td>${stamp(lead.created_at)}</td><td><select data-id="${escapeHtml(lead.id)}" aria-label="${escapeHtml(lead.name)}的线索状态"><option value="new">待跟进</option><option value="contacted">已联系</option><option value="closed">已完成</option></select></td></tr>`).join('')||'<tr><td class="empty" colspan="5">暂未收到预约。</td></tr>';
+  $('#lead-count').textContent=leads.total;
+  $('#leads-page').textContent=`第 ${leads.page} / ${Math.max(1,Math.ceil(leads.total/leads.page_size))} 页，共 ${leads.total} 条线索`;
+  $('#leads-prev').disabled=leads.page<=1;$('#leads-next').disabled=leads.page>=Math.ceil(leads.total/leads.page_size);
+  $('#leads').innerHTML=leads.items.map((lead,index)=>`<tr><td>${(leads.page-1)*leads.page_size+index+1}</td><td>${escapeHtml(lead.name)}</td><td>${escapeHtml(lead.company)}</td><td>${escapeHtml(lead.contact)}</td><td>${escapeHtml(lead.challenge)}</td><td>${stamp(lead.created_at)}</td><td><select data-id="${escapeHtml(lead.id)}" aria-label="${escapeHtml(lead.name)}的线索状态"><option value="new">待跟进</option><option value="contacted">已联系</option><option value="closed">已完成</option></select></td></tr>`).join('')||'<tr><td class="empty" colspan="7">暂未收到预约。</td></tr>';
   document.querySelectorAll('select[data-id]').forEach(select=>{const lead=leads.items.find(item=>String(item.id)===select.dataset.id);select.value=lead.status;select.onchange=async()=>{select.disabled=true;try{await api(`/admin/api/leads/${select.dataset.id}`,{method:'PUT',body:JSON.stringify({status:select.value})})}catch(error){select.value=lead.status;alert(error.message)}finally{select.disabled=false}}});
 }
 
 async function refresh(){
-  const [users,leads,status,content]=await Promise.all([api(`/admin/api/users?page=${usersPage}`),api('/admin/api/leads'),api('/admin/api/status'),api('/admin/api/content')]);
+  const [users,leads,status,content]=await Promise.all([api(`/admin/api/users?page=${usersPage}`),api(`/admin/api/leads?page=${leadsPage}`),api('/admin/api/status'),api('/admin/api/content')]);
   renderUsers(users);renderLeads(leads);
   $('#release').textContent=status.release.split('/').pop().slice(0,8);
   contentState={items:content.items,groups:content.groups,active:contentState.groups[contentState.active]?contentState.active:Object.keys(content.groups)[0]};renderContent();
@@ -42,6 +45,7 @@ async function refresh(){
 
 $('#refresh-users').onclick=()=>refresh().catch(error=>$('#deploy-output').textContent=error.message);
 $('#users-prev').onclick=()=>{usersPage=Math.max(1,usersPage-1);refresh()};$('#users-next').onclick=()=>{usersPage+=1;refresh()};
+$('#leads-prev').onclick=()=>{leadsPage=Math.max(1,leadsPage-1);refresh()};$('#leads-next').onclick=()=>{leadsPage+=1;refresh()};
 $('#refresh-leads').onclick=()=>refresh().catch(error=>$('#deploy-output').textContent=error.message);
 document.querySelectorAll('[data-panel-target]').forEach(button=>button.onclick=()=>showPanel(button.dataset.panelTarget));showPanel('overview');
 $('#content-form').onsubmit=async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(event.currentTarget));try{await api('/admin/api/content',{method:'PUT',body:JSON.stringify({values})});contentState.items.forEach(item=>{if(values[item.content_key]!==undefined)item.content_value=values[item.content_key]});$('#content-message').textContent='已保存，官网刷新后生效。'}catch(error){$('#content-message').textContent=error.message}};

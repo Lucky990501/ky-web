@@ -420,9 +420,12 @@ class Handler(BaseHTTPRequestHandler):
                         ).fetchall()
                 return json_response(self, {"items": [dict(row) for row in reversed(rows)]})
             if path == "/admin/api/leads":
+                page = max(1, int(parse_qs(parsed.query).get("page", ["1"])[0]))
+                page_size = 20
                 with db() as conn:
-                    rows = conn.execute("SELECT * FROM leads ORDER BY id DESC LIMIT 200").fetchall()
-                return json_response(self, {"items": [dict(row) for row in rows]})
+                    rows = conn.execute("SELECT * FROM leads ORDER BY id DESC LIMIT ? OFFSET ?", (page_size, (page - 1) * page_size)).fetchall()
+                    total = conn.execute("SELECT COUNT(*) AS total FROM leads").fetchone()["total"]
+                return json_response(self, {"items": [dict(row) for row in rows], "total": total, "page": page, "page_size": page_size})
             if path == "/admin/api/users":
                 page = max(1, int(parse_qs(parsed.query).get("page", ["1"])[0]))
                 page_size = 20
