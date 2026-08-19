@@ -36,7 +36,52 @@ fetch('/api/site-content', { cache: 'no-store' }).then(response => response.ok ?
 }).catch(() => {});
 
 const authTrigger = $('#auth-trigger'), authForm = $('#auth-form'), authMessage = $('#auth-message');
-let authMode = 'login';
+header.querySelector('.header-actions .open')?.remove();
+
+const emailInput = authForm.elements.email;
+const emailField = emailInput.closest('label');
+const profilePhoneInput = authForm.elements.phone;
+profilePhoneInput.name = 'contact_phone';
+profilePhoneInput.autocomplete = 'tel';
+profilePhoneInput.closest('label').firstChild.textContent = '联系电话（可选）';
+emailField.classList.add('auth-email-field');
+const phoneField = document.createElement('label');
+phoneField.className = 'auth-phone-field';
+phoneField.append('手机号');
+const phoneInput = document.createElement('input');
+phoneInput.name = 'login_phone';
+phoneInput.type = 'tel';
+phoneInput.inputMode = 'numeric';
+phoneInput.autocomplete = 'tel';
+phoneInput.placeholder = '请输入 11 位手机号';
+phoneInput.maxLength = 20;
+phoneField.append(phoneInput);
+emailField.before(phoneField);
+
+const identitySwitch = document.createElement('div');
+identitySwitch.className = 'auth-identity-switch';
+identitySwitch.setAttribute('role', 'group');
+identitySwitch.setAttribute('aria-label', '登录方式');
+identitySwitch.innerHTML = '<span>登录方式</span><button class="active" type="button" data-auth-identity="email" aria-pressed="true">邮箱</button><button type="button" data-auth-identity="phone" aria-pressed="false">手机号</button>';
+document.querySelector('.auth-switch').after(identitySwitch);
+
+let authMode = 'login', authIdentity = 'email';
+function setAuthIdentity(identity) {
+  authIdentity = identity;
+  const usingPhone = identity === 'phone';
+  emailField.hidden = usingPhone;
+  phoneField.hidden = !usingPhone;
+  emailInput.disabled = usingPhone;
+  phoneInput.disabled = !usingPhone;
+  emailInput.required = !usingPhone;
+  phoneInput.required = usingPhone;
+  document.querySelectorAll('[data-auth-identity]').forEach(button => {
+    const active = button.dataset.authIdentity === identity;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  authMessage.textContent = '';
+}
 function setAuthMode(mode) {
   authMode = mode;
   authModal.dataset.mode = mode;
@@ -48,6 +93,7 @@ function setAuthMode(mode) {
   authMessage.textContent = '';
 }
 document.querySelectorAll('[data-auth-mode]').forEach(button => button.onclick = () => setAuthMode(button.dataset.authMode));
+document.querySelectorAll('[data-auth-identity]').forEach(button => button.onclick = () => setAuthIdentity(button.dataset.authIdentity));
 authTrigger.onclick = () => {
   if (sessionStorage.getItem(tokenKey)) { sessionStorage.removeItem(tokenKey); syncAccount(); return; }
   setAuthMode('login'); openDialog(authModal);
@@ -55,15 +101,16 @@ authTrigger.onclick = () => {
 authForm.onsubmit = async event => {
   event.preventDefault();
   const fields = Object.fromEntries(new FormData(authForm));
-  const payload = authMode === 'login' ? { email: fields.email, password: fields.password } : {
-    email: fields.email, password: fields.password, consent: fields.consent === 'on',
-    profile: { name: fields.name, company: fields.company, phone: fields.phone, job_title: fields.job_title }
+  const identity = authIdentity === 'phone' ? { phone: fields.login_phone } : { email: fields.email };
+  const payload = authMode === 'login' ? { identity_type: authIdentity, ...identity, password: fields.password } : {
+    identity_type: authIdentity, ...identity, password: fields.password, consent: fields.consent === 'on',
+    profile: { name: fields.name, company: fields.company, phone: fields.contact_phone || fields.login_phone || '', job_title: fields.job_title }
   };
   authMessage.textContent = '正在验证…';
   try {
     const result = await request(`/api/auth/${authMode === 'login' ? 'login' : 'register'}`, { method: 'POST', body: JSON.stringify(payload) });
     sessionStorage.setItem(tokenKey, result.token);
-    authModal.close(); authForm.reset(); syncAccount(); loadChatHistory();
+    authModal.close(); authForm.reset(); setAuthIdentity(authIdentity); syncAccount(); loadChatHistory();
   } catch (error) { authMessage.textContent = error.message; }
 };
 async function syncAccount() {
@@ -71,7 +118,7 @@ async function syncAccount() {
   if (!token) { authTrigger.textContent = '登录'; return; }
   try {
     const { user } = await request('/api/auth/me', {}, true);
-    authTrigger.textContent = `${user.name || user.email} · 退出`;
+    authTrigger.textContent = `${user.name || user.email || user.login_phone} · 退出`;
   } catch (_) { sessionStorage.removeItem(tokenKey); authTrigger.textContent = '登录'; }
 }
 
@@ -108,4 +155,4 @@ const activate = section => { header.dataset.theme = section.dataset.theme; dots
 if (reduced) sections.forEach(section => section.classList.add('visible'));
 else { const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (entry.isIntersecting) { entry.target.classList.add('visible'); activate(entry.target); } }), { threshold: .55 }); sections.forEach(section => observer.observe(section)); }
 document.querySelectorAll('.industry').forEach(button => button.onclick = () => { document.querySelectorAll('.industry').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('.industry-core strong').textContent = button.dataset.name; $('.industry-core i').textContent = button.dataset.desc; });
-setAuthMode('login'); syncAccount();
+setAuthMode('login'); setAuthIdentity('email'); syncAccount();

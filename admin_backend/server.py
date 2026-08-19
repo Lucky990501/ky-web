@@ -22,6 +22,8 @@ MIGRATION_MARKER = Path(os.environ.get("KUNYUAN_DATABASE_MIGRATION_MARKER", "/va
 DEPLOY_SCRIPT = os.environ.get("KUNYUAN_ADMIN_DEPLOY_SCRIPT", "/usr/local/sbin/kunyuan-admin-deploy")
 MAX_BODY = 32 * 1024
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
+PHONE_EMAIL_SUFFIX = "@phone.kunyuan.invalid"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 CHAT_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 DEFAULT_CONTENT = {
@@ -85,7 +87,8 @@ def initialize():
             );
             CREATE TABLE IF NOT EXISTS users (
               id BIGSERIAL PRIMARY KEY,
-              email TEXT NOT NULL UNIQUE,
+              email TEXT UNIQUE,
+              phone TEXT,
               password_hash TEXT NOT NULL,
               password_salt TEXT NOT NULL,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -104,6 +107,7 @@ def initialize():
               expires_at BIGINT NOT NULL, revoked_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_user_sessions_active ON user_sessions(token_hash, expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone);
             CREATE TABLE IF NOT EXISTS chat_messages (
               id BIGSERIAL PRIMARY KEY,
               session_id TEXT NOT NULL,
@@ -117,6 +121,9 @@ def initialize():
             for statement in schema.split(";"):
                 if statement.strip():
                     conn.execute(statement)
+            conn.execute("ALTER TABLE users ALTER COLUMN email DROP NOT NULL")
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone)")
         else:
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS leads (
@@ -131,6 +138,7 @@ def initialize():
             CREATE TABLE IF NOT EXISTS users (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+              phone TEXT,
               password_hash TEXT NOT NULL,
               password_salt TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -167,6 +175,10 @@ def initialize():
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session
               ON chat_messages(session_id, id);
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+            if "phone" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone)")
         for key, value in DEFAULT_CONTENT.items():
             conn.execute("INSERT INTO content(content_key, content_value, updated_at) VALUES (?, ?, ?) ON CONFLICT (content_key) DO NOTHING", (key, value, now()))
     migrate_legacy_sqlite()
@@ -211,14 +223,38 @@ def valid_email(value):
     return len(value) <= 254 and bool(EMAIL_PATTERN.fullmatch(value))
 
 
+def normalize_phone(value):
+    phone = re.sub(r"[\s-]", "", str(value))
+    if phone.startswith("+86"):
+        phone = phone[3:]
+    elif phone.startswith("0086"):
+        phone = phone[4:]
+    return phone
+
+
 def read_credentials(data):
-    email = str(data.get("email", "")).strip().lower()
+    identity_type = str(data.get("identity_type", "email"))
     password = data.get("password", "")
-    if not valid_email(email):
-        raise ValueError("请输入有效的邮箱地址。")
     if not isinstance(password, str) or not 10 <= len(password) <= 128:
         raise ValueError("密码长度应为 10–128 个字符。")
-    return email, password
+    if identity_type == "email":
+        email = str(data.get("email", "")).strip().lower()
+        if not valid_email(email) or email.endswith(PHONE_EMAIL_SUFFIX):
+            raise ValueError("请输入有效的邮箱地址。")
+        return identity_type, email, None, password
+    if identity_type == "phone":
+        phone = normalize_phone(data.get("phone", ""))
+        if not PHONE_PATTERN.fullmatch(phone):
+            raise ValueError("请输入有效的中国大陆手机号。")
+        return identity_type, None, phone, password
+    raise ValueError("请选择邮箱或手机号登录。")
+
+
+def stored_email(email, phone):
+    """SQLite's legacy email column is NOT NULL; hide its internal fallback from clients."""
+    if email or DATABASE_URL:
+        return email
+    return f"phone-{phone}{PHONE_EMAIL_SUFFIX}"
 
 
 def profile_values(data, require_name=False):
@@ -251,12 +287,17 @@ def authenticated_user(handler):
     token_hash = hashlib.sha256(authorization[7:].encode("utf-8")).hexdigest()
     with db() as conn:
         row = conn.execute(
-            """SELECT u.id, u.email, u.created_at, u.last_login_at, p.name, p.phone, p.company, p.job_title, p.consent_at
+            """SELECT u.id, u.email, u.phone AS login_phone, u.created_at, u.last_login_at, p.name, p.phone, p.company, p.job_title, p.consent_at
                FROM user_sessions s JOIN users u ON u.id=s.user_id JOIN user_profiles p ON p.user_id=u.id
                WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at >= ?""",
             (token_hash, int(datetime.now(timezone.utc).timestamp())),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    user = dict(row)
+    if user.get("email", "").endswith(PHONE_EMAIL_SUFFIX):
+        user["email"] = None
+    return user
 
 
 def support_reply(message):
@@ -373,8 +414,10 @@ class Handler(BaseHTTPRequestHandler):
                     lead_id = cursor.fetchone()["id"]
                 return json_response(self, {"id": lead_id, "message": "已收到，我们将在 1 个工作日内联系您。"}, HTTPStatus.CREATED)
             if path == "/api/auth/register":
-                email, password = read_credentials(data)
+                identity_type, email, phone, password = read_credentials(data)
                 profile = profile_values(data, require_name=True)
+                if identity_type == "phone" and not profile["phone"]:
+                    profile["phone"] = phone
                 if data.get("consent") is not True:
                     return json_response(self, {"error": "请先同意个人信息处理。"}, HTTPStatus.BAD_REQUEST)
                 salt = secrets.token_bytes(16)
@@ -382,8 +425,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with db() as conn:
                         cursor = conn.execute(
-                            "INSERT INTO users(email, password_hash, password_salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
-                            (email, password_hash(password, salt), salt.hex(), stamp, stamp),
+                            "INSERT INTO users(email, phone, password_hash, password_salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+                            (stored_email(email, phone), phone, password_hash(password, salt), salt.hex(), stamp, stamp),
                         )
                         user_id = cursor.fetchone()["id"]
                         conn.execute(
@@ -393,15 +436,18 @@ class Handler(BaseHTTPRequestHandler):
                         token = issue_session(conn, user_id)
                 except Exception as exc:
                     if is_unique_violation(exc):
-                        return json_response(self, {"error": "该邮箱已注册，请直接登录。"}, HTTPStatus.CONFLICT)
+                        label = "手机号" if identity_type == "phone" else "邮箱"
+                        return json_response(self, {"error": f"该{label}已注册，请直接登录。"}, HTTPStatus.CONFLICT)
                     raise
                 return json_response(self, {"token": token, "message": "注册成功。"}, HTTPStatus.CREATED)
             if path == "/api/auth/login":
-                email, password = read_credentials(data)
+                identity_type, email, phone, password = read_credentials(data)
+                identifier_column, identifier = ("phone", phone) if identity_type == "phone" else ("email", email)
                 with db() as conn:
-                    user = conn.execute("SELECT id, password_hash, password_salt FROM users WHERE email=?", (email,)).fetchone()
+                    user = conn.execute(f"SELECT id, password_hash, password_salt FROM users WHERE {identifier_column}=?", (identifier,)).fetchone()
                     if not user or not hmac.compare_digest(password_hash(password, bytes.fromhex(user["password_salt"])), user["password_hash"]):
-                        return json_response(self, {"error": "邮箱或密码不正确。"}, HTTPStatus.UNAUTHORIZED)
+                        label = "手机号" if identity_type == "phone" else "邮箱"
+                        return json_response(self, {"error": f"{label}或密码不正确。"}, HTTPStatus.UNAUTHORIZED)
                     stamp = now()
                     conn.execute("UPDATE users SET last_login_at=?, updated_at=? WHERE id=?", (stamp, stamp, user["id"]))
                     token = issue_session(conn, user["id"])
