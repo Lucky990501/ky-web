@@ -43,6 +43,11 @@ const emailField = emailInput.closest('label');
 authForm.elements.password.minLength = 9;
 const phoneInput = authForm.elements.phone;
 const phoneField = phoneInput.closest('label');
+const nicknameInput = authForm.elements.name;
+nicknameInput.closest('label').firstChild.textContent = '昵称 *';
+nicknameInput.autocomplete = 'nickname';
+nicknameInput.maxLength = 50;
+nicknameInput.placeholder = '请输入您希望展示的昵称';
 phoneField.firstChild.textContent = '手机号 *';
 phoneInput.type = 'tel';
 phoneInput.inputMode = 'numeric';
@@ -50,7 +55,7 @@ phoneInput.autocomplete = 'tel';
 phoneInput.placeholder = '请输入 11 位手机号';
 phoneInput.maxLength = 20;
 phoneInput.pattern = '1[3-9]\\d{9}';
-['name', 'company', 'job_title'].forEach(name => authForm.elements[name].closest('label').remove());
+['company', 'job_title'].forEach(name => authForm.elements[name].closest('label').remove());
 authForm.querySelector('input[name="consent"]').closest('label').remove();
 const referralField = document.createElement('label');
 referralField.className = 'auth-profile';
@@ -85,6 +90,8 @@ function setAuthMode(mode) {
   $('#auth-note').textContent = mode === 'login' ? '登录后可保留您的客服会话与咨询资料。' : '注册后可保留客服会话与咨询资料。';
   $('#auth-submit').textContent = mode === 'login' ? '登录' : '创建账号';
   authForm.password.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  nicknameInput.required = mode === 'register';
+  nicknameInput.disabled = mode === 'login';
   phoneInput.required = mode === 'register';
   phoneInput.disabled = mode === 'login';
   referralInput.disabled = mode === 'login';
@@ -102,7 +109,8 @@ authForm.onsubmit = async event => {
   if (!authForm.reportValidity()) return;
   const fields = Object.fromEntries(new FormData(authForm));
   const payload = authMode === 'login' ? { identity_type: 'email', email: fields.email, password: fields.password } : {
-    email: fields.email, phone: fields.phone, password: fields.password, referral_code: fields.referral_code || ''
+    email: fields.email, phone: fields.phone, password: fields.password, referral_code: fields.referral_code || '',
+    profile: { name: fields.name, phone: fields.phone }
   };
   authMessage.textContent = '正在验证…';
   try {

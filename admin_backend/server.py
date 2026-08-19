@@ -284,6 +284,8 @@ def profile_values(data, require_name=False):
     values = {key: str(raw.get(key, "")).strip() for key in ("name", "phone", "company", "job_title")}
     if any(len(value) > 200 for value in values.values()):
         raise ValueError("单项资料不能超过 200 个字符。")
+    if len(values["name"]) > 50:
+        raise ValueError("昵称不能超过 50 个字符。")
     if require_name and not values["name"]:
         raise ValueError("请填写姓名。")
     return values
@@ -435,7 +437,7 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, {"id": lead_id, "message": "已收到，我们将在 1 个工作日内联系您。"}, HTTPStatus.CREATED)
             if path == "/api/auth/register":
                 email, phone, password, referral_code = read_registration_credentials(data)
-                profile = profile_values(data)
+                profile = profile_values(data, require_name=True)
                 profile["phone"] = phone
                 salt = secrets.token_bytes(16)
                 stamp = now()
