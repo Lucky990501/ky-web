@@ -16,12 +16,13 @@ function renderUsers(users){
     const phone=user.phone||user.login_phone||'未留手机号';
     const email=user.email||'未留邮箱';
     const company=[user.company,user.job_title].filter(Boolean).join(' · ')||'暂未补充企业信息';
-    return `<tr><td><div class="person"><span class="avatar" aria-hidden="true">${escapeHtml(initials(name))}</span><div><strong>${escapeHtml(name)}</strong><small>用户 #${escapeHtml(user.id)}</small></div></div></td><td>${escapeHtml(phone)}<small>${escapeHtml(email)}</small></td><td>${escapeHtml(company)}</td><td>${stamp(user.created_at)}</td><td>${stamp(user.last_login_at)}</td><td><button class="secondary user-edit" data-user-id="${user.id}" type="button">编辑</button></td></tr>`;
+    return `<tr><td><div class="person"><span class="avatar" aria-hidden="true">${escapeHtml(initials(name))}</span><div><strong>${escapeHtml(name)}</strong><button class="field-edit" data-field="name" data-user-id="${user.id}" type="button">编辑</button><small>用户 #${escapeHtml(user.id)}</small></div></div></td><td>${escapeHtml(phone)}<button class="field-edit" data-field="phone" data-user-id="${user.id}" type="button">编辑</button><small>${escapeHtml(email)}<button class="field-edit" data-field="email" data-user-id="${user.id}" type="button">编辑</button></small></td><td>${escapeHtml(company)}</td><td>${stamp(user.created_at)}</td><td>${stamp(user.last_login_at)}</td></tr>`;
   }).join('')||'<tr><td class="empty" colspan="6">暂未有注册用户。</td></tr>';
-  document.querySelectorAll('.user-edit').forEach(button=>button.onclick=()=>editUser(usersById[button.dataset.userId]));
+  document.querySelectorAll('.field-edit').forEach(button=>button.onclick=()=>editUserField(usersById[button.dataset.userId],button.dataset.field));
 }
 
 async function editUser(user){const name=prompt('昵称',user.name||'');if(name===null)return;const email=prompt('邮箱',user.email||'');if(email===null)return;const phone=prompt('手机号',user.phone||user.login_phone||'');if(phone===null)return;const company=prompt('企业名称',user.company||'');if(company===null)return;const job_title=prompt('职位',user.job_title||'');if(job_title===null)return;try{await api(`/admin/api/users/${user.id}`,{method:'PUT',body:JSON.stringify({email,phone,profile:{name,phone,company,job_title}})});await refresh()}catch(error){alert(error.message)}}
+async function editUserField(user,field){const labels={name:'昵称',phone:'手机号',email:'邮箱'};const current=field==='phone'?(user.phone||user.login_phone||''):(user[field]||'');const value=prompt(`修改${labels[field]}`,current);if(value===null)return;const name=field==='name'?value:(user.name||'未设置昵称');const phone=field==='phone'?value:(user.phone||user.login_phone||'');const email=field==='email'?value:(user.email||'');try{await api(`/admin/api/users/${user.id}`,{method:'PUT',body:JSON.stringify({email,phone,profile:{name,phone,company:user.company||'',job_title:user.job_title||''}})});await refresh()}catch(error){alert(error.message)}}
 
 function renderLeads(leads){
   $('#lead-count').textContent=leads.items.length;
