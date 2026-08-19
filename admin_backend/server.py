@@ -573,6 +573,25 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("UPDATE leads SET status=?, updated_at=? WHERE id=?", (status, now(), lead_id))
                 return json_response(self, {"ok": True})
+            if path.startswith("/admin/api/users/"):
+                user_id = int(path.rsplit("/", 1)[-1])
+                profile = profile_values(data, require_name=True)
+                email = str(data.get("email", "")).strip().lower()
+                phone = normalize_phone(data.get("phone", ""))
+                if not valid_email(email) or email.endswith(PHONE_EMAIL_SUFFIX):
+                    return json_response(self, {"error": "请输入有效的邮箱地址。"}, HTTPStatus.BAD_REQUEST)
+                if not PHONE_PATTERN.fullmatch(phone):
+                    return json_response(self, {"error": "请输入有效的中国大陆手机号。"}, HTTPStatus.BAD_REQUEST)
+                profile["phone"] = phone
+                try:
+                    with db() as conn:
+                        conn.execute("UPDATE users SET email=?, phone=?, updated_at=? WHERE id=?", (stored_email(email, phone), phone, now(), user_id))
+                        conn.execute("UPDATE user_profiles SET name=?, phone=?, company=?, job_title=?, updated_at=? WHERE user_id=?", (*profile.values(), now(), user_id))
+                except Exception as exc:
+                    if is_unique_violation(exc):
+                        return json_response(self, {"error": "该手机号或邮箱已被其他用户使用。"}, HTTPStatus.CONFLICT)
+                    raise
+                return json_response(self, {"ok": True})
             self.send_error(HTTPStatus.NOT_FOUND)
         except (ValueError, json.JSONDecodeError) as exc:
             json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
