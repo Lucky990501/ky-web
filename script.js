@@ -31,9 +31,8 @@ $('#modal form').onsubmit = async event => {
   } catch (error) { message.textContent = error.message; }
 };
 
-fetch('/api/site-content', { cache: 'no-store' }).then(response => response.ok ? response.json() : {}).then(content => {
-  Object.entries(content).forEach(([key, value]) => document.querySelectorAll(`[data-content="${key}"]`).forEach(element => { element.textContent = value; }));
-}).catch(() => {});
+const siteContentTargets={hero_title:'#s1 h1',hero_summary:'[data-content="hero_summary"]',hero_cta:'#s1 .copy .button',problem_title:'#s2 h2',problem_1:'#s2 .problems article:nth-child(1) p',problem_2:'#s2 .problems article:nth-child(2) p',problem_3:'#s2 .problems article:nth-child(3) p',problem_4:'#s2 .problems article:nth-child(4) p',path_title:'#s3 h2',path_1_title:'#s3 .steps article:nth-child(1) h3',path_1_desc:'#s3 .steps article:nth-child(1) p',path_2_title:'#s3 .steps article:nth-child(2) h3',path_2_desc:'#s3 .steps article:nth-child(2) p',path_3_title:'#s3 .steps article:nth-child(3) h3',path_3_desc:'#s3 .steps article:nth-child(3) p',sprint_title:'#s4 h2',sprint_summary:'#s4 .sprint-copy>p:not(.kicker)',method_title:'#s5 h2',industry_title:'#s6 h2',industry_1:'#s6 .industry:nth-child(1)',industry_2:'#s6 .industry:nth-child(2)',industry_3:'#s6 .industry:nth-child(3)',industry_4:'#s6 .industry:nth-child(4)',cta_title:'#s7 h2',cta_summary:'[data-content="cta_summary"]'};
+fetch('/api/site-content',{cache:'no-store'}).then(response=>response.ok?response.json():{}).then(content=>{Object.entries(content).forEach(([key,value])=>{document.querySelectorAll(`[data-content="${key}"]`).forEach(element=>{element.textContent=value});const element=document.querySelector(siteContentTargets[key]);if(element)element.textContent=value})}).catch(()=>{});
 
 const authTrigger = $('#auth-trigger'), authForm = $('#auth-form'), authMessage = $('#auth-message');
 header.querySelector('.header-actions .open')?.remove();

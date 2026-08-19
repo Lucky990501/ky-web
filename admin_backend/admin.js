@@ -3,6 +3,9 @@ const api=(path,options={})=>fetch(path,{headers:{'Content-Type':'application/js
 const stamp=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—';
 const escapeHtml=value=>{const element=document.createElement('div');element.textContent=value??'';return element.innerHTML};
 const initials=value=>(value||'用户').trim().slice(0,2).toUpperCase();
+let contentState={items:[],groups:{},active:'hero'};
+function renderContent(){const group=contentState.active;$('#content-groups').innerHTML=Object.entries(contentState.groups).map(([id,label])=>`<button type="button" class="${id===group?'active':''}" data-content-group="${id}">${escapeHtml(label)}</button>`).join('');$('#content-fields').innerHTML=contentState.items.filter(item=>item.group===group).map(item=>`<label>${escapeHtml(item.label)}<textarea name="${escapeHtml(item.content_key)}" rows="${item.content_value.length>60?4:2}">${escapeHtml(item.content_value)}</textarea></label>`).join('');document.querySelectorAll('[data-content-group]').forEach(button=>button.onclick=()=>{contentState.active=button.dataset.contentGroup;renderContent()})}
+function showPanel(panel){document.querySelectorAll('.panel').forEach(element=>{element.hidden=element.dataset.panel!==panel});document.querySelectorAll('[data-panel-target]').forEach(button=>button.classList.toggle('active',button.dataset.panelTarget===panel))}
 
 function renderUsers(users){
   $('#user-count').textContent=users.total;
@@ -25,11 +28,12 @@ async function refresh(){
   const [users,leads,status,content]=await Promise.all([api('/admin/api/users'),api('/admin/api/leads'),api('/admin/api/status'),api('/admin/api/content')]);
   renderUsers(users);renderLeads(leads);
   $('#release').textContent=status.release.split('/').pop().slice(0,8);
-  content.items.forEach(item=>{const field=document.querySelector(`[name="${item.content_key}"]`);if(field)field.value=item.content_value});
+  contentState={items:content.items,groups:content.groups,active:contentState.groups[contentState.active]?contentState.active:Object.keys(content.groups)[0]};renderContent();
 }
 
 $('#refresh-users').onclick=()=>refresh().catch(error=>$('#deploy-output').textContent=error.message);
 $('#refresh-leads').onclick=()=>refresh().catch(error=>$('#deploy-output').textContent=error.message);
-$('#content-form').onsubmit=async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(event.currentTarget));try{await api('/admin/api/content',{method:'PUT',body:JSON.stringify({values})});$('#content-message').textContent='已保存，官网刷新后生效。'}catch(error){$('#content-message').textContent=error.message}};
+document.querySelectorAll('[data-panel-target]').forEach(button=>button.onclick=()=>showPanel(button.dataset.panelTarget));showPanel('overview');
+$('#content-form').onsubmit=async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(event.currentTarget));try{await api('/admin/api/content',{method:'PUT',body:JSON.stringify({values})});contentState.items.forEach(item=>{if(values[item.content_key]!==undefined)item.content_value=values[item.content_key]});$('#content-message').textContent='已保存，官网刷新后生效。'}catch(error){$('#content-message').textContent=error.message}};
 $('#deploy').onclick=async()=>{if(!confirm('确认部署服务器已接收的最新版本？'))return;$('#deploy').disabled=true;try{const result=await api('/admin/api/deploy',{method:'POST',body:'{}'});$('#deploy-output').textContent=result.output;await refresh()}catch(error){$('#deploy-output').textContent=error.message}finally{$('#deploy').disabled=false}};
 refresh().catch(error=>$('#deploy-output').textContent=error.message);

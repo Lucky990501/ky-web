@@ -29,7 +29,23 @@ CHAT_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 DEFAULT_CONTENT = {
     "hero_summary": "从员工 AI 能力、业务场景重构，到 Agent、Ontology 与企业级 AI 系统建设，陪伴企业完成 AI 原生化转型。",
     "cta_summary": "一次 30–60 分钟的初步沟通，帮助您判断当前阶段、优先场景与下一步行动。",
+    "hero_title": "让 AI 真正进入企业业务流程。", "hero_cta": "预约 AI 转型诊断",
+    "problem_title": "做了 AI，却没有形成价值。", "problem_1": "AI 停留在个人工具，没有进入团队协作与业务流程。", "problem_2": "做了很多 Agent，却没有连接知识、规则与真实系统。", "problem_3": "业务与技术缺少共同语言，不知道什么值得优先投入。", "problem_4": "Demo 可以运行，却无法走向生产和持续演化。",
+    "path_title": "不是更多技术，而是一条升级路径。", "path_1_title": "AI 能力启航", "path_1_desc": "建立共同语言，让组织先用起来。", "path_2_title": "AI 场景重构", "path_2_desc": "把模糊需求变成可决策的项目蓝图。", "path_3_title": "AI 原生组织建设", "path_3_desc": "让 AI 嵌入知识、流程、系统与治理。",
+    "sprint_title": "3 天，把“想做 AI”变成可决策的蓝图。", "sprint_summary": "让业务、技术和管理层围绕同一份可验证的项目方案做决策。",
+    "method_title": "不是做一个 Agent，而是构建组织能力。", "industry_title": "让 AI 理解企业的业务世界。", "industry_1": "制造业", "industry_2": "物流供应链", "industry_3": "企业法务", "industry_4": "客服与营销", "cta_title": "不知道从哪里开始？预约企业 AI 转型诊断。",
 }
+CONTENT_GROUPS = {
+    "hero": "首页首屏", "problem": "AI 困境", "path": "转型路径", "sprint": "诊断冲刺", "method": "方法体系", "industry": "行业场景", "cta": "预约转化",
+}
+CONTENT_FIELDS = {key: {"label": label, "group": group} for key, label, group in (
+    ("hero_title", "首屏主标题", "hero"), ("hero_summary", "首屏介绍", "hero"), ("hero_cta", "首屏按钮", "hero"),
+    ("problem_title", "区域标题", "problem"), *((f"problem_{i}", f"困境 {i}", "problem") for i in range(1, 5)),
+    ("path_title", "区域标题", "path"), *((f"path_{i}_{part}", f"路径 {i}{' 标题' if part == 'title' else ' 说明'}", "path") for i in range(1, 4) for part in ("title", "desc")),
+    ("sprint_title", "区域标题", "sprint"), ("sprint_summary", "区域说明", "sprint"), ("method_title", "区域标题", "method"),
+    ("industry_title", "区域标题", "industry"), *((f"industry_{i}", f"行业 {i}", "industry") for i in range(1, 5)),
+    ("cta_title", "预约标题", "cta"), ("cta_summary", "预约说明", "cta"),
+)}
 
 
 def now():
@@ -427,7 +443,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/admin/api/content":
                 with db() as conn:
                     rows = conn.execute("SELECT content_key, content_value, updated_at FROM content ORDER BY content_key").fetchall()
-                return json_response(self, {"items": [dict(row) for row in rows]})
+                items = []
+                for row in rows:
+                    item = dict(row)
+                    item.update(CONTENT_FIELDS.get(item["content_key"], {"label": item["content_key"], "group": "hero"}))
+                    items.append(item)
+                return json_response(self, {"groups": CONTENT_GROUPS, "items": items})
             if path == "/admin/api/status":
                 current = Path("/var/www/kunyuan-ai/current")
                 release = str(current.resolve()) if current.exists() else "未发布"
