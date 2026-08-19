@@ -89,6 +89,7 @@ def initialize():
               id BIGSERIAL PRIMARY KEY,
               email TEXT UNIQUE,
               phone TEXT,
+              referral_code TEXT,
               password_hash TEXT NOT NULL,
               password_salt TEXT NOT NULL,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -122,6 +123,7 @@ def initialize():
                     conn.execute(statement)
             conn.execute("ALTER TABLE users ALTER COLUMN email DROP NOT NULL")
             conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT")
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone)")
         else:
             conn.executescript("""
@@ -138,6 +140,7 @@ def initialize():
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               email TEXT NOT NULL COLLATE NOCASE UNIQUE,
               phone TEXT,
+              referral_code TEXT,
               password_hash TEXT NOT NULL,
               password_salt TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -177,6 +180,8 @@ def initialize():
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
             if "phone" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+            if "referral_code" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN referral_code TEXT")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone)")
         for key, value in DEFAULT_CONTENT.items():
             conn.execute("INSERT INTO content(content_key, content_value, updated_at) VALUES (?, ?, ?) ON CONFLICT (content_key) DO NOTHING", (key, value, now()))
@@ -247,6 +252,22 @@ def read_credentials(data):
             raise ValueError("请输入有效的中国大陆手机号。")
         return identity_type, None, phone, password
     raise ValueError("请选择邮箱或手机号登录。")
+
+
+def read_registration_credentials(data):
+    email = str(data.get("email", "")).strip().lower()
+    phone = normalize_phone(data.get("phone", ""))
+    password = data.get("password", "")
+    referral_code = str(data.get("referral_code", "")).strip()
+    if not valid_email(email) or email.endswith(PHONE_EMAIL_SUFFIX):
+        raise ValueError("请输入有效的邮箱地址。")
+    if not PHONE_PATTERN.fullmatch(phone):
+        raise ValueError("请输入有效的中国大陆手机号。")
+    if not isinstance(password, str) or not 10 <= len(password) <= 128:
+        raise ValueError("密码长度应为 10–128 个字符。")
+    if len(referral_code) > 64:
+        raise ValueError("推荐码不能超过 64 个字符。")
+    return email, phone, password, referral_code
 
 
 def stored_email(email, phone):
@@ -413,19 +434,16 @@ class Handler(BaseHTTPRequestHandler):
                     lead_id = cursor.fetchone()["id"]
                 return json_response(self, {"id": lead_id, "message": "已收到，我们将在 1 个工作日内联系您。"}, HTTPStatus.CREATED)
             if path == "/api/auth/register":
-                identity_type, email, phone, password = read_credentials(data)
-                profile = profile_values(data, require_name=True)
-                if identity_type == "phone" and not profile["phone"]:
-                    profile["phone"] = phone
-                if data.get("consent") is not True:
-                    return json_response(self, {"error": "请先同意个人信息处理。"}, HTTPStatus.BAD_REQUEST)
+                email, phone, password, referral_code = read_registration_credentials(data)
+                profile = profile_values(data)
+                profile["phone"] = phone
                 salt = secrets.token_bytes(16)
                 stamp = now()
                 try:
                     with db() as conn:
                         cursor = conn.execute(
-                            "INSERT INTO users(email, phone, password_hash, password_salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-                            (stored_email(email, phone), phone, password_hash(password, salt), salt.hex(), stamp, stamp),
+                            "INSERT INTO users(email, phone, referral_code, password_hash, password_salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                            (stored_email(email, phone), phone, referral_code or None, password_hash(password, salt), salt.hex(), stamp, stamp),
                         )
                         user_id = cursor.fetchone()["id"]
                         conn.execute(
@@ -435,8 +453,7 @@ class Handler(BaseHTTPRequestHandler):
                         token = issue_session(conn, user_id)
                 except Exception as exc:
                     if is_unique_violation(exc):
-                        label = "手机号" if identity_type == "phone" else "邮箱"
-                        return json_response(self, {"error": f"该{label}已注册，请直接登录。"}, HTTPStatus.CONFLICT)
+                        return json_response(self, {"error": "该手机号或邮箱已注册，请直接登录。"}, HTTPStatus.CONFLICT)
                     raise
                 return json_response(self, {"token": token, "message": "注册成功。"}, HTTPStatus.CREATED)
             if path == "/api/auth/login":

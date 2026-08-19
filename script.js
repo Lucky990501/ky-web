@@ -40,48 +40,43 @@ header.querySelector('.header-actions .open')?.remove();
 
 const emailInput = authForm.elements.email;
 const emailField = emailInput.closest('label');
-const profilePhoneInput = authForm.elements.phone;
-profilePhoneInput.name = 'contact_phone';
-profilePhoneInput.autocomplete = 'tel';
-profilePhoneInput.closest('label').firstChild.textContent = '联系电话（可选）';
-emailField.classList.add('auth-email-field');
-const phoneField = document.createElement('label');
-phoneField.className = 'auth-phone-field';
-phoneField.append('手机号');
-const phoneInput = document.createElement('input');
-phoneInput.name = 'login_phone';
+const phoneInput = authForm.elements.phone;
+const phoneField = phoneInput.closest('label');
+phoneField.firstChild.textContent = '手机号 *';
 phoneInput.type = 'tel';
 phoneInput.inputMode = 'numeric';
 phoneInput.autocomplete = 'tel';
 phoneInput.placeholder = '请输入 11 位手机号';
 phoneInput.maxLength = 20;
-phoneField.append(phoneInput);
-emailField.before(phoneField);
+phoneInput.pattern = '1[3-9]\\d{9}';
+['name', 'company', 'job_title'].forEach(name => authForm.elements[name].closest('label').remove());
+authForm.querySelector('input[name="consent"]').closest('label').remove();
+const referralField = document.createElement('label');
+referralField.className = 'auth-profile';
+referralField.append('推荐码（可选）');
+const referralInput = document.createElement('input');
+referralInput.name = 'referral_code';
+referralInput.autocomplete = 'off';
+referralInput.maxLength = 64;
+referralInput.placeholder = '如有推荐码，请填写';
+referralField.append(referralInput);
+authForm.querySelector('#auth-submit').before(referralField);
 
-const identitySwitch = document.createElement('div');
-identitySwitch.className = 'auth-identity-switch';
-identitySwitch.setAttribute('role', 'group');
-identitySwitch.setAttribute('aria-label', '登录方式');
-identitySwitch.innerHTML = '<span>登录方式</span><button class="active" type="button" data-auth-identity="email" aria-pressed="true">邮箱</button><button type="button" data-auth-identity="phone" aria-pressed="false">手机号</button>';
-document.querySelector('.auth-switch').after(identitySwitch);
-
-let authMode = 'login', authIdentity = 'email';
-function setAuthIdentity(identity) {
-  authIdentity = identity;
-  const usingPhone = identity === 'phone';
-  emailField.hidden = usingPhone;
-  phoneField.hidden = !usingPhone;
-  emailInput.disabled = usingPhone;
-  phoneInput.disabled = !usingPhone;
-  emailInput.required = !usingPhone;
-  phoneInput.required = usingPhone;
-  document.querySelectorAll('[data-auth-identity]').forEach(button => {
-    const active = button.dataset.authIdentity === identity;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-pressed', String(active));
-  });
-  authMessage.textContent = '';
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const phonePattern = /^1[3-9]\d{9}$/;
+emailField.firstChild.textContent = '邮箱 *';
+authForm.elements.password.closest('label').firstChild.textContent = '密码 *';
+function validateIdentityField(field) {
+  const value = field.value.trim();
+  const valid = field === emailInput ? emailPattern.test(value) : phonePattern.test(value.replace(/[\s-]/g, '').replace(/^(\+86|0086)/, ''));
+  field.setCustomValidity(valid || !value ? '' : field === emailInput ? '请输入有效的邮箱地址。' : '请输入有效的 11 位中国大陆手机号。');
 }
+[emailInput, phoneInput].forEach(field => {
+  field.addEventListener('input', () => validateIdentityField(field));
+  field.addEventListener('blur', () => validateIdentityField(field));
+});
+
+let authMode = 'login';
 function setAuthMode(mode) {
   authMode = mode;
   authModal.dataset.mode = mode;
@@ -89,28 +84,30 @@ function setAuthMode(mode) {
   $('#auth-note').textContent = mode === 'login' ? '登录后可保留您的客服会话与咨询资料。' : '注册后可保留客服会话与咨询资料。';
   $('#auth-submit').textContent = mode === 'login' ? '登录' : '创建账号';
   authForm.password.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  phoneInput.required = mode === 'register';
+  phoneInput.disabled = mode === 'login';
+  referralInput.disabled = mode === 'login';
   document.querySelectorAll('[data-auth-mode]').forEach(button => button.classList.toggle('active', button.dataset.authMode === mode));
   authMessage.textContent = '';
 }
 document.querySelectorAll('[data-auth-mode]').forEach(button => button.onclick = () => setAuthMode(button.dataset.authMode));
-document.querySelectorAll('[data-auth-identity]').forEach(button => button.onclick = () => setAuthIdentity(button.dataset.authIdentity));
 authTrigger.onclick = () => {
   if (sessionStorage.getItem(tokenKey)) { sessionStorage.removeItem(tokenKey); syncAccount(); return; }
   setAuthMode('login'); openDialog(authModal);
 };
 authForm.onsubmit = async event => {
   event.preventDefault();
+  [emailInput, phoneInput].forEach(field => { if (!field.disabled) validateIdentityField(field); });
+  if (!authForm.reportValidity()) return;
   const fields = Object.fromEntries(new FormData(authForm));
-  const identity = authIdentity === 'phone' ? { phone: fields.login_phone } : { email: fields.email };
-  const payload = authMode === 'login' ? { identity_type: authIdentity, ...identity, password: fields.password } : {
-    identity_type: authIdentity, ...identity, password: fields.password, consent: fields.consent === 'on',
-    profile: { name: fields.name, company: fields.company, phone: fields.contact_phone || fields.login_phone || '', job_title: fields.job_title }
+  const payload = authMode === 'login' ? { identity_type: 'email', email: fields.email, password: fields.password } : {
+    email: fields.email, phone: fields.phone, password: fields.password, referral_code: fields.referral_code || ''
   };
   authMessage.textContent = '正在验证…';
   try {
     const result = await request(`/api/auth/${authMode === 'login' ? 'login' : 'register'}`, { method: 'POST', body: JSON.stringify(payload) });
     sessionStorage.setItem(tokenKey, result.token);
-    authModal.close(); authForm.reset(); setAuthIdentity(authIdentity); syncAccount(); loadChatHistory();
+    authModal.close(); authForm.reset(); setAuthMode(authMode); syncAccount(); loadChatHistory();
   } catch (error) { authMessage.textContent = error.message; }
 };
 async function syncAccount() {
@@ -155,4 +152,4 @@ const activate = section => { header.dataset.theme = section.dataset.theme; dots
 if (reduced) sections.forEach(section => section.classList.add('visible'));
 else { const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (entry.isIntersecting) { entry.target.classList.add('visible'); activate(entry.target); } }), { threshold: .55 }); sections.forEach(section => observer.observe(section)); }
 document.querySelectorAll('.industry').forEach(button => button.onclick = () => { document.querySelectorAll('.industry').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('.industry-core strong').textContent = button.dataset.name; $('.industry-core i').textContent = button.dataset.desc; });
-setAuthMode('login'); setAuthIdentity('email'); syncAccount();
+setAuthMode('login'); syncAccount();
