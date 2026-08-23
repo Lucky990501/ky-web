@@ -7,7 +7,7 @@
 1. 复制 `deployment/`、`publish-via-server.ps1`、`.deploy-secrets.example` 到新项目根目录，并将 `.deploy-secrets.local`、`.deploy-bridge/`、`*.bundle` 写进 `.gitignore`。
 2. 复制 `.deploy-secrets.example` 为 `.deploy-secrets.local`，只在本机填入服务器、GitHub SSH 别名、私钥路径与域名。不要提交该文件。
 3. 在本机私密配置中填入 `NGINX_*` 字段及真实证书路径。框架会在每次发布时重建并启用该独立站点配置；不要手工复用其他项目的站点文件。
-4. 先运行 `./publish-via-server.ps1` 模拟。代码提交后，运行 `./publish-via-server.ps1 -Execute` 发布。
+4. Windows 先运行 `./publish-via-server.ps1` 模拟；macOS 在终端运行 `./deploy.sh` 模拟。代码提交后，分别运行 `./publish-via-server.ps1 -Execute` 或 `./deploy.sh --execute` 发布。
 
 ## 约定
 
@@ -17,3 +17,9 @@
 - `HEALTHCHECK_URL` 是公开访问地址。若 HTTPS 由 CDN、负载均衡或反向代理终止，设置 `ORIGIN_HEALTHCHECK_URL=https://127.0.0.1/` 与 `ORIGIN_HEALTHCHECK_HOST`，发布时会校验服务器本机的 HTTPS Nginx，而不会错误依赖公网回环。
 - `SERVER_SITE_ROOT`、`SERVER_SITE_HOST` 是旧项目兼容字段；新项目使用 `SERVER_RELEASE_ROOT`、`HEALTHCHECK_HOST`。
 - 本框架管理静态 Nginx 发布。Node、Docker、后端服务可沿用 Git 中转，但应另行定义服务重启与健康检查策略。
+
+## macOS 发布
+
+`deploy.sh` 使用 macOS 自带的 `zsh`，不需要安装 PowerShell。首次使用先运行 `chmod +x deploy.sh deployment/release.sh`。
+
+在项目根目录运行 `./deploy.sh` 只校验配置和当前 Git 提交，不会上传、推送或访问服务器。确认模拟输出后，使用 `./deploy.sh --execute` 执行实际发布。
