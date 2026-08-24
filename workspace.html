@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="锟元 AI 工作台" />
+    <link rel="icon" href="/assets/kunyuan-ai-logo.png" />
+    <link rel="stylesheet" href="/workspace.css" />
+    <title>锟元 AI 工作台</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="workspace-brand" href="https://luckio.cn/" aria-label="返回锟元 AI 官网">
+          <img src="/assets/kunyuan-ai-logo.png" alt="锟元 AI" />
+          <span>锟元 <b>AI</b></span>
+        </a>
+        <button class="create-agent" id="create-agent" type="button"><span>＋</span> 创建智能体</button>
+        <nav class="main-nav" aria-label="工作台导航">
+          <button class="nav-item active" type="button" data-page="workspace"><span>◇</span> 工作台</button>
+          <button class="nav-item" type="button" data-page="agents"><span>◎</span> 我的智能体</button>
+          <button class="nav-item" type="button" data-page="runs"><span>↗</span> 运行记录</button>
+        </nav>
+        <div class="sidebar-section">
+          <div class="section-heading"><span>我的智能体</span><span class="agent-count" id="agent-count">0</span></div>
+          <div class="agent-list" id="agent-list" aria-live="polite"></div>
+        </div>
+        <div class="sidebar-footer">
+          <span class="runtime-dot"></span><span>锟元 Runtime · 预览版</span>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div><p class="eyebrow">KUNYUAN AI PLATFORM</p><h1 id="page-title">工作台</h1></div>
+          <div class="profile"><span class="profile-avatar" id="profile-avatar">K</span><span id="profile-name">正在连接…</span></div>
+        </header>
+
+        <section class="workspace-view" id="workspace-view">
+          <div class="welcome-card">
+            <p class="eyebrow">你的智能体控制中心</p>
+            <h2>把业务经验，<br /><em>沉淀成可运行的智能体。</em></h2>
+            <p>创建角色、设定工作边界、持续积累会话与运行记录。底层执行能力由锟元 AI 平台统一治理。</p>
+            <button class="primary-action" type="button" data-open-create>创建第一个智能体 <span>→</span></button>
+          </div>
+          <div class="status-card">
+            <div class="status-card-head"><span>平台状态</span><span class="status-badge">预览运行</span></div>
+            <div class="status-row"><span>用户身份</span><strong>已连接</strong></div>
+            <div class="status-row"><span>剩余 AI 额度</span><strong id="quota-balance">加载中</strong></div>
+            <div class="status-row"><span>智能体隔离</span><strong>按账号隔离</strong></div>
+            <div class="status-row"><span>Harness 接入</span><strong>准备中</strong></div>
+            <p>当前版本已记录智能体配置与任务。Harness 将作为受控运行层接入，不向普通用户暴露服务器或终端权限。</p>
+          </div>
+          <section class="agent-grid-section">
+            <div class="section-title"><div><p class="eyebrow">MY AGENTS</p><h2>继续工作</h2></div><button class="text-action" type="button" data-show-agents>查看全部 →</button></div>
+            <div class="agent-grid" id="agent-grid"></div>
+          </section>
+          <section class="runs-section">
+            <div class="section-title"><div><p class="eyebrow">ACTIVITY</p><h2>最近运行</h2></div></div>
+            <div class="run-list" id="run-list"></div>
+          </section>
+        </section>
+
+        <section class="chat-view hidden" id="chat-view">
+          <div class="chat-header"><button class="back-button" id="back-to-workspace" type="button">← 工作台</button><div><p class="eyebrow" id="chat-template">智能体</p><h2 id="chat-agent-name">选择一个智能体</h2></div><span class="chat-status">可用</span></div>
+          <div class="chat-layout">
+            <div class="conversation" id="conversation" aria-live="polite"></div>
+            <form class="composer" id="task-form">
+              <textarea id="task-input" rows="2" maxlength="4000" placeholder="给智能体一项任务…" disabled></textarea>
+              <div><span>每次执行消耗 1 次 AI 额度</span><button class="send-button" type="submit" disabled>发送 <span>↑</span></button></div>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="create-dialog" id="create-dialog">
+      <form method="dialog" class="dialog-inner" id="agent-form">
+        <button class="close-dialog" value="cancel" aria-label="关闭" type="button">×</button>
+        <p class="eyebrow">NEW AGENT</p><h2>创建你的智能体</h2><p class="dialog-copy">先选一个角色模板，再定义它的工作边界。后续可以接入专属知识库和工具。</p>
+        <fieldset class="template-picker" id="template-picker"><legend>选择模板</legend></fieldset>
+        <label>智能体名称<input name="name" minlength="2" maxlength="50" required /></label>
+        <label>一句话说明<input name="description" maxlength="240" /></label>
+        <label>工作指令<textarea name="instructions" rows="5" minlength="10" maxlength="6000" required></textarea></label>
+        <p class="form-message" id="form-message" role="status"></p>
+        <button class="primary-action" type="submit">创建并进入对话 <span>→</span></button>
+      </form>
+    </dialog>
+    <script src="/workspace.js"></script>
+  </body>
+</html>

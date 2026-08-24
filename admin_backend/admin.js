@@ -7,6 +7,8 @@ let contentState={items:[],groups:{},active:'hero'};
 let usersById={};
 let usersPage=1;
 let leadsPage=1;
+const usersHeader=$('#users').closest('table').querySelector('thead tr');
+const creditHeader=document.createElement('th');creditHeader.textContent='剩余额度';usersHeader.insertBefore(creditHeader,usersHeader.children[5]);
 function renderContent(){const group=contentState.active;$('#content-groups').innerHTML=Object.entries(contentState.groups).map(([id,label])=>`<button type="button" class="${id===group?'active':''}" data-content-group="${id}">${escapeHtml(label)}</button>`).join('');$('#content-fields').innerHTML=contentState.items.filter(item=>item.group===group).map(item=>`<label>${escapeHtml(item.label)}<textarea name="${escapeHtml(item.content_key)}" rows="${item.content_value.length>60?4:2}">${escapeHtml(item.content_value)}</textarea></label>`).join('');document.querySelectorAll('[data-content-group]').forEach(button=>button.onclick=()=>{contentState.active=button.dataset.contentGroup;renderContent()})}
 function showPanel(panel){document.querySelectorAll('.panel').forEach(element=>{element.hidden=element.dataset.panel!==panel});document.querySelectorAll('[data-panel-target]').forEach(button=>button.classList.toggle('active',button.dataset.panelTarget===panel))}
 
@@ -22,11 +24,14 @@ function renderUsers(users){
     const company=[user.company,user.job_title].filter(Boolean).join(' · ')||'暂未补充企业信息';
     return `<tr><td>${(users.page-1)*users.page_size+index+1}</td><td>${escapeHtml(name)}<button class="field-edit" data-field="name" data-user-id="${user.id}" type="button">编辑</button></td><td>${escapeHtml(phone)}<button class="field-edit" data-field="phone" data-user-id="${user.id}" type="button">编辑</button></td><td>${escapeHtml(email)}<button class="field-edit" data-field="email" data-user-id="${user.id}" type="button">编辑</button></td><td>${escapeHtml(company)}</td><td>${stamp(user.created_at)}</td><td>${stamp(user.last_login_at)}</td></tr>`;
   }).join('')||'<tr><td class="empty" colspan="7">暂未有注册用户。</td></tr>';
-  document.querySelectorAll('.field-edit').forEach(button=>button.onclick=()=>editUserField(usersById[button.dataset.userId],button.dataset.field));
+  if(!users.items.length){$('#users tr td').colSpan=8;return}
+  $('#users').querySelectorAll('tr').forEach((row,index)=>{const user=users.items[index];const cell=document.createElement('td');const balance=Number(user.ai_credit_balance||0);cell.append(document.createTextNode(`${balance} 次`));const button=document.createElement('button');button.className='field-edit';button.type='button';button.textContent='调整';button.onclick=()=>adjustUserCredit(user);cell.append(button);row.insertBefore(cell,row.children[5])});
+  document.querySelectorAll('.field-edit[data-field]').forEach(button=>button.onclick=()=>editUserField(usersById[button.dataset.userId],button.dataset.field));
 }
 
 async function editUser(user){const name=prompt('昵称',user.name||'');if(name===null)return;const email=prompt('邮箱',user.email||'');if(email===null)return;const phone=prompt('手机号',user.phone||user.login_phone||'');if(phone===null)return;const company=prompt('企业名称',user.company||'');if(company===null)return;const job_title=prompt('职位',user.job_title||'');if(job_title===null)return;try{await api(`/admin/api/users/${user.id}`,{method:'PUT',body:JSON.stringify({email,phone,profile:{name,phone,company,job_title}})});await refresh()}catch(error){alert(error.message)}}
 async function editUserField(user,field){const labels={name:'昵称',phone:'手机号',email:'邮箱'};const current=field==='phone'?(user.phone||user.login_phone||''):(user[field]||'');const value=prompt(`修改${labels[field]}`,current);if(value===null)return;const name=field==='name'?value:(user.name||'未设置昵称');const phone=field==='phone'?value:(user.phone||user.login_phone||'');const email=field==='email'?value:(user.email||'');try{await api(`/admin/api/users/${user.id}`,{method:'PUT',body:JSON.stringify({email,phone,profile:{name,phone,company:user.company||'',job_title:user.job_title||''}})});await refresh()}catch(error){alert(error.message)}}
+async function adjustUserCredit(user){const value=prompt(`调整 ${user.name||'该用户'} 的 AI 额度（输入正数增加、负数扣减）`,`0`);if(value===null)return;const delta=Number(value);if(!Number.isInteger(delta)||delta===0){alert('请输入非零整数。');return}try{const result=await api(`/admin/api/users/${user.id}/ai-credits`,{method:'PUT',body:JSON.stringify({delta,reason:'manual_admin'})});alert(`剩余额度：${result.balance} 次`);await refresh()}catch(error){alert(error.message)}}
 
 function renderLeads(leads){
   $('#lead-count').textContent=leads.total;

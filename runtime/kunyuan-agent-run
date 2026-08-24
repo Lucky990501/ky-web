@@ -1,0 +1,42 @@
+#!/bin/sh
+# Server-owned bridge from the website control plane to a tool-free DSH profile.
+set -eu
+
+if [ "$#" -ne 3 ]; then
+  exit 64
+fi
+
+user_id=$1
+agent_id=$2
+task=$3
+case "$user_id" in ''|*[!0-9]*) exit 64 ;; esac
+case "$agent_id" in ''|*[!0-9]*) exit 64 ;; esac
+
+runtime_root=/var/lib/kunyuan-runtime
+profile_source=/etc/kunyuan-runtime/harness-safe.patch.yml
+runtime_home="$runtime_root/homes/$user_id"
+workspace="$runtime_root/workspaces/$user_id/$agent_id"
+
+install -d -o root -g dsh -m 0710 "$runtime_root" "$runtime_root/homes" "$runtime_root/workspaces"
+install -d -o dsh -g dsh -m 0700 "$runtime_home" "$runtime_home/sessions" "$workspace"
+install -d -o dsh -g dsh -m 0700 "$runtime_home/profiles" "$runtime_home/profiles/headless"
+install -m 0600 -o dsh -g dsh /dev/null "$runtime_home/profiles/headless/cordis.yml"
+printf '%s\n' '# DSH profile root. Bundles and the safe patch compose this profile.' '[]' > "$runtime_home/profiles/headless/cordis.yml"
+install -m 0640 -o root -g dsh "$profile_source" "$runtime_home/profiles/headless/cordis.patch.yml"
+
+set -a
+. /etc/kunyuan-runtime/model.env
+set +a
+test -n "${DEEPSEEK_API_KEY:-}"
+
+# DSH's TypeScript loader resolves from its installed project directory. The
+# actual agent tools are disabled by the profile, and user state is in DSH_HOME.
+cd /opt/dsh
+exec /usr/bin/sudo -u dsh -H env -i \
+  HOME=/var/lib/dsh \
+  PATH=/usr/bin:/bin \
+  DSH_HOME="$runtime_home" \
+  DSH_PERMISSION_MODE=read-only \
+  DSH_TELEMETRY_DISABLED=1 \
+  DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
+  /usr/bin/node --import tsx/esm /opt/dsh/apps/cli/src/bin.ts --profile headless "$task"

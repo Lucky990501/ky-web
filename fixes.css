@@ -243,6 +243,27 @@ nav a:hover, .meta:hover, .kicker:hover, .tag:hover,
 @media (prefers-reduced-motion: reduce) { .chat-trigger, .account-button { transition: none; } }
 @media (max-width: 840px) { .header-actions { min-width: auto; } .account-button { min-height: 40px; min-width: 70px; padding: 0 10px; } .chat-widget { right: 18px; bottom: 78px; } .chat-panel { bottom: 58px; } }
 
+/* Account center for registered users and their AI usage balance. */
+.account-modal { width: min(560px, calc(100% - 32px)); padding: 34px; }
+.account-hero { display: flex; align-items: center; gap: 16px; padding-right: 32px; }
+.account-hero .kicker { margin-bottom: 7px; }
+.account-hero h2 { font-size: 30px; }
+.account-hero p:last-child { margin: 7px 0 0; color: #647685; font-size: 13px; }
+.account-avatar { display: grid; width: 58px; height: 58px; flex: 0 0 auto; place-items: center; border-radius: 50%; background: linear-gradient(145deg, #176d94, #0a2236); color: #dff4fc; font-size: 22px; font-weight: 800; }
+.account-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 28px 0 0; }
+.account-details div { min-height: 76px; border: 1px solid #dbe6eb; border-radius: 9px; padding: 12px 13px; background: #f8fbfc; }
+.account-details dt { color: #718291; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+.account-details dd { overflow-wrap: anywhere; margin: 8px 0 0; color: #173047; font-size: 14px; font-weight: 700; }
+.account-details .account-credit { border-color: #99d5ea; background: #edf9fd; }
+.account-credit dd { color: #09678f; }
+.account-credit b { font-size: 24px; letter-spacing: -.05em; }
+.account-credit span { color: #3d7185; font-size: 12px; }
+.account-hint { margin: 15px 0 0; color: #6b7e8c; font-size: 12px; line-height: 1.7; }
+.account-actions { display: flex; gap: 10px; margin-top: 22px; }
+.account-logout { border: 1px solid #cbd8de; border-radius: 7px; padding: 0 15px; background: #fff; color: #526876; font: 700 12px inherit; cursor: pointer; }
+.account-logout:hover { border-color: #89aabb; background: #f2f8fa; }
+@media (max-width: 480px) { .account-modal { padding: 27px 20px; } .account-details { grid-template-columns: 1fr; } .account-actions { align-items: stretch; flex-direction: column; } .account-actions .button, .account-logout { min-height: 44px; } }
+
 /* Hero: a living enterprise knowledge graph, built from first-party CSS and SVG. */
 .hero-graph {
   background:

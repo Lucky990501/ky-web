@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Kunyuan AI admin service. Binds to loopback; Nginx owns authentication."""
+import base64
 import json
 import os
 import hashlib
@@ -20,12 +21,43 @@ DATABASE_URL = os.environ.get("KUNYUAN_DATABASE_URL", "")
 LEGACY_SQLITE_DB = Path(os.environ.get("KUNYUAN_LEGACY_SQLITE_DB", "/var/lib/kunyuan-admin/admin.db"))
 MIGRATION_MARKER = Path(os.environ.get("KUNYUAN_DATABASE_MIGRATION_MARKER", "/var/lib/kunyuan-admin/postgres-migration.done"))
 DEPLOY_SCRIPT = os.environ.get("KUNYUAN_ADMIN_DEPLOY_SCRIPT", "/usr/local/sbin/kunyuan-admin-deploy")
+WORKSPACE_RUNTIME_RUNNER = os.environ.get("KUNYUAN_WORKSPACE_RUNTIME_RUNNER", "/usr/local/sbin/kunyuan-agent-run")
+WORKSPACE_RUNTIME_TIMEOUT_SECONDS = int(os.environ.get("KUNYUAN_WORKSPACE_RUNTIME_TIMEOUT_SECONDS", "90"))
 MAX_BODY = 32 * 1024
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 PHONE_EMAIL_SUFFIX = "@phone.kunyuan.invalid"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+WORKSPACE_SSO_COOKIE = "kunyuan_workspace_sso"
+WORKSPACE_SSO_TTL_SECONDS = 60 * 5
+WORKSPACE_SSO_SECRET = os.environ.get("KUNYUAN_WORKSPACE_SSO_SECRET", "")
 CHAT_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
+WORKSPACE_AGENT_TEMPLATES = {
+    "research": {
+        "name": "行业研究助手",
+        "description": "梳理行业动态、竞品与关键决策信息。",
+        "instructions": "你是一名严谨的行业研究助手。先澄清研究范围，再按结论、证据、风险和下一步输出。",
+    },
+    "sales": {
+        "name": "销售策略助手",
+        "description": "协助准备客户洞察、拜访策略与跟进内容。",
+        "instructions": "你是一名企业销售策略助手。围绕客户目标、决策角色、价值假设和下一步行动给出可执行建议。",
+    },
+    "service": {
+        "name": "客户服务助手",
+        "description": "把常见咨询转为清晰、可靠的服务答复。",
+        "instructions": "你是一名专业客户服务助手。回答准确、简洁，无法确认的信息要明确说明并建议人工跟进。",
+    },
+    "custom": {
+        "name": "自定义智能体",
+        "description": "从一个空白角色开始，配置专属工作方式。",
+        "instructions": "你是一个企业智能体。遵守用户设定的角色、边界和交付格式。",
+    },
+}
+
+
+class InsufficientAiCredit(Exception):
+    """Raised when a user has no available paid AI usage quota."""
 DEFAULT_CONTENT = {
     "hero_summary": "从员工 AI 能力、业务场景重构，到 Agent、Ontology 与企业级 AI 系统建设，陪伴企业完成 AI 原生化转型。",
     "cta_summary": "一次 30–60 分钟的初步沟通，帮助您判断当前阶段、优先场景与下一步行动。",
@@ -133,6 +165,51 @@ def initialize():
               created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);
+            CREATE TABLE IF NOT EXISTS workspace_agents (
+              id BIGSERIAL PRIMARY KEY,
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              template_key TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              instructions TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused')),
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_agents_user ON workspace_agents(user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS workspace_conversations (
+              id BIGSERIAL PRIMARY KEY,
+              agent_id BIGINT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              title TEXT NOT NULL DEFAULT '新会话', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_conversations_agent ON workspace_conversations(agent_id, user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS workspace_messages (
+              id BIGSERIAL PRIMARY KEY,
+              conversation_id BIGINT NOT NULL REFERENCES workspace_conversations(id) ON DELETE CASCADE,
+              role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+              content TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_messages_conversation ON workspace_messages(conversation_id, id);
+            CREATE TABLE IF NOT EXISTS workspace_runs (
+              id BIGSERIAL PRIMARY KEY,
+              agent_id BIGINT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              conversation_id BIGINT REFERENCES workspace_conversations(id) ON DELETE SET NULL,
+              status TEXT NOT NULL CHECK (status IN ('queued', 'completed', 'failed')),
+              input TEXT NOT NULL, output TEXT, runtime TEXT NOT NULL DEFAULT 'preview',
+              created_at TEXT NOT NULL, completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_runs_user ON workspace_runs(user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS user_ai_credits (
+              user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+              balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0), updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_ai_credit_ledger (
+              id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              run_id BIGINT REFERENCES workspace_runs(id) ON DELETE SET NULL,
+              delta INTEGER NOT NULL, balance_after INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ai_credit_ledger_user ON user_ai_credit_ledger(user_id, id DESC);
             """
             for statement in schema.split(";"):
                 if statement.strip():
@@ -192,6 +269,51 @@ def initialize():
             );
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session
               ON chat_messages(session_id, id);
+            CREATE TABLE IF NOT EXISTS workspace_agents (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              template_key TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              instructions TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused')),
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_agents_user ON workspace_agents(user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS workspace_conversations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              agent_id INTEGER NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              title TEXT NOT NULL DEFAULT '新会话', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_conversations_agent ON workspace_conversations(agent_id, user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS workspace_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              conversation_id INTEGER NOT NULL REFERENCES workspace_conversations(id) ON DELETE CASCADE,
+              role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+              content TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_messages_conversation ON workspace_messages(conversation_id, id);
+            CREATE TABLE IF NOT EXISTS workspace_runs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              agent_id INTEGER NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              conversation_id INTEGER REFERENCES workspace_conversations(id) ON DELETE SET NULL,
+              status TEXT NOT NULL CHECK (status IN ('queued', 'completed', 'failed')),
+              input TEXT NOT NULL, output TEXT, runtime TEXT NOT NULL DEFAULT 'preview',
+              created_at TEXT NOT NULL, completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_workspace_runs_user ON workspace_runs(user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS user_ai_credits (
+              user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+              balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0), updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_ai_credit_ledger (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              run_id INTEGER REFERENCES workspace_runs(id) ON DELETE SET NULL,
+              delta INTEGER NOT NULL, balance_after INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ai_credit_ledger_user ON user_ai_credit_ledger(user_id, id DESC);
             """)
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
             if "phone" not in columns:
@@ -225,12 +347,14 @@ def migrate_legacy_sqlite():
         legacy.close()
 
 
-def json_response(handler, payload, status=HTTPStatus.OK):
+def json_response(handler, payload, status=HTTPStatus.OK, headers=None):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Cache-Control", "no-store")
+    for name, value in (headers or {}).items():
+        handler.send_header(name, value)
     handler.end_headers()
     handler.wfile.write(data)
 
@@ -338,6 +462,187 @@ def authenticated_user(handler):
     return user
 
 
+def _base64url(value):
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _base64url_decode(value):
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def issue_workspace_sso(user_id):
+    """Issue a brief signed proof for Nginx to gate the separate AI workspace."""
+    if not WORKSPACE_SSO_SECRET:
+        raise RuntimeError("AI 工作台统一登录尚未完成配置。")
+    payload = {
+        "aud": "ai-workspace",
+        "exp": int(datetime.now(timezone.utc).timestamp()) + WORKSPACE_SSO_TTL_SECONDS,
+        "sub": int(user_id),
+    }
+    encoded_payload = _base64url(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signed = f"v1.{encoded_payload}".encode("ascii")
+    signature = _base64url(hmac.new(WORKSPACE_SSO_SECRET.encode("utf-8"), signed, hashlib.sha256).digest())
+    return f"v1.{encoded_payload}.{signature}"
+
+
+def valid_workspace_sso(token):
+    """Return the workspace user id only for an authentic, unexpired token."""
+    if not WORKSPACE_SSO_SECRET or not token:
+        return None
+    try:
+        version, encoded_payload, signature = token.split(".")
+        if version != "v1":
+            return None
+        signed = f"{version}.{encoded_payload}".encode("ascii")
+        expected = _base64url(hmac.new(WORKSPACE_SSO_SECRET.encode("utf-8"), signed, hashlib.sha256).digest())
+        if not hmac.compare_digest(signature, expected):
+            return None
+        payload = json.loads(_base64url_decode(encoded_payload))
+        if payload.get("aud") != "ai-workspace" or int(payload.get("exp", 0)) < int(datetime.now(timezone.utc).timestamp()):
+            return None
+        user_id = int(payload.get("sub", 0))
+        return user_id if user_id > 0 else None
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, base64.binascii.Error):
+        return None
+
+
+def workspace_sso_from_request(handler):
+    cookie_header = handler.headers.get("Cookie", "")
+    for item in cookie_header.split(";"):
+        name, separator, value = item.strip().partition("=")
+        if separator and name == WORKSPACE_SSO_COOKIE:
+            return valid_workspace_sso(value)
+    return None
+
+
+def workspace_user(handler):
+    """Resolve the user only for an Nginx-authenticated workspace request."""
+    if self_header := handler.headers.get("X-Kunyuan-Workspace-Auth"):
+        if self_header != "1":
+            return None
+    else:
+        return None
+    user_id = workspace_sso_from_request(handler)
+    if not user_id:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            """SELECT u.id, u.email, u.phone AS login_phone, p.name, p.company, p.job_title
+               FROM users u LEFT JOIN user_profiles p ON p.user_id=u.id WHERE u.id=?""",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return None
+    user = dict(row)
+    if user.get("email", "").endswith(PHONE_EMAIL_SUFFIX):
+        user["email"] = None
+    return user
+
+
+def workspace_agent_payload(data):
+    template_key = str(data.get("template_key", "custom"))
+    if template_key not in WORKSPACE_AGENT_TEMPLATES:
+        raise ValueError("智能体模板无效。")
+    template = WORKSPACE_AGENT_TEMPLATES[template_key]
+    name = str(data.get("name", template["name"])).strip()
+    description = str(data.get("description", template["description"])).strip()
+    instructions = str(data.get("instructions", template["instructions"])).strip()
+    if not 2 <= len(name) <= 50:
+        raise ValueError("智能体名称需为 2–50 个字符。")
+    if len(description) > 240:
+        raise ValueError("智能体说明不能超过 240 个字符。")
+    if not 10 <= len(instructions) <= 6000:
+        raise ValueError("请填写 10–6000 个字符的智能体指令。")
+    return name, template_key, description, instructions
+
+
+def workspace_agent(conn, agent_id, user_id):
+    return conn.execute(
+        """SELECT id, user_id, name, template_key, description, instructions, status, created_at, updated_at
+           FROM workspace_agents WHERE id=? AND user_id=?""",
+        (agent_id, user_id),
+    ).fetchone()
+
+
+def ai_credit_balance(conn, user_id):
+    conn.execute(
+        "INSERT INTO user_ai_credits(user_id, balance, updated_at) VALUES (?, 0, ?) ON CONFLICT (user_id) DO NOTHING",
+        (user_id, now()),
+    )
+    return conn.execute("SELECT balance, updated_at FROM user_ai_credits WHERE user_id=?", (user_id,)).fetchone()
+
+
+def reserve_ai_credit(conn, user_id, run_id):
+    """Atomically reserve one successful-workspace-run credit."""
+    ai_credit_balance(conn, user_id)
+    row = conn.execute(
+        """UPDATE user_ai_credits SET balance=balance-1, updated_at=?
+           WHERE user_id=? AND balance >= 1 RETURNING balance""",
+        (now(), user_id),
+    ).fetchone()
+    if not row:
+        return None
+    stamp = now()
+    conn.execute(
+        """INSERT INTO user_ai_credit_ledger(user_id, run_id, delta, balance_after, reason, created_at)
+           VALUES (?, ?, -1, ?, 'workspace_run', ?)""",
+        (user_id, run_id, row["balance"], stamp),
+    )
+    return row["balance"]
+
+
+def refund_ai_credit(conn, user_id, run_id):
+    row = conn.execute(
+        "UPDATE user_ai_credits SET balance=balance+1, updated_at=? WHERE user_id=? RETURNING balance",
+        (now(), user_id),
+    ).fetchone()
+    conn.execute(
+        """INSERT INTO user_ai_credit_ledger(user_id, run_id, delta, balance_after, reason, created_at)
+           VALUES (?, ?, 1, ?, 'runtime_refund', ?)""",
+        (user_id, run_id, row["balance"], now()),
+    )
+    return row["balance"]
+
+
+def workspace_runtime_reply(agent, message, history):
+    """Run a user task through the server-owned, tool-free Harness profile."""
+    history_text = "\n".join(
+        f"{'用户' if item['role'] == 'user' else '智能体'}：{item['content']}"
+        for item in history[-8:]
+    )[-8000:]
+    task = f"""你正在作为锟元 AI 工作台中的「{agent['name']}」提供文本回答。
+
+智能体职责：
+{agent['instructions']}
+
+工作边界：仅基于对话内容进行分析、写作和建议。不要声称访问过文件、终端、网络、数据库或任何外部系统；无法确认的事实请明确说明。请用中文输出，结构清晰、可直接交付给业务用户。
+
+最近对话：
+{history_text}
+
+请回答本次用户任务：
+{message}
+"""
+    try:
+        result = subprocess.run(
+            [WORKSPACE_RUNTIME_RUNNER, str(agent["user_id"]), str(agent["id"]), task],
+            capture_output=True,
+            text=True,
+            timeout=WORKSPACE_RUNTIME_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "本次智能体运行超时，请稍后重试。"
+    except OSError:
+        return None, "智能体运行服务暂不可用，请稍后重试。"
+    if result.returncode != 0:
+        return None, "智能体运行未完成，请稍后重试。"
+    reply = result.stdout.strip()
+    if not reply:
+        return None, "智能体没有返回内容，请稍后重试。"
+    return reply[-12000:], None
+
+
 def support_reply(message):
     """Safe first-line concierge until a dedicated LLM provider is configured."""
     text = message.lower()
@@ -397,11 +702,87 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     rows = conn.execute("SELECT content_key, content_value FROM content").fetchall()
                 return json_response(self, {row["content_key"]: row["content_value"] for row in rows})
+            if path == "/api/auth/workspace/verify":
+                # This endpoint is called only by Nginx's internal auth_request.
+                if self.headers.get("X-Kunyuan-Workspace-Auth") != "1":
+                    return json_response(self, {"error": "仅供内部鉴权使用。"}, HTTPStatus.NOT_FOUND)
+                user_id = workspace_sso_from_request(self)
+                if not user_id:
+                    return json_response(self, {"error": "AI 工作台登录已失效。"}, HTTPStatus.UNAUTHORIZED)
+                with db() as conn:
+                    user_exists = conn.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone()
+                if not user_exists:
+                    return json_response(self, {"error": "AI 工作台登录已失效。"}, HTTPStatus.UNAUTHORIZED)
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Workspace-User-Id", str(user_id))
+                self.end_headers()
+                return
             if path == "/api/auth/me":
                 user = authenticated_user(self)
                 if not user:
                     return json_response(self, {"error": "登录已失效或未登录。"}, HTTPStatus.UNAUTHORIZED)
                 return json_response(self, {"user": user})
+            if path == "/api/account/ai-balance":
+                user = authenticated_user(self)
+                if not user:
+                    return json_response(self, {"error": "登录已失效或未登录。"}, HTTPStatus.UNAUTHORIZED)
+                with db() as conn:
+                    credit = ai_credit_balance(conn, user["id"])
+                return json_response(self, {"balance": credit["balance"], "unit": "次", "updated_at": credit["updated_at"]})
+            if path == "/api/workspace/bootstrap":
+                user = workspace_user(self)
+                if not user:
+                    return json_response(self, {"error": "工作台登录已失效。"}, HTTPStatus.UNAUTHORIZED)
+                with db() as conn:
+                    agents = conn.execute(
+                        """SELECT id, name, template_key, description, status, created_at, updated_at
+                           FROM workspace_agents WHERE user_id=? ORDER BY id DESC""",
+                        (user["id"],),
+                    ).fetchall()
+                    runs = conn.execute(
+                        """SELECT r.id, r.agent_id, a.name AS agent_name, r.status, r.runtime, r.created_at, r.completed_at
+                           FROM workspace_runs r JOIN workspace_agents a ON a.id=r.agent_id
+                           WHERE r.user_id=? ORDER BY r.id DESC LIMIT 8""",
+                        (user["id"],),
+                    ).fetchall()
+                    credit = ai_credit_balance(conn, user["id"])
+                templates = [{"key": key, "name": item["name"], "description": item["description"]} for key, item in WORKSPACE_AGENT_TEMPLATES.items()]
+                return json_response(self, {"user": user, "agents": [dict(row) for row in agents], "runs": [dict(row) for row in runs], "templates": templates, "runtime": "harness", "quota": {"balance": credit["balance"], "unit": "次"}})
+            if path == "/api/workspace/agents":
+                user = workspace_user(self)
+                if not user:
+                    return json_response(self, {"error": "工作台登录已失效。"}, HTTPStatus.UNAUTHORIZED)
+                with db() as conn:
+                    rows = conn.execute(
+                        """SELECT id, name, template_key, description, status, created_at, updated_at
+                           FROM workspace_agents WHERE user_id=? ORDER BY id DESC""",
+                        (user["id"],),
+                    ).fetchall()
+                return json_response(self, {"items": [dict(row) for row in rows]})
+            if path.startswith("/api/workspace/agents/") and path.endswith("/messages"):
+                user = workspace_user(self)
+                if not user:
+                    return json_response(self, {"error": "工作台登录已失效。"}, HTTPStatus.UNAUTHORIZED)
+                agent_id = int(path.split("/")[4])
+                with db() as conn:
+                    agent = workspace_agent(conn, agent_id, user["id"])
+                    if not agent:
+                        return json_response(self, {"error": "未找到该智能体。"}, HTTPStatus.NOT_FOUND)
+                    if ai_credit_balance(conn, user["id"])["balance"] < 1:
+                        return json_response(self, {"error": "AI 使用额度不足，请充值后再试。"}, HTTPStatus.PAYMENT_REQUIRED)
+                    conversation = conn.execute(
+                        """SELECT id, title, created_at, updated_at FROM workspace_conversations
+                           WHERE agent_id=? AND user_id=? ORDER BY id DESC LIMIT 1""",
+                        (agent_id, user["id"]),
+                    ).fetchone()
+                    if not conversation:
+                        return json_response(self, {"conversation": None, "items": []})
+                    rows = conn.execute(
+                        "SELECT id, role, content, created_at FROM workspace_messages WHERE conversation_id=? ORDER BY id ASC",
+                        (conversation["id"],),
+                    ).fetchall()
+                return json_response(self, {"conversation": dict(conversation), "items": [dict(row) for row in rows]})
             if path == "/api/chat/history":
                 session_id = parse_qs(parsed.query).get("session", [""])[0]
                 if not CHAT_SESSION_PATTERN.fullmatch(session_id):
@@ -433,9 +814,11 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     rows = conn.execute(
                         """SELECT u.id, u.email, u.phone AS login_phone, u.created_at, u.last_login_at,
-                                  p.name, p.phone, p.company, p.job_title, p.consent_at
+                                  p.name, p.phone, p.company, p.job_title, p.consent_at,
+                                  COALESCE(c.balance, 0) AS ai_credit_balance, c.updated_at AS ai_credit_updated_at
                            FROM users u
                            LEFT JOIN user_profiles p ON p.user_id=u.id
+                           LEFT JOIN user_ai_credits c ON c.user_id=u.id
                            ORDER BY u.id DESC LIMIT ? OFFSET ?""", (page_size, offset)
                     ).fetchall()
                     total = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
@@ -479,6 +862,94 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     lead_id = cursor.fetchone()["id"]
                 return json_response(self, {"id": lead_id, "message": "已收到，我们将在 1 个工作日内联系您。"}, HTTPStatus.CREATED)
+            if path == "/api/auth/workspace/session":
+                user = authenticated_user(self)
+                if not user:
+                    return json_response(self, {"error": "请先登录官网账号。"}, HTTPStatus.UNAUTHORIZED)
+                token = issue_workspace_sso(user["id"])
+                cookie = (
+                    f"{WORKSPACE_SSO_COOKIE}={token}; Max-Age={WORKSPACE_SSO_TTL_SECONDS}; "
+                    "Path=/; Domain=.luckio.cn; Secure; HttpOnly; SameSite=Lax"
+                )
+                return json_response(self, {"url": "https://ai.luckio.cn/"}, headers={"Set-Cookie": cookie})
+            if path == "/api/workspace/agents":
+                user = workspace_user(self)
+                if not user:
+                    return json_response(self, {"error": "工作台登录已失效。"}, HTTPStatus.UNAUTHORIZED)
+                name, template_key, description, instructions = workspace_agent_payload(data)
+                stamp = now()
+                with db() as conn:
+                    cursor = conn.execute(
+                        """INSERT INTO workspace_agents(user_id, name, template_key, description, instructions, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id""",
+                        (user["id"], name, template_key, description, instructions, stamp, stamp),
+                    )
+                    agent_id = cursor.fetchone()["id"]
+                    agent = workspace_agent(conn, agent_id, user["id"])
+                return json_response(self, {"agent": dict(agent)}, HTTPStatus.CREATED)
+            if path.startswith("/api/workspace/agents/") and path.endswith("/messages"):
+                user = workspace_user(self)
+                if not user:
+                    return json_response(self, {"error": "工作台登录已失效。"}, HTTPStatus.UNAUTHORIZED)
+                agent_id = int(path.split("/")[4])
+                message = str(data.get("message", "")).strip()
+                if not 1 <= len(message) <= 4000:
+                    return json_response(self, {"error": "请输入不超过 4000 个字符的任务。"}, HTTPStatus.BAD_REQUEST)
+                stamp = now()
+                with db() as conn:
+                    agent = workspace_agent(conn, agent_id, user["id"])
+                    if not agent:
+                        return json_response(self, {"error": "未找到该智能体。"}, HTTPStatus.NOT_FOUND)
+                    conversation = conn.execute(
+                        """SELECT id FROM workspace_conversations WHERE agent_id=? AND user_id=?
+                           ORDER BY id DESC LIMIT 1""",
+                        (agent_id, user["id"]),
+                    ).fetchone()
+                    if conversation:
+                        conversation_id = conversation["id"]
+                    else:
+                        cursor = conn.execute(
+                            """INSERT INTO workspace_conversations(agent_id, user_id, title, created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?) RETURNING id""",
+                            (agent_id, user["id"], message[:60], stamp, stamp),
+                        )
+                        conversation_id = cursor.fetchone()["id"]
+                    history = [dict(row) for row in conn.execute(
+                        """SELECT role, content FROM workspace_messages WHERE conversation_id=?
+                           ORDER BY id DESC LIMIT 8""",
+                        (conversation_id,),
+                    ).fetchall()][::-1]
+                    conn.execute(
+                        "INSERT INTO workspace_messages(conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+                        (conversation_id, message, stamp),
+                    )
+                    cursor = conn.execute(
+                        """INSERT INTO workspace_runs(agent_id, user_id, conversation_id, status, input, runtime, created_at)
+                           VALUES (?, ?, ?, 'queued', ?, 'harness', ?) RETURNING id""",
+                        (agent_id, user["id"], conversation_id, message, stamp),
+                    )
+                    run_id = cursor.fetchone()["id"]
+                    remaining_credit = reserve_ai_credit(conn, user["id"], run_id)
+                    if remaining_credit is None:
+                        raise InsufficientAiCredit()
+                    history.append({"role": "user", "content": message})
+                reply, runtime_error = workspace_runtime_reply(agent, message, history)
+                output = reply or runtime_error
+                status = "completed" if reply else "failed"
+                completed_at = now()
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO workspace_messages(conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                        (conversation_id, output, completed_at),
+                    )
+                    conn.execute(
+                        """UPDATE workspace_runs SET status=?, output=?, completed_at=? WHERE id=? AND user_id=?""",
+                        (status, output, completed_at, run_id, user["id"]),
+                    )
+                    conn.execute("UPDATE workspace_conversations SET updated_at=? WHERE id=?", (completed_at, conversation_id))
+                    if not reply:
+                        remaining_credit = refund_ai_credit(conn, user["id"], run_id)
+                return json_response(self, {"run": {"id": run_id, "status": status, "runtime": "harness"}, "reply": output, "created_at": completed_at, "quota": {"balance": remaining_credit, "unit": "次"}}, HTTPStatus.CREATED)
             if path == "/api/auth/register":
                 email, phone, password, referral_code = read_registration_credentials(data)
                 profile = profile_values(data, require_name=True)
@@ -537,6 +1008,8 @@ class Handler(BaseHTTPRequestHandler):
                 status = HTTPStatus.OK if result.returncode == 0 else HTTPStatus.BAD_GATEWAY
                 return json_response(self, {"ok": result.returncode == 0, "output": (result.stdout + result.stderr)[-4000:]}, status)
             self.send_error(HTTPStatus.NOT_FOUND)
+        except InsufficientAiCredit:
+            json_response(self, {"error": "AI 使用额度不足，请充值后再试。"}, HTTPStatus.PAYMENT_REQUIRED)
         except (ValueError, json.JSONDecodeError) as exc:
             json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except subprocess.TimeoutExpired:
@@ -579,6 +1052,29 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("UPDATE leads SET status=?, updated_at=? WHERE id=?", (status, now(), lead_id))
                 return json_response(self, {"ok": True})
+            if path.startswith("/admin/api/users/") and path.endswith("/ai-credits"):
+                user_id = int(path.split("/")[4])
+                delta = int(data.get("delta", 0))
+                reason = str(data.get("reason", "manual_admin"))[:120] or "manual_admin"
+                if not -100000 <= delta <= 100000 or delta == 0:
+                    return json_response(self, {"error": "额度调整需为 -100000 至 100000 的非零整数。"}, HTTPStatus.BAD_REQUEST)
+                with db() as conn:
+                    if not conn.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
+                        return json_response(self, {"error": "未找到用户。"}, HTTPStatus.NOT_FOUND)
+                    ai_credit_balance(conn, user_id)
+                    credit = conn.execute(
+                        """UPDATE user_ai_credits SET balance=balance+?, updated_at=?
+                           WHERE user_id=? AND balance+? >= 0 RETURNING balance, updated_at""",
+                        (delta, now(), user_id, delta),
+                    ).fetchone()
+                    if not credit:
+                        return json_response(self, {"error": "扣减后额度不能小于 0。"}, HTTPStatus.CONFLICT)
+                    conn.execute(
+                        """INSERT INTO user_ai_credit_ledger(user_id, delta, balance_after, reason, created_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (user_id, delta, credit["balance"], reason, now()),
+                    )
+                return json_response(self, {"user_id": user_id, "balance": credit["balance"], "unit": "次", "updated_at": credit["updated_at"]})
             if path.startswith("/admin/api/users/"):
                 user_id = int(path.rsplit("/", 1)[-1])
                 profile = profile_values(data, require_name=True)

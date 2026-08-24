@@ -26,3 +26,15 @@ PostgreSQL 数据文件、账号和密码均不在发布目录内。首次切换
 `GET /api/auth/me`：返回当前用户及留资资料。
 
 `PUT /api/auth/profile`：传入 `profile` 对象，更新当前用户资料。
+
+`GET /api/account/ai-balance`：返回当前登录用户的剩余 AI 额度。工作台每次成功执行任务消耗 1 次额度；运行失败会自动退回。
+
+## 管理后台额度配置
+
+`GET /admin/api/users` 的每位用户包含 `ai_credit_balance`。管理员可调用 `PUT /admin/api/users/{id}/ai-credits` 调整额度：
+
+```json
+{"delta": 10, "reason": "manual_admin"}
+```
+
+`delta` 为正数时增加额度，为负数时扣减额度；余额不会低于 0，并会记录调整流水。

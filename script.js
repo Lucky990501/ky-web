@@ -36,6 +36,55 @@ fetch('/api/site-content',{cache:'no-store'}).then(response=>response.ok?respons
 
 const authTrigger = $('#auth-trigger'), authForm = $('#auth-form'), authMessage = $('#auth-message');
 header.querySelector('.header-actions .open')?.remove();
+const accountModal = document.createElement('dialog');
+accountModal.className = 'account-modal';
+accountModal.innerHTML = '<button class="close" aria-label="关闭">×</button><div class="account-hero"><span class="account-avatar" id="account-avatar">K</span><div><p class="kicker">KUNYUAN AI ACCOUNT</p><h2 id="account-name">我的账户</h2><p id="account-note">您的账号与 AI 服务额度</p></div></div><dl class="account-details"><div><dt>手机号</dt><dd id="account-phone">—</dd></div><div><dt>邮箱</dt><dd id="account-email">—</dd></div><div><dt>注册时间</dt><dd id="account-created">—</dd></div><div class="account-credit"><dt>剩余 AI 额度</dt><dd><b id="account-credit">—</b> <span>次</span></dd></div></dl><p class="account-hint">工作台每次成功执行任务消耗 1 次额度；请联系管理员配置或增加额度。</p><div class="account-actions"><button class="button" id="account-workspace" type="button">进入 AI 工作台　↗</button><button class="account-logout" id="account-logout" type="button">退出登录</button></div>';
+document.body.append(accountModal);
+accountModal.querySelector('.close').onclick = () => accountModal.close();
+accountModal.onclick = event => { if (event.target === accountModal) accountModal.close(); };
+let accountUser = null;
+
+function accountLabel(user) { return user.name || user.email || user.login_phone || '锟元用户'; }
+function accountInitial(user) { return accountLabel(user).trim().slice(0, 1).toUpperCase(); }
+function accountTime(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' }).format(date); }
+function renderAccount(user, balance) {
+  $('#account-avatar').textContent = accountInitial(user); $('#account-name').textContent = accountLabel(user); $('#account-note').textContent = user.company || '已连接官网账号与 AI 工作台';
+  $('#account-phone').textContent = user.phone || user.login_phone || '未填写'; $('#account-email').textContent = user.email || '未填写'; $('#account-created').textContent = accountTime(user.created_at); $('#account-credit').textContent = String(balance);
+}
+async function loadAccount() {
+  const [{ user }, credit] = await Promise.all([request('/api/auth/me', {}, true), request('/api/account/ai-balance', {}, true)]);
+  accountUser = user; renderAccount(user, credit.balance); return user;
+}
+async function openAccount() {
+  try { await loadAccount(); openDialog(accountModal); } catch (_) { sessionStorage.removeItem(tokenKey); accountUser = null; syncAccount(); setAuthMode('login'); openDialog(authModal); }
+}
+function logout() { sessionStorage.removeItem(tokenKey); accountUser = null; accountModal.close(); syncAccount(); }
+$('#account-logout').onclick = logout;
+$('#account-workspace').onclick = () => { accountModal.close(); openWorkspace(); };
+
+async function openWorkspace() {
+  if (!sessionStorage.getItem(tokenKey)) {
+    sessionStorage.setItem('kunyuan_workspace_redirect', '1');
+    setAuthMode('login'); openDialog(authModal);
+    return;
+  }
+  try {
+    const result = await request('/api/auth/workspace/session', { method: 'POST', body: '{}' }, true);
+    sessionStorage.removeItem('kunyuan_workspace_redirect');
+    window.location.assign(result.url);
+  } catch (error) {
+    sessionStorage.removeItem(tokenKey);
+    syncAccount();
+    sessionStorage.setItem('kunyuan_workspace_redirect', '1');
+    authMessage.textContent = error.message;
+    setAuthMode('login'); openDialog(authModal);
+  }
+}
+
+document.querySelectorAll('nav a[href="ai-transformation.html"]').forEach(link => {
+  link.href = 'https://ai.luckio.cn/';
+  link.addEventListener('click', event => { event.preventDefault(); openWorkspace(); });
+});
 
 const emailInput = authForm.elements.email;
 const emailField = emailInput.closest('label');
@@ -99,7 +148,7 @@ function setAuthMode(mode) {
 }
 document.querySelectorAll('[data-auth-mode]').forEach(button => button.onclick = () => setAuthMode(button.dataset.authMode));
 authTrigger.onclick = () => {
-  if (sessionStorage.getItem(tokenKey)) { sessionStorage.removeItem(tokenKey); syncAccount(); return; }
+  if (sessionStorage.getItem(tokenKey)) { openAccount(); return; }
   setAuthMode('login'); openDialog(authModal);
 };
 authForm.onsubmit = async event => {
@@ -116,15 +165,16 @@ authForm.onsubmit = async event => {
     const result = await request(`/api/auth/${authMode === 'login' ? 'login' : 'register'}`, { method: 'POST', body: JSON.stringify(payload) });
     sessionStorage.setItem(tokenKey, result.token);
     authModal.close(); authForm.reset(); setAuthMode(authMode); syncAccount(); loadChatHistory();
+    if (sessionStorage.getItem('kunyuan_workspace_redirect') || new URLSearchParams(location.search).get('next') === 'ai') openWorkspace();
   } catch (error) { authMessage.textContent = error.message; }
 };
 async function syncAccount() {
   const token = sessionStorage.getItem(tokenKey);
-  if (!token) { authTrigger.textContent = '登录'; return; }
+  if (!token) { accountUser = null; authTrigger.textContent = '登录'; return; }
   try {
     const { user } = await request('/api/auth/me', {}, true);
-    authTrigger.textContent = `${user.name || user.email || user.login_phone} · 退出`;
-  } catch (_) { sessionStorage.removeItem(tokenKey); authTrigger.textContent = '登录'; }
+    accountUser = user; authTrigger.textContent = '我的账户';
+  } catch (_) { sessionStorage.removeItem(tokenKey); accountUser = null; authTrigger.textContent = '登录'; }
 }
 
 const chatPanel = $('#chat-panel'), chatTrigger = $('#chat-trigger'), chatMessages = $('#chat-messages'), chatForm = $('#chat-form'), chatInput = $('#chat-input');
@@ -179,3 +229,4 @@ if (!reduced && heroGraph && knowledgeGraph) {
 }
 document.querySelectorAll('.industry').forEach(button => button.onclick = () => { document.querySelectorAll('.industry').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('.industry-core strong').textContent = button.dataset.name; $('.industry-core i').textContent = button.dataset.desc; });
 setAuthMode('login'); syncAccount();
+if (new URLSearchParams(location.search).get('next') === 'ai') openWorkspace();
