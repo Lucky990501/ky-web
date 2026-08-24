@@ -204,6 +204,11 @@ if [ -f "$release/admin_backend/server.py" ]; then
     printf 'KUNYUAN_DATABASE_URL=postgresql://kunyuan_app:%s@127.0.0.1:5432/kunyuan\n' "$database_password" > "$database_env"
     chmod 600 "$database_env"
   fi
+  if ! grep -q '^KUNYUAN_WORKSPACE_SSO_SECRET=' "$database_env"; then
+    workspace_sso_secret="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)"
+    printf 'KUNYUAN_WORKSPACE_SSO_SECRET=%s\n' "$workspace_sso_secret" >> "$database_env"
+    chmod 600 "$database_env"
+  fi
   cat > /etc/systemd/system/kunyuan-admin.service <<'SERVICE'
 [Unit]
 Description=Kunyuan AI administration service
