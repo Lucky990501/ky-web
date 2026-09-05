@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent
@@ -31,6 +33,8 @@ SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 WORKSPACE_SSO_COOKIE = "kunyuan_workspace_sso"
 WORKSPACE_SSO_TTL_SECONDS = 60 * 5
 WORKSPACE_SSO_SECRET = os.environ.get("KUNYUAN_WORKSPACE_SSO_SECRET", "")
+IMAGE_GATEWAY_INTERNAL_URL = os.environ.get("KUNYUAN_IMAGE_GATEWAY_INTERNAL_URL", "http://127.0.0.1:8020").rstrip("/")
+IMAGE_GATEWAY_ADMIN_TOKEN = os.environ.get("KUNYUAN_IMAGE_GATEWAY_ADMIN_TOKEN", "")
 CHAT_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 WORKSPACE_AGENT_TEMPLATES = {
     "research": {
@@ -210,6 +214,16 @@ def initialize():
               delta INTEGER NOT NULL, balance_after INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_ai_credit_ledger_user ON user_ai_credit_ledger(user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS api_keys (
+              id BIGSERIAL PRIMARY KEY,
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              token_name TEXT NOT NULL UNIQUE,
+              token_prefix TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              revoked_at TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_one_active_per_user
+              ON api_keys(user_id) WHERE revoked_at IS NULL;
             """
             for statement in schema.split(";"):
                 if statement.strip():
@@ -314,6 +328,16 @@ def initialize():
               delta INTEGER NOT NULL, balance_after INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_ai_credit_ledger_user ON user_ai_credit_ledger(user_id, id DESC);
+            CREATE TABLE IF NOT EXISTS api_keys (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              token_name TEXT NOT NULL UNIQUE,
+              token_prefix TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              revoked_at TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_one_active_per_user
+              ON api_keys(user_id) WHERE revoked_at IS NULL;
             """)
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
             if "phone" not in columns:
@@ -643,6 +667,41 @@ def workspace_runtime_reply(agent, message, history):
     return reply[-12000:], None
 
 
+def gateway_admin_request(path, method="GET", payload=None):
+    """Call the gateway's loopback-only management API without exposing its admin secret."""
+    if not IMAGE_GATEWAY_ADMIN_TOKEN:
+        raise RuntimeError("图片 API Key 服务尚未完成配置。")
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urlrequest.Request(
+        f"{IMAGE_GATEWAY_INTERNAL_URL}{path}",
+        data=data,
+        method=method,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {IMAGE_GATEWAY_ADMIN_TOKEN}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urlerror.HTTPError, urlerror.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError("API Key 服务暂时不可用，请稍后再试。") from exc
+
+
+def issue_image_api_key(user_id):
+    token_name = f"user-{user_id}-{secrets.token_hex(8)}"
+    result = gateway_admin_request("/internal/v1/tokens", "POST", {"name": token_name})
+    token = str(result.get("token", ""))
+    if not token:
+        raise RuntimeError("API Key 服务返回无效结果。")
+    return token_name, token
+
+
+def revoke_image_api_key(token_name):
+    gateway_admin_request(f"/internal/v1/tokens/{token_name}", "DELETE")
+
+
 def support_reply(message):
     """Safe first-line concierge until a dedicated LLM provider is configured."""
     text = message.lower()
@@ -730,6 +789,17 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     credit = ai_credit_balance(conn, user["id"])
                 return json_response(self, {"balance": credit["balance"], "unit": "次", "updated_at": credit["updated_at"]})
+            if path == "/api/developer/api-keys":
+                user = authenticated_user(self)
+                if not user:
+                    return json_response(self, {"error": "登录已失效或未登录。"}, HTTPStatus.UNAUTHORIZED)
+                with db() as conn:
+                    rows = conn.execute(
+                        """SELECT id, token_prefix, created_at, revoked_at FROM api_keys
+                           WHERE user_id=? ORDER BY id DESC""",
+                        (user["id"],),
+                    ).fetchall()
+                return json_response(self, {"items": [dict(row) for row in rows]})
             if path == "/api/workspace/bootstrap":
                 user = workspace_user(self)
                 if not user:
@@ -872,6 +942,39 @@ class Handler(BaseHTTPRequestHandler):
                     "Path=/; Domain=.luckio.cn; Secure; HttpOnly; SameSite=Lax"
                 )
                 return json_response(self, {"url": "https://ai.luckio.cn/"}, headers={"Set-Cookie": cookie})
+            if path == "/api/developer/api-keys":
+                user = authenticated_user(self)
+                if not user:
+                    return json_response(self, {"error": "登录已失效或未登录。"}, HTTPStatus.UNAUTHORIZED)
+                with db() as conn:
+                    active = conn.execute(
+                        "SELECT id FROM api_keys WHERE user_id=? AND revoked_at IS NULL",
+                        (user["id"],),
+                    ).fetchone()
+                if active:
+                    return json_response(self, {"error": "请先撤销现有 API Key，再创建新的 Key。"}, HTTPStatus.CONFLICT)
+                token_name, token = issue_image_api_key(user["id"])
+                try:
+                    with db() as conn:
+                        cursor = conn.execute(
+                            """INSERT INTO api_keys(user_id, token_name, token_prefix, created_at)
+                               VALUES (?, ?, ?, ?) RETURNING id""",
+                            (user["id"], token_name, token[:16], now()),
+                        )
+                        key_id = cursor.fetchone()["id"]
+                except Exception as exc:
+                    try:
+                        revoke_image_api_key(token_name)
+                    except RuntimeError:
+                        pass
+                    if is_unique_violation(exc):
+                        return json_response(self, {"error": "请先撤销现有 API Key，再创建新的 Key。"}, HTTPStatus.CONFLICT)
+                    raise
+                return json_response(
+                    self,
+                    {"item": {"id": key_id, "token_prefix": token[:16], "created_at": now(), "revoked_at": None}, "api_key": token},
+                    HTTPStatus.CREATED,
+                )
             if path == "/api/workspace/agents":
                 user = workspace_user(self)
                 if not user:
@@ -1014,6 +1117,31 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except subprocess.TimeoutExpired:
             json_response(self, {"error": "发布检查超时。"}, HTTPStatus.GATEWAY_TIMEOUT)
+        except Exception as exc:
+            json_response(self, {"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        try:
+            if not path.startswith("/api/developer/api-keys/"):
+                return self.send_error(HTTPStatus.NOT_FOUND)
+            user = authenticated_user(self)
+            if not user:
+                return json_response(self, {"error": "登录已失效或未登录。"}, HTTPStatus.UNAUTHORIZED)
+            key_id = int(path.rsplit("/", 1)[-1])
+            with db() as conn:
+                row = conn.execute(
+                    "SELECT token_name FROM api_keys WHERE id=? AND user_id=? AND revoked_at IS NULL",
+                    (key_id, user["id"]),
+                ).fetchone()
+            if not row:
+                return json_response(self, {"error": "未找到可撤销的 API Key。"}, HTTPStatus.NOT_FOUND)
+            revoke_image_api_key(row["token_name"])
+            with db() as conn:
+                conn.execute("UPDATE api_keys SET revoked_at=? WHERE id=? AND user_id=?", (now(), key_id, user["id"]))
+            return json_response(self, {"ok": True})
+        except ValueError:
+            json_response(self, {"error": "API Key 标识无效。"}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             json_response(self, {"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 

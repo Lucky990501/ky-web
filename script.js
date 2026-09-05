@@ -38,7 +38,7 @@ const authTrigger = $('#auth-trigger'), authForm = $('#auth-form'), authMessage 
 header.querySelector('.header-actions .open')?.remove();
 const accountModal = document.createElement('dialog');
 accountModal.className = 'account-modal';
-accountModal.innerHTML = '<button class="close" aria-label="关闭">×</button><div class="account-hero"><span class="account-avatar" id="account-avatar">K</span><div><p class="kicker">KUNYUAN AI ACCOUNT</p><h2 id="account-name">我的账户</h2><p id="account-note">您的账号与 AI 服务额度</p></div></div><dl class="account-details"><div><dt>手机号</dt><dd id="account-phone">—</dd></div><div><dt>邮箱</dt><dd id="account-email">—</dd></div><div><dt>注册时间</dt><dd id="account-created">—</dd></div><div class="account-credit"><dt>剩余 AI 额度</dt><dd><b id="account-credit">—</b> <span>次</span></dd></div></dl><p class="account-hint">工作台每次成功执行任务消耗 1 次额度；请联系管理员配置或增加额度。</p><div class="account-actions"><button class="button" id="account-workspace" type="button">进入 AI 工作台　↗</button><button class="account-logout" id="account-logout" type="button">退出登录</button></div>';
+accountModal.innerHTML = '<button class="close" aria-label="关闭">×</button><div class="account-hero"><span class="account-avatar" id="account-avatar">K</span><div><p class="kicker">KUNYUAN AI ACCOUNT</p><h2 id="account-name">我的账户</h2><p id="account-note">您的账号与 AI 服务额度</p></div></div><dl class="account-details"><div><dt>手机号</dt><dd id="account-phone">—</dd></div><div><dt>邮箱</dt><dd id="account-email">—</dd></div><div><dt>注册时间</dt><dd id="account-created">—</dd></div><div class="account-credit"><dt>剩余 AI 额度</dt><dd><b id="account-credit">—</b> <span>次</span></dd></div></dl><p class="account-hint">工作台每次成功执行任务消耗 1 次额度；请联系管理员配置或增加额度。</p><div class="account-actions"><button class="button" id="account-workspace" type="button">进入 AI 工作台　↗</button><button class="account-api-keys" id="account-api-keys" type="button">管理图片 API Key</button><button class="account-logout" id="account-logout" type="button">退出登录</button></div>';
 document.body.append(accountModal);
 accountModal.querySelector('.close').onclick = () => accountModal.close();
 accountModal.onclick = event => { if (event.target === accountModal) accountModal.close(); };
@@ -61,6 +61,65 @@ async function openAccount() {
 function logout() { sessionStorage.removeItem(tokenKey); accountUser = null; accountModal.close(); syncAccount(); }
 $('#account-logout').onclick = logout;
 $('#account-workspace').onclick = () => { accountModal.close(); openWorkspace(); };
+
+const apiKeyModal = document.createElement('dialog');
+apiKeyModal.className = 'api-key-modal';
+apiKeyModal.innerHTML = '<button class="close" aria-label="关闭">×</button><p class="kicker">DEVELOPER ACCESS</p><h2>图片 API Key</h2><p class="api-key-intro">用于调用图片创建与图片编辑接口。完整 Key 仅会显示一次，请立即保存。</p><div class="api-key-list" id="api-key-list"></div><p class="message" id="api-key-message" aria-live="polite"></p><button class="button" id="api-key-create" type="button">创建新的 API Key</button>';
+document.body.append(apiKeyModal);
+apiKeyModal.querySelector('.close').onclick = () => apiKeyModal.close();
+apiKeyModal.onclick = event => { if (event.target === apiKeyModal) apiKeyModal.close(); };
+apiKeyModal.addEventListener('close', () => {
+  const secret = apiKeyModal.querySelector('.api-key-secret');
+  if (secret) secret.remove();
+  $('#api-key-message').textContent = '';
+});
+
+function renderApiKeys(items) {
+  const list = $('#api-key-list'), active = items.find(item => !item.revoked_at);
+  list.innerHTML = active
+    ? `<article class="api-key-card"><span>当前有效 Key</span><code>${active.token_prefix}…</code><small>创建于 ${accountTime(active.created_at)}</small><button type="button" class="api-key-revoke" data-key-id="${active.id}">撤销此 Key</button></article>`
+    : '<p class="api-key-empty">尚未创建 API Key。</p>';
+  $('#api-key-create').hidden = Boolean(active);
+  list.querySelector('.api-key-revoke')?.addEventListener('click', () => revokeApiKey(active.id));
+}
+async function loadApiKeys() {
+  const result = await request('/api/developer/api-keys', {}, true);
+  renderApiKeys(result.items || []);
+}
+async function openApiKeys() {
+  accountModal.close();
+  openDialog(apiKeyModal);
+  $('#api-key-message').textContent = '正在读取…';
+  try { await loadApiKeys(); $('#api-key-message').textContent = ''; }
+  catch (error) { $('#api-key-message').textContent = error.message; }
+}
+async function createApiKey() {
+  const message = $('#api-key-message'), button = $('#api-key-create');
+  button.disabled = true; message.textContent = '正在创建…';
+  try {
+    const result = await request('/api/developer/api-keys', { method: 'POST', body: '{}' }, true);
+    renderApiKeys([result.item]);
+    const secret = document.createElement('section');
+    secret.className = 'api-key-secret';
+    secret.innerHTML = '<strong>请立即复制并安全保存</strong><code></code><button type="button">复制 API Key</button><small>关闭此窗口后将无法再次查看完整 Key。</small>';
+    secret.querySelector('code').textContent = result.api_key;
+    secret.querySelector('button').onclick = async () => {
+      try { await navigator.clipboard.writeText(result.api_key); secret.querySelector('button').textContent = '已复制'; }
+      catch (_) { message.textContent = '复制失败，请手动复制上方 Key。'; }
+    };
+    $('#api-key-list').after(secret); message.textContent = '';
+  } catch (error) { message.textContent = error.message; }
+  finally { button.disabled = false; }
+}
+async function revokeApiKey(id) {
+  const message = $('#api-key-message');
+  if (!confirm('撤销后，使用此 Key 的图片接口将立即不可用。确定撤销吗？')) return;
+  message.textContent = '正在撤销…';
+  try { await request(`/api/developer/api-keys/${id}`, { method: 'DELETE' }, true); await loadApiKeys(); message.textContent = 'API Key 已撤销。'; }
+  catch (error) { message.textContent = error.message; }
+}
+$('#account-api-keys').onclick = openApiKeys;
+$('#api-key-create').onclick = createApiKey;
 
 async function openWorkspace() {
   if (!sessionStorage.getItem(tokenKey)) {

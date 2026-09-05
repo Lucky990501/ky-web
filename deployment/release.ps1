@@ -225,6 +225,7 @@ Environment=KUNYUAN_MIGRATE_LEGACY_SQLITE=1
 Environment=KUNYUAN_DATABASE_MIGRATION_MARKER=/var/lib/kunyuan-admin/postgres-migration.done
 Environment=KUNYUAN_ADMIN_DEPLOY_SCRIPT=/usr/local/sbin/kunyuan-admin-deploy
 Environment=KUNYUAN_ADMIN_PORT=18780
+EnvironmentFile=-/etc/kunyuan-admin/image-gateway.env
 ExecStart=/usr/bin/python3 __RELEASE_ROOT__/current/admin_backend/server.py
 Restart=always
 RestartSec=3

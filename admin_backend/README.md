@@ -29,6 +29,16 @@ PostgreSQL 数据文件、账号和密码均不在发布目录内。首次切换
 
 `GET /api/account/ai-balance`：返回当前登录用户的剩余 AI 额度。工作台每次成功执行任务消耗 1 次额度；运行失败会自动退回。
 
+## 用户图片 API Key
+
+已登录用户可在官网“我的账户”中管理自己的图片 API Key。每个账户同时只能保留一枚有效 Key；创建新 Key 前需要先撤销原 Key。服务端只保存 Key 的前缀和网关侧哈希，完整 Key 仅在创建成功时返回一次。
+
+- `GET /api/developer/api-keys`：列出当前用户的 Key 状态，不返回完整 Key。
+- `POST /api/developer/api-keys`：创建 Key，响应中的 `api_key` 只在本次响应出现一次。
+- `DELETE /api/developer/api-keys/{id}`：撤销该用户自己的有效 Key。
+
+以上接口均需 `Authorization: Bearer <官网登录令牌>`。网页后端通过服务器本地地址调用图片网关管理接口；网关管理员凭据不会发送至浏览器。
+
 ## 管理后台额度配置
 
 `GET /admin/api/users` 的每位用户包含 `ai_credit_balance`。管理员可调用 `PUT /admin/api/users/{id}/ai-credits` 调整额度：
