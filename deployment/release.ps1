@@ -333,6 +333,9 @@ $values = @{
   '__NGINX_SITE_NAME__' = $nginxSiteName; '__NGINX_CONFIG_B64__' = $encodedNginxConfig
 }
 foreach ($token in $values.Keys) { $serverScript = $serverScript.Replace($token, $values[$token]) }
+# The script is decoded directly into Bash on Linux. Normalize PowerShell's CRLF
+# here so the remote shell never receives carriage-return control characters.
+$serverScript = $serverScript -replace "`r`n", "`n"
 $encodedServerScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($serverScript))
 & ssh @sshBase $remote "echo $encodedServerScript | base64 -d | bash"
 if ($LASTEXITCODE -ne 0) { throw 'Publishing or website deployment failed. The prior release was restored if the health check failed.' }
