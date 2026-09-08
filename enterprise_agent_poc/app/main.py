@@ -112,6 +112,13 @@ async def health() -> dict:
     return {"status": "ok", "runtime": "openai-codex==0.147.0", "scope": "runtime-poc"}
 
 
+@app.get("/api/health")
+async def production_health() -> dict:
+    """Stable unauthenticated health endpoint for the production proxy."""
+    return {"status": "ok", "runtime": "openai-codex==0.147.0", "environment": settings.environment}
+
+
+@app.get("/", include_in_schema=False)
 @app.get("/login", include_in_schema=False)
 @app.get("/workspace", include_in_schema=False)
 @app.get("/agents/image", include_in_schema=False)
