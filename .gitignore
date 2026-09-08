@@ -1,5 +1,8 @@
 # Local deployment credentials and transient release artifacts
 .deploy-secrets.local
+.env
+.env.*
+*.egg-info/
 .deploy-bridge/
 *.bundle
 __pycache__/

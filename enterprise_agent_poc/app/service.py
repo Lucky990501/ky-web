@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+from app.domain import RuntimeProfile, RuntimeSession
+from app.runtime.base import RuntimeProvider
+from app.settings import Settings
+from app.store import POCStore
+
+
+IMAGE_AGENT_INSTRUCTIONS = """你是一名企业视觉内容 Agent。
+
+理解用户的视觉需求，并使用当前可用 Skill 完成任务。对于每个海报成图请求，必须按顺序调用 Platform MCP：enterprise_config_get、knowledge_search、asset_search、image_generation。不得跳过任何一步。
+
+企业配置中的禁止项、必须项和品牌规则优先于用户措辞；不得虚构企业资料、价格、师资、课程数量或其他企业事实。资料不足时明确说明缺失信息。最终回复仅写面向用户的简短结果，不暴露令牌、跨租户资料或隐藏推理。"""
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    run_id: str
+    conversation_id: str
+    thread_id: str
+    text: str
+
+
+class AgentService:
+    def __init__(self, store: POCStore, runtime: RuntimeProvider, settings: Settings) -> None:
+        self._store = store
+        self._runtime = runtime
+        self._settings = settings
+
+    def profile_for(self, tenant_id: str, agent_id: str) -> RuntimeProfile:
+        if agent_id != "image-agent":
+            raise LookupError("POC 当前只提供 image-agent。")
+        return RuntimeProfile.build(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            model_provider_id=self._settings.model_provider_id,
+            model_id=self._settings.model_id,
+            reasoning_effort=self._settings.reasoning_effort,
+            skill_manifest={"poster-design": "1.0.0"},
+        )
+
+    async def run(self, tenant_id: str, agent_id: str, message: str, conversation_id: str | None = None) -> RunResult:
+        profile = self.profile_for(tenant_id, agent_id)
+        session: RuntimeSession
+        if conversation_id:
+            existing = self._store.conversation(conversation_id, tenant_id)
+            if not existing:
+                raise LookupError("会话不存在或不属于当前 Tenant。")
+            if existing["agent_id"] != agent_id or existing["runtime_profile_id"] != profile.id:
+                raise ValueError("会话与当前 Agent 或 Runtime Profile 不匹配。")
+            session = await self._runtime.resume_session(profile, existing["runtime_thread_id"])
+        else:
+            session = await self._runtime.create_session(profile, IMAGE_AGENT_INSTRUCTIONS)
+            conversation_id = str(uuid.uuid4())
+            self._store.save_conversation(
+                conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version
+            )
+        run_id = str(uuid.uuid4())
+        baseline = {
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "conversation_id": conversation_id,
+            "codex_thread_id": session.thread_id,
+            "runtime_version": profile.runtime_version,
+            "model_provider": profile.model_provider_id,
+            "model": profile.model_id,
+            "reasoning_effort": profile.reasoning_effort,
+            "skill_name": "poster-design",
+            "skill_version": profile.skill_manifest["poster-design"],
+            "mcp_calls": [],
+            "knowledge_calls": [],
+            "asset_calls": [],
+            "tool_calls": [],
+            "token_usage": {"input_tokens": None, "output_tokens": None},
+            "latency_ms": None,
+            "estimated_cost": None,
+            "estimated_cost_note": "未配置价格表；不对未知价格进行估算。",
+            "status": "running",
+            "error": None,
+            "final_result": None,
+            "artifacts": {
+                "design_brief": message,
+                "image_prompt": None,
+                "reference_assets": [],
+                "enterprise_context_used": None,
+                "knowledge_context_used": [],
+            },
+        }
+        self._store.create_run_trace(run_id, conversation_id, tenant_id, agent_id, session.thread_id, baseline)
+        self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
+        trace = baseline
+        try:
+            turn = await self._runtime.run_turn(session, message)
+            trace = self._completed_trace(baseline, turn)
+            required_mcp_failed = any(call["status"].lower().endswith("failed") for call in trace["mcp_calls"])
+            status = "completed" if turn.status.lower() in {"completed", "success"} and not turn.error and not required_mcp_failed else "failed"
+            trace["status"] = status
+            self._store.log_event(conversation_id, f"turn.{status}", {"run_id": run_id, "token_usage": trace["token_usage"], "latency_ms": turn.latency_ms})
+            if status != "completed":
+                raise RuntimeError(self._safe_error(turn.error))
+            self._store.finish_run_trace(run_id, status, trace, turn.thread_id)
+            return RunResult(run_id=run_id, conversation_id=conversation_id, thread_id=turn.thread_id, text=turn.text)
+        except Exception as exc:
+            trace["status"] = "failed"
+            trace["error"] = self._safe_error(str(exc))
+            self._store.finish_run_trace(run_id, "failed", trace, session.thread_id)
+            self._store.log_event(conversation_id, "turn.failed", {"run_id": run_id, "error": trace["error"]})
+            raise RuntimeError(trace["error"]) from exc
+
+    @staticmethod
+    def _completed_trace(trace: dict, turn) -> dict:
+        trace = {**trace}
+        calls = list(turn.mcp_calls)
+        trace["mcp_calls"] = calls
+        trace["tool_calls"] = [{"server": call["server"], "tool": call["tool"], "status": call["status"]} for call in calls]
+        trace["knowledge_calls"] = [call for call in calls if call["tool"] == "knowledge_search"]
+        trace["asset_calls"] = [call for call in calls if call["tool"] == "asset_search"]
+        trace["token_usage"] = {"input_tokens": turn.input_tokens, "output_tokens": turn.output_tokens}
+        trace["latency_ms"] = turn.latency_ms
+        trace["error"] = AgentService._safe_error(turn.error) if turn.error else None
+        trace["final_result"] = turn.text
+        artifacts = dict(trace["artifacts"])
+        for call in calls:
+            if call["tool"] == "enterprise_config_get":
+                artifacts["enterprise_context_used"] = call["output_summary"]
+            elif call["tool"] == "knowledge_search":
+                artifacts["knowledge_context_used"].append(call["output_summary"])
+            elif call["tool"] == "asset_search":
+                artifacts["reference_assets"].append(call["output_summary"])
+            elif call["tool"] == "image_generation":
+                artifacts["image_prompt"] = call["input_summary"]
+        trace["artifacts"] = artifacts
+        return trace
+
+    @staticmethod
+    def _safe_error(error: str | None) -> str:
+        if not error:
+            return "Codex Turn 未完成。"
+        if "Incorrect API key" in error or "401 Unauthorized" in error:
+            return "OpenAI API Key 被拒绝（401）；请配置可用于 Responses API 的有效密钥。"
+        return error[:600]

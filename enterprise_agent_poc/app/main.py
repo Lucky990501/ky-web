@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import Cookie, FastAPI, Header, HTTPException, Response
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_password, verify_password
+from app.product_service import TaskService
+from app.product_store import ProductStore
+from app.storage import storage_provider
+from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
+from app.security import RuntimeTokenIssuer
+from app.service import AgentService
+from app.settings import settings
+from app.skills import SkillDeployment
+from app.store import POCStore
+
+
+class RunRequest(BaseModel):
+    agent_id: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=4_000)
+    conversation_id: str | None = None
+
+
+class LoginRequest(BaseModel):
+    account: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class AgentTaskRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4_000)
+    conversation_id: str | None = None
+class RenameRequest(BaseModel): title: str = Field(min_length=1,max_length=80)
+class EnterpriseConfigRequest(BaseModel): payload: dict
+class KnowledgeTextRequest(BaseModel): name: str = Field(min_length=1,max_length=180); content: str = Field(min_length=1,max_length=100_000)
+class AssetRequest(BaseModel): name: str = Field(min_length=1,max_length=120); asset_type: str; url: str = Field(min_length=1,max_length=2_000); tags: list[str]=[]; description: str=""
+class SaveGenerationRequest(BaseModel): name: str = Field(min_length=1,max_length=120)
+class RuntimeTestRequest(BaseModel): mode: str = Field(pattern="^(ok|enterprise_config)$")
+
+
+store = POCStore(settings.database_url)
+token_issuer = RuntimeTokenIssuer(settings.token_secret)
+manager = CodexRuntimeManager(settings, SkillDeployment(Path(__file__).resolve().parents[1] / "skill_packages"), token_issuer)
+runtime = CodexRuntimeProvider(manager)
+agents = AgentService(store, runtime, settings)
+product_store = ProductStore(store)
+task_service = TaskService(product_store, agents)
+sessions = SessionIssuer(settings.token_secret)
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    product_store.initialize()
+    if settings.bootstrap_demo_data:
+        store.seed_demo_data()
+        # Development-only synthetic accounts. Production provisioning is external.
+        product_store.create_user("tenant-a", "admin@tenant-a.test", hash_password("ChangeMe!2026"), "Tenant A 管理员", "enterprise_admin")
+        product_store.create_user("tenant-a", "member@tenant-a.test", hash_password("ChangeMe!2026"), "Tenant A 成员", "member")
+        product_store.create_user("tenant-b", "admin@tenant-b.test", hash_password("ChangeMe!2026"), "Tenant B 管理员", "enterprise_admin")
+    if settings.task_queue == "local":
+        for task in product_store.recoverable_tasks():
+            asyncio.create_task(task_service.execute(task))
+    yield
+    await runtime.close()
+
+
+app = FastAPI(title="Enterprise AI Agent Runtime POC", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def current_user(workbench_session: str | None = Cookie(default=None)) -> UserPrincipal:
+    if not workbench_session:
+        raise HTTPException(401, "请先登录。")
+    try:
+        return sessions.verify(workbench_session)
+    except AuthenticationError as exc:
+        raise HTTPException(401, "登录已失效，请重新登录。") from exc
+
+def require_admin(workbench_session: str | None) -> UserPrincipal:
+    principal=current_user(workbench_session)
+    if principal.role != "enterprise_admin": raise HTTPException(403,"仅企业管理员可操作。")
+    return principal
+
+def _key_fingerprint() -> str | None:
+    key=os.environ.get(settings.codex_api_key_env)
+    return hashlib.sha256(key.encode()).hexdigest()[:12] if key else None
+
+
+def admin_user(principal: UserPrincipal = Cookie(default=None)):  # pragma: no cover - route helper replaced below
+    return principal
+
+
+def tenant_from_key(poc_api_key: str | None) -> str:
+    if not poc_api_key:
+        raise HTTPException(401, "缺少 POC API Key。")
+    tenant_id = store.tenant_for_api_key(poc_api_key)
+    if not tenant_id:
+        raise HTTPException(401, "POC API Key 无效。")
+    return tenant_id
+
+
+@app.get("/api/v1/poc/health")
+async def health() -> dict:
+    return {"status": "ok", "runtime": "openai-codex==0.147.0", "scope": "runtime-poc"}
+
+
+@app.get("/login", include_in_schema=False)
+@app.get("/workspace", include_in_schema=False)
+@app.get("/agents/image", include_in_schema=False)
+@app.get("/conversations", include_in_schema=False)
+@app.get("/generations", include_in_schema=False)
+@app.get("/enterprise-config", include_in_schema=False)
+@app.get("/knowledge", include_in_schema=False)
+@app.get("/assets", include_in_schema=False)
+async def product_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.post("/api/v1/auth/login")
+async def login(payload: LoginRequest, response: Response) -> dict:
+    user = product_store.user_by_email(payload.account)
+    if not user or not verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(401, "账号或密码不正确。")
+    token = sessions.issue(UserPrincipal(user["id"], user["tenant_id"], user["role"]))
+    response.set_cookie("workbench_session", token, httponly=True, samesite="lax", secure=settings.secure_cookies, max_age=12 * 60 * 60, path="/")
+    return {"user": {"id": user["id"], "display_name": user["display_name"], "tenant_id": user["tenant_id"], "role": user["role"]}}
+
+
+@app.post("/api/v1/auth/logout")
+async def logout(response: Response) -> dict:
+    response.delete_cookie("workbench_session", path="/")
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/me")
+async def me(workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    return {"user_id": principal.user_id, "tenant_id": principal.tenant_id, "role": principal.role}
+
+
+@app.get("/api/v1/workspace")
+async def workspace(workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    return product_store.workspace(principal.tenant_id, principal.user_id)
+
+
+@app.post("/api/v1/agents/{agent_id}/runs", status_code=202)
+async def create_agent_task(agent_id: str, payload: AgentTaskRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    if agent_id != "image-agent":
+        raise HTTPException(404, "当前只开放图片生成智能体。")
+    try:
+        task = product_store.create_task(principal.tenant_id, principal.user_id, agent_id, payload.message, payload.conversation_id)
+    except ValueError as exc:
+        if str(exc) == "insufficient_credit":
+            raise HTTPException(402, "积分不足，无法提交图片任务。") from exc
+        raise
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if settings.task_queue == "redis":
+        from app.task_queue import RedisTaskQueue
+        RedisTaskQueue.from_settings(settings).enqueue(task["id"])
+    else:
+        asyncio.create_task(task_service.execute(task))
+    return task
+
+
+@app.get("/api/v1/tasks/{task_id}")
+async def get_task(task_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    task = product_store.task(task_id, principal.tenant_id, principal.user_id)
+    if not task:
+        raise HTTPException(404, "任务不存在。")
+    return task
+
+
+@app.get("/api/v1/conversations")
+async def list_conversations(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+    principal = current_user(workbench_session)
+    return product_store.conversations(principal.tenant_id, principal.user_id)
+
+
+@app.get("/api/v1/generations")
+async def list_generations(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+    principal = current_user(workbench_session)
+    return product_store.generations(principal.tenant_id, principal.user_id)
+
+@app.delete("/api/v1/generations/{generation_id}")
+async def delete_generation(generation_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=current_user(workbench_session); item=product_store.delete_generation(principal.tenant_id,principal.user_id,generation_id)
+    if not item: raise HTTPException(404,"生成记录不存在。")
+    return {"status":"deleted"}
+
+@app.post("/api/v1/generations/{generation_id}/save-to-assets")
+async def save_to_assets(generation_id: str,payload: SaveGenerationRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=current_user(workbench_session); item=product_store.save_generation_as_asset(principal.tenant_id,principal.user_id,generation_id,payload.name)
+    if not item: raise HTTPException(404,"生成记录不存在。")
+    return item
+
+@app.patch("/api/v1/conversations/{conversation_id}")
+async def rename_conversation(conversation_id: str,payload: RenameRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=current_user(workbench_session)
+    if not product_store.rename_conversation(principal.tenant_id,principal.user_id,conversation_id,payload.title): raise HTTPException(404,"会话不存在。")
+    return {"status":"ok"}
+
+@app.delete("/api/v1/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=current_user(workbench_session)
+    if not product_store.delete_conversation(principal.tenant_id,principal.user_id,conversation_id): raise HTTPException(404,"会话不存在。")
+    return {"status":"deleted"}
+
+@app.get("/api/v1/enterprise-config")
+async def get_enterprise_config(workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=require_admin(workbench_session); return store.enterprise_config(principal.tenant_id)
+@app.put("/api/v1/enterprise-config")
+async def put_enterprise_config(payload: EnterpriseConfigRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=require_admin(workbench_session); return product_store.update_enterprise_config(principal.tenant_id,payload.payload)
+@app.get("/api/v1/knowledge/files")
+async def list_knowledge_files(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+    principal=require_admin(workbench_session); return product_store.knowledge_files(principal.tenant_id)
+@app.post("/api/v1/knowledge/text")
+async def create_knowledge_text(payload: KnowledgeTextRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=require_admin(workbench_session); return product_store.add_knowledge_text(principal.tenant_id,payload.name,payload.content)
+@app.delete("/api/v1/knowledge/files/{file_id}")
+async def delete_knowledge_file(file_id: str,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=require_admin(workbench_session)
+    if not product_store.delete_knowledge_file(principal.tenant_id,file_id): raise HTTPException(404,"文件不存在。")
+    return {"status":"deleted"}
+@app.get("/api/v1/assets")
+async def list_assets(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+    principal=require_admin(workbench_session); return product_store.assets(principal.tenant_id)
+@app.post("/api/v1/assets")
+async def create_asset(payload: AssetRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=require_admin(workbench_session)
+    try: return product_store.add_asset(principal.tenant_id,payload.name,payload.asset_type,payload.url,payload.tags,payload.description)
+    except ValueError as exc: raise HTTPException(422,"不支持的素材类型。") from exc
+@app.delete("/api/v1/assets/{asset_id}")
+async def delete_asset(asset_id: str,workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=require_admin(workbench_session)
+    if not product_store.delete_asset(principal.tenant_id,asset_id): raise HTTPException(404,"素材不存在。")
+    return {"status":"deleted"}
+
+
+@app.get("/api/v1/storage/{storage_key:path}")
+async def get_storage(storage_key: str, workbench_session: str | None = Cookie(default=None)):
+    principal = current_user(workbench_session)
+    if not product_store.can_read_storage(principal.tenant_id, principal.user_id, storage_key):
+        raise HTTPException(404, "图片不存在。")
+    try:
+        return Response(storage_provider(settings).get(storage_key), media_type="image/png")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "图片文件不存在。") from exc
+
+
+@app.get("/api/v1/poc/runtime-baseline")
+async def runtime_baseline() -> dict:
+    """Safe-to-display configuration; secrets are deliberately excluded."""
+    return {
+        "runtime_version": "openai-codex==0.147.0",
+        "model_provider_id": settings.model_provider_id,
+        "model_base_url": settings.model_base_url,
+        "model_wire_api": settings.model_wire_api,
+        "model_id": settings.model_id,
+        "reasoning_effort": settings.reasoning_effort,
+        "skill": {"name": "poster-design", "version": "1.0.0"},
+        "image_provider_id": settings.image_provider_id,
+        "image_model_id": settings.image_model_id,
+        "api_key_configured": bool(os.environ.get(settings.codex_api_key_env)),
+    }
+
+@app.get("/api/admin/runtime/diagnostics")
+async def runtime_diagnostics(workbench_session: str | None = Cookie(default=None)) -> dict:
+    require_admin(workbench_session)
+    last=store.latest_run_trace()
+    latest_success=None
+    if last and last["status"] == "completed": latest_success={"run_id":last["run_id"],"completed_at":last["completed_at"]}
+    return {"runtime_version":"openai-codex==0.147.0","provider":settings.model_provider_id,"model":settings.model_id,"base_url":settings.model_base_url,"wire_api":settings.model_wire_api,"api_key_present":bool(os.environ.get(settings.codex_api_key_env)),"api_key_fingerprint":_key_fingerprint(),"codex_process_profiles":len(manager._instances),"platform_mcp_url":settings.platform_mcp_url,"platform_mcp_configured":bool(settings.platform_mcp_url),"deepseek_auth_status":"not_probed","deepseek_responses_status":"not_probed","last_successful_turn":latest_success,"last_error":(last["payload"].get("error") if last and last["status"] == "failed" else None)}
+
+@app.post("/api/admin/runtime/test")
+async def runtime_test(payload: RuntimeTestRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal=require_admin(workbench_session)
+    prompt="只回复 OK" if payload.mode == "ok" else "调用 enterprise_config_get 并只返回企业名称"
+    try:
+        result=await agents.run(principal.tenant_id,"image-agent",prompt)
+    except RuntimeError as exc:
+        raise HTTPException(502,"Runtime 最小测试失败；请查看 diagnostics 的 last_error。") from exc
+    return {"status":"completed","run_id":result.run_id,"conversation_id":result.conversation_id,"codex_thread_id":result.thread_id,"response":result.text}
+
+
+@app.post("/api/v1/poc/runs")
+async def run_agent(request: RunRequest, x_poc_api_key: str | None = Header(default=None)) -> dict:
+    tenant_id = tenant_from_key(x_poc_api_key)
+    try:
+        result = await agents.run(tenant_id, request.agent_id, request.message, request.conversation_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {
+        "run_id": result.run_id,
+        "conversation_id": result.conversation_id,
+        "runtime_thread_id": result.thread_id,
+        "status": "completed",
+        "reply": result.text,
+    }

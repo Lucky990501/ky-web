@@ -1,0 +1,7 @@
+.env
+.runtime-data
+__pycache__
+.pytest_cache
+*.pyc
+*.db
+reports
