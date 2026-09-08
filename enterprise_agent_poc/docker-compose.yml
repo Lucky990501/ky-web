@@ -32,6 +32,8 @@ services:
     restart: unless-stopped
     env_file: .env.production
     command: python -m app.platform_mcp.server
+    environment:
+      ENTERPRISE_POC_MCP_HOST: 0.0.0.0
     depends_on:
       postgres:
         condition: service_healthy

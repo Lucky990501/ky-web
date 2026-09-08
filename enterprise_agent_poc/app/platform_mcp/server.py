@@ -37,7 +37,7 @@ def _bearer_from_context(ctx: Any) -> str:
 def create_mcp():
     mcp = FastMCP(
         "Enterprise Platform MCP",
-        host="127.0.0.1",
+        host=os.environ.get("ENTERPRISE_POC_MCP_HOST", "127.0.0.1"),
         port=int(os.environ.get("ENTERPRISE_POC_MCP_PORT", "8091")),
         streamable_http_path="/mcp",
     )
