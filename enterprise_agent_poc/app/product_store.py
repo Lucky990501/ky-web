@@ -100,7 +100,18 @@ class ProductStore:
     def conversations(self, tenant_id: str, user_id: str, limit: int = 50) -> list[dict]:
         with self._store.connection() as conn:
             rows = conn.execute("SELECT c.id,c.agent_id,c.runtime_thread_id,o.title,c.created_at FROM conversations c JOIN conversation_owners o ON o.conversation_id=c.id WHERE c.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL ORDER BY c.created_at DESC LIMIT ?", (tenant_id,user_id,limit)).fetchall()
-        return [dict(row) for row in rows]
+            conversations = [dict(row) for row in rows]
+            # Keep the query portable across SQLite and PostgreSQL while exposing
+            # only the current user's most recent image for each conversation.
+            for conversation in conversations:
+                generation = conn.execute(
+                    "SELECT id,storage_key,mime_type,created_at FROM generations "
+                    "WHERE tenant_id=? AND user_id=? AND conversation_id=? AND deleted_at IS NULL "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (tenant_id, user_id, conversation["id"]),
+                ).fetchone()
+                conversation["latest_generation"] = dict(generation) if generation else None
+        return conversations
 
     def generations(self, tenant_id: str, user_id: str, limit: int = 50) -> list[dict]:
         with self._store.connection() as conn:
