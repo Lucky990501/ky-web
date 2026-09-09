@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, require_semantic_runtime, runtime_diagnostic
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, require_semantic_runtime, runtime_diagnostic
 from app.product_store import ProductStore
 from app.settings import settings
 from app.storage import storage_provider
@@ -62,3 +62,12 @@ def test_production_rejects_local_hash_when_fallback_is_disabled(tmp_path):
     assert diagnostic["strict"] is True
     with pytest.raises(RuntimeError, match="生产语义检索未就绪"):
         require_semantic_runtime(product, runtime_settings)
+
+
+def test_openai_compatible_embedding_response_requires_configured_dimension():
+    provider = OpenAICompatibleEmbeddingProvider(
+        replace(settings, embedding_base_url="https://n1.ai/v1", embedding_api_key="test-key", embedding_model="text-embedding-3-small", embedding_dimension=3)
+    )
+    assert provider._vectors({"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]}, 1) == [[0.1, 0.2, 0.3]]
+    with pytest.raises(RuntimeError, match="维度"):
+        provider._vectors({"data": [{"index": 0, "embedding": [0.1]}]}, 1)

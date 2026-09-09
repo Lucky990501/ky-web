@@ -70,6 +70,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     product_store.initialize()
+    if settings.environment == "production" and settings.embedding_provider != "local-hash":
+        product_store.ensure_pgvector_schema(settings.embedding_dimension)
     if settings.bootstrap_demo_data:
         store.seed_demo_data()
         product_store.initialize()

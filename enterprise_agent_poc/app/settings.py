@@ -77,6 +77,7 @@ class Settings:
     embedding_model: str
     embedding_dimension: int
     embedding_api_key: str
+    embedding_base_url: str
     knowledge_allow_fallback: bool
     knowledge_max_upload_bytes: int
 
@@ -125,6 +126,7 @@ class Settings:
             embedding_model=os.environ.get("EMBEDDING_MODEL", "local-hash-v1"),
             embedding_dimension=int(os.environ.get("EMBEDDING_DIMENSION", "128")),
             embedding_api_key=os.environ.get("EMBEDDING_API_KEY", ""),
+            embedding_base_url=os.environ.get("EMBEDDING_BASE_URL", ""),
             knowledge_allow_fallback=os.environ.get("KNOWLEDGE_ALLOW_FALLBACK", "true" if os.environ.get("APP_ENV", "development").lower() != "production" else "false").lower() == "true",
             knowledge_max_upload_bytes=int(os.environ.get("KNOWLEDGE_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),
         )

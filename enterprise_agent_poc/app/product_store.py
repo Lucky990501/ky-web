@@ -75,6 +75,24 @@ class ProductStore:
                 for agent in CATALOG.values():
                     conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status) VALUES (?,?,'enabled') ON CONFLICT(tenant_id,agent_id) DO NOTHING", (tenant["id"], agent.id))
 
+    def ensure_pgvector_schema(self, dimension: int) -> None:
+        """Migrate legacy JSON embeddings only after a formal Provider is configured."""
+        if not self._store.is_postgres or not 1 <= dimension <= 4096:
+            raise ValueError("pgvector 维度配置无效。")
+        with self._store.connection() as conn:
+            installed = conn.execute("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='vector') AS installed").fetchone()["installed"]
+            if not installed:
+                raise RuntimeError("PostgreSQL 未启用 pgvector 扩展。")
+            column = conn.execute("SELECT udt_name FROM information_schema.columns WHERE table_schema='public' AND table_name='knowledge_chunks' AND column_name='embedding'").fetchone()
+            if column and column["udt_name"] != "vector":
+                conn.execute("ALTER TABLE knowledge_chunks RENAME COLUMN embedding TO embedding_legacy")
+                conn.execute(f"ALTER TABLE knowledge_chunks ADD COLUMN embedding vector({dimension})")
+            elif not column:
+                conn.execute(f"ALTER TABLE knowledge_chunks ADD COLUMN embedding vector({dimension})")
+            conn.execute("ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS embedding_dimension INTEGER")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant_model ON knowledge_chunks(tenant_id,embedding_provider,embedding_model,embedding_dimension)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_embedding_hnsw ON knowledge_chunks USING hnsw (embedding vector_cosine_ops)")
+
     def create_user(self, tenant_id: str, email: str, password_hash: str, display_name: str, role: str) -> None:
         with self._store.connection() as conn:
             conn.execute(
@@ -317,7 +335,12 @@ class ProductStore:
         with self._store.connection() as conn:
             conn.execute("DELETE FROM knowledge_chunks WHERE tenant_id=? AND file_id=?", (tenant_id, file_id))
             for chunk in chunks:
-                conn.execute("INSERT INTO knowledge_chunks(id,tenant_id,knowledge_base_id,file_id,content,title,section,page_number,chunk_index,embedding,embedding_provider,embedding_model,embedding_version,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), tenant_id, chunk.get("knowledge_base_id"), file_id, chunk["content"], chunk.get("title"), chunk.get("section"), chunk.get("page_number"), chunk["chunk_index"], json.dumps(chunk.get("embedding")), chunk.get("embedding_provider"), chunk.get("embedding_model"), chunk.get("embedding_version"), json.dumps(chunk.get("metadata", {}), ensure_ascii=False)))
+                vector = chunk.get("embedding")
+                embedding = "[" + ",".join(f"{value:.10g}" for value in vector) + "]" if self._store.is_postgres and vector else json.dumps(vector)
+                if self._store.is_postgres:
+                    conn.execute("INSERT INTO knowledge_chunks(id,tenant_id,knowledge_base_id,file_id,content,title,section,page_number,chunk_index,embedding,embedding_provider,embedding_model,embedding_dimension,embedding_version,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), tenant_id, chunk.get("knowledge_base_id"), file_id, chunk["content"], chunk.get("title"), chunk.get("section"), chunk.get("page_number"), chunk["chunk_index"], embedding, chunk.get("embedding_provider"), chunk.get("embedding_model"), len(vector or []), chunk.get("embedding_version"), json.dumps(chunk.get("metadata", {}), ensure_ascii=False)))
+                else:
+                    conn.execute("INSERT INTO knowledge_chunks(id,tenant_id,knowledge_base_id,file_id,content,title,section,page_number,chunk_index,embedding,embedding_provider,embedding_model,embedding_version,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), tenant_id, chunk.get("knowledge_base_id"), file_id, chunk["content"], chunk.get("title"), chunk.get("section"), chunk.get("page_number"), chunk["chunk_index"], embedding, chunk.get("embedding_provider"), chunk.get("embedding_model"), chunk.get("embedding_version"), json.dumps(chunk.get("metadata", {}), ensure_ascii=False)))
 
     def knowledge_chunks(self, tenant_id: str, file_id: str) -> list[dict]:
         with self._store.connection() as conn:

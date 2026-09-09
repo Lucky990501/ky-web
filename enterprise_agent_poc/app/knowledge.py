@@ -12,6 +12,7 @@ from pathlib import Path
 from app.product_store import ProductStore
 from app.settings import Settings
 from app.storage import storage_provider
+import httpx
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +124,49 @@ class LocalHashEmbeddingProvider(EmbeddingProvider):
     async def embed_query(self, text: str) -> list[float]: return self._embed(text)
 
 
+class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
+    """OpenAI-compatible `/embeddings` adapter; credentials stay in Settings."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._base_url = settings.embedding_base_url.rstrip("/")
+        self._api_key = settings.embedding_api_key
+        self._model = settings.embedding_model
+        self._dimension = settings.embedding_dimension
+
+    def _payload(self, texts: list[str]) -> dict:
+        return {"model": self._model, "input": texts, "encoding_format": "float"}
+
+    def _vectors(self, body: dict, expected: int) -> list[list[float]]:
+        data = sorted(body.get("data") or [], key=lambda item: item.get("index", 0))
+        vectors = [item.get("embedding") for item in data]
+        if len(vectors) != expected or any(not isinstance(vector, list) or len(vector) != self._dimension for vector in vectors):
+            raise RuntimeError("Embedding Provider 返回的向量数量或维度与配置不一致。")
+        return [[float(value) for value in vector] for vector in vectors]
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(f"{self._base_url}/embeddings", headers={"Authorization": f"Bearer {self._api_key}"}, json=self._payload(texts))
+            response.raise_for_status()
+            return self._vectors(response.json(), len(texts))
+
+    async def embed_query(self, text: str) -> list[float]:
+        return (await self.embed_documents([text]))[0]
+
+    def embed_query_sync(self, text: str) -> list[float]:
+        with httpx.Client(timeout=45) as client:
+            response = client.post(f"{self._base_url}/embeddings", headers={"Authorization": f"Bearer {self._api_key}"}, json=self._payload([text]))
+            response.raise_for_status()
+            return self._vectors(response.json(), 1)[0]
+
+
+def embedding_provider_for(settings: Settings) -> EmbeddingProvider:
+    if settings.embedding_provider == "local-hash":
+        return LocalHashEmbeddingProvider(settings.embedding_dimension)
+    if settings.embedding_provider in {"openai-compatible", "openai"}:
+        return OpenAICompatibleEmbeddingProvider(settings)
+    raise RuntimeError("未支持的 Embedding Provider。")
+
+
 def runtime_diagnostic(product: ProductStore, settings: Settings) -> dict:
     """Describe readiness without leaking credentials or silently downgrading."""
     reasons: list[str] = []
@@ -141,6 +185,8 @@ def runtime_diagnostic(product: ProductStore, settings: Settings) -> dict:
         reasons.append("当前 Embedding Provider 为 local-hash，不是正式 Embedding Provider。")
     if settings.embedding_provider != "local-hash" and not settings.embedding_api_key:
         reasons.append("正式 Embedding Provider 未配置 EMBEDDING_API_KEY。")
+    if settings.embedding_provider != "local-hash" and not settings.embedding_base_url:
+        reasons.append("正式 Embedding Provider 未配置 EMBEDDING_BASE_URL。")
     strict = settings.environment == "production" and not settings.knowledge_allow_fallback
     return {
         "status": "ok" if not reasons else "degraded",
@@ -164,7 +210,7 @@ class KnowledgeProcessingService:
     def __init__(self, product: ProductStore, settings: Settings) -> None:
         self.product, self.settings = product, settings
         self.parser = DocumentParser(); self.chunker = ChunkingStrategy(settings.knowledge_chunk_size, settings.knowledge_chunk_overlap)
-        self.embedding = LocalHashEmbeddingProvider(settings.embedding_dimension)
+        self.embedding = embedding_provider_for(settings)
 
     async def process(self, tenant_id: str, file_id: str) -> None:
         record = self.product.knowledge_file(tenant_id, file_id)
@@ -189,14 +235,31 @@ class KnowledgeProcessingService:
 
 class KnowledgeRetrievalService:
     def __init__(self, product: ProductStore, settings: Settings) -> None:
-        self.product, self.settings = product, settings; self.embedding = LocalHashEmbeddingProvider(settings.embedding_dimension)
+        self.product, self.settings = product, settings; self.embedding = embedding_provider_for(settings)
     def search(self, tenant_id: str, query: str, top_k: int = 5) -> list[dict]:
         require_semantic_runtime(self.product, self.settings)
-        query_vector = self.embedding._embed(query)
+        if isinstance(self.embedding, OpenAICompatibleEmbeddingProvider):
+            query_vector = self.embedding.embed_query_sync(query)
+        elif isinstance(self.embedding, LocalHashEmbeddingProvider):
+            query_vector = self.embedding._embed(query)
+        else:
+            raise RuntimeError("Embedding Provider 不支持同步检索。")
         terms = set(re.findall(r"[\u4e00-\u9fff]{1,2}|[a-zA-Z0-9_]+", query.lower()))
         try:
             with self.product._store.connection() as conn:
-                rows = conn.execute("SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,c.embedding,f.name filename FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id WHERE c.tenant_id=? AND f.status='ready'", (tenant_id,)).fetchall()
+                if self.product._store.is_postgres and self.settings.embedding_provider != "local-hash":
+                    literal = "[" + ",".join(f"{value:.10g}" for value in query_vector) + "]"
+                    rows = conn.execute(
+                        "SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,"
+                        "(1 - (c.embedding <=> ?::vector)) AS vector_score,f.name filename "
+                        "FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id "
+                        "WHERE c.tenant_id=? AND f.status='ready' AND c.embedding IS NOT NULL "
+                        "AND c.embedding_provider=? AND c.embedding_model=? AND c.embedding_dimension=? "
+                        "ORDER BY c.embedding <=> ?::vector LIMIT ?",
+                        (literal, tenant_id, self.settings.embedding_provider, self.settings.embedding_model, self.settings.embedding_dimension, literal, max(top_k * 4, 20)),
+                    ).fetchall()
+                else:
+                    rows = conn.execute("SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,c.embedding,f.name filename FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id WHERE c.tenant_id=? AND f.status='ready'", (tenant_id,)).fetchall()
         except Exception:
             rows = []
         if not rows:
@@ -205,8 +268,12 @@ class KnowledgeRetrievalService:
             return self.product._store.knowledge_search(tenant_id, query, top_k)
         results=[]
         for row in rows:
-            vector=json.loads(row["embedding"] or "[]")
-            semantic=sum(a*b for a,b in zip(query_vector,vector)); text=(row["title"]+" "+row["content"]).lower(); keyword=sum(term in text for term in terms)/max(1,len(terms)); score=0.65*semantic+0.35*keyword
+            if "vector_score" in row:
+                semantic = float(row["vector_score"] or 0)
+            else:
+                vector=json.loads(row["embedding"] or "[]")
+                semantic=sum(a*b for a,b in zip(query_vector,vector))
+            text=((row["title"] or "")+" "+row["content"]).lower(); keyword=sum(term in text for term in terms)/max(1,len(terms)); score=0.65*semantic+0.35*keyword
             if score >= self.settings.knowledge_min_score:
                 results.append({"chunk_id":row["id"],"file_id":row["file_id"],"filename":row["filename"],"content":row["content"][:1200],"section":row["section"],"page":row["page_number"],"vector_score":round(semantic,4),"keyword_score":round(keyword,4),"score":round(score,4)})
         return sorted(results,key=lambda item:item["score"],reverse=True)[:top_k]
