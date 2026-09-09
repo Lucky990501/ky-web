@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 
+from app.agent_catalog import CATALOG, get_agent
 from app.store import POCStore
 
 
@@ -18,6 +19,9 @@ class ProductStore:
             with self._store.connection() as conn:
                 conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_storage_key TEXT")
                 conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_mime_type TEXT")
+                conn.execute("CREATE TABLE IF NOT EXISTS agent_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, description TEXT NOT NULL, icon TEXT NOT NULL, status TEXT NOT NULL, default_runtime_profile TEXT NOT NULL, credit_cost INTEGER NOT NULL, skill_manifest TEXT NOT NULL, allows_image_generation BOOLEAN NOT NULL DEFAULT FALSE)")
+                conn.execute("CREATE TABLE IF NOT EXISTS tenant_agent_instances (tenant_id TEXT NOT NULL REFERENCES tenants(id), agent_id TEXT NOT NULL REFERENCES agent_templates(id), status TEXT NOT NULL, PRIMARY KEY(tenant_id,agent_id))")
+            self._seed_agent_catalog()
             return
         with self._store.connection() as conn:
             conn.executescript("""
@@ -33,12 +37,27 @@ class ProductStore:
                 CREATE TABLE IF NOT EXISTS knowledge_bases (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS knowledge_files (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), knowledge_base_id TEXT REFERENCES knowledge_bases(id), name TEXT NOT NULL, status TEXT NOT NULL, storage_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS asset_metadata (asset_id TEXT PRIMARY KEY REFERENCES assets(id), description TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'enterprise');
+                CREATE TABLE IF NOT EXISTS agent_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, description TEXT NOT NULL, icon TEXT NOT NULL, status TEXT NOT NULL, default_runtime_profile TEXT NOT NULL, credit_cost INTEGER NOT NULL, skill_manifest TEXT NOT NULL, allows_image_generation INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS tenant_agent_instances (tenant_id TEXT NOT NULL REFERENCES tenants(id), agent_id TEXT NOT NULL REFERENCES agent_templates(id), status TEXT NOT NULL, PRIMARY KEY(tenant_id,agent_id));
             """)
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
             if "avatar_storage_key" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN avatar_storage_key TEXT")
             if "avatar_mime_type" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN avatar_mime_type TEXT")
+        self._seed_agent_catalog()
+
+    def _seed_agent_catalog(self) -> None:
+        with self._store.connection() as conn:
+            for agent in CATALOG.values():
+                conn.execute(
+                    "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,allows_image_generation) VALUES (?,?,?,?,?,'enabled','default',?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,description=excluded.description,icon=excluded.icon,credit_cost=excluded.credit_cost,skill_manifest=excluded.skill_manifest,allows_image_generation=excluded.allows_image_generation",
+                    (agent.id, agent.name, agent.slug, agent.description, agent.icon, agent.credit_cost, json.dumps(agent.skill_manifest), int(agent.allows_image_generation)),
+                )
+            tenants = conn.execute("SELECT id FROM tenants").fetchall()
+            for tenant in tenants:
+                for agent in CATALOG.values():
+                    conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status) VALUES (?,?,'enabled') ON CONFLICT(tenant_id,agent_id) DO NOTHING", (tenant["id"], agent.id))
 
     def create_user(self, tenant_id: str, email: str, password_hash: str, display_name: str, role: str) -> None:
         with self._store.connection() as conn:
@@ -82,17 +101,34 @@ class ProductStore:
             tenant = conn.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()
             credit = conn.execute("SELECT balance FROM credit_accounts WHERE tenant_id=?", (tenant_id,)).fetchone()
         config = self._store.enterprise_config(tenant_id)
-        return {"tenant_name": tenant["name"], "brand_name": config.get("brand_name"), "logo": config.get("logo"), "credit_balance": credit["balance"] if credit else 0, "recent_conversations": self.conversations(tenant_id, user_id, 5), "recent_generations": self.generations(tenant_id, user_id, 5)}
+        return {"tenant_name": tenant["name"], "brand_name": config.get("brand_name"), "logo": config.get("logo"), "credit_balance": credit["balance"] if credit else 0, "agents": self.agents(tenant_id), "recent_conversations": self.conversations(tenant_id, user_id, 5), "recent_generations": self.generations(tenant_id, user_id, 5)}
+
+    def agents(self, tenant_id: str) -> list[dict]:
+        with self._store.connection() as conn:
+            rows = conn.execute("SELECT t.id,t.name,t.slug,t.description,t.icon,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? ORDER BY t.id", (tenant_id,)).fetchall()
+        return [{**dict(row), "enabled": dict(row).get("tenant_status") == "enabled"} for row in rows]
+
+    def agent_enabled(self, tenant_id: str, agent_id: str) -> bool:
+        get_agent(agent_id)
+        with self._store.connection() as conn:
+            row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
+        return bool(row and row["status"] == "enabled")
 
     def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None) -> dict:
         with self._store.connection() as conn:
             credit = conn.execute("SELECT balance FROM credit_accounts WHERE tenant_id=?", (tenant_id,)).fetchone()
-            if not credit or credit["balance"] < 20:
+            agent = get_agent(agent_id)
+            instance = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
+            if not instance or instance["status"] != "enabled":
+                raise LookupError("该智能体尚未为当前企业启用。")
+            if not credit or credit["balance"] < agent.credit_cost:
                 raise ValueError("insufficient_credit")
             if conversation_id:
-                owner = conn.execute("SELECT user_id FROM conversation_owners WHERE conversation_id=? AND deleted_at IS NULL", (conversation_id,)).fetchone()
+                owner = conn.execute("SELECT o.user_id,c.agent_id FROM conversation_owners o JOIN conversations c ON c.id=o.conversation_id WHERE o.conversation_id=? AND o.deleted_at IS NULL AND c.tenant_id=?", (conversation_id, tenant_id)).fetchone()
                 if not owner or owner["user_id"] != user_id:
                     raise LookupError("会话不存在或不属于当前用户。")
+                if owner["agent_id"] != agent_id:
+                    raise ValueError("不能跨智能体复用会话。")
             task_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?, 'queued', '任务已进入队列')", (task_id,))
@@ -105,7 +141,7 @@ class ProductStore:
             if response is not None:
                 conn.execute("INSERT INTO task_results(task_id,final_response,result_json) VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET final_response=excluded.final_response,result_json=excluded.result_json", (task_id,response,json.dumps({"run_id":run_id},ensure_ascii=False)))
 
-    def attach_conversation(self, conversation_id: str, user_id: str, title: str = "新图片会话") -> None:
+    def attach_conversation(self, conversation_id: str, user_id: str, title: str = "新会话") -> None:
         with self._store.connection() as conn:
             conn.execute("INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,?)", (conversation_id,user_id,title))
 
@@ -208,11 +244,16 @@ class ProductStore:
         with self._store.connection() as conn: cursor=conn.execute("DELETE FROM assets WHERE id=? AND tenant_id=?",(asset_id,tenant_id))
         return cursor.rowcount == 1
 
-    def charge_success(self, tenant_id: str, user_id: str, task_id: str, amount: int = 20) -> None:
+    def charge_success(self, tenant_id: str, user_id: str, task_id: str) -> None:
         with self._store.connection() as conn:
-            if conn.execute("SELECT 1 FROM credit_transactions WHERE task_id=? AND reason='poster-design'",(task_id,)).fetchone(): return
+            task = conn.execute("SELECT agent_id FROM tasks WHERE id=? AND tenant_id=? AND user_id=?", (task_id, tenant_id, user_id)).fetchone()
+            if not task:
+                return
+            agent = get_agent(task["agent_id"])
+            if conn.execute("SELECT 1 FROM credit_transactions WHERE task_id=?",(task_id,)).fetchone(): return
+            amount = agent.credit_cost
             conn.execute("UPDATE credit_accounts SET balance=balance-?,updated_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND balance>=?",(amount,tenant_id,amount))
-            conn.execute("INSERT INTO credit_transactions(id,tenant_id,user_id,task_id,amount,reason) VALUES (?,?,?,?,?,?)",(str(uuid.uuid4()),tenant_id,user_id,task_id,-amount,"poster-design"))
+            conn.execute("INSERT INTO credit_transactions(id,tenant_id,user_id,task_id,amount,reason) VALUES (?,?,?,?,?,?)",(str(uuid.uuid4()),tenant_id,user_id,task_id,-amount,agent.slug))
 
     def recoverable_tasks(self) -> list[dict]:
         with self._store.connection() as conn:

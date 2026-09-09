@@ -7,13 +7,7 @@ from app.domain import RuntimeProfile, RuntimeSession
 from app.runtime.base import RuntimeProvider
 from app.settings import Settings
 from app.store import POCStore
-
-
-IMAGE_AGENT_INSTRUCTIONS = """你是一名企业视觉内容 Agent。
-
-理解用户的视觉需求，并使用当前可用 Skill 完成任务。对于每个海报成图请求，必须按顺序且每项仅调用一次 Platform MCP：enterprise_config_get、knowledge_search、asset_search、image_generation。不得跳过任何一步。完成 image_generation 后立即给出简短最终结果；不要重复检索、重复调用工具，或输出执行过程。
-
-企业配置中的禁止项、必须项和品牌规则优先于用户措辞；不得虚构企业资料、价格、师资、课程数量或其他企业事实。资料不足时明确说明缺失信息。最终回复仅写面向用户的简短结果，不暴露令牌、跨租户资料或隐藏推理。"""
+from app.agent_catalog import get_agent
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,19 +25,19 @@ class AgentService:
         self._settings = settings
 
     def profile_for(self, tenant_id: str, agent_id: str) -> RuntimeProfile:
-        if agent_id != "image-agent":
-            raise LookupError("POC 当前只提供 image-agent。")
+        agent = get_agent(agent_id)
         return RuntimeProfile.build(
             tenant_id=tenant_id,
             agent_id=agent_id,
             model_provider_id=self._settings.model_provider_id,
             model_id=self._settings.model_id,
             reasoning_effort=self._settings.reasoning_effort,
-            skill_manifest={"poster-design": "1.0.0"},
+            skill_manifest=agent.skill_manifest,
         )
 
     async def run(self, tenant_id: str, agent_id: str, message: str, conversation_id: str | None = None) -> RunResult:
         profile = self.profile_for(tenant_id, agent_id)
+        agent = get_agent(agent_id)
         session: RuntimeSession
         if conversation_id:
             existing = self._store.conversation(conversation_id, tenant_id)
@@ -53,7 +47,7 @@ class AgentService:
                 raise ValueError("会话与当前 Agent 或 Runtime Profile 不匹配。")
             session = await self._runtime.resume_session(profile, existing["runtime_thread_id"])
         else:
-            session = await self._runtime.create_session(profile, IMAGE_AGENT_INSTRUCTIONS)
+            session = await self._runtime.create_session(profile, agent.instructions)
             conversation_id = str(uuid.uuid4())
             self._store.save_conversation(
                 conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version
@@ -69,8 +63,9 @@ class AgentService:
             "model_provider": profile.model_provider_id,
             "model": profile.model_id,
             "reasoning_effort": profile.reasoning_effort,
-            "skill_name": "poster-design",
-            "skill_version": profile.skill_manifest["poster-design"],
+            "skills": [{"name": name, "version": version} for name, version in profile.skill_manifest.items()],
+            "skill_name": next(iter(profile.skill_manifest)),
+            "skill_version": next(iter(profile.skill_manifest.values())),
             "mcp_calls": [],
             "knowledge_calls": [],
             "asset_calls": [],

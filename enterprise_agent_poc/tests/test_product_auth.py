@@ -41,3 +41,28 @@ def test_user_can_update_own_profile_and_avatar_only():
         assert updated.json()["display_name"] == "测试成员"
         assert updated.json()["avatar_url"]
         assert client.get("/api/v1/me/avatar").content == b"\x89PNG\r\n\x1a\n"
+
+
+def test_agent_catalog_exposes_enabled_tenant_instances_and_separate_agent_threads():
+    with TestClient(app) as client:
+        client.post("/api/v1/auth/login", json={"account": "member@tenant-a.test", "password": "ChangeMe!2026"})
+        agents = client.get("/api/v1/agents")
+        assert agents.status_code == 200
+        templates = {item["id"]: item for item in agents.json()}
+        assert templates["copywriting-agent"]["enabled"] is True
+        assert templates["copywriting-agent"]["credit_cost"] == 3
+        assert templates["campaign-agent"]["credit_cost"] == 8
+        assert templates["copywriting-agent"]["allows_image_generation"] in (False, 0)
+
+
+def test_copywriting_task_uses_its_own_credit_cost_and_refuses_cross_agent_conversation():
+    from app.main import product_store
+
+    with TestClient(app) as client:
+        client.post("/api/v1/auth/login", json={"account": "member@tenant-a.test", "password": "ChangeMe!2026"})
+        principal = product_store.user_by_email("member@tenant-a.test")
+        before = client.get("/api/v1/workspace").json()["credit_balance"]
+        task = product_store.create_task("tenant-a", principal["id"], "copywriting-agent", "课程介绍", None)
+        assert task["agent_id"] == "copywriting-agent"
+        assert client.get("/api/v1/workspace").json()["credit_balance"] == before
+        product_store.set_task(task["id"], "tenant-a", "cancelled", "cancelled", "测试清理")

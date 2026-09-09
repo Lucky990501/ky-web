@@ -67,6 +67,7 @@ async def lifespan(_: FastAPI):
     product_store.initialize()
     if settings.bootstrap_demo_data:
         store.seed_demo_data()
+        product_store.initialize()
         # Development-only synthetic accounts. Production provisioning is external.
         product_store.create_user("tenant-a", "admin@tenant-a.test", hash_password("ChangeMe!2026"), "Tenant A 管理员", "enterprise_admin")
         product_store.create_user("tenant-a", "member@tenant-a.test", hash_password("ChangeMe!2026"), "Tenant A 成员", "member")
@@ -235,16 +236,23 @@ async def workspace(workbench_session: str | None = Cookie(default=None)) -> dic
     return product_store.workspace(principal.tenant_id, principal.user_id)
 
 
+@app.get("/api/v1/agents")
+async def list_agents(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+    """Return only templates enabled for the signed-in tenant."""
+    principal = current_user(workbench_session)
+    return product_store.agents(principal.tenant_id)
+
+
 @app.post("/api/v1/agents/{agent_id}/runs", status_code=202)
 async def create_agent_task(agent_id: str, payload: AgentTaskRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = current_user(workbench_session)
-    if agent_id != "image-agent":
-        raise HTTPException(404, "当前只开放图片生成智能体。")
+    if not product_store.agent_enabled(principal.tenant_id, agent_id):
+        raise HTTPException(404, "该智能体尚未为当前企业启用。")
     try:
         task = product_store.create_task(principal.tenant_id, principal.user_id, agent_id, payload.message, payload.conversation_id)
     except ValueError as exc:
         if str(exc) == "insufficient_credit":
-            raise HTTPException(402, "积分不足，无法提交图片任务。") from exc
+            raise HTTPException(402, "积分不足，无法提交任务。") from exc
         raise
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc

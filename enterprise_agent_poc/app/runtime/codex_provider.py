@@ -43,12 +43,15 @@ class CodexRuntimeManager:
         skills_dir = codex_home / "skills"
         self._deployment.deploy(profile.skill_manifest, skills_dir)
         token_expires_at = int(time.time()) + 15 * 60
+        scopes = ["enterprise_config:read", "knowledge:search", "assets:search"]
+        if profile.agent_id == "image-agent":
+            scopes.append("image:generate")
         token = self._token_issuer.issue(
             RuntimePrincipal(
                 tenant_id=profile.tenant_id,
                 agent_id=profile.agent_id,
                 runtime_profile_id=profile.id,
-                scopes=("enterprise_config:read", "knowledge:search", "assets:search", "image:generate"),
+                scopes=tuple(scopes),
                 expires_at=token_expires_at,
             )
         )
