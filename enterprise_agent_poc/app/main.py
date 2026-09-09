@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_password, verify_password
 from app.product_service import TaskService
 from app.product_store import ProductStore
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, runtime_diagnostic
 from app.storage import storage_provider
 from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
 from app.security import RuntimeTokenIssuer
@@ -154,7 +154,8 @@ async def health() -> dict:
 @app.get("/api/health")
 async def production_health() -> dict:
     """Stable unauthenticated health endpoint for the production proxy."""
-    return {"status": "ok", "runtime": "openai-codex==0.147.0", "environment": settings.environment}
+    diagnostic = runtime_diagnostic(product_store, settings)
+    return {"status": "degraded" if diagnostic["strict"] and diagnostic["status"] != "ok" else "ok", "runtime": "openai-codex==0.147.0", "environment": settings.environment, "knowledge": diagnostic["status"]}
 
 
 @app.get("/", include_in_schema=False)
@@ -351,6 +352,10 @@ async def put_enterprise_config(payload: EnterpriseConfigRequest,workbench_sessi
 @app.get("/api/v1/knowledge/files")
 async def list_knowledge_files(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
     principal=require_admin(workbench_session); return product_store.knowledge_files(principal.tenant_id)
+@app.get("/api/v1/knowledge/diagnostics")
+async def knowledge_diagnostics(workbench_session: str | None = Cookie(default=None)) -> dict:
+    require_admin(workbench_session)
+    return runtime_diagnostic(product_store, settings)
 @app.post("/api/v1/knowledge/files", status_code=202)
 async def upload_knowledge_file(file: UploadFile = File(...), knowledge_base_id: str | None = Form(default=None), workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = require_admin(workbench_session)

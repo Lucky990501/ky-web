@@ -123,6 +123,43 @@ class LocalHashEmbeddingProvider(EmbeddingProvider):
     async def embed_query(self, text: str) -> list[float]: return self._embed(text)
 
 
+def runtime_diagnostic(product: ProductStore, settings: Settings) -> dict:
+    """Describe readiness without leaking credentials or silently downgrading."""
+    reasons: list[str] = []
+    pgvector_installed = False
+    if not product._store.is_postgres:
+        reasons.append("生产语义检索需要 PostgreSQL 和 pgvector。")
+    else:
+        try:
+            with product._store.connection() as conn:
+                pgvector_installed = bool(conn.execute("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='vector') AS installed").fetchone()["installed"])
+        except Exception:
+            reasons.append("无法确认 pgvector 扩展状态。")
+        if not pgvector_installed:
+            reasons.append("PostgreSQL 未启用 pgvector 扩展。")
+    if settings.embedding_provider == "local-hash":
+        reasons.append("当前 Embedding Provider 为 local-hash，不是正式 Embedding Provider。")
+    if settings.embedding_provider != "local-hash" and not settings.embedding_api_key:
+        reasons.append("正式 Embedding Provider 未配置 EMBEDDING_API_KEY。")
+    strict = settings.environment == "production" and not settings.knowledge_allow_fallback
+    return {
+        "status": "ok" if not reasons else "degraded",
+        "strict": strict,
+        "pgvector_installed": pgvector_installed,
+        "embedding_provider": settings.embedding_provider,
+        "embedding_model": settings.embedding_model,
+        "embedding_dimension": settings.embedding_dimension,
+        "allow_fallback": settings.knowledge_allow_fallback,
+        "reasons": reasons,
+    }
+
+
+def require_semantic_runtime(product: ProductStore, settings: Settings) -> None:
+    diagnostic = runtime_diagnostic(product, settings)
+    if diagnostic["strict"] and diagnostic["status"] != "ok":
+        raise RuntimeError("生产语义检索未就绪：" + "；".join(diagnostic["reasons"]))
+
+
 class KnowledgeProcessingService:
     def __init__(self, product: ProductStore, settings: Settings) -> None:
         self.product, self.settings = product, settings
@@ -133,6 +170,7 @@ class KnowledgeProcessingService:
         record = self.product.knowledge_file(tenant_id, file_id)
         if not record or record["status"] == "ready": return
         try:
+            require_semantic_runtime(self.product, self.settings)
             self.product.set_knowledge_file_status(tenant_id, file_id, "parsing")
             content = storage_provider(self.settings).get(record["storage_key"])
             parsed = await self.parser.parse(record.get("filename") or record["name"], content)
@@ -153,6 +191,7 @@ class KnowledgeRetrievalService:
     def __init__(self, product: ProductStore, settings: Settings) -> None:
         self.product, self.settings = product, settings; self.embedding = LocalHashEmbeddingProvider(settings.embedding_dimension)
     def search(self, tenant_id: str, query: str, top_k: int = 5) -> list[dict]:
+        require_semantic_runtime(self.product, self.settings)
         query_vector = self.embedding._embed(query)
         terms = set(re.findall(r"[\u4e00-\u9fff]{1,2}|[a-zA-Z0-9_]+", query.lower()))
         try:

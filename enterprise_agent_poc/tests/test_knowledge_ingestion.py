@@ -1,7 +1,9 @@
 import asyncio
 from dataclasses import replace
 
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService
+import pytest
+
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, require_semantic_runtime, runtime_diagnostic
 from app.product_store import ProductStore
 from app.settings import settings
 from app.storage import storage_provider
@@ -41,3 +43,22 @@ def test_text_file_is_parsed_chunked_indexed_and_retrieved_per_tenant(tmp_path):
     retrieval = KnowledgeRetrievalService(product, runtime_settings)
     assert any("每周诊断" in item["content"] for item in retrieval.search("tenant-a", "秋季数学诊断"))
     assert all("每周诊断" not in item.get("content", "") for item in retrieval.search("tenant-b", "秋季数学诊断"))
+
+
+def test_production_rejects_local_hash_when_fallback_is_disabled(tmp_path):
+    runtime_settings = replace(
+        settings,
+        database_url=f"sqlite:///{tmp_path / 'strict.db'}",
+        database_path=tmp_path / "strict.db",
+        environment="production",
+        knowledge_allow_fallback=False,
+        embedding_provider="local-hash",
+        embedding_api_key="",
+    )
+    product = ProductStore(POCStore(runtime_settings.database_url))
+    product.initialize()
+    diagnostic = runtime_diagnostic(product, runtime_settings)
+    assert diagnostic["status"] == "degraded"
+    assert diagnostic["strict"] is True
+    with pytest.raises(RuntimeError, match="生产语义检索未就绪"):
+        require_semantic_runtime(product, runtime_settings)
