@@ -150,7 +150,10 @@ async def logout(response: Response) -> dict:
 @app.get("/api/v1/me")
 async def me(workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = current_user(workbench_session)
-    return {"user_id": principal.user_id, "tenant_id": principal.tenant_id, "role": principal.role}
+    user = product_store.user_by_id(principal.user_id, principal.tenant_id)
+    if not user:
+        raise HTTPException(401, "当前用户不存在。")
+    return {"user_id": user["id"], "tenant_id": user["tenant_id"], "role": user["role"], "display_name": user["display_name"], "email": user["email"]}
 
 
 @app.get("/api/v1/workspace")

@@ -42,6 +42,15 @@ class ProductStore:
             row = conn.execute("SELECT * FROM users WHERE email=?", (email.lower(),)).fetchone()
         return dict(row) if row else None
 
+    def user_by_id(self, user_id: str, tenant_id: str) -> dict | None:
+        """Return only the signed-in user's own product profile."""
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT id, tenant_id, email, display_name, role FROM users WHERE id=? AND tenant_id=?",
+                (user_id, tenant_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def workspace(self, tenant_id: str, user_id: str) -> dict:
         with self._store.connection() as conn:
             tenant = conn.execute("SELECT name FROM tenants WHERE id=?", (tenant_id,)).fetchone()
