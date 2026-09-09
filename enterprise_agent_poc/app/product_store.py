@@ -46,7 +46,8 @@ class ProductStore:
         """Return only the signed-in user's own product profile."""
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT id, tenant_id, email, display_name, role FROM users WHERE id=? AND tenant_id=?",
+                "SELECT u.id, u.tenant_id, u.email, u.display_name, u.role, t.name AS tenant_name "
+                "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=? AND u.tenant_id=?",
                 (user_id, tenant_id),
             ).fetchone()
         return dict(row) if row else None

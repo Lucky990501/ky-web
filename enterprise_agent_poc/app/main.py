@@ -153,7 +153,7 @@ async def me(workbench_session: str | None = Cookie(default=None)) -> dict:
     user = product_store.user_by_id(principal.user_id, principal.tenant_id)
     if not user:
         raise HTTPException(401, "当前用户不存在。")
-    return {"user_id": user["id"], "tenant_id": user["tenant_id"], "role": user["role"], "display_name": user["display_name"], "email": user["email"]}
+    return {"user_id": user["id"], "tenant_id": user["tenant_id"], "tenant_name": user["tenant_name"], "role": user["role"], "display_name": user["display_name"], "email": user["email"]}
 
 
 @app.get("/api/v1/workspace")
