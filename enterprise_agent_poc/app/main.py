@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import os
+from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -43,6 +45,10 @@ class KnowledgeTextRequest(BaseModel): name: str = Field(min_length=1,max_length
 class AssetRequest(BaseModel): name: str = Field(min_length=1,max_length=120); asset_type: str; url: str = Field(min_length=1,max_length=2_000); tags: list[str]=[]; description: str=""
 class SaveGenerationRequest(BaseModel): name: str = Field(min_length=1,max_length=120)
 class RuntimeTestRequest(BaseModel): mode: str = Field(pattern="^(ok|enterprise_config)$")
+class ProfileUpdateRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+    email: str = Field(min_length=3, max_length=254)
+    avatar_data_url: str | None = Field(default=None, max_length=3_000_000)
 
 
 store = POCStore(settings.database_url)
@@ -88,6 +94,33 @@ def require_admin(workbench_session: str | None) -> UserPrincipal:
     principal=current_user(workbench_session)
     if principal.role != "enterprise_admin": raise HTTPException(403,"仅企业管理员可操作。")
     return principal
+
+
+def profile_response(user: dict) -> dict:
+    return {
+        "user_id": user["id"],
+        "tenant_id": user["tenant_id"],
+        "tenant_name": user["tenant_name"],
+        "role": user["role"],
+        "display_name": user["display_name"],
+        "email": user["email"],
+        "avatar_url": f"/api/v1/me/avatar?v={uuid4().hex}" if user.get("avatar_storage_key") else None,
+    }
+
+
+def decode_avatar(data_url: str) -> tuple[bytes, str, str]:
+    try:
+        header, encoded = data_url.split(",", 1)
+        mime_type = header.removeprefix("data:").removesuffix(";base64")
+        extensions = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+        if mime_type not in extensions or not header.endswith(";base64"):
+            raise ValueError
+        content = base64.b64decode(encoded, validate=True)
+        if not content or len(content) > 2 * 1024 * 1024:
+            raise ValueError
+        return content, mime_type, extensions[mime_type]
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "头像仅支持不超过 2MB 的 PNG、JPG 或 WebP 图片。") from exc
 
 def _key_fingerprint() -> str | None:
     key=os.environ.get(settings.codex_api_key_env)
@@ -153,7 +186,47 @@ async def me(workbench_session: str | None = Cookie(default=None)) -> dict:
     user = product_store.user_by_id(principal.user_id, principal.tenant_id)
     if not user:
         raise HTTPException(401, "当前用户不存在。")
-    return {"user_id": user["id"], "tenant_id": user["tenant_id"], "tenant_name": user["tenant_name"], "role": user["role"], "display_name": user["display_name"], "email": user["email"]}
+    return profile_response(user)
+
+
+@app.put("/api/v1/me")
+async def update_me(payload: ProfileUpdateRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    display_name, email = payload.display_name.strip(), payload.email.strip().lower()
+    if not display_name or "@" not in email:
+        raise HTTPException(422, "请输入有效的姓名和邮箱。")
+    existing = product_store.user_by_email(email)
+    if existing and existing["id"] != principal.user_id:
+        raise HTTPException(409, "该邮箱已被其他账号使用。")
+    current = product_store.user_by_id(principal.user_id, principal.tenant_id)
+    if not current:
+        raise HTTPException(401, "当前用户不存在。")
+    avatar_key = avatar_mime = None
+    if payload.avatar_data_url:
+        content, avatar_mime, extension = decode_avatar(payload.avatar_data_url)
+        avatar_key = f"profiles/{principal.tenant_id}/{principal.user_id}/avatar-{uuid4().hex}.{extension}"
+        storage_provider(settings).put(avatar_key, content, avatar_mime)
+    user = product_store.update_user_profile(principal.user_id, principal.tenant_id, display_name, email, avatar_key, avatar_mime)
+    if not user:
+        raise HTTPException(404, "用户不存在。")
+    if avatar_key and current.get("avatar_storage_key") and current["avatar_storage_key"] != avatar_key:
+        try:
+            storage_provider(settings).delete(current["avatar_storage_key"])
+        except FileNotFoundError:
+            pass
+    return profile_response(user)
+
+
+@app.get("/api/v1/me/avatar")
+async def my_avatar(workbench_session: str | None = Cookie(default=None)):
+    principal = current_user(workbench_session)
+    user = product_store.user_by_id(principal.user_id, principal.tenant_id)
+    if not user or not user.get("avatar_storage_key"):
+        raise HTTPException(404, "头像不存在。")
+    try:
+        return Response(storage_provider(settings).get(user["avatar_storage_key"]), media_type=user.get("avatar_mime_type") or "image/png")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "头像文件不存在。") from exc
 
 
 @app.get("/api/v1/workspace")

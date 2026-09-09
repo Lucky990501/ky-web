@@ -15,10 +15,13 @@ class ProductStore:
     def initialize(self) -> None:
         self._store.initialize()
         if self._store.is_postgres:
+            with self._store.connection() as conn:
+                conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_storage_key TEXT")
+                conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_mime_type TEXT")
             return
         with self._store.connection() as conn:
             conn.executescript("""
-                CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('enterprise_admin','member')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('enterprise_admin','member')), avatar_storage_key TEXT, avatar_mime_type TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS credit_accounts (tenant_id TEXT PRIMARY KEY REFERENCES tenants(id), balance INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS credit_transactions (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT REFERENCES users(id), task_id TEXT, amount INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT NOT NULL REFERENCES users(id), agent_id TEXT NOT NULL, conversation_id TEXT, input_text TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')), stage TEXT, error_code TEXT, user_message TEXT, run_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, started_at TEXT, completed_at TEXT);
@@ -31,10 +34,18 @@ class ProductStore:
                 CREATE TABLE IF NOT EXISTS knowledge_files (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), knowledge_base_id TEXT REFERENCES knowledge_bases(id), name TEXT NOT NULL, status TEXT NOT NULL, storage_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS asset_metadata (asset_id TEXT PRIMARY KEY REFERENCES assets(id), description TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'enterprise');
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "avatar_storage_key" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN avatar_storage_key TEXT")
+            if "avatar_mime_type" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN avatar_mime_type TEXT")
 
     def create_user(self, tenant_id: str, email: str, password_hash: str, display_name: str, role: str) -> None:
         with self._store.connection() as conn:
-            conn.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)", (str(uuid.uuid4()), tenant_id, email.lower(), password_hash, display_name, role))
+            conn.execute(
+                "INSERT OR IGNORE INTO users(id,tenant_id,email,password_hash,display_name,role,created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (str(uuid.uuid4()), tenant_id, email.lower(), password_hash, display_name, role),
+            )
             conn.execute("INSERT OR IGNORE INTO credit_accounts(tenant_id,balance) VALUES (?, 200)", (tenant_id,))
 
     def user_by_email(self, email: str) -> dict | None:
@@ -46,11 +57,25 @@ class ProductStore:
         """Return only the signed-in user's own product profile."""
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT u.id, u.tenant_id, u.email, u.display_name, u.role, t.name AS tenant_name "
+                "SELECT u.id, u.tenant_id, u.email, u.display_name, u.role, u.avatar_storage_key, u.avatar_mime_type, t.name AS tenant_name "
                 "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=? AND u.tenant_id=?",
                 (user_id, tenant_id),
             ).fetchone()
         return dict(row) if row else None
+
+    def update_user_profile(self, user_id: str, tenant_id: str, display_name: str, email: str, avatar_storage_key: str | None = None, avatar_mime_type: str | None = None) -> dict | None:
+        with self._store.connection() as conn:
+            if avatar_storage_key:
+                conn.execute(
+                    "UPDATE users SET display_name=?, email=?, avatar_storage_key=?, avatar_mime_type=? WHERE id=? AND tenant_id=?",
+                    (display_name, email.lower(), avatar_storage_key, avatar_mime_type, user_id, tenant_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE users SET display_name=?, email=? WHERE id=? AND tenant_id=?",
+                    (display_name, email.lower(), user_id, tenant_id),
+                )
+        return self.user_by_id(user_id, tenant_id)
 
     def workspace(self, tenant_id: str, user_id: str) -> dict:
         with self._store.connection() as conn:
