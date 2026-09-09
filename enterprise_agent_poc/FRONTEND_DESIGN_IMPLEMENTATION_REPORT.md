@@ -1,0 +1,51 @@
+# Workbench V1｜正式前端设计还原报告
+
+## 页面与路由
+
+| 设计稿页面 | 前端页面 | 实际数据/API |
+| --- | --- | --- |
+| 登录 | 未登录根页 | `POST /api/v1/auth/login` |
+| 工作台 | `workspace` 导航视图 | `GET /api/v1/workspace` |
+| AI 创作 | `image` 导航视图 | 会话、任务、生成、素材 API |
+| 我的生成 | `generations` 导航视图 | `GET/DELETE /api/v1/generations` |
+| 企业知识库 | `knowledge` 导航视图 | 知识文件、文本知识 API |
+| 企业素材库 | `assets` 导航视图 | 素材 CRUD API |
+| 企业配置 | `enterprise` 导航视图 | 企业配置 GET/PUT API |
+| 成员管理 | `members` 导航视图 | 当前无成员 API，显示明确依赖状态 |
+| 使用与计费 | `billing` 导航视图 | 工作台积分与真实生成记录 API |
+
+## 统一组件
+
+- AppShell、Sidebar、Topbar、PageHeader
+- Button、Input、Tabs、StatusTag、DataTable、EmptyState
+- UploadArea、ImageCard、ConversationItem、TaskProgress
+- Gallery、FilterToolbar、BrandPreview、CreditPanel
+
+全站使用统一蓝色企业工作台 Token、圆角、阴影、间距与响应式断点；图标由 Lucide 图标库提供。
+
+## 已完成交互
+
+- 账号密码登录、退出后重登录态；第三方登录按无后端能力禁用。
+- 工作台快捷入口、最近会话续聊、最近生成预览。
+- AI 图片任务创建、真实任务阶段显示、生成结果预览/下载/保存到素材库。
+- 生成图库查看、下载、删除。
+- 文本知识录入、知识删除；素材 URL 录入、预览、删除与筛选。
+- 企业品牌/规则配置编辑保存；积分与真实生成记录展示。
+
+## 设计稿差异
+
+- 登录页使用新增的无文字教育创作插画，而不是设计稿中的人物插画；正式业务图片不使用演示图。
+- Banner、公告、趋势图和未开放智能体使用结构化真实/空状态，不硬编码设计稿中的业务数字、姓名或文件。
+- 知识库的“上传文件”视觉区保留，但当前入口引导至文本知识录入，因为后端尚未提供文件上传 API。
+- 成员管理与在线充值提供清晰的后端依赖状态，不开放伪造操作。
+
+## 浏览器验证
+
+- 本地 `http://127.0.0.1:18092/`：登录页面可访问，账号/密码字段、登录按钮与禁用占位可被浏览器无障碍树识别。
+- Python 测试：8/8 通过；前端 JavaScript 语法检查通过。
+- 完整登录态的九页视觉回归需要在包含测试账号的受控浏览器会话中继续完成，不能在报告中伪造截图结果。
+
+## 当前 Bug / 后续
+
+- 外部 Lucide CDN 在离线网络下会退化为无图标；后续可将图标静态打包进仓库。
+- 成员、上传、支付与用量趋势依赖详见 `BACKEND_API_GAPS.md`。
