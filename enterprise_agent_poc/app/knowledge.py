@@ -15,6 +15,15 @@ from app.storage import storage_provider
 import httpx
 
 
+_embedding_probe_error: str | None = None
+
+
+def set_embedding_probe(error: str | None) -> None:
+    """Keep only a safe availability state, never provider response details."""
+    global _embedding_probe_error
+    _embedding_probe_error = error
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedDocument:
     text: str
@@ -187,6 +196,8 @@ def runtime_diagnostic(product: ProductStore, settings: Settings) -> dict:
         reasons.append("正式 Embedding Provider 未配置 EMBEDDING_API_KEY。")
     if settings.embedding_provider != "local-hash" and not settings.embedding_base_url:
         reasons.append("正式 Embedding Provider 未配置 EMBEDDING_BASE_URL。")
+    if _embedding_probe_error:
+        reasons.append("正式 Embedding Provider 连通性验证失败。")
     strict = settings.environment == "production" and not settings.knowledge_allow_fallback
     return {
         "status": "ok" if not reasons else "degraded",

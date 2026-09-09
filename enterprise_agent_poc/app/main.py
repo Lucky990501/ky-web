@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_password, verify_password
 from app.product_service import TaskService
 from app.product_store import ProductStore
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, runtime_diagnostic
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, embedding_provider_for, runtime_diagnostic, set_embedding_probe
 from app.storage import storage_provider
 from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
 from app.security import RuntimeTokenIssuer
@@ -72,6 +72,11 @@ async def lifespan(_: FastAPI):
     product_store.initialize()
     if settings.environment == "production" and settings.embedding_provider != "local-hash":
         product_store.ensure_pgvector_schema(settings.embedding_dimension)
+        try:
+            vector = await embedding_provider_for(settings).embed_query("embedding provider startup verification")
+            set_embedding_probe(None if len(vector) == settings.embedding_dimension else "dimension_mismatch")
+        except Exception:
+            set_embedding_probe("unavailable")
     if settings.bootstrap_demo_data:
         store.seed_demo_data()
         product_store.initialize()

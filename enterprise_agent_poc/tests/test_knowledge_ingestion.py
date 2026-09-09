@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, require_semantic_runtime, runtime_diagnostic
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, require_semantic_runtime, runtime_diagnostic, set_embedding_probe
 from app.product_store import ProductStore
 from app.settings import settings
 from app.storage import storage_provider
@@ -71,3 +71,21 @@ def test_openai_compatible_embedding_response_requires_configured_dimension():
     assert provider._vectors({"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]}, 1) == [[0.1, 0.2, 0.3]]
     with pytest.raises(RuntimeError, match="维度"):
         provider._vectors({"data": [{"index": 0, "embedding": [0.1]}]}, 1)
+
+
+def test_failed_embedding_probe_degrades_strict_production_health(tmp_path):
+    runtime_settings = replace(
+        settings,
+        database_url=f"sqlite:///{tmp_path / 'probe.db'}",
+        database_path=tmp_path / "probe.db",
+        environment="production",
+        knowledge_allow_fallback=False,
+        embedding_provider="openai-compatible",
+        embedding_base_url="https://n1.ai/v1",
+        embedding_api_key="test-key",
+    )
+    product = ProductStore(POCStore(runtime_settings.database_url))
+    product.initialize()
+    set_embedding_probe("unavailable")
+    assert "正式 Embedding Provider 连通性验证失败。" in runtime_diagnostic(product, runtime_settings)["reasons"]
+    set_embedding_probe(None)
