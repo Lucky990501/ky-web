@@ -269,8 +269,19 @@ class ProductStore:
     def create_knowledge_file(self, tenant_id: str, user_id: str, filename: str, mime_type: str, size_bytes: int, storage_key: str, knowledge_base_id: str | None = None) -> dict:
         file_id = str(uuid.uuid4())
         with self._store.connection() as conn:
+            if knowledge_base_id:
+                base = conn.execute("SELECT id FROM knowledge_bases WHERE id=? AND tenant_id=?", (knowledge_base_id, tenant_id)).fetchone()
+                if not base:
+                    raise ValueError("知识库不存在或不属于当前企业。")
+            else:
+                base = conn.execute("SELECT id FROM knowledge_bases WHERE tenant_id=? ORDER BY created_at,id LIMIT 1", (tenant_id,)).fetchone()
+                if not base:
+                    knowledge_base_id = str(uuid.uuid4())
+                    conn.execute("INSERT INTO knowledge_bases(id,tenant_id,name) VALUES (?,?,?)", (knowledge_base_id, tenant_id, "企业知识库"))
+                else:
+                    knowledge_base_id = base["id"]
             conn.execute("INSERT INTO knowledge_files(id,tenant_id,knowledge_base_id,name,filename,mime_type,size_bytes,uploaded_by,status,storage_key) VALUES (?,?,?,?,?,?,?,?,?,?)", (file_id, tenant_id, knowledge_base_id, filename[:180], filename[:180], mime_type, size_bytes, user_id, "uploaded", storage_key))
-        return {"file_id": file_id, "filename": filename, "status": "uploaded"}
+        return {"file_id": file_id, "knowledge_base_id": knowledge_base_id, "filename": filename, "status": "uploaded"}
 
     def knowledge_file(self, tenant_id: str, file_id: str) -> dict | None:
         with self._store.connection() as conn:

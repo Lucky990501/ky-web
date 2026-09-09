@@ -374,7 +374,7 @@ async def upload_knowledge_file(file: UploadFile = File(...), knowledge_base_id:
             RedisTaskQueue.from_settings(settings).enqueue_knowledge(record["file_id"], principal.tenant_id)
         else:
             asyncio.create_task(knowledge_processing.process(principal.tenant_id, record["file_id"]))
-        return {**record, "status": "uploaded"}
+        return {**record, "status": "queued"}
     except Exception:
         storage_provider(settings).delete(storage_key)
         raise
