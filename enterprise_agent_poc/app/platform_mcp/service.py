@@ -5,6 +5,8 @@ from uuid import uuid4
 
 from app.security import RuntimeTokenIssuer
 from app.store import POCStore
+from app.product_store import ProductStore
+from app.knowledge import KnowledgeRetrievalService
 from app.settings import Settings
 from app.storage import storage_provider
 from app.store import POCStore
@@ -17,6 +19,7 @@ class PlatformMCPService:
         self._store = store
         self._tokens = token_issuer
         self._settings = settings
+        self._knowledge = KnowledgeRetrievalService(ProductStore(store), settings)
 
     def enterprise_config_get(self, bearer_token: str) -> dict:
         principal = self._tokens.verify(bearer_token, "enterprise_config:read")
@@ -26,7 +29,7 @@ class PlatformMCPService:
     def knowledge_search(self, bearer_token: str, query: str, limit: int = 5) -> list[dict]:
         principal = self._tokens.verify(bearer_token, "knowledge:search")
         self._audit(principal.tenant_id, "knowledge_search", "completed")
-        return self._store.knowledge_search(principal.tenant_id, query, limit)
+        return self._knowledge.search(principal.tenant_id, query, limit)
 
     def asset_search(self, bearer_token: str, query: str, asset_type: str | None = None) -> list[dict]:
         principal = self._tokens.verify(bearer_token, "assets:search")

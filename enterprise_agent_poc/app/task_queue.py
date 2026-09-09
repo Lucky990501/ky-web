@@ -12,6 +12,8 @@ from app.settings import Settings
 class RedisTaskQueue:
     pending = "enterprise-agent:tasks:pending"
     processing = "enterprise-agent:tasks:processing"
+    knowledge_pending = "enterprise-agent:knowledge:pending"
+    knowledge_processing = "enterprise-agent:knowledge:processing"
 
     def __init__(self, redis_url: str) -> None:
         from redis import Redis
@@ -38,3 +40,12 @@ class RedisTaskQueue:
 
     def acknowledge(self, task_id: str) -> None:
         self._client.lrem(self.processing, 1, task_id)
+
+    def enqueue_knowledge(self, file_id: str, tenant_id: str) -> None:
+        self._client.lpush(self.knowledge_pending, f"{tenant_id}:{file_id}")
+
+    def reserve_knowledge(self, timeout: int = 1) -> str | None:
+        return self._client.brpoplpush(self.knowledge_pending, self.knowledge_processing, timeout=timeout)
+
+    def acknowledge_knowledge(self, value: str) -> None:
+        self._client.lrem(self.knowledge_processing, 1, value)

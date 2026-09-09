@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 
 from app.agent_catalog import CATALOG, get_agent
 from app.store import POCStore
@@ -19,6 +20,16 @@ class ProductStore:
             with self._store.connection() as conn:
                 conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_storage_key TEXT")
                 conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_mime_type TEXT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS filename TEXT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS mime_type TEXT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS size_bytes BIGINT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS uploaded_by TEXT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS error_message TEXT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS parsed_text TEXT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS chunk_count INTEGER NOT NULL DEFAULT 0")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS embedding_provider TEXT")
+                conn.execute("ALTER TABLE knowledge_files ADD COLUMN IF NOT EXISTS embedding_model TEXT")
+                conn.execute("CREATE TABLE IF NOT EXISTS knowledge_chunks (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, knowledge_base_id TEXT, file_id TEXT NOT NULL REFERENCES knowledge_files(id) ON DELETE CASCADE, content TEXT NOT NULL, title TEXT, section TEXT, page_number INTEGER, chunk_index INTEGER NOT NULL, embedding TEXT, embedding_provider TEXT, embedding_model TEXT, embedding_version TEXT, metadata TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(file_id,chunk_index))")
                 conn.execute("CREATE TABLE IF NOT EXISTS agent_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, description TEXT NOT NULL, icon TEXT NOT NULL, status TEXT NOT NULL, default_runtime_profile TEXT NOT NULL, credit_cost INTEGER NOT NULL, skill_manifest TEXT NOT NULL, allows_image_generation BOOLEAN NOT NULL DEFAULT FALSE)")
                 conn.execute("CREATE TABLE IF NOT EXISTS tenant_agent_instances (tenant_id TEXT NOT NULL REFERENCES tenants(id), agent_id TEXT NOT NULL REFERENCES agent_templates(id), status TEXT NOT NULL, PRIMARY KEY(tenant_id,agent_id))")
             self._seed_agent_catalog()
@@ -35,7 +46,8 @@ class ProductStore:
                 CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS generations (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id), provider TEXT, model TEXT, storage_key TEXT, mime_type TEXT, width INTEGER, height INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TEXT);
                 CREATE TABLE IF NOT EXISTS knowledge_bases (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-                CREATE TABLE IF NOT EXISTS knowledge_files (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), knowledge_base_id TEXT REFERENCES knowledge_bases(id), name TEXT NOT NULL, status TEXT NOT NULL, storage_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS knowledge_files (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), knowledge_base_id TEXT REFERENCES knowledge_bases(id), name TEXT NOT NULL, filename TEXT, mime_type TEXT, size_bytes INTEGER, uploaded_by TEXT, status TEXT NOT NULL, storage_key TEXT, error_message TEXT, parsed_text TEXT, chunk_count INTEGER NOT NULL DEFAULT 0, embedding_provider TEXT, embedding_model TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS knowledge_chunks (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), knowledge_base_id TEXT, file_id TEXT NOT NULL REFERENCES knowledge_files(id) ON DELETE CASCADE, content TEXT NOT NULL, title TEXT, section TEXT, page_number INTEGER, chunk_index INTEGER NOT NULL, embedding TEXT, embedding_provider TEXT, embedding_model TEXT, embedding_version TEXT, metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(file_id,chunk_index));
                 CREATE TABLE IF NOT EXISTS asset_metadata (asset_id TEXT PRIMARY KEY REFERENCES assets(id), description TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'enterprise');
                 CREATE TABLE IF NOT EXISTS agent_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, description TEXT NOT NULL, icon TEXT NOT NULL, status TEXT NOT NULL, default_runtime_profile TEXT NOT NULL, credit_cost INTEGER NOT NULL, skill_manifest TEXT NOT NULL, allows_image_generation INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS tenant_agent_instances (tenant_id TEXT NOT NULL REFERENCES tenants(id), agent_id TEXT NOT NULL REFERENCES agent_templates(id), status TEXT NOT NULL, PRIMARY KEY(tenant_id,agent_id));
@@ -45,6 +57,10 @@ class ProductStore:
                 conn.execute("ALTER TABLE users ADD COLUMN avatar_storage_key TEXT")
             if "avatar_mime_type" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN avatar_mime_type TEXT")
+            file_columns = {row["name"] for row in conn.execute("PRAGMA table_info(knowledge_files)").fetchall()}
+            for name, ddl in {"filename":"TEXT", "mime_type":"TEXT", "size_bytes":"INTEGER", "uploaded_by":"TEXT", "error_message":"TEXT", "parsed_text":"TEXT", "chunk_count":"INTEGER NOT NULL DEFAULT 0", "embedding_provider":"TEXT", "embedding_model":"TEXT"}.items():
+                if name not in file_columns:
+                    conn.execute(f"ALTER TABLE knowledge_files ADD COLUMN {name} {ddl}")
         self._seed_agent_catalog()
 
     def _seed_agent_catalog(self) -> None:
@@ -150,7 +166,7 @@ class ProductStore:
         if role not in {"user", "assistant"}:
             raise ValueError("不支持的消息角色。")
         with self._store.connection() as conn:
-            conn.execute("INSERT INTO messages(id,conversation_id,role,content) VALUES (?,?,?,?)", (str(uuid.uuid4()), conversation_id, role, content[:12000]))
+            conn.execute("INSERT INTO messages(id,conversation_id,role,content,created_at) VALUES (?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, role, content[:12000], datetime.now(timezone.utc).isoformat()))
 
     def conversation_detail(self, tenant_id: str, user_id: str, conversation_id: str) -> dict | None:
         with self._store.connection() as conn:
@@ -249,6 +265,35 @@ class ProductStore:
     def knowledge_files(self, tenant_id: str) -> list[dict]:
         with self._store.connection() as conn: rows=conn.execute("SELECT * FROM knowledge_files WHERE tenant_id=? ORDER BY created_at DESC",(tenant_id,)).fetchall()
         return [dict(x) for x in rows]
+
+    def create_knowledge_file(self, tenant_id: str, user_id: str, filename: str, mime_type: str, size_bytes: int, storage_key: str, knowledge_base_id: str | None = None) -> dict:
+        file_id = str(uuid.uuid4())
+        with self._store.connection() as conn:
+            conn.execute("INSERT INTO knowledge_files(id,tenant_id,knowledge_base_id,name,filename,mime_type,size_bytes,uploaded_by,status,storage_key) VALUES (?,?,?,?,?,?,?,?,?,?)", (file_id, tenant_id, knowledge_base_id, filename[:180], filename[:180], mime_type, size_bytes, user_id, "uploaded", storage_key))
+        return {"file_id": file_id, "filename": filename, "status": "uploaded"}
+
+    def knowledge_file(self, tenant_id: str, file_id: str) -> dict | None:
+        with self._store.connection() as conn:
+            row = conn.execute("SELECT * FROM knowledge_files WHERE id=? AND tenant_id=?", (file_id, tenant_id)).fetchone()
+        return dict(row) if row else None
+
+    def set_knowledge_file_status(self, tenant_id: str, file_id: str, status: str, *, error_message: str | None = None, parsed_text: str | None = None, chunk_count: int | None = None, embedding_provider: str | None = None, embedding_model: str | None = None) -> None:
+        allowed = {"uploaded", "queued", "parsing", "chunking", "embedding", "indexing", "ready", "failed"}
+        if status not in allowed:
+            raise ValueError("无效知识文件状态。")
+        with self._store.connection() as conn:
+            conn.execute("UPDATE knowledge_files SET status=?,error_message=?,parsed_text=COALESCE(?,parsed_text),chunk_count=COALESCE(?,chunk_count),embedding_provider=COALESCE(?,embedding_provider),embedding_model=COALESCE(?,embedding_model) WHERE id=? AND tenant_id=?", (status, error_message, parsed_text, chunk_count, embedding_provider, embedding_model, file_id, tenant_id))
+
+    def replace_knowledge_chunks(self, tenant_id: str, file_id: str, chunks: list[dict]) -> None:
+        with self._store.connection() as conn:
+            conn.execute("DELETE FROM knowledge_chunks WHERE tenant_id=? AND file_id=?", (tenant_id, file_id))
+            for chunk in chunks:
+                conn.execute("INSERT INTO knowledge_chunks(id,tenant_id,knowledge_base_id,file_id,content,title,section,page_number,chunk_index,embedding,embedding_provider,embedding_model,embedding_version,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), tenant_id, chunk.get("knowledge_base_id"), file_id, chunk["content"], chunk.get("title"), chunk.get("section"), chunk.get("page_number"), chunk["chunk_index"], json.dumps(chunk.get("embedding")), chunk.get("embedding_provider"), chunk.get("embedding_model"), chunk.get("embedding_version"), json.dumps(chunk.get("metadata", {}), ensure_ascii=False)))
+
+    def knowledge_chunks(self, tenant_id: str, file_id: str) -> list[dict]:
+        with self._store.connection() as conn:
+            rows = conn.execute("SELECT id,content,title,section,page_number,chunk_index,embedding,metadata FROM knowledge_chunks WHERE tenant_id=? AND file_id=? ORDER BY chunk_index", (tenant_id, file_id)).fetchall()
+        return [dict(row) for row in rows]
 
     def add_knowledge_text(self, tenant_id: str, name: str, content: str) -> dict:
         file_id=str(uuid.uuid4())

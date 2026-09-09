@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.main import product_store, runtime, store, task_service
+from app.main import product_store, runtime, store, task_service, knowledge_processing
 from app.settings import settings
 from app.task_queue import RedisTaskQueue
 
@@ -21,6 +21,14 @@ async def run() -> None:
     logger.info("worker ready")
     try:
         while True:
+            knowledge_job = await asyncio.to_thread(queue.reserve_knowledge)
+            if knowledge_job:
+                try:
+                    tenant_id, file_id = knowledge_job.split(":", 1)
+                    await knowledge_processing.process(tenant_id, file_id)
+                finally:
+                    queue.acknowledge_knowledge(knowledge_job)
+                continue
             task_id = await asyncio.to_thread(queue.reserve)
             if not task_id:
                 continue

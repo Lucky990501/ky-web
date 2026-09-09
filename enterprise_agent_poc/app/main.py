@@ -9,7 +9,7 @@ from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Cookie, FastAPI, Header, HTTPException, Response
+from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_password, verify_password
 from app.product_service import TaskService
 from app.product_store import ProductStore
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService
 from app.storage import storage_provider
 from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
 from app.security import RuntimeTokenIssuer
@@ -43,6 +44,7 @@ class AgentTaskRequest(BaseModel):
 class RenameRequest(BaseModel): title: str = Field(min_length=1,max_length=80)
 class EnterpriseConfigRequest(BaseModel): payload: dict
 class KnowledgeTextRequest(BaseModel): name: str = Field(min_length=1,max_length=180); content: str = Field(min_length=1,max_length=100_000)
+class KnowledgeQueryRequest(BaseModel): query: str = Field(min_length=1, max_length=2_000); top_k: int = Field(default=5, ge=1, le=10)
 class AssetRequest(BaseModel): name: str = Field(min_length=1,max_length=120); asset_type: str; url: str = Field(min_length=1,max_length=2_000); tags: list[str]=[]; description: str=""
 class SaveGenerationRequest(BaseModel): name: str = Field(min_length=1,max_length=120)
 class RuntimeTestRequest(BaseModel): mode: str = Field(pattern="^(ok|enterprise_config)$")
@@ -59,6 +61,8 @@ runtime = CodexRuntimeProvider(manager)
 agents = AgentService(store, runtime, settings)
 product_store = ProductStore(store)
 task_service = TaskService(product_store, agents)
+knowledge_processing = KnowledgeProcessingService(product_store, settings)
+knowledge_retrieval = KnowledgeRetrievalService(product_store, settings)
 sessions = SessionIssuer(settings.token_secret)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -347,13 +351,63 @@ async def put_enterprise_config(payload: EnterpriseConfigRequest,workbench_sessi
 @app.get("/api/v1/knowledge/files")
 async def list_knowledge_files(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
     principal=require_admin(workbench_session); return product_store.knowledge_files(principal.tenant_id)
+@app.post("/api/v1/knowledge/files", status_code=202)
+async def upload_knowledge_file(file: UploadFile = File(...), knowledge_base_id: str | None = Form(default=None), workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session)
+    filename = Path(file.filename or "").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".pdf", ".docx", ".txt", ".md"}:
+        raise HTTPException(415, "仅支持 PDF、DOCX、TXT、MD 文件。")
+    content = await file.read(settings.knowledge_max_upload_bytes + 1)
+    if not content:
+        raise HTTPException(422, "不能上传空文件。")
+    if len(content) > settings.knowledge_max_upload_bytes:
+        raise HTTPException(413, "文件超过允许大小。")
+    file_id = str(uuid4())
+    storage_key = f"knowledge/{principal.tenant_id}/{file_id}{suffix}"
+    storage_provider(settings).put(storage_key, content, file.content_type or "application/octet-stream")
+    try:
+        record = product_store.create_knowledge_file(principal.tenant_id, principal.user_id, filename, file.content_type or "application/octet-stream", len(content), storage_key, knowledge_base_id)
+        product_store.set_knowledge_file_status(principal.tenant_id, record["file_id"], "queued")
+        if settings.task_queue == "redis":
+            from app.task_queue import RedisTaskQueue
+            RedisTaskQueue.from_settings(settings).enqueue_knowledge(record["file_id"], principal.tenant_id)
+        else:
+            asyncio.create_task(knowledge_processing.process(principal.tenant_id, record["file_id"]))
+        return {**record, "status": "uploaded"}
+    except Exception:
+        storage_provider(settings).delete(storage_key)
+        raise
+@app.get("/api/v1/knowledge/files/{file_id}")
+async def get_knowledge_file(file_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session); item = product_store.knowledge_file(principal.tenant_id, file_id)
+    if not item: raise HTTPException(404, "知识文件不存在。")
+    item["chunks"] = product_store.knowledge_chunks(principal.tenant_id, file_id) if item["status"] == "ready" else []
+    return item
+@app.post("/api/v1/knowledge/files/{file_id}/retry", status_code=202)
+async def retry_knowledge_file(file_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session); item = product_store.knowledge_file(principal.tenant_id, file_id)
+    if not item: raise HTTPException(404, "知识文件不存在。")
+    product_store.set_knowledge_file_status(principal.tenant_id, file_id, "queued", error_message=None)
+    if settings.task_queue == "redis":
+        from app.task_queue import RedisTaskQueue
+        RedisTaskQueue.from_settings(settings).enqueue_knowledge(file_id, principal.tenant_id)
+    else: asyncio.create_task(knowledge_processing.process(principal.tenant_id, file_id))
+    return {"file_id":file_id,"status":"queued"}
+@app.post("/api/v1/knowledge/retrieval-test")
+async def knowledge_retrieval_test(payload: KnowledgeQueryRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session)
+    return {"query": payload.query, "results": knowledge_retrieval.search(principal.tenant_id, payload.query, payload.top_k)}
 @app.post("/api/v1/knowledge/text")
 async def create_knowledge_text(payload: KnowledgeTextRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
     principal=require_admin(workbench_session); return product_store.add_knowledge_text(principal.tenant_id,payload.name,payload.content)
 @app.delete("/api/v1/knowledge/files/{file_id}")
 async def delete_knowledge_file(file_id: str,workbench_session: str | None = Cookie(default=None)) -> dict:
     principal=require_admin(workbench_session)
-    if not product_store.delete_knowledge_file(principal.tenant_id,file_id): raise HTTPException(404,"文件不存在。")
+    item=product_store.knowledge_file(principal.tenant_id,file_id)
+    if not item or not product_store.delete_knowledge_file(principal.tenant_id,file_id): raise HTTPException(404,"文件不存在。")
+    if item.get("storage_key"):
+        storage_provider(settings).delete(item["storage_key"])
     return {"status":"deleted"}
 @app.get("/api/v1/assets")
 async def list_assets(workbench_session: str | None = Cookie(default=None)) -> list[dict]:

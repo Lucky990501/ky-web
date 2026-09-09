@@ -70,6 +70,13 @@ class Settings:
     environment: str
     secure_cookies: bool
     bootstrap_demo_data: bool
+    knowledge_chunk_size: int
+    knowledge_chunk_overlap: int
+    knowledge_min_score: float
+    embedding_provider: str
+    embedding_model: str
+    embedding_dimension: int
+    knowledge_max_upload_bytes: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -109,6 +116,13 @@ class Settings:
             environment=os.environ.get("APP_ENV", "development").lower(),
             secure_cookies=os.environ.get("ENTERPRISE_POC_SECURE_COOKIES", "false").lower() == "true",
             bootstrap_demo_data=os.environ.get("ENTERPRISE_POC_BOOTSTRAP_DEMO_DATA", "true").lower() == "true",
+            knowledge_chunk_size=int(os.environ.get("KNOWLEDGE_CHUNK_SIZE", "800")),
+            knowledge_chunk_overlap=int(os.environ.get("KNOWLEDGE_CHUNK_OVERLAP", "120")),
+            knowledge_min_score=float(os.environ.get("KNOWLEDGE_MIN_SCORE", "0.16")),
+            embedding_provider=os.environ.get("EMBEDDING_PROVIDER", "local-hash"),
+            embedding_model=os.environ.get("EMBEDDING_MODEL", "local-hash-v1"),
+            embedding_dimension=int(os.environ.get("EMBEDDING_DIMENSION", "128")),
+            knowledge_max_upload_bytes=int(os.environ.get("KNOWLEDGE_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),
         )
 
 
