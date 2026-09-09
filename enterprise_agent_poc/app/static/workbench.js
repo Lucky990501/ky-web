@@ -1,6 +1,8 @@
 const app = document.querySelector('#app');
 let me, activeConversationId = null;
-const api = (path, options = {}) => fetch(path, { credentials: 'same-origin', headers: { 'content-type': 'application/json', ...(options.headers || {}) }, ...options }).then(async r => { const body = await r.json(); if (!r.ok) throw Error(body.detail || '请求失败'); return body; });
+const pageCache = new Map();
+const cacheablePaths = new Set(['/api/v1/me','/api/v1/workspace','/api/v1/conversations','/api/v1/generations','/api/v1/knowledge/files','/api/v1/assets','/api/v1/enterprise-config']);
+const api = (path, options = {}) => { const method = (options.method || 'GET').toUpperCase(), canCache = method === 'GET' && cacheablePaths.has(path), cached = pageCache.get(path); if (canCache && cached && Date.now() - cached.at < 15000) return Promise.resolve(cached.value); return fetch(path, { credentials: 'same-origin', headers: { 'content-type': 'application/json', ...(options.headers || {}) }, ...options }).then(async r => { const body = await r.json(); if (!r.ok) throw Error(body.detail || '请求失败'); if (canCache) pageCache.set(path,{at:Date.now(),value:body}); if (method !== 'GET') pageCache.clear(); return body; }); };
 const escapeHtml = v => String(v || '').replace(/[&<>'"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;' })[c]);
 const icon = (name, size = 18) => `<i data-lucide="${name}" width="${size}" height="${size}"></i>`;
 const storageUrl = item => `/api/v1/storage/${String(item.storage_key).split('/').map(encodeURIComponent).join('/')}`;
@@ -26,19 +28,23 @@ function shell() {
 const header = (title, description, iconName) => `<header class="page-header"><div class="title-row">${icon(iconName,32)}<div><h1>${title === '企业配置' ? '企业设置' : title}</h1><p>${description}</p></div></div></header>`;
 const button = (copy, iconName, cls='secondary', attrs='') => `<button class="button ${cls}" ${attrs}>${icon(iconName,17)}${copy}</button>`;
 const stageMap = {queued:'正在理解需求',loading_context:'正在读取企业资料',retrieving_knowledge:'正在读取企业资料',retrieving_assets:'正在准备品牌素材',generating:'正在生成图片',saving_asset:'正在保存结果'};
+const pageLoading = () => `<section class="page-loading" aria-live="polite" aria-busy="true"><div class="skeleton-title"><i></i><span></span></div><div class="skeleton-subtitle"></div><div class="skeleton-layout"><article><div class="skeleton-banner"></div><div class="skeleton-row"><i></i><i></i><i></i></div><div class="skeleton-panel"></div></article><aside><div class="skeleton-card"></div><div class="skeleton-card"></div></aside></div><p>正在加载页面内容…</p></section>`;
 
 async function render(page) {
   const main = document.querySelector('#main');
   document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === page));
-  if (page === 'workspace') return workspace(main);
-  if (page === 'image') return imageAgent(main);
-  if (page === 'generations') return generations(main);
-  if (page === 'knowledge') return knowledge(main);
-  if (page === 'assets') return assets(main);
-  if (page === 'enterprise') return enterprise(main);
-  if (page === 'members') return members(main);
-  if (page === 'billing') return billing(main);
-  if (page === 'profile') return profile(main);
+  main.innerHTML = pageLoading();
+  try {
+    if (page === 'workspace') return await workspace(main);
+    if (page === 'image') return await imageAgent(main);
+    if (page === 'generations') return await generations(main);
+    if (page === 'knowledge') return await knowledge(main);
+    if (page === 'assets') return await assets(main);
+    if (page === 'enterprise') return await enterprise(main);
+    if (page === 'members') return await members(main);
+    if (page === 'billing') return await billing(main);
+    if (page === 'profile') return await profile(main);
+  } catch (error) { main.innerHTML = `<section class="page-load-error" role="alert"><b>${icon('circle-alert',24)}页面加载失败</b><p>${escapeHtml(error.message || '请稍后重试。')}</p><button class="button primary" data-retry-page="${escapeHtml(page)}">${icon('refresh-cw')}重新加载</button></section>`; main.querySelector('[data-retry-page]').onclick = () => render(page); refreshIcons(); }
 }
 
 async function workspace(main) {
