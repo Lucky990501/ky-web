@@ -177,6 +177,24 @@ class ProductStore:
             if not conversation:
                 return None
             messages = conn.execute("SELECT id,role,content,created_at FROM messages WHERE conversation_id=? ORDER BY created_at,id", (conversation_id,)).fetchall()
+            if not messages:
+                # Conversations created before message persistence still have a
+                # task input/result audit trail. Expose it as read-only history
+                # so those users can inspect context and safely resume the same
+                # Codex thread without manufacturing any missing content.
+                legacy = conn.execute(
+                    "SELECT t.id,t.input_text,t.created_at,r.final_response,t.completed_at "
+                    "FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id "
+                    "WHERE t.conversation_id=? AND t.tenant_id=? AND t.user_id=? "
+                    "ORDER BY t.created_at,t.id",
+                    (conversation_id, tenant_id, user_id),
+                ).fetchall()
+                restored: list[dict] = []
+                for task in legacy:
+                    restored.append({"id": f"legacy-user-{task['id']}", "role": "user", "content": task["input_text"], "created_at": task["created_at"]})
+                    if task["final_response"]:
+                        restored.append({"id": f"legacy-assistant-{task['id']}", "role": "assistant", "content": task["final_response"], "created_at": task["completed_at"] or task["created_at"]})
+                messages = restored
             runs = conn.execute("SELECT run_id,status,created_at,completed_at,payload FROM run_traces WHERE conversation_id=? AND tenant_id=? ORDER BY created_at", (conversation_id, tenant_id)).fetchall()
         result = dict(conversation)
         result["messages"] = [dict(item) for item in messages]

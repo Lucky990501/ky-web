@@ -83,3 +83,20 @@ def test_conversation_detail_returns_only_its_owner_visible_messages():
         detail = client.get(f"/api/v1/conversations/{conversation_id}")
         assert detail.status_code == 200
         assert [item["content"] for item in detail.json()["messages"]] == ["写招生文案", "这是生成的正文"]
+
+
+def test_conversation_detail_recovers_legacy_task_context_when_messages_are_absent():
+    from app.main import product_store, store
+    import uuid
+
+    with TestClient(app) as client:
+        client.post("/api/v1/auth/login", json={"account": "member@tenant-a.test", "password": "ChangeMe!2026"})
+        user = product_store.user_by_email("member@tenant-a.test")
+        conversation_id = str(uuid.uuid4())
+        store.save_conversation(conversation_id, "tenant-a", "copywriting-agent", "profile", "legacy-thread", "test")
+        product_store.attach_conversation(conversation_id, user["id"], "旧会话")
+        task = product_store.create_task("tenant-a", user["id"], "copywriting-agent", "旧任务内容", conversation_id)
+        product_store.set_task(task["id"], "tenant-a", "completed", "completed", "任务完成", response="旧任务正文", conversation_id=conversation_id)
+        detail = client.get(f"/api/v1/conversations/{conversation_id}")
+        assert detail.status_code == 200
+        assert [item["content"] for item in detail.json()["messages"]] == ["旧任务内容", "旧任务正文"]
