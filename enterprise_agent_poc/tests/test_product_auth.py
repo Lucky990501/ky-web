@@ -66,3 +66,20 @@ def test_copywriting_task_uses_its_own_credit_cost_and_refuses_cross_agent_conve
         assert task["agent_id"] == "copywriting-agent"
         assert client.get("/api/v1/workspace").json()["credit_balance"] == before
         product_store.set_task(task["id"], "tenant-a", "cancelled", "cancelled", "测试清理")
+
+
+def test_conversation_detail_returns_only_its_owner_visible_messages():
+    from app.main import product_store, store
+    import uuid
+
+    with TestClient(app) as client:
+        client.post("/api/v1/auth/login", json={"account": "member@tenant-a.test", "password": "ChangeMe!2026"})
+        user = product_store.user_by_email("member@tenant-a.test")
+        conversation_id = str(uuid.uuid4())
+        store.save_conversation(conversation_id, "tenant-a", "copywriting-agent", "profile", "thread-test", "test")
+        product_store.attach_conversation(conversation_id, user["id"], "历史文案")
+        product_store.add_message(conversation_id, "user", "写招生文案")
+        product_store.add_message(conversation_id, "assistant", "这是生成的正文")
+        detail = client.get(f"/api/v1/conversations/{conversation_id}")
+        assert detail.status_code == 200
+        assert [item["content"] for item in detail.json()["messages"]] == ["写招生文案", "这是生成的正文"]

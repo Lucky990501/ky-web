@@ -145,6 +145,28 @@ class ProductStore:
         with self._store.connection() as conn:
             conn.execute("INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,?)", (conversation_id,user_id,title))
 
+    def add_message(self, conversation_id: str, role: str, content: str) -> None:
+        """Persist user-visible chat content only; never persist hidden reasoning."""
+        if role not in {"user", "assistant"}:
+            raise ValueError("不支持的消息角色。")
+        with self._store.connection() as conn:
+            conn.execute("INSERT INTO messages(id,conversation_id,role,content) VALUES (?,?,?,?)", (str(uuid.uuid4()), conversation_id, role, content[:12000]))
+
+    def conversation_detail(self, tenant_id: str, user_id: str, conversation_id: str) -> dict | None:
+        with self._store.connection() as conn:
+            conversation = conn.execute(
+                "SELECT c.id,c.agent_id,c.runtime_thread_id,c.created_at,o.title FROM conversations c JOIN conversation_owners o ON o.conversation_id=c.id WHERE c.id=? AND c.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL",
+                (conversation_id, tenant_id, user_id),
+            ).fetchone()
+            if not conversation:
+                return None
+            messages = conn.execute("SELECT id,role,content,created_at FROM messages WHERE conversation_id=? ORDER BY created_at,id", (conversation_id,)).fetchall()
+            runs = conn.execute("SELECT run_id,status,created_at,completed_at,payload FROM run_traces WHERE conversation_id=? AND tenant_id=? ORDER BY created_at", (conversation_id, tenant_id)).fetchall()
+        result = dict(conversation)
+        result["messages"] = [dict(item) for item in messages]
+        result["runs"] = [{"run_id": item["run_id"], "status": item["status"], "created_at": item["created_at"], "completed_at": item["completed_at"]} for item in runs]
+        return result
+
     def rename_conversation(self, tenant_id: str, user_id: str, conversation_id: str, title: str) -> bool:
         with self._store.connection() as conn:
             cursor=conn.execute("UPDATE conversation_owners SET title=? WHERE conversation_id=? AND user_id=? AND EXISTS (SELECT 1 FROM conversations WHERE id=? AND tenant_id=?)",(title.strip()[:80],conversation_id,user_id,conversation_id,tenant_id))
@@ -161,6 +183,14 @@ class ProductStore:
             events = conn.execute("SELECT stage,message,created_at FROM task_events WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
         if not row: return None
         result = dict(row); result["events"] = [dict(x) for x in events]; return result
+
+    def task_events_since(self, task_id: str, tenant_id: str, user_id: str, after_id: int = 0) -> list[dict]:
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT e.id,e.stage,e.message,e.created_at FROM task_events e JOIN tasks t ON t.id=e.task_id WHERE e.task_id=? AND t.tenant_id=? AND t.user_id=? AND e.id>? ORDER BY e.id",
+                (task_id, tenant_id, user_id, after_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def task_for_worker(self, task_id: str) -> dict | None:
         """Internal queue lookup. It deliberately has no user-controlled tenant input."""

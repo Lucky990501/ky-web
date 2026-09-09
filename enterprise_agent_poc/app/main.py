@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Cookie, FastAPI, Header, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -273,10 +274,39 @@ async def get_task(task_id: str, workbench_session: str | None = Cookie(default=
     return task
 
 
+@app.get("/api/v1/tasks/{task_id}/events")
+async def stream_task_events(task_id: str, after: int = 0, workbench_session: str | None = Cookie(default=None)):
+    """SSE of persisted, user-visible task phases. No reasoning is streamed."""
+    principal = current_user(workbench_session)
+    async def events():
+        last_id = after
+        for _ in range(180):
+            for item in product_store.task_events_since(task_id, principal.tenant_id, principal.user_id, last_id):
+                last_id = item["id"]
+                yield f"event: progress\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+            task = product_store.task(task_id, principal.tenant_id, principal.user_id)
+            if not task:
+                yield "event: error\ndata: {\"message\":\"任务不存在。\"}\n\n"
+                return
+            if task["status"] in {"completed", "failed", "cancelled"}:
+                yield f"event: complete\ndata: {json.dumps({'status': task['status'], 'message': task.get('user_message'), 'final_response': task.get('final_response'), 'conversation_id': task.get('conversation_id')}, ensure_ascii=False)}\n\n"
+                return
+            await asyncio.sleep(0.7)
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.get("/api/v1/conversations")
 async def list_conversations(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
     principal = current_user(workbench_session)
     return product_store.conversations(principal.tenant_id, principal.user_id)
+
+@app.get("/api/v1/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    detail = product_store.conversation_detail(principal.tenant_id, principal.user_id, conversation_id)
+    if not detail:
+        raise HTTPException(404, "会话不存在。")
+    return detail
 
 
 @app.get("/api/v1/generations")
