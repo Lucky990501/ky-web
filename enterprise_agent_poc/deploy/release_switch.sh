@@ -8,7 +8,9 @@ release_root="$base/releases/$release_id/enterprise_agent_poc"
 shared_env="$base/shared/enterprise-agent.env"
 services=(enterprise-agent-api enterprise-agent-mcp enterprise-agent-worker)
 
-case "$release_id" in *[!A-Za-z0-9._-]*|'') echo "invalid release id" >&2; exit 2;; esac
+case "$release_id" in
+  ""|*[!A-Za-z0-9._-]*) echo "invalid release id" >&2; exit 2 ;;
+esac
 [[ -d "$release_root" && -f "$release_root/pyproject.toml" ]] || { echo "release source missing" >&2; exit 2; }
 [[ -f "$shared_env" ]] || { echo "shared environment file missing" >&2; exit 2; }
 [[ "$(stat -c %a "$shared_env")" =~ ^[0-6]00$ ]] || { echo "shared environment file must not be group/world readable" >&2; exit 2; }
