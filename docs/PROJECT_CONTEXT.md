@@ -181,6 +181,7 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 - 剩余失败：r09、r16、r19、p08；均为 physical section / alias 口径失败，但 Top-1 canonical_section 正确。正式指标仍按原评测口径判失败。
 - API、MCP、Worker 均 active；`/api/health` 为 `status: ok`、`knowledge: ok`。
 - V1.4 结论为 `PASS WITH ISSUES`，阶段已结束，不得自动开始 Skill Registry。
+- Phase A 最终生产门禁（2026-09-10）为 `BLOCKED`：Tenant A/B、正式浏览器 E2E、三 Agent Grounding、无知识回归与 Thread Resume 缺少本轮生产证据；生产工作树仍不是可从 Commit + Migration + Environment 重建的干净 Release。详见 `enterprise_agent_poc/ENTERPRISE_KNOWLEDGE_PHASE_A_FINAL_REPORT.md`。
 
 ## 9. 待办事项
 
@@ -242,13 +243,12 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 建议按以下顺序推进：
 
-1. **等待 V1.4 人工确认**：当前阶段已 `PASS WITH ISSUES`；不要自动进入 Skill Registry 或 Agent Expansion。
-2. **同步 Git 远端**：网络恢复后将本地 `master` 正常推送至 `origin/master`，禁止改写历史。
-3. **决定下一项 Retrieval 专项**：在 Reranker、Query Rewrite、Parent-Child Retrieval 中按剩余 Case 证据选择；优先源转换与父子结构，不提前引入复杂 LLM Reranker。
-4. **完成双 Tenant 验收**：在授权环境中创建临时 Tenant B，验证上传、检索、MCP Scope、Agent 输出，随后清理数据。
+1. **完成 Phase A 核心阻塞项**：建立临时 Tenant 的安全 Provision/Cleanup 能力，恢复正式浏览器 E2E，并在隔离租户中完成三 Agent、无知识和 Resume 的生产证据。
+2. **收口生产 Release**：从明确 commit 建立独立 release，应用可记录的 migrations、注入环境配置、健康检查并保留回滚点；不要覆盖当前历史工作树。
+3. **同步 Git 远端**：网络恢复后将本地 `master` 正常推送至 `origin/master`，禁止改写历史。
+4. **仅在 Phase A PASS 后进入 Skill Registry V1**：在此之前保持 RAG Retrieval V1.4 FROZEN，不新增 RAG 算法。
 5. **收口 Trace 与数据治理**：持久化必要的脱敏检索证据，制定内容保留策略。
-6. **收口部署可复现性**：migration runner、pgvector Compose、生产环境模板、健康检查和回滚流程。
-7. **补齐产品管理面**：成员、Tenant/Agent 管理、素材上传、账户安全和计费。
+6. **补齐产品管理面**：成员、Tenant/Agent 管理、素材上传、账户安全和计费。
 
 ## 接管规则
 
