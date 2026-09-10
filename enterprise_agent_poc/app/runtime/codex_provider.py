@@ -13,7 +13,7 @@ from app.domain import RuntimeProfile, RuntimeSession, RuntimeTurn, SandboxPolic
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.skills import SkillDeployment
 from app.settings import Settings
-from app.runtime.base import RuntimeProvider
+from app.runtime.base import RuntimeProvider, RuntimeStartError
 
 
 @dataclass(slots=True)
@@ -32,7 +32,15 @@ class CodexRuntimeManager:
         self._deployment = deployment
         self._token_issuer = token_issuer
         self._instances: dict[str, _Instance] = {}
+        self._startup_events: dict[str, list[dict]] = {}
         self._lock = asyncio.Lock()
+
+    def _start_event(self, profile: RuntimeProfile, event: str, **details: str) -> None:
+        self._startup_events.setdefault(profile.id, []).append({"event": event, **details})
+
+    def startup_events(self, profile: RuntimeProfile) -> tuple[dict, ...]:
+        """Return only lifecycle labels/stages; never provider error text or secrets."""
+        return tuple(dict(event) for event in self._startup_events.get(profile.id, ()))
 
     def _paths(self, profile: RuntimeProfile) -> tuple[Path, Path]:
         root = self._settings.data_dir / "runtime" / profile.tenant_id / profile.agent_id / profile.id
@@ -127,39 +135,52 @@ class CodexRuntimeManager:
 
     async def get(self, profile: RuntimeProfile):
         async with self._lock:
+            self._startup_events[profile.id] = [{"event": "runtime_start_requested"}]
             current = self._instances.get(profile.id)
             if current and current.token_expires_at > int(time.time()) + 60:
                 current.last_active_at = time.monotonic()
+                self._start_event(profile, "app_server_ready")
                 return current.codex
             if current:
                 await current.codex.close()
                 del self._instances[profile.id]
+            stage = "runtime_profile"
             try:
                 from openai_codex import AsyncCodex, CodexConfig
-            except ImportError as exc:  # pragma: no cover - environment dependency
-                raise RuntimeError("未安装 openai-codex==0.147.0；请先安装 POC 依赖。") from exc
-            codex_home, workspace, token, token_expires_at = self._prepare_profile(profile)
-            api_key = os.environ.get(self._settings.codex_api_key_env)
-            if not api_key:
-                raise RuntimeError(f"未配置 Codex API Key 环境变量：{self._settings.codex_api_key_env}。")
-            env = {
-                "CODEX_HOME": str(codex_home),
-                "PLATFORM_MCP_TOKEN": token,
-                # The secret stays process-local: it is never written into
-                # config.toml, the database, trace payloads, or source files.
-                self._settings.codex_api_key_env: api_key,
-            }
-            codex = AsyncCodex(CodexConfig(cwd=str(workspace), env=env))
-            await codex.__aenter__()
-            if profile.model_provider_id != "deepseek":
-                await codex.login_api_key(api_key)
-            self._instances[profile.id] = _Instance(
-                codex=codex,
-                profile=profile,
-                last_active_at=time.monotonic(),
-                token_expires_at=token_expires_at,
-            )
-            return codex
+                codex_home, workspace, token, token_expires_at = self._prepare_profile(profile)
+                stage = "provider_initialization"
+                api_key = os.environ.get(self._settings.codex_api_key_env)
+                if not api_key:
+                    raise RuntimeError("Codex API Key 未配置。")
+                env = {
+                    "CODEX_HOME": str(codex_home),
+                    "PLATFORM_MCP_TOKEN": token,
+                    # The secret stays process-local: it is never written into
+                    # config.toml, the database, trace payloads, or source files.
+                    self._settings.codex_api_key_env: api_key,
+                }
+                codex = AsyncCodex(CodexConfig(cwd=str(workspace), env=env))
+                self._start_event(profile, "runtime_process_created")
+                stage = "app_server"
+                await codex.__aenter__()
+                if profile.model_provider_id != "deepseek":
+                    await codex.login_api_key(api_key)
+                self._start_event(profile, "app_server_ready")
+                self._instances[profile.id] = _Instance(
+                    codex=codex,
+                    profile=profile,
+                    last_active_at=time.monotonic(),
+                    token_expires_at=token_expires_at,
+                )
+                return codex
+            except Exception as exc:
+                self._start_event(profile, "runtime_start_failed", stage=stage)
+                if 'codex' in locals():
+                    try:
+                        await codex.close()
+                    except Exception:
+                        pass
+                raise RuntimeStartError(stage) from exc
 
     async def close(self) -> None:
         async with self._lock:
@@ -182,17 +203,26 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     async def create_session(self, profile: RuntimeProfile, developer_instructions: str) -> RuntimeSession:
         codex = await self._manager.get(profile)
-        thread = await codex.thread_start(
-            cwd=str(self._manager._paths(profile)[1]),
-            developer_instructions=developer_instructions,
-            model=profile.model_id,
-            config={"model_reasoning_effort": profile.reasoning_effort},
-            model_provider=profile.model_provider_id,
-            sandbox=self._sandbox(profile.sandbox),
-        )
+        self._manager._start_event(profile, "thread_start_requested")
+        try:
+            thread = await codex.thread_start(
+                cwd=str(self._manager._paths(profile)[1]),
+                developer_instructions=developer_instructions,
+                model=profile.model_id,
+                config={"model_reasoning_effort": profile.reasoning_effort},
+                model_provider=profile.model_provider_id,
+                sandbox=self._sandbox(profile.sandbox),
+            )
+        except Exception as exc:
+            self._manager._start_event(profile, "runtime_start_failed", stage="thread_start")
+            raise RuntimeStartError("thread_start") from exc
+        self._manager._start_event(profile, "thread_started")
         self._profiles[profile.id] = profile
         self._threads[thread.id] = thread
         return RuntimeSession(thread_id=thread.id, profile_id=profile.id)
+
+    def startup_events(self, profile: RuntimeProfile) -> tuple[dict, ...]:
+        return self._manager.startup_events(profile)
 
     async def resume_session(self, profile: RuntimeProfile, thread_id: str) -> RuntimeSession:
         codex = await self._manager.get(profile)

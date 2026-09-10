@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 
 from app.domain import RuntimeProfile, RuntimeSession
-from app.runtime.base import RuntimeProvider
+from app.runtime.base import RuntimeProvider, RuntimeStartError
 from app.settings import Settings
 from app.store import POCStore
 from app.agent_catalog import get_agent
@@ -44,27 +44,22 @@ class AgentService:
     async def run(self, tenant_id: str, agent_id: str, message: str, conversation_id: str | None = None) -> RunResult:
         profile = self.profile_for(tenant_id, agent_id)
         agent = get_agent(agent_id)
-        session: RuntimeSession
+        is_resume = bool(conversation_id)
         if conversation_id:
             existing = self._store.conversation(conversation_id, tenant_id)
             if not existing:
                 raise LookupError("会话不存在或不属于当前 Tenant。")
             if existing["agent_id"] != agent_id or existing["runtime_profile_id"] != profile.id:
                 raise ValueError("会话与当前 Agent 或 Runtime Profile 不匹配。")
-            session = await self._runtime.resume_session(profile, existing["runtime_thread_id"])
         else:
-            session = await self._runtime.create_session(profile, agent.instructions)
             conversation_id = str(uuid.uuid4())
-            self._store.save_conversation(
-                conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version
-            )
         run_id = str(uuid.uuid4())
         baseline = {
             "run_id": run_id,
             "tenant_id": tenant_id,
             "agent_id": agent_id,
             "conversation_id": conversation_id,
-            "codex_thread_id": session.thread_id,
+            "codex_thread_id": None,
             "runtime_version": profile.runtime_version,
             "model_provider": profile.model_provider_id,
             "model": profile.model_id,
@@ -95,12 +90,24 @@ class AgentService:
                 "knowledge_context_used": [],
             },
         }
-        self._store.create_run_trace(run_id, conversation_id, tenant_id, agent_id, session.thread_id, baseline)
-        self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
+        # A startup may fail before Codex returns a thread.  Persist a minimal
+        # trace first so the task keeps an auditable run_id without inventing a
+        # thread id or storing provider exceptions/secrets.
+        self._store.create_run_trace(run_id, conversation_id, tenant_id, agent_id, "pending", baseline)
         trace = baseline
         try:
+            if is_resume:
+                session = await self._runtime.resume_session(profile, existing["runtime_thread_id"])
+            else:
+                session = await self._runtime.create_session(profile, agent.instructions)
+                self._store.save_conversation(
+                    conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version
+                )
+            trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
+            self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
             turn = await self._runtime.run_turn(session, message)
-            trace = self._completed_trace(baseline, turn)
+            trace = self._completed_trace(trace, turn)
+            trace["lifecycle_events"] = self._startup_events(profile) + trace["lifecycle_events"]
             required_mcp_failed = any(call["status"].lower().endswith("failed") for call in trace["mcp_calls"])
             has_final_response = bool(turn.text.strip())
             status = "completed" if turn.status.lower() in {"completed", "success"} and not turn.error and not required_mcp_failed and has_final_response else "failed"
@@ -113,12 +120,25 @@ class AgentService:
             return RunResult(run_id=run_id, conversation_id=conversation_id, thread_id=turn.thread_id, text=turn.text)
         except Exception as exc:
             trace["status"] = "failed"
-            trace["error"] = self._safe_error(str(exc))
-            self._store.finish_run_trace(run_id, "failed", trace, session.thread_id)
-            self._store.log_event(conversation_id, "turn.failed", {"run_id": run_id, "error": trace["error"]})
+            startup_events = self._startup_events(profile)
+            lifecycle_events = list(trace.get("lifecycle_events", []))
+            if lifecycle_events[: len(startup_events)] != startup_events:
+                lifecycle_events = startup_events + lifecycle_events
+            trace["lifecycle_events"] = lifecycle_events
+            trace["error"] = "Codex Runtime 未能启动；请查看安全运行时 Trace。" if isinstance(exc, RuntimeStartError) else self._safe_error(str(exc))
+            thread_id = trace.get("codex_thread_id") or "pending"
+            self._store.finish_run_trace(run_id, "failed", trace, thread_id)
+            if trace.get("codex_thread_id"):
+                self._store.log_event(conversation_id, "turn.failed", {"run_id": run_id, "error": trace["error"]})
             if isinstance(exc, AgentRunError):
                 raise
             raise AgentRunError(trace["error"], run_id=run_id, conversation_id=conversation_id) from exc
+
+    def _startup_events(self, profile: RuntimeProfile) -> list[dict]:
+        getter = getattr(self._runtime, "startup_events", None)
+        if not callable(getter):
+            return []
+        return [dict(event) for event in getter(profile)]
 
     @staticmethod
     def _completed_trace(trace: dict, turn) -> dict:

@@ -4,7 +4,8 @@ import asyncio
 
 from app.domain import RuntimeSession, RuntimeTurn
 from app.runtime.codex_provider import CodexRuntimeProvider
-from app.service import AgentService
+from app.service import AgentService, AgentRunError
+from app.runtime.base import RuntimeStartError
 from app.settings import Settings
 from app.store import POCStore
 
@@ -30,6 +31,24 @@ class FakeRuntime:
                 {"server": "platform", "tool": "image_generation", "input_summary": "poster prompt", "output_summary": "image", "status": "completed", "duration_ms": 5, "error": None},
             ),
         )
+
+
+class FailingStartupRuntime:
+    def startup_events(self, profile):
+        return (
+            {"event": "runtime_start_requested"},
+            {"event": "runtime_process_created"},
+            {"event": "runtime_start_failed", "stage": "app_server"},
+        )
+
+    async def create_session(self, profile, developer_instructions):
+        raise RuntimeStartError("app_server")
+
+    async def resume_session(self, profile, thread_id):
+        raise RuntimeStartError("app_server")
+
+    async def run_turn(self, session, message):  # pragma: no cover - startup always fails
+        raise AssertionError("must not run a turn")
 
 
 def test_run_trace_records_only_tool_observations(tmp_path, monkeypatch):
@@ -63,3 +82,22 @@ def test_retrieval_observation_does_not_persist_query_or_chunk_content():
     assert "企业内部资料" not in str(observation)
     assert "不应保存" not in str(observation)
     assert observation["results"] == [{"chunk_id": "chunk-1", "file_id": "file-1", "score": 0.8, "accepted": True, "rejection_reason": None}]
+
+
+def test_startup_failure_creates_a_safe_trace_before_thread_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{tmp_path / 'poc.db'}")
+    store = POCStore(tmp_path / "poc.db")
+    store.seed_demo_data()
+    service = AgentService(store, FailingStartupRuntime(), Settings.from_env())
+
+    try:
+        asyncio.run(service.run("tenant-a", "image-agent", "生成海报"))
+        raise AssertionError("expected startup failure")
+    except AgentRunError as exc:
+        trace = store.run_trace(exc.run_id, "tenant-a")
+
+    assert trace and trace["status"] == "failed"
+    assert trace["codex_thread_id"] == "pending"
+    assert trace["payload"]["error"] == "Codex Runtime 未能启动；请查看安全运行时 Trace。"
+    assert trace["payload"]["lifecycle_events"][-1] == {"event": "runtime_start_failed", "stage": "app_server"}

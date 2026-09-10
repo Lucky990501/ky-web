@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.product_store import ProductStore
-from app.service import AgentService
+from app.service import AgentService, AgentRunError
 from app.agent_catalog import get_agent
 import re
 
@@ -41,4 +41,4 @@ class TaskService:
                 code, message = "mcp_error", "企业上下文服务暂时不可用，请稍后重试。"
             else:
                 code, message = "runtime_error", "任务执行失败，请稍后重试。"
-            self._store.set_task(task_id, tenant_id, "failed", "failed", message, error_code=code)
+            self._store.set_task(task_id, tenant_id, "failed", "failed", message, error_code=code, run_id=getattr(exc, "run_id", None), conversation_id=getattr(exc, "conversation_id", None))
