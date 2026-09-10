@@ -35,7 +35,7 @@ class TaskService:
             self._store.set_task(task_id, tenant_id, "completed", "completed", "任务已完成，正文已返回", run_id=result.run_id, response=result.text, conversation_id=result.conversation_id)
         except Exception as exc:
             error = str(exc).lower()
-            if "image" in error or "图片" in error:
+            if "image_generation" in error or "image provider" in error or "图片生成" in error:
                 code, message = "image_provider_error", "图片生成服务暂时不可用，请稍后重试。"
             elif "mcp" in error:
                 code, message = "mcp_error", "企业上下文服务暂时不可用，请稍后重试。"

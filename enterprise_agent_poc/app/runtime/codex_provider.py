@@ -201,6 +201,15 @@ class CodexRuntimeProvider(RuntimeProvider):
 
         return Sandbox.read_only if policy is SandboxPolicy.READ_ONLY else Sandbox.workspace_write
 
+    @staticmethod
+    def _rollout_unavailable(error: Exception) -> bool:
+        text = str(error).lower()
+        return "no rollout found for thread id" in text or (
+            "failed to read thread: thread-store internal error" in text
+            and "belongs to thread" in text
+            and "expected" in text
+        )
+
     async def create_session(self, profile: RuntimeProfile, developer_instructions: str) -> RuntimeSession:
         codex = await self._manager.get(profile)
         self._manager._start_event(profile, "thread_start_requested")
@@ -244,7 +253,7 @@ class CodexRuntimeProvider(RuntimeProvider):
             )
             self._manager._start_event(profile, "thread_resumed")
         except Exception as exc:
-            if "no rollout found for thread id" not in str(exc).lower() or not developer_instructions:
+            if not self._rollout_unavailable(exc) or not developer_instructions:
                 raise
             self._manager._start_event(profile, "thread_resume_unavailable")
             recovered_instructions = developer_instructions

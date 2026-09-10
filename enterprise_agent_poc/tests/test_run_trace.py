@@ -133,3 +133,12 @@ def test_missing_rollout_can_rebind_same_agent_using_visible_history(tmp_path, m
     assert result.thread_id == "thread-recovered"
     assert store.conversation("conversation-1", "tenant-a")["runtime_thread_id"] == "thread-recovered"
     assert runtime.recovery_context == "user: 写一版招生文案\nassistant: 第一版正文"
+
+
+def test_rollout_mapping_conflict_is_recoverable_but_unrelated_errors_are_not():
+    mismatch = RuntimeError(
+        "failed to read thread: thread-store internal error: session metadata /safe/path "
+        "belongs to thread old-thread, expected requested-thread"
+    )
+    assert CodexRuntimeProvider._rollout_unavailable(mismatch) is True
+    assert CodexRuntimeProvider._rollout_unavailable(RuntimeError("image provider unavailable")) is False
