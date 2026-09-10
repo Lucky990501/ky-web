@@ -15,10 +15,11 @@ esac
 [[ -f "$shared_env" ]] || { echo "shared environment file missing" >&2; exit 2; }
 [[ "$(stat -c %a "$shared_env")" =~ ^[0-6]00$ ]] || { echo "shared environment file must not be group/world readable" >&2; exit 2; }
 
-previous=$(readlink -f "$base/current" 2>/dev/null || true)
+current_link="$base/release-current"
+previous=$(readlink -f "$current_link" 2>/dev/null || true)
 backup=$(mktemp -d "$base/.release-switch.XXXXXX")
 rollback() {
-  if [[ -n "$previous" && -d "$previous" ]]; then ln -sfn "$previous" "$base/current"; else rm -f "$base/current"; fi
+  if [[ -n "$previous" && -d "$previous" ]]; then ln -sfn "$previous" "$current_link"; else rm -f "$current_link"; fi
   for service in "${services[@]}"; do
     dropin="/etc/systemd/system/$service.service.d/release.conf"
     if [[ -f "$backup/$service.conf" ]]; then install -D -m 0644 "$backup/$service.conf" "$dropin"; else rm -f "$dropin"; fi
@@ -52,7 +53,7 @@ EOF
     echo "ExecStart=$release_root/.venv/bin/python -m app.worker" >> "$dropin"
   fi
 done
-ln -sfn "$release_root" "$base/current"
+ln -sfn "$release_root" "$current_link"
 systemctl daemon-reload
 systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
 for service in "${services[@]}"; do systemctl is-active --quiet "$service.service"; done
