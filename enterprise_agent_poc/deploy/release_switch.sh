@@ -45,6 +45,7 @@ for service in "${services[@]}"; do
   cat > "$dropin" <<EOF
 [Service]
 WorkingDirectory=$release_root
+EnvironmentFile=
 EnvironmentFile=$shared_env
 Environment=PYTHONPATH=$release_root
 ExecStart=
