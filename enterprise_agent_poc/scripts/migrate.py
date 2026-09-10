@@ -59,7 +59,7 @@ def status(store: POCStore) -> int:
     unknown = sorted(set(applied) - {item["version"] for item in files})
     if unknown:
         exit_code = 2
-    print(json.dumps({"database": "postgresql", "migrations": records, "unknown_history_versions": unknown}, ensure_ascii=False))
+    print(json.dumps({"database": "postgresql", "migrations": records, "unknown_history_versions": unknown}, ensure_ascii=False, default=str))
     return exit_code
 
 
