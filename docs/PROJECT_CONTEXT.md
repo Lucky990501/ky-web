@@ -46,7 +46,7 @@ Platform MCP（streamable HTTP）
 | 新工作台 API | Python 3.11、FastAPI、Uvicorn、Pydantic |
 | Agent Runtime | `openai-codex==0.147.0`、DeepSeek Responses API、Runtime Profile |
 | MCP | `mcp` / FastMCP、Streamable HTTP、HMAC Bearer Token |
-| 知识库 | PDF/DOCX/TXT/MD 解析、OpenAI-compatible Embedding、pgvector；本地可用 deterministic local-hash adapter |
+| 知识库 | PDF/DOCX/TXT/MD 解析、OpenAI-compatible Embedding、pgvector、canonical metadata、Lightweight Query Intent、Hybrid + Metadata Boost；本地可用 deterministic local-hash adapter |
 | 数据 | PostgreSQL + pgvector（生产）、SQLite（开发） |
 | 异步任务 | Redis + 独立 Worker（生产），`asyncio.create_task`（本地） |
 | 对象存储 | 阿里云 OSS（生产）、本地文件系统（开发） |
@@ -82,7 +82,7 @@ Platform MCP（streamable HTTP）
 │  ├─ skill_packages/                          # 版本化 Skills
 │  ├─ migrations/postgres/                     # 生产数据库 SQL
 │  ├─ tests/                                   # pytest 回归
-│  ├─ evals/                                   # RAG 固定评测数据（当前未跟踪）
+│  ├─ evals/                                   # RAG 固定评测数据、审核 Alias 与生产结果
 │  ├─ scripts/                                 # 验收和评测脚本
 │  ├─ deploy/ / nginx/                         # POC 部署说明与代理配置
 │  └─ *_REPORT.md                              # 历史验收与状态报告
@@ -166,32 +166,32 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 ### Git 快照（2026-09-10）
 
-- 当前分支：`master`，与 `origin/master` 同步。
-- 最新已提交版本：`a2a6609 fix: degrade health when embedding probe fails`。
-- 暂存区为空。
-- 存在未提交的 RAG/Trace 改动和未跟踪的评测材料；在未得到明确指令前不得丢弃、覆盖或重置它们。
+- 当前分支：`master`。
+- V1.4 已提交：`2bee63d feat: improve RAG v1.4 retrieval metadata`、`d015bc4 fix: refine historical RAG intent`。
+- GitHub `origin/master` 仍落后本地；最近推送因连接被重置失败，需补做同步。
+- 工作树仍有 V1.4 以前已存在的无关修改与未跟踪报告；不得丢弃、覆盖或重置。
 
-### 当前未提交主线
+### Enterprise Knowledge V1.4 生产状态
 
-未提交改动集中于 Enterprise Knowledge V1.2/V1.3：
-
-- `RetrievalConfidencePolicy`：用总分、向量分、关键词匹配和 margin 拒绝弱相关结果。
-- FastMCP 的同步检索被移到线程，避免阻塞 Streamable HTTP 事件循环。
-- SDK MCP 状态归一化为稳定词汇。
-- Turn Trace 增加 `turn_started`、工具开始/完成、模型恢复、最终回复收到、Turn 完成等生命周期事件。
-- 没有最终正文的 Turn 会被标记失败，同时保留可关联的 `run_id` 和 `conversation_id`。
-- 未跟踪的 `evals/rag_v1_3_dataset.json` 含 40 条固定 RAG 用例；`scripts/run_rag_v1_3_eval.py` 是针对一个 Tenant 的只读评测脚本。
-- 2026-09-10 的真实生产 40 条评测已完成，但章节 Grounding 和拒答指标未达标；详见 `enterprise_agent_poc/ENTERPRISE_KNOWLEDGE_PRODUCTION_FINAL_REPORT.md`。其后已在本地增加 Query 拒答策略、人工审核小节别名入口和无明文配置值的漂移诊断；尚未部署和重新生产复验。Phase A 仍为 BLOCKED，不得进入 Skill Registry 或 Agent Expansion。
+- 生产租户：`zhiy-e-intelligence`；1 个知识文件、287 个 Chunk。
+- 索引已全量重建为 `rag-index-v2`，Embedding 为 `text-embedding-3-small` / 1536，metadata schema 为 `knowledge-metadata-v1`。
+- 287/287 Chunk 具有 canonical_section、record/entity type、来源、section、sheet、index/schema version；year、person_name、event_name 按适用记录允许为空。
+- 数据库回滚快照：`rag_index_backup_v1_4_2bee63d_20260910`；代码备份：`/opt/enterprise-agent-workbench/backups/rag-v1-4-2bee63d-20260910`。
+- 固定 40 条最终生产复评：answerable recall 1.00、section recall 0.8667、Top-1 0.6667、grounded precision 0.8667、no-answer rejection 1.00、case pass 0.90。
+- 剩余失败：r09、r16、r19、p08；均为 physical section / alias 口径失败，但 Top-1 canonical_section 正确。正式指标仍按原评测口径判失败。
+- API、MCP、Worker 均 active；`/api/health` 为 `status: ok`、`knowledge: ok`。
+- V1.4 结论为 `PASS WITH ISSUES`，阶段已结束，不得自动开始 Skill Registry。
 
 ## 9. 待办事项
 
 ### RAG 验收与安全
 
-1. 由知识内容负责人审核 `evals/rag_v1_3_section_aliases.template.json`，形成受控的实际小节别名映射；不得从评测输出自动生成。
-2. 将 Query 拒答策略和配置漂移诊断部署到受控发布目录；先通过配置指纹对比，再重新运行 40 条评测并归档。
-3. 创建并清理临时 Tenant B，完成上传、检索、MCP Token 和 Agent Grounding 的隔离验收。
-4. 将脱敏后的 query、Chunk/File ID、评分、接受/拒绝原因和检索耗时持久化到 Run Trace。
-5. 为 Embedding 重建、模型/维度版本变化建立明确 reindex 流程。
+1. 补做本地 `master` 到 GitHub `origin/master` 的同步；不得 force push。
+2. 若继续提升 r09、r16、r19、p08，优先评估源转换修复、record_type 细分或 Parent-Child Retrieval；不要自动扩大 Alias。
+3. Alias 变更必须由知识内容负责人独立审核，不能从评测输出自动生成。
+4. 保留 Reindex 数据库快照，待人工确认稳定期与删除策略；不要自动删除。
+5. 创建并清理临时 Tenant B，完成上传、检索、MCP Token 和 Agent Grounding 的隔离验收。
+6. 将脱敏后的 query、Chunk/File ID、评分、接受/拒绝原因和检索耗时持久化到 Run Trace。
 
 ### 产品能力
 
@@ -216,6 +216,8 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 - **Runtime Profile 是隔离单元。** Profile 改变（Tenant、Skill、模型、Sandbox 等）即产生新 Runtime 标识，旧 Thread 不可跨 Profile 复用。
 - **只记录可观察事件，不记录隐藏推理。** Trace 记录工具摘要、状态、延迟和结果；不要增加 Chain-of-Thought 持久化。
 - **生产禁用语义检索 fallback。** 生产且 `KNOWLEDGE_ALLOW_FALLBACK=false` 时，缺 pgvector、正式 Embedding 或连通性会使健康状态降级并拒绝语义处理/检索。
+- **Canonical metadata 与 Eval Alias 分离。** canonical_section 只能由知识源结构生成；Alias 仅用于经人工审核的评测等价判断，不能反向写入生产分类逻辑。
+- **Metadata 只做 Boost，不做 Hard Filter。** Query Intent 可能误判，首版通过有限加权改善排序并保持 Recall。
 - **私有生成文件经应用鉴权读取。** 不将 Provider 临时 URL 当作最终用户资产。
 - **任务成功后才扣积分。** 失败任务不扣费；已有去重检查防止同一 Task 重复扣款。
 - **旧工作台保持工具全禁用。** 不应把旧 DSH Runtime 与新 Platform MCP/Codex Runtime 混用。
@@ -223,8 +225,10 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 ## 11. 已知问题
 
-- V1.3 生产评测结果已归档，但其抽象 `expected_section` 与真实索引小节名没有人工审核的映射，因此不能将当前 `section_recall_at_k=0` 直接解释为向量召回失败。
-- 本地已有绝对承诺、无证据价格和显式不存在实体的 Query 拒答策略；部署前不要把本地测试结果当作生产安全验收。
+- V1.4 仍有 r09、r16、r19、p08 四个 physical section / alias 失败；其 canonical Top-K 正确，不应把它们简单解释为类别召回失败。
+- 旧 Markdown 转换仍产生 124 个“记录 N”弱标题；V1.4 metadata 已恢复类别和年份，但展示 section 仍弱。
+- p08 仍受“源文件差异 / 数据冲突 / 切片策略”等维护类 section 排序影响。
+- GitHub 推送当前受网络连接重置影响，生产已部署版本暂时领先 `origin/master`。
 - `scripts/verify_runtime_config.py` 和管理员诊断的 `runtime_config` 仅返回 SHA-256 指纹和配置状态，可用于阻断 `.env.production` 与服务进程漂移，不能代替受控发布流程。
 - `knowledge_search` 已在检索实际成功后才记录 `completed`，失败时记录 `failed`。
 - `KnowledgeRetrievalService` 在无 Chunk 结果时会回退到旧 `knowledge_documents` 文本检索路径；它仍带 Tenant 条件，但需要明确其是否应参与严格生产 RAG。
@@ -238,12 +242,13 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 建议按以下顺序推进：
 
-1. **冻结并审查现有未提交 RAG 改动**：先提交前进行针对性测试与评审，不要覆盖。
-2. **完成 RAG V1.3 评测可信度**：人工审核小节别名，部署拒答策略与配置指纹，然后运行 40 条集，记录章节召回、Top-1 章节准确率、grounded precision、拒答率与时延。
-3. **完成双 Tenant 验收**：在授权环境中创建临时 Tenant B，验证上传、检索、MCP Scope、Agent 输出，随后清理数据。
-4. **收口 Trace 与数据治理**：持久化必要的脱敏检索证据，制定内容保留策略。
-5. **收口部署可复现性**：migration runner、pgvector Compose、生产环境模板、健康检查和回滚流程。
-6. **补齐产品管理面**：成员、Tenant/Agent 管理、素材上传、账户安全和计费。
+1. **等待 V1.4 人工确认**：当前阶段已 `PASS WITH ISSUES`；不要自动进入 Skill Registry 或 Agent Expansion。
+2. **同步 Git 远端**：网络恢复后将本地 `master` 正常推送至 `origin/master`，禁止改写历史。
+3. **决定下一项 Retrieval 专项**：在 Reranker、Query Rewrite、Parent-Child Retrieval 中按剩余 Case 证据选择；优先源转换与父子结构，不提前引入复杂 LLM Reranker。
+4. **完成双 Tenant 验收**：在授权环境中创建临时 Tenant B，验证上传、检索、MCP Scope、Agent 输出，随后清理数据。
+5. **收口 Trace 与数据治理**：持久化必要的脱敏检索证据，制定内容保留策略。
+6. **收口部署可复现性**：migration runner、pgvector Compose、生产环境模板、健康检查和回滚流程。
+7. **补齐产品管理面**：成员、Tenant/Agent 管理、素材上传、账户安全和计费。
 
 ## 接管规则
 

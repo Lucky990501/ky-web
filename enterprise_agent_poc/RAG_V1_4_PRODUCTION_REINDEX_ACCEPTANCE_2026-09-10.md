@@ -1,7 +1,9 @@
 # Enterprise Knowledge V1.4 生产 Reindex 验收
 
-验收日期：2026-09-10  
-生产租户：`zhiy-e-intelligence`  
+验收日期：2026-09-10
+
+生产租户：`zhiy-e-intelligence`
+
 代码提交：`2bee63d`
 
 ## 1. 结论
@@ -37,6 +39,7 @@
 | --- | --- |
 | Files Reindexed | 1 |
 | Chunks Before / After | 287 / 287 |
+| Embedding Provider / Model / Dimension | `openai-compatible` / `text-embedding-3-small` / 1536 |
 | Embedding Version | `rag-index-v2`: 287/287 |
 | Metadata Schema | `knowledge-metadata-v1`: 287/287 |
 | canonical_section | 287/287 |
@@ -64,4 +67,3 @@ Canonical 分布：AI知识库 30、使用说明 4、历史日期索引 132、�
 ## 6. 发布说明
 
 `2bee63d` 已在本地 `master` 创建。向 GitHub `origin/master` 推送时连接被远端重置，生产发布不依赖此次直推，后续仍需重试同步；该网络问题不影响本次生产 Reindex 的技术验收。
-
