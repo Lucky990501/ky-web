@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, QueryAnswerabilityPolicy, RetrievalConfidencePolicy, require_semantic_runtime, runtime_diagnostic, set_embedding_probe
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, QueryAnswerabilityPolicy, RetrievalConfidencePolicy, require_semantic_runtime, retrieval_policy_diagnostic, runtime_diagnostic, set_embedding_probe
 from app.product_store import ProductStore
 from app.settings import safe_runtime_config_snapshot, settings
 from scripts.verify_runtime_config import compare, parse_env_file
@@ -96,6 +96,7 @@ def test_retrieval_confidence_policy_rejects_weak_unrelated_candidates():
     policy = RetrievalConfidencePolicy(0.20, 0.30, False, 0.02)
     assert policy.decision(vector_score=0.526, keyword_score=0.125, final_score=0.3856) == (True, None)
     assert policy.decision(vector_score=0.2542, keyword_score=0, final_score=0.1652) == (False, "below_minimum_final_score")
+    assert policy.decision(vector_score=0.35, keyword_score=0, final_score=0.215) == (False, "within_confidence_margin")
 
 
 def test_query_answerability_policy_requires_evidence_for_sensitive_requests():
@@ -104,6 +105,22 @@ def test_query_answerability_policy_requires_evidence_for_sensitive_requests():
     assert policy.rejection_reason("请给出不存在课程的授课老师和名额。", []) == "explicitly_nonexistent_entity"
     assert policy.rejection_reason("名师面对面课程价格是9999元吗？", [{"title": "活动介绍", "content": "活动安排"}]) == "price_without_grounding"
     assert policy.rejection_reason("课程价格是多少？", [{"title": "课程费用", "content": "报名费用为 999 元"}]) is None
+
+
+def test_query_guard_covers_categories_without_query_specific_blacklists():
+    policy = QueryAnswerabilityPolicy()
+    assert policy.pre_retrieval_rejection_reason("请给我某位客户的手机联系方式") == "private_or_credential_data"
+    assert policy.pre_retrieval_rejection_reason("未公开的客户名单和融资金额是什么？") == "non_public_enterprise_data"
+    assert policy.pre_retrieval_rejection_reason("可以帮我预订下周的航班吗？") == "obvious_out_of_scope"
+    assert policy.pre_retrieval_rejection_reason("我们的课程承诺一定录取吗？") == "unsupported_absolute_promise"
+
+
+def test_policy_diagnostic_exposes_only_p0_approved_state():
+    diagnostic = retrieval_policy_diagnostic(settings)
+    assert diagnostic["query_guard_enabled"] is settings.knowledge_query_guard_enabled
+    assert diagnostic["guard_policy_version"] == "query-guard-v2"
+    assert diagnostic["min_final_score"] == settings.knowledge_min_final_score
+    assert "runtime_config_fingerprint" in diagnostic
 
 
 def test_safe_runtime_config_snapshot_never_contains_raw_configuration_values():

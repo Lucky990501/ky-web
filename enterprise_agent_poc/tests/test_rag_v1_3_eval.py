@@ -1,4 +1,8 @@
-from scripts.run_rag_v1_3_eval import apply_section_aliases, evaluate_case, metrics_for
+import hashlib
+
+import pytest
+
+from scripts.run_rag_v1_3_eval import EvalPreflightError, apply_section_aliases, evaluate_case, metrics_for, safe_failure, validate_dataset
 
 
 def test_positive_case_requires_the_expected_section_not_just_any_result():
@@ -39,3 +43,24 @@ def test_reviewer_approved_section_aliases_allow_concrete_index_sections():
     assert result["accepted_sections"] == ["活动场次", "2023-2024秋季｜活动时间"]
     assert result["section_match_at_k"] is True
     assert result["passed"] is True
+
+
+def test_eval_case_persists_only_a_query_hash():
+    case = {"id": "p1", "query": "企业内部问题", "expected_answerable": True, "expected_section": "目标"}
+    row = evaluate_case(case, [], 1.0)
+    assert row["query_sha256"] == hashlib.sha256("企业内部问题".encode("utf-8")).hexdigest()
+    assert "企业内部问题" not in str(row)
+
+
+def test_eval_case_records_query_guard_without_returning_results():
+    case = {"id": "n1", "query": "敏感请求", "expected_answerable": False, "expected_section": None}
+    row = evaluate_case(case, [], 1.0, "query_guard", "private_or_credential_data")
+    assert row["accepted"] is False
+    assert row["rejection_reason"] == "query_guard"
+    assert row["rejection_detail"] == "private_or_credential_data"
+
+
+def test_eval_preflight_dataset_requires_fixed_distribution_and_safe_failures():
+    with pytest.raises(EvalPreflightError, match="eval_dataset_invalid"):
+        validate_dataset([])
+    assert safe_failure(EvalPreflightError("tenant_not_found")) == {"status": "failed", "error_type": "preflight_failed", "message": "tenant_not_found"}

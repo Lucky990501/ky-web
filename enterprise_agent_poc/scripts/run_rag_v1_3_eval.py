@@ -6,15 +6,71 @@ credentials.  It is intentionally a production-read-only evaluator.
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from app.knowledge import KnowledgeRetrievalService
+from app.knowledge import KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, require_semantic_runtime
 from app.product_store import ProductStore
 from app.settings import Settings
 from app.store import POCStore
+
+
+class EvalPreflightError(RuntimeError):
+    """A safe, actionable failure before any evaluation query is executed."""
+
+
+def safe_failure(exc: Exception) -> dict[str, str]:
+    """Do not surface provider responses, query text, or connection strings."""
+    if isinstance(exc, EvalPreflightError):
+        return {"status": "failed", "error_type": "preflight_failed", "message": str(exc)}
+    return {"status": "failed", "error_type": "evaluation_failed", "message": type(exc).__name__}
+
+
+def validate_dataset(dataset: object) -> list[dict[str, Any]]:
+    if not isinstance(dataset, list) or len(dataset) != 40:
+        raise EvalPreflightError("eval_dataset_invalid")
+    cases = [item for item in dataset if isinstance(item, dict)]
+    groups = {"r": 0, "p": 0, "n": 0}
+    for case in cases:
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or case_id[:1] not in groups or not isinstance(case.get("query"), str):
+            raise EvalPreflightError("eval_dataset_invalid")
+        groups[case_id[:1]] += 1
+    if len(cases) != 40 or groups != {"r": 20, "p": 10, "n": 10}:
+        raise EvalPreflightError("eval_dataset_distribution_invalid")
+    return cases
+
+
+def preflight(service: KnowledgeRetrievalService, product: ProductStore, settings: Settings, tenant_id: str, dataset: object) -> list[dict[str, Any]]:
+    """Verify every production dependency before the first benchmark query."""
+    cases = validate_dataset(dataset)
+    try:
+        require_semantic_runtime(product, settings)
+        with product._store.connection() as conn:
+            tenant = conn.execute("SELECT id FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+            ready = conn.execute("SELECT COUNT(*) AS count FROM knowledge_files WHERE tenant_id=? AND status='ready'", (tenant_id,)).fetchone()
+            chunks = conn.execute("SELECT COUNT(*) AS count FROM knowledge_chunks WHERE tenant_id=?", (tenant_id,)).fetchone()
+    except Exception as exc:
+        raise EvalPreflightError("database_or_pgvector_unavailable") from exc
+    if not tenant:
+        raise EvalPreflightError("tenant_not_found")
+    if not ready or int(ready["count"]) < 1 or not chunks or int(chunks["count"]) < 1:
+        raise EvalPreflightError("knowledge_base_not_ready")
+    if settings.task_queue == "redis" and not settings.redis_url:
+        raise EvalPreflightError("redis_configuration_missing")
+    try:
+        if isinstance(service.embedding, OpenAICompatibleEmbeddingProvider):
+            vector = service.embedding.embed_query_sync("rag evaluation readiness probe")
+            if len(vector) != settings.embedding_dimension:
+                raise EvalPreflightError("embedding_dimension_mismatch")
+    except EvalPreflightError:
+        raise
+    except Exception as exc:
+        raise EvalPreflightError("embedding_provider_unavailable") from exc
+    return cases
 
 
 def apply_section_aliases(cases: list[dict[str, Any]], aliases: dict[str, list[str]]) -> list[dict[str, Any]]:
@@ -32,7 +88,13 @@ def apply_section_aliases(cases: list[dict[str, Any]], aliases: dict[str, list[s
     return resolved
 
 
-def evaluate_case(case: dict[str, Any], results: list[dict[str, Any]], latency_ms: float) -> dict[str, Any]:
+def evaluate_case(
+    case: dict[str, Any],
+    results: list[dict[str, Any]],
+    latency_ms: float,
+    rejection_reason: str | None = None,
+    rejection_detail: str | None = None,
+) -> dict[str, Any]:
     """Evaluate one retrieval without emitting enterprise document content."""
     expected_answerable = bool(case["expected_answerable"])
     expected_section = case.get("expected_section")
@@ -53,6 +115,7 @@ def evaluate_case(case: dict[str, Any], results: list[dict[str, Any]], latency_m
     accepted = bool(results)
     return {
         "case_id": case["id"],
+        "query_sha256": hashlib.sha256(case["query"].encode("utf-8")).hexdigest(),
         "expected_answerable": expected_answerable,
         "expected_section": expected_section,
         "accepted_sections": accepted_sections,
@@ -60,6 +123,8 @@ def evaluate_case(case: dict[str, Any], results: list[dict[str, Any]], latency_m
         "file_ids": sorted({item["file_id"] for item in results if item.get("file_id")}),
         "retrieved_sections": retrieved_sections,
         "accepted": accepted,
+        "rejection_reason": rejection_reason,
+        "rejection_detail": rejection_detail,
         "section_match_at_k": section_match_at_k,
         "top_1_section_match": top_1_section_match,
         "passed": section_match_at_k if expected_answerable else not accepted,
@@ -110,17 +175,27 @@ def main() -> int:
             raise ValueError("章节别名文件必须包含 aliases 对象。")
         dataset = apply_section_aliases(dataset, aliases)
     settings = Settings.from_env()
-    service = KnowledgeRetrievalService(ProductStore(POCStore(settings.database_url)), settings)
+    product = ProductStore(POCStore(settings.database_url))
+    service = KnowledgeRetrievalService(product, settings)
+    dataset = preflight(service, product, settings, tenant_id, dataset)
     rows = []
     for case in dataset:
         started = time.perf_counter()
-        results = service.search(tenant_id, case["query"], 5)
+        try:
+            outcome = service.search_outcome(tenant_id, case["query"], 5)
+        except Exception as exc:
+            print(json.dumps({**safe_failure(exc), "case_id": case["id"]}, ensure_ascii=False))
+            return 2
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
-        rows.append(evaluate_case(case, results, latency_ms))
+        rows.append(evaluate_case(case, outcome.results, latency_ms, outcome.rejection_reason, outcome.rejection_detail))
     metrics = metrics_for(rows)
-    print(json.dumps({"tenant_id": tenant_id, "metrics": metrics, "cases": rows}, ensure_ascii=False))
+    print(json.dumps({"status": "completed", "tenant_id": tenant_id, "eval_dataset_version": "rag-v1.3", "section_alias_version": "none" if not alias_path else alias_path.stem, "metrics": metrics, "cases": rows}, ensure_ascii=False))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(json.dumps(safe_failure(exc), ensure_ascii=False))
+        raise SystemExit(2)

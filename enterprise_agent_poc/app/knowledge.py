@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.product_store import ProductStore
-from app.settings import Settings
+from app.settings import Settings, safe_runtime_config_snapshot
 from app.storage import storage_provider
 import httpx
 
@@ -151,24 +151,54 @@ class RetrievalConfidencePolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalOutcome:
+    """A retrieval decision safe to expose to internal evaluation tooling."""
+
+    results: list[dict]
+    accepted: bool
+    rejection_reason: str | None = None
+    rejection_detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class QueryAnswerabilityPolicy:
     """Reject unsupported claims before ungrounded context reaches an Agent."""
 
+    VERSION = "query-guard-v2"
     enabled: bool = True
 
     _absolute_promise = re.compile(r"(?:保证|承诺|包|保).{0,12}(?:提升|提分|保过|录取|收益|前[0-9一二三四五六七八九十]+)")
     _explicitly_nonexistent = re.compile(r"不存在.{0,12}(?:课程|老师|教师|讲师|活动|项目|名额|班级)")
+    _private_or_credential_data = re.compile(r"(?:私人|个人|他人|用户|客户|员工|负责人).{0,16}(?:电话|手机号|联系方式|住址|身份证|银行卡|密码|验证码|名单)|(?:密码|验证码|密钥|api[ _-]?key|token|银行卡号|cvv)")
+    _non_public_enterprise_data = re.compile(r"(?:未公开|内部|机密|保密|竞争对手).{0,20}(?:融资|金额|客户|名单|数据|资料|信息|财务|报价)")
+    _obvious_out_of_scope = re.compile(r"(?:预订|购买|维修|报修|转账|开户).{0,20}(?:机票|航班|酒店|设备|金融|银行卡)")
     _price_request = re.compile(r"(?:价格|费用|收费|报价|多少钱|人民币|[0-9]+\s*元)")
     _price_evidence = re.compile(r"(?:价格|费用|收费|报价|人民币|[0-9]+\s*元)")
 
-    def rejection_reason(self, query: str, candidates: list[dict]) -> str | None:
+    def pre_retrieval_rejection_reason(self, query: str) -> str | None:
+        """Reject category-level unsafe or unanswerable requests before embedding."""
         if not self.enabled:
             return None
         normalized = re.sub(r"\s+", "", query)
+        if self._non_public_enterprise_data.search(normalized):
+            return "non_public_enterprise_data"
+        if self._private_or_credential_data.search(normalized):
+            return "private_or_credential_data"
+        if self._obvious_out_of_scope.search(normalized):
+            return "obvious_out_of_scope"
         if self._explicitly_nonexistent.search(normalized):
             return "explicitly_nonexistent_entity"
         if self._absolute_promise.search(normalized):
             return "unsupported_absolute_promise"
+        return None
+
+    def rejection_reason(self, query: str, candidates: list[dict]) -> str | None:
+        pre_retrieval_reason = self.pre_retrieval_rejection_reason(query)
+        if pre_retrieval_reason:
+            return pre_retrieval_reason
+        if not self.enabled:
+            return None
+        normalized = re.sub(r"\s+", "", query)
         if self._price_request.search(normalized):
             evidence = " ".join(
                 f"{item.get('title', '')} {item.get('section', '')} {item.get('content', '')}"
@@ -177,6 +207,18 @@ class QueryAnswerabilityPolicy:
             if not self._price_evidence.search(evidence):
                 return "price_without_grounding"
         return None
+
+
+def retrieval_policy_diagnostic(settings: Settings) -> dict:
+    """Return the P0 RAG policy state without exposing secrets or raw URLs."""
+    return {
+        "query_guard_enabled": settings.knowledge_query_guard_enabled,
+        "guard_policy_version": QueryAnswerabilityPolicy.VERSION,
+        "min_final_score": settings.knowledge_min_final_score,
+        "min_vector_score": settings.knowledge_min_vector_score,
+        "result_margin": settings.knowledge_result_margin,
+        "runtime_config_fingerprint": safe_runtime_config_snapshot()["fingerprint"],
+    }
 
 
 class LocalHashEmbeddingProvider(EmbeddingProvider):
@@ -309,6 +351,13 @@ class KnowledgeRetrievalService:
         self.policy = RetrievalConfidencePolicy.from_settings(settings)
         self.answerability_policy = QueryAnswerabilityPolicy(settings.knowledge_query_guard_enabled)
     def search(self, tenant_id: str, query: str, top_k: int = 5) -> list[dict]:
+        """Compatibility API for runtime callers that only need accepted chunks."""
+        return self.search_outcome(tenant_id, query, top_k).results
+
+    def search_outcome(self, tenant_id: str, query: str, top_k: int = 5) -> RetrievalOutcome:
+        guard_reason = self.answerability_policy.pre_retrieval_rejection_reason(query)
+        if guard_reason:
+            return RetrievalOutcome([], False, "query_guard", guard_reason)
         require_semantic_runtime(self.product, self.settings)
         if isinstance(self.embedding, OpenAICompatibleEmbeddingProvider):
             query_vector = self.embedding.embed_query_sync(query)
@@ -338,8 +387,12 @@ class KnowledgeRetrievalService:
             # Compatibility for the pre-V1 text records while enterprises migrate
             # their content through the file ingestion pipeline.
             legacy_results = self.product._store.knowledge_search(tenant_id, query, top_k)
-            return [] if self.answerability_policy.rejection_reason(query, legacy_results) else legacy_results
+            guard_reason = self.answerability_policy.rejection_reason(query, legacy_results)
+            if guard_reason:
+                return RetrievalOutcome([], False, "query_guard", guard_reason)
+            return RetrievalOutcome(legacy_results, bool(legacy_results))
         results=[]
+        confidence_reasons: list[str] = []
         for row in rows:
             if "vector_score" in row:
                 semantic = float(row["vector_score"] or 0)
@@ -350,6 +403,14 @@ class KnowledgeRetrievalService:
             accepted, rejection_reason = self.policy.decision(vector_score=semantic, keyword_score=keyword, final_score=score)
             if accepted:
                 results.append({"chunk_id":row["id"],"file_id":row["file_id"],"filename":row["filename"],"title":row["title"],"content":row["content"][:1200],"section":row["section"],"page":row["page_number"],"vector_score":round(semantic,4),"keyword_score":round(keyword,4),"score":round(score,4),"accepted":True,"rejection_reason":rejection_reason})
-        if self.answerability_policy.rejection_reason(query, results):
-            return []
-        return sorted(results,key=lambda item:item["score"],reverse=True)[:top_k]
+            elif rejection_reason:
+                confidence_reasons.append(rejection_reason)
+        guard_reason = self.answerability_policy.rejection_reason(query, results)
+        if guard_reason:
+            return RetrievalOutcome([], False, "query_guard", guard_reason)
+        results = sorted(results,key=lambda item:item["score"],reverse=True)[:top_k]
+        if len(results) >= 2 and results[0]["keyword_score"] <= 0 and results[0]["score"] - results[1]["score"] < self.policy.result_margin:
+            return RetrievalOutcome([], False, "within_top_score_margin")
+        if not results and confidence_reasons:
+            return RetrievalOutcome([], False, confidence_reasons[0])
+        return RetrievalOutcome(results, bool(results))
