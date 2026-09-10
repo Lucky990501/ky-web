@@ -6,6 +6,7 @@ release_id="${1:?usage: release_switch.sh <release-id>}"
 base=/opt/enterprise-agent-workbench
 release_root="$base/releases/$release_id/enterprise_agent_poc"
 shared_env="$base/shared/enterprise-agent.env"
+runtime_venv="$base/venv"
 services=(enterprise-agent-api enterprise-agent-mcp enterprise-agent-worker)
 
 case "$release_id" in
@@ -14,6 +15,7 @@ esac
 [[ -d "$release_root" && -f "$release_root/pyproject.toml" ]] || { echo "release source missing" >&2; exit 2; }
 [[ -f "$shared_env" ]] || { echo "shared environment file missing" >&2; exit 2; }
 [[ "$(stat -c %a "$shared_env")" =~ ^[0-6]00$ ]] || { echo "shared environment file must not be group/world readable" >&2; exit 2; }
+[[ -x "$runtime_venv/bin/python" && -x "$runtime_venv/bin/uvicorn" ]] || { echo "managed runtime venv missing" >&2; exit 2; }
 
 current_link="$base/release-current"
 previous=$(readlink -f "$current_link" 2>/dev/null || true)
@@ -29,12 +31,12 @@ rollback() {
 }
 trap 'rollback; exit 1' ERR
 
-python3 -m venv "$release_root/.venv"
-"$release_root/.venv/bin/pip" install --disable-pip-version-check --no-input "$release_root"
+"$runtime_venv/bin/python" -c 'import openai_codex'
+"$runtime_venv/bin/pip" check
 set -a; . "$shared_env"; set +a
 cd "$release_root"
-"$release_root/.venv/bin/python" scripts/migrate.py up
-"$release_root/.venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env" | grep -q '"matches": true'
+"$runtime_venv/bin/python" scripts/migrate.py up
+"$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env" | grep -q '"matches": true'
 
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"
@@ -47,11 +49,11 @@ EnvironmentFile=$shared_env
 ExecStart=
 EOF
   if [[ "$service" == enterprise-agent-api ]]; then
-    echo "ExecStart=$release_root/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18090" >> "$dropin"
+    echo "ExecStart=$runtime_venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18090" >> "$dropin"
   elif [[ "$service" == enterprise-agent-mcp ]]; then
-    echo "ExecStart=$release_root/.venv/bin/python -m app.platform_mcp.server" >> "$dropin"
+    echo "ExecStart=$runtime_venv/bin/python -m app.platform_mcp.server" >> "$dropin"
   else
-    echo "ExecStart=$release_root/.venv/bin/python -m app.worker" >> "$dropin"
+    echo "ExecStart=$runtime_venv/bin/python -m app.worker" >> "$dropin"
   fi
 done
 ln -sfn "$release_root" "$current_link"
