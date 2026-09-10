@@ -266,7 +266,7 @@ async def create_agent_task(agent_id: str, payload: AgentTaskRequest, workbench_
     except ValueError as exc:
         if str(exc) == "insufficient_credit":
             raise HTTPException(402, "积分不足，无法提交任务。") from exc
-        raise
+        raise HTTPException(409, str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     if settings.task_queue == "redis":
