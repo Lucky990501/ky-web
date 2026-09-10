@@ -8,6 +8,7 @@ place this endpoint behind TLS and a service-only network policy.
 """
 
 import os
+import asyncio
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -50,7 +51,10 @@ def create_mcp():
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
     async def knowledge_search(query: str, limit: int = 5, ctx: Context = None) -> list[dict]:
         """Search knowledge belonging only to the authenticated enterprise."""
-        return service.knowledge_search(_bearer_from_context(ctx), query, limit)
+        # Embedding lookup performs a synchronous HTTPS request.  Keeping it off
+        # FastMCP's event loop lets the streamable HTTP transport continue to
+        # send tool responses instead of being disconnected mid-call.
+        return await asyncio.to_thread(service.knowledge_search, _bearer_from_context(ctx), query, limit)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
     async def asset_search(query: str, asset_type: str | None = None, ctx: Context = None) -> list[dict]:

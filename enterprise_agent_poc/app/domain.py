@@ -66,3 +66,4 @@ class RuntimeTurn:
     mcp_calls: tuple[dict, ...] = ()
     status: str = "completed"
     error: str | None = None
+    lifecycle_events: tuple[dict, ...] = ()
