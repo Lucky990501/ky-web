@@ -32,8 +32,9 @@ trap 'rollback; exit 1' ERR
 python3 -m venv "$release_root/.venv"
 "$release_root/.venv/bin/pip" install --disable-pip-version-check --no-input "$release_root"
 set -a; . "$shared_env"; set +a
-"$release_root/.venv/bin/python" "$release_root/scripts/migrate.py" up
-"$release_root/.venv/bin/python" "$release_root/scripts/verify_runtime_config.py" --environment-file "$shared_env" | grep -q '"matches": true'
+cd "$release_root"
+"$release_root/.venv/bin/python" scripts/migrate.py up
+"$release_root/.venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env" | grep -q '"matches": true'
 
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"
