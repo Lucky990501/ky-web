@@ -97,7 +97,18 @@ class AgentService:
         trace = baseline
         try:
             if is_resume:
-                session = await self._runtime.resume_session(profile, existing["runtime_thread_id"])
+                recovery_context = self._recovery_context(conversation_id, tenant_id, message)
+                session = await self._runtime.resume_session(
+                    profile,
+                    existing["runtime_thread_id"],
+                    developer_instructions=agent.instructions,
+                    recovery_context=recovery_context,
+                )
+                if session.thread_id != existing["runtime_thread_id"]:
+                    if not self._store.replace_conversation_thread(
+                        conversation_id, tenant_id, existing["runtime_thread_id"], session.thread_id
+                    ):
+                        raise RuntimeError("会话 Thread 绑定并发更新失败。")
             else:
                 session = await self._runtime.create_session(profile, agent.instructions)
                 self._store.save_conversation(
@@ -139,6 +150,13 @@ class AgentService:
         if not callable(getter):
             return []
         return [dict(event) for event in getter(profile)]
+
+    def _recovery_context(self, conversation_id: str, tenant_id: str, current_message: str) -> str:
+        messages = self._store.conversation_messages(conversation_id, tenant_id)
+        if messages and messages[-1]["role"] == "user" and messages[-1]["content"] == current_message:
+            messages = messages[:-1]
+        lines = [f"{item['role']}: {item['content']}" for item in messages]
+        return "\n".join(lines)[-12000:]
 
     @staticmethod
     def _completed_trace(trace: dict, turn) -> dict:

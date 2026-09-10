@@ -18,7 +18,13 @@ class RuntimeProvider(ABC):
     async def create_session(self, profile: RuntimeProfile, developer_instructions: str) -> RuntimeSession: ...
 
     @abstractmethod
-    async def resume_session(self, profile: RuntimeProfile, thread_id: str) -> RuntimeSession: ...
+    async def resume_session(
+        self,
+        profile: RuntimeProfile,
+        thread_id: str,
+        developer_instructions: str | None = None,
+        recovery_context: str | None = None,
+    ) -> RuntimeSession: ...
 
     @abstractmethod
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn: ...

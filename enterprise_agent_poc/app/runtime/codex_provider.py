@@ -224,16 +224,45 @@ class CodexRuntimeProvider(RuntimeProvider):
     def startup_events(self, profile: RuntimeProfile) -> tuple[dict, ...]:
         return self._manager.startup_events(profile)
 
-    async def resume_session(self, profile: RuntimeProfile, thread_id: str) -> RuntimeSession:
+    async def resume_session(
+        self,
+        profile: RuntimeProfile,
+        thread_id: str,
+        developer_instructions: str | None = None,
+        recovery_context: str | None = None,
+    ) -> RuntimeSession:
         codex = await self._manager.get(profile)
-        thread = await codex.thread_resume(
-            thread_id,
-            cwd=str(self._manager._paths(profile)[1]),
-            model=profile.model_id,
-            config={"model_reasoning_effort": profile.reasoning_effort},
-            model_provider=profile.model_provider_id,
-            sandbox=self._sandbox(profile.sandbox),
-        )
+        self._manager._start_event(profile, "thread_resume_requested")
+        try:
+            thread = await codex.thread_resume(
+                thread_id,
+                cwd=str(self._manager._paths(profile)[1]),
+                model=profile.model_id,
+                config={"model_reasoning_effort": profile.reasoning_effort},
+                model_provider=profile.model_provider_id,
+                sandbox=self._sandbox(profile.sandbox),
+            )
+            self._manager._start_event(profile, "thread_resumed")
+        except Exception as exc:
+            if "no rollout found for thread id" not in str(exc).lower() or not developer_instructions:
+                raise
+            self._manager._start_event(profile, "thread_resume_unavailable")
+            recovered_instructions = developer_instructions
+            if recovery_context:
+                recovered_instructions += (
+                    "\n\nThe prior runtime rollout is unavailable. Continue using only this "
+                    "user-visible conversation history; it contains no hidden reasoning:\n" + recovery_context
+                )
+            self._manager._start_event(profile, "thread_start_requested")
+            thread = await codex.thread_start(
+                cwd=str(self._manager._paths(profile)[1]),
+                developer_instructions=recovered_instructions,
+                model=profile.model_id,
+                config={"model_reasoning_effort": profile.reasoning_effort},
+                model_provider=profile.model_provider_id,
+                sandbox=self._sandbox(profile.sandbox),
+            )
+            self._manager._start_event(profile, "thread_started")
         self._profiles[profile.id] = profile
         self._threads[thread.id] = thread
         return RuntimeSession(thread_id=thread.id, profile_id=profile.id)

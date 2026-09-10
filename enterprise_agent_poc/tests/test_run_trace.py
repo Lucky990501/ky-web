@@ -8,13 +8,14 @@ from app.service import AgentService, AgentRunError
 from app.runtime.base import RuntimeStartError
 from app.settings import Settings
 from app.store import POCStore
+from app.product_store import ProductStore
 
 
 class FakeRuntime:
     async def create_session(self, profile, developer_instructions):
         return RuntimeSession(thread_id="thread-test-1", profile_id=profile.id)
 
-    async def resume_session(self, profile, thread_id):
+    async def resume_session(self, profile, thread_id, **_kwargs):
         return RuntimeSession(thread_id=thread_id, profile_id=profile.id)
 
     async def run_turn(self, session, message):
@@ -44,11 +45,20 @@ class FailingStartupRuntime:
     async def create_session(self, profile, developer_instructions):
         raise RuntimeStartError("app_server")
 
-    async def resume_session(self, profile, thread_id):
+    async def resume_session(self, profile, thread_id, **_kwargs):
         raise RuntimeStartError("app_server")
 
     async def run_turn(self, session, message):  # pragma: no cover - startup always fails
         raise AssertionError("must not run a turn")
+
+
+class RecoveringRuntime(FakeRuntime):
+    def __init__(self):
+        self.recovery_context = None
+
+    async def resume_session(self, profile, thread_id, **kwargs):
+        self.recovery_context = kwargs.get("recovery_context")
+        return RuntimeSession(thread_id="thread-recovered", profile_id=profile.id)
 
 
 def test_run_trace_records_only_tool_observations(tmp_path, monkeypatch):
@@ -101,3 +111,25 @@ def test_startup_failure_creates_a_safe_trace_before_thread_exists(tmp_path, mon
     assert trace["codex_thread_id"] == "pending"
     assert trace["payload"]["error"] == "Codex Runtime 未能启动；请查看安全运行时 Trace。"
     assert trace["payload"]["lifecycle_events"][-1] == {"event": "runtime_start_failed", "stage": "app_server"}
+
+
+def test_missing_rollout_can_rebind_same_agent_using_visible_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{tmp_path / 'poc.db'}")
+    store = POCStore(tmp_path / "poc.db")
+    store.seed_demo_data()
+    product = ProductStore(store)
+    product.initialize()
+    runtime = RecoveringRuntime()
+    service = AgentService(store, runtime, Settings.from_env())
+    profile = service.profile_for("tenant-a", "copywriting-agent")
+    store.save_conversation("conversation-1", "tenant-a", "copywriting-agent", profile.id, "thread-old", profile.runtime_version)
+    product.add_message("conversation-1", "user", "写一版招生文案")
+    product.add_message("conversation-1", "assistant", "第一版正文")
+    product.add_message("conversation-1", "user", "压缩成短文案")
+
+    result = asyncio.run(service.run("tenant-a", "copywriting-agent", "压缩成短文案", "conversation-1"))
+
+    assert result.thread_id == "thread-recovered"
+    assert store.conversation("conversation-1", "tenant-a")["runtime_thread_id"] == "thread-recovered"
+    assert runtime.recovery_context == "user: 写一版招生文案\nassistant: 第一版正文"

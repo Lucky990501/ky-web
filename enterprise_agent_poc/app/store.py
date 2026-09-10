@@ -227,6 +227,25 @@ class POCStore:
             row = conn.execute("SELECT * FROM conversations WHERE id=? AND tenant_id=?", (conversation_id, tenant_id)).fetchone()
         return dict(row) if row else None
 
+    def conversation_messages(self, conversation_id: str, tenant_id: str, limit: int = 20) -> list[dict]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT m.role,m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+                "WHERE m.conversation_id=? AND c.tenant_id=? ORDER BY m.created_at DESC,m.id DESC LIMIT ?",
+                (conversation_id, tenant_id, limit),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def replace_conversation_thread(
+        self, conversation_id: str, tenant_id: str, expected_thread_id: str, new_thread_id: str
+    ) -> bool:
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE conversations SET runtime_thread_id=? WHERE id=? AND tenant_id=? AND runtime_thread_id=?",
+                (new_thread_id, conversation_id, tenant_id, expected_thread_id),
+            )
+        return cursor.rowcount == 1
+
     def log_event(self, conversation_id: str | None, event_type: str, payload: dict) -> None:
         with self.connection() as conn:
             conn.execute(
