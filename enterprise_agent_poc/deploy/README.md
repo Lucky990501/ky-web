@@ -18,5 +18,22 @@ proxies to the loopback-only Compose Nginx listener (`127.0.0.1:18080`).
 5. Verify `/api/v1/poc/health`, database migration, Redis worker logs and an
    authenticated browser task before directing traffic to the new host.
 
+## Runtime configuration verification
+
+The release environment file is the authoritative source for one release. Do
+not separately inject any of the RAG/database/embedding variables through a
+systemd unit, shell profile, or an old deployment directory. Before a RAG
+acceptance run, execute the verifier in a process that inherited the same
+environment as the API service:
+
+```powershell
+python scripts/verify_runtime_config.py --environment-file .env.production
+```
+
+It prints only presence flags and SHA-256 fingerprints, never values or
+secrets. `matches` must be `true`. For an already-running API, compare its
+admin-only `/api/admin/runtime/diagnostics` `runtime_config.fingerprint` with
+the verifier's `expected_fingerprint`; a mismatch blocks the acceptance run.
+
 The existing workspace server settings are a connection reference only. They
 must not be copied into this project or used to overwrite the existing site.

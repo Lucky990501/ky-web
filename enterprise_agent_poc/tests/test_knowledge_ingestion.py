@@ -3,9 +3,10 @@ from dataclasses import replace
 
 import pytest
 
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, require_semantic_runtime, runtime_diagnostic, set_embedding_probe
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, QueryAnswerabilityPolicy, RetrievalConfidencePolicy, require_semantic_runtime, runtime_diagnostic, set_embedding_probe
 from app.product_store import ProductStore
-from app.settings import settings
+from app.settings import safe_runtime_config_snapshot, settings
+from scripts.verify_runtime_config import compare, parse_env_file
 from app.storage import storage_provider
 from app.store import POCStore
 
@@ -89,3 +90,38 @@ def test_failed_embedding_probe_degrades_strict_production_health(tmp_path):
     set_embedding_probe("unavailable")
     assert "正式 Embedding Provider 连通性验证失败。" in runtime_diagnostic(product, runtime_settings)["reasons"]
     set_embedding_probe(None)
+
+
+def test_retrieval_confidence_policy_rejects_weak_unrelated_candidates():
+    policy = RetrievalConfidencePolicy(0.20, 0.30, False, 0.02)
+    assert policy.decision(vector_score=0.526, keyword_score=0.125, final_score=0.3856) == (True, None)
+    assert policy.decision(vector_score=0.2542, keyword_score=0, final_score=0.1652) == (False, "below_minimum_final_score")
+
+
+def test_query_answerability_policy_requires_evidence_for_sensitive_requests():
+    policy = QueryAnswerabilityPolicy()
+    assert policy.rejection_reason("这场活动保证能提升多少分？", []) == "unsupported_absolute_promise"
+    assert policy.rejection_reason("请给出不存在课程的授课老师和名额。", []) == "explicitly_nonexistent_entity"
+    assert policy.rejection_reason("名师面对面课程价格是9999元吗？", [{"title": "活动介绍", "content": "活动安排"}]) == "price_without_grounding"
+    assert policy.rejection_reason("课程价格是多少？", [{"title": "课程费用", "content": "报名费用为 999 元"}]) is None
+
+
+def test_safe_runtime_config_snapshot_never_contains_raw_configuration_values():
+    source = {"APP_ENV": "production", "ENTERPRISE_POC_DATABASE_URL": "postgresql://user:super-secret@db/app"}
+    snapshot = safe_runtime_config_snapshot(source)
+    assert snapshot["fields"]["APP_ENV"]["configured"] is True
+    assert snapshot["fields"]["ENTERPRISE_POC_DATABASE_URL"]["configured"] is True
+    assert "super-secret" not in str(snapshot)
+
+
+def test_runtime_config_verifier_parses_and_compares_without_exposing_values(tmp_path):
+    path = tmp_path / ".env.production"
+    path.write_text("APP_ENV=production\nEMBEDDING_MODEL=embedding-v1\n", encoding="utf-8")
+    expected = parse_env_file(path)
+    same = compare(expected, {"APP_ENV": "production", "EMBEDDING_MODEL": "embedding-v1"})
+    changed = compare(expected, {"APP_ENV": "production", "EMBEDDING_MODEL": "embedding-v2"})
+
+    assert same["fields"][0]["expected_configured"] is True
+    assert same["matches"] is True
+    assert changed["matches"] is False
+    assert "embedding-v1" not in str(changed)

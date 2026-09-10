@@ -2,11 +2,35 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+# These names identify runtime behavior but never expose their values.  They
+# are also the contract used by the deployment verifier to catch a systemd or
+# shell environment accidentally overriding the release environment file.
+RUNTIME_CONFIG_ENV_NAMES = (
+    "APP_ENV",
+    "ENTERPRISE_POC_DATABASE_URL",
+    "ENTERPRISE_POC_MCP_URL",
+    "REDIS_URL",
+    "ENTERPRISE_POC_TASK_QUEUE",
+    "EMBEDDING_PROVIDER",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_DIMENSION",
+    "EMBEDDING_BASE_URL",
+    "KNOWLEDGE_ALLOW_FALLBACK",
+    "KNOWLEDGE_MIN_FINAL_SCORE",
+    "KNOWLEDGE_MIN_VECTOR_SCORE",
+    "KNOWLEDGE_KEYWORD_EXACT_MATCH",
+    "KNOWLEDGE_RESULT_MARGIN",
+    "KNOWLEDGE_QUERY_GUARD_ENABLED",
+)
 
 
 def _load_workspace_secrets() -> None:
@@ -73,6 +97,11 @@ class Settings:
     knowledge_chunk_size: int
     knowledge_chunk_overlap: int
     knowledge_min_score: float
+    knowledge_min_final_score: float
+    knowledge_min_vector_score: float
+    knowledge_keyword_exact_match: bool
+    knowledge_result_margin: float
+    knowledge_query_guard_enabled: bool
     embedding_provider: str
     embedding_model: str
     embedding_dimension: int
@@ -121,7 +150,12 @@ class Settings:
             bootstrap_demo_data=os.environ.get("ENTERPRISE_POC_BOOTSTRAP_DEMO_DATA", "true").lower() == "true",
             knowledge_chunk_size=int(os.environ.get("KNOWLEDGE_CHUNK_SIZE", "800")),
             knowledge_chunk_overlap=int(os.environ.get("KNOWLEDGE_CHUNK_OVERLAP", "120")),
-            knowledge_min_score=float(os.environ.get("KNOWLEDGE_MIN_SCORE", "0.16")),
+            knowledge_min_score=float(os.environ.get("KNOWLEDGE_MIN_SCORE", os.environ.get("KNOWLEDGE_MIN_FINAL_SCORE", "0.20"))),
+            knowledge_min_final_score=float(os.environ.get("KNOWLEDGE_MIN_FINAL_SCORE", os.environ.get("KNOWLEDGE_MIN_SCORE", "0.20"))),
+            knowledge_min_vector_score=float(os.environ.get("KNOWLEDGE_MIN_VECTOR_SCORE", "0.30")),
+            knowledge_keyword_exact_match=os.environ.get("KNOWLEDGE_KEYWORD_EXACT_MATCH", "false").lower() == "true",
+            knowledge_result_margin=float(os.environ.get("KNOWLEDGE_RESULT_MARGIN", "0.02")),
+            knowledge_query_guard_enabled=os.environ.get("KNOWLEDGE_QUERY_GUARD_ENABLED", "true").lower() == "true",
             embedding_provider=os.environ.get("EMBEDDING_PROVIDER", "local-hash"),
             embedding_model=os.environ.get("EMBEDDING_MODEL", "local-hash-v1"),
             embedding_dimension=int(os.environ.get("EMBEDDING_DIMENSION", "128")),
@@ -133,3 +167,21 @@ class Settings:
 
 
 settings = Settings.from_env()
+
+
+def safe_runtime_config_snapshot(environ: dict[str, str] | None = None) -> dict:
+    """Return comparable, non-reversible configuration fingerprints only."""
+    source = os.environ if environ is None else environ
+    fields = {}
+    for name in RUNTIME_CONFIG_ENV_NAMES:
+        value = source.get(name, "")
+        fields[name] = {
+            "configured": bool(value),
+            "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+        }
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    return {
+        "algorithm": "sha256",
+        "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "fields": fields,
+    }

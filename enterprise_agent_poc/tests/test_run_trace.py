@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app.domain import RuntimeSession, RuntimeTurn
+from app.runtime.codex_provider import CodexRuntimeProvider
 from app.service import AgentService
 from app.settings import Settings
 from app.store import POCStore
@@ -24,7 +25,7 @@ class FakeRuntime:
             latency_ms=34,
             mcp_calls=(
                 {"server": "platform", "tool": "enterprise_config_get", "input_summary": None, "output_summary": "brand", "status": "completed", "duration_ms": 1, "error": None},
-                {"server": "platform", "tool": "knowledge_search", "input_summary": "秋季", "output_summary": "course", "status": "completed", "duration_ms": 1, "error": None},
+                {"server": "platform", "tool": "knowledge_search", "input_summary": "秋季", "output_summary": "course", "status": "completed", "duration_ms": 1, "error": None, "retrieval_observation": {"query_sha256": "redacted", "query_length": 2, "result_count": 1, "results": [{"chunk_id": "chunk-1", "file_id": "file-1", "score": 0.8, "accepted": True, "rejection_reason": None}]}},
                 {"server": "platform", "tool": "asset_search", "input_summary": "logo", "output_summary": "logo", "status": "completed", "duration_ms": 1, "error": None},
                 {"server": "platform", "tool": "image_generation", "input_summary": "poster prompt", "output_summary": "image", "status": "completed", "duration_ms": 5, "error": None},
             ),
@@ -46,3 +47,19 @@ def test_run_trace_records_only_tool_observations(tmp_path, monkeypatch):
         "enterprise_config_get", "knowledge_search", "asset_search", "image_generation"
     ]
     assert "reasoning" not in trace["payload"]
+    assert trace["payload"]["tool_calls_completed"] is True
+    assert trace["payload"]["final_response_received"] is True
+    assert trace["payload"]["knowledge_retrievals"] == [{"query_sha256": "redacted", "query_length": 2, "result_count": 1, "results": [{"chunk_id": "chunk-1", "file_id": "file-1", "score": 0.8, "accepted": True, "rejection_reason": None}]}]
+
+
+def test_retrieval_observation_does_not_persist_query_or_chunk_content():
+    observation = CodexRuntimeProvider._retrieval_observation(
+        '{"query":"企业内部资料"}',
+        '[{"chunk_id":"chunk-1","file_id":"file-1","content":"不应保存","score":0.8,"accepted":true}]',
+    )
+
+    assert observation["query_length"] == 6
+    assert observation["query_sha256"]
+    assert "企业内部资料" not in str(observation)
+    assert "不应保存" not in str(observation)
+    assert observation["results"] == [{"chunk_id": "chunk-1", "file_id": "file-1", "score": 0.8, "accepted": True, "rejection_reason": None}]

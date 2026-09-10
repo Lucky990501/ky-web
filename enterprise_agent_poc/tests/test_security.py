@@ -34,3 +34,16 @@ def test_tampered_token_is_rejected(service):
     mcp, token = service
     with pytest.raises(TokenError):
         mcp.knowledge_search(token[:-1] + "x", "秋季")
+
+
+def test_failed_knowledge_search_is_audited_as_failed(service):
+    mcp, token = service
+
+    class FailingKnowledge:
+        def search(self, *_args, **_kwargs):
+            raise RuntimeError("embedding unavailable")
+
+    mcp._knowledge = FailingKnowledge()
+    with pytest.raises(RuntimeError, match="embedding unavailable"):
+        mcp.knowledge_search(token, "秋季")
+    assert mcp._store.latest_mcp_audit("tenant-a", "knowledge_search")["status"] == "failed"

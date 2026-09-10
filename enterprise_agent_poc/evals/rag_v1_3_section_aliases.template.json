@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "review_status": "template_only",
+  "instructions": "由知识库内容负责人逐条审核。aliases 只能填写已人工确认与抽象 expected_section 等价的实际索引小节标题；不得根据本次检索返回结果自动生成。审核完成后另存为不含正文的受控评测资产，并用 --section-aliases 指定。",
+  "aliases": {
+    "AI知识库": [],
+    "活动场次": [],
+    "嘉宾档案": [],
+    "推荐阅读": [],
+    "活动流程规则": [],
+    "历史日期索引": [],
+    "使用说明": []
+  }
+}

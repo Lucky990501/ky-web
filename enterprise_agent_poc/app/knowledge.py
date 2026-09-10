@@ -120,6 +120,65 @@ class EmbeddingProvider:
     async def embed_query(self, text: str) -> list[float]: raise NotImplementedError
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievalConfidencePolicy:
+    """Configurable V1 gate that rejects weak, ungrounded retrieval candidates."""
+
+    minimum_final_score: float
+    minimum_vector_score: float
+    keyword_exact_match: bool
+    result_margin: float
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "RetrievalConfidencePolicy":
+        return cls(
+            minimum_final_score=settings.knowledge_min_final_score,
+            minimum_vector_score=settings.knowledge_min_vector_score,
+            keyword_exact_match=settings.knowledge_keyword_exact_match,
+            result_margin=settings.knowledge_result_margin,
+        )
+
+    def decision(self, *, vector_score: float, keyword_score: float, final_score: float) -> tuple[bool, str | None]:
+        if final_score < self.minimum_final_score:
+            return False, "below_minimum_final_score"
+        if vector_score < self.minimum_vector_score and keyword_score <= 0:
+            return False, "below_minimum_vector_score"
+        if self.keyword_exact_match and keyword_score <= 0:
+            return False, "keyword_exact_match_required"
+        if keyword_score <= 0 and final_score < self.minimum_final_score + self.result_margin:
+            return False, "within_confidence_margin"
+        return True, None
+
+
+@dataclass(frozen=True, slots=True)
+class QueryAnswerabilityPolicy:
+    """Reject unsupported claims before ungrounded context reaches an Agent."""
+
+    enabled: bool = True
+
+    _absolute_promise = re.compile(r"(?:保证|承诺|包|保).{0,12}(?:提升|提分|保过|录取|收益|前[0-9一二三四五六七八九十]+)")
+    _explicitly_nonexistent = re.compile(r"不存在.{0,12}(?:课程|老师|教师|讲师|活动|项目|名额|班级)")
+    _price_request = re.compile(r"(?:价格|费用|收费|报价|多少钱|人民币|[0-9]+\s*元)")
+    _price_evidence = re.compile(r"(?:价格|费用|收费|报价|人民币|[0-9]+\s*元)")
+
+    def rejection_reason(self, query: str, candidates: list[dict]) -> str | None:
+        if not self.enabled:
+            return None
+        normalized = re.sub(r"\s+", "", query)
+        if self._explicitly_nonexistent.search(normalized):
+            return "explicitly_nonexistent_entity"
+        if self._absolute_promise.search(normalized):
+            return "unsupported_absolute_promise"
+        if self._price_request.search(normalized):
+            evidence = " ".join(
+                f"{item.get('title', '')} {item.get('section', '')} {item.get('content', '')}"
+                for item in candidates
+            )
+            if not self._price_evidence.search(evidence):
+                return "price_without_grounding"
+        return None
+
+
 class LocalHashEmbeddingProvider(EmbeddingProvider):
     """Deterministic V1 provider; swappable through the provider interface."""
     def __init__(self, dimension: int) -> None: self.dimension = dimension
@@ -247,6 +306,8 @@ class KnowledgeProcessingService:
 class KnowledgeRetrievalService:
     def __init__(self, product: ProductStore, settings: Settings) -> None:
         self.product, self.settings = product, settings; self.embedding = embedding_provider_for(settings)
+        self.policy = RetrievalConfidencePolicy.from_settings(settings)
+        self.answerability_policy = QueryAnswerabilityPolicy(settings.knowledge_query_guard_enabled)
     def search(self, tenant_id: str, query: str, top_k: int = 5) -> list[dict]:
         require_semantic_runtime(self.product, self.settings)
         if isinstance(self.embedding, OpenAICompatibleEmbeddingProvider):
@@ -276,7 +337,8 @@ class KnowledgeRetrievalService:
         if not rows:
             # Compatibility for the pre-V1 text records while enterprises migrate
             # their content through the file ingestion pipeline.
-            return self.product._store.knowledge_search(tenant_id, query, top_k)
+            legacy_results = self.product._store.knowledge_search(tenant_id, query, top_k)
+            return [] if self.answerability_policy.rejection_reason(query, legacy_results) else legacy_results
         results=[]
         for row in rows:
             if "vector_score" in row:
@@ -285,6 +347,9 @@ class KnowledgeRetrievalService:
                 vector=json.loads(row["embedding"] or "[]")
                 semantic=sum(a*b for a,b in zip(query_vector,vector))
             text=((row["title"] or "")+" "+row["content"]).lower(); keyword=sum(term in text for term in terms)/max(1,len(terms)); score=0.65*semantic+0.35*keyword
-            if score >= self.settings.knowledge_min_score:
-                results.append({"chunk_id":row["id"],"file_id":row["file_id"],"filename":row["filename"],"content":row["content"][:1200],"section":row["section"],"page":row["page_number"],"vector_score":round(semantic,4),"keyword_score":round(keyword,4),"score":round(score,4)})
+            accepted, rejection_reason = self.policy.decision(vector_score=semantic, keyword_score=keyword, final_score=score)
+            if accepted:
+                results.append({"chunk_id":row["id"],"file_id":row["file_id"],"filename":row["filename"],"title":row["title"],"content":row["content"][:1200],"section":row["section"],"page":row["page_number"],"vector_score":round(semantic,4),"keyword_score":round(keyword,4),"score":round(score,4),"accepted":True,"rejection_reason":rejection_reason})
+        if self.answerability_policy.rejection_reason(query, results):
+            return []
         return sorted(results,key=lambda item:item["score"],reverse=True)[:top_k]

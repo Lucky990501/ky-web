@@ -28,8 +28,13 @@ class PlatformMCPService:
 
     def knowledge_search(self, bearer_token: str, query: str, limit: int = 5) -> list[dict]:
         principal = self._tokens.verify(bearer_token, "knowledge:search")
+        try:
+            results = self._knowledge.search(principal.tenant_id, query, limit)
+        except Exception:
+            self._audit(principal.tenant_id, "knowledge_search", "failed")
+            raise
         self._audit(principal.tenant_id, "knowledge_search", "completed")
-        return self._knowledge.search(principal.tenant_id, query, limit)
+        return results
 
     def asset_search(self, bearer_token: str, query: str, asset_type: str | None = None) -> list[dict]:
         principal = self._tokens.verify(bearer_token, "assets:search")

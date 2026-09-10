@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -214,6 +215,7 @@ class CodexRuntimeProvider(RuntimeProvider):
             codex = await self._manager.get(profile)
             thread = await codex.thread_resume(session.thread_id, sandbox=self._sandbox(profile.sandbox))
             self._threads[session.thread_id] = thread
+        lifecycle_events: list[dict] = [{"event": "turn_started"}]
         result = await thread.run(message, sandbox=self._sandbox(profile.sandbox))
         usage = result.usage
         mcp_calls: list[dict] = []
@@ -224,26 +226,43 @@ class CodexRuntimeProvider(RuntimeProvider):
             tool = getattr(item, "tool", None)
             server = getattr(item, "server", None)
             if tool and server:
-                mcp_calls.append(
-                    {
-                        "server": server,
-                        "tool": tool,
-                        "input_summary": self._summary(getattr(item, "arguments", None)),
-                        "output_summary": self._summary(getattr(item, "result", None)),
-                        "status": str(getattr(item, "status", "completed")),
-                        "duration_ms": getattr(item, "duration_ms", None),
-                        "error": self._summary(getattr(item, "error", None)),
-                    }
-                )
+                raw_tool_status = getattr(item, "status", "completed")
+                # The SDK currently exposes a string such as
+                # ``McpToolCallStatus.completed`` for some providers.  Store a
+                # stable status vocabulary in the product trace.
+                status = str(getattr(raw_tool_status, "value", raw_tool_status)).rsplit(".", 1)[-1].lower()
+                arguments = getattr(item, "arguments", None)
+                tool_result = getattr(item, "result", None)
+                call = {
+                    "server": server,
+                    "tool": tool,
+                    "input_summary": self._summary(arguments),
+                    "output_summary": self._summary(tool_result),
+                    "status": status,
+                    "duration_ms": getattr(item, "duration_ms", None),
+                    "error": self._summary(getattr(item, "error", None)),
+                }
+                if tool == "knowledge_search":
+                    call["retrieval_observation"] = self._retrieval_observation(arguments, tool_result)
+                mcp_calls.append(call)
+                lifecycle_events.extend(({"event": "tool_started", "tool": tool}, {"event": "tool_completed", "tool": tool, "status": status}))
+        text = result.final_response or ""
+        if mcp_calls:
+            lifecycle_events.append({"event": "model_resumed"})
+        if text.strip():
+            lifecycle_events.append({"event": "final_response_received", "length": len(text)})
+        raw_status = getattr(getattr(result, "status", None), "value", str(getattr(result, "status", "completed")))
+        lifecycle_events.append({"event": "turn_completed", "status": raw_status, "has_final_response": bool(text.strip())})
         return RuntimeTurn(
             thread_id=session.thread_id,
-            text=result.final_response or "",
+            text=text,
             input_tokens=getattr(usage, "input_tokens", None) if usage else None,
             output_tokens=getattr(usage, "output_tokens", None) if usage else None,
             latency_ms=getattr(result, "duration_ms", None),
             mcp_calls=tuple(mcp_calls),
-            status=getattr(getattr(result, "status", None), "value", str(getattr(result, "status", "completed"))),
+            status=raw_status,
             error=self._summary(getattr(result, "error", None)),
+            lifecycle_events=tuple(lifecycle_events),
         )
 
     @staticmethod
@@ -253,6 +272,44 @@ class CodexRuntimeProvider(RuntimeProvider):
         text = str(value).replace("\n", " ")
         text = re.sub(r"Incorrect API key provided:\s*[^,.]+", "API key rejected", text, flags=re.IGNORECASE)
         return text if len(text) <= limit else text[: limit - 1] + "…"
+
+    @staticmethod
+    def _json_value(value: object) -> object | None:
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    @classmethod
+    def _retrieval_observation(cls, arguments: object, result: object) -> dict:
+        """Persist minimal retrieval evidence without retaining query or chunk text."""
+        argument_value = cls._json_value(arguments)
+        query = argument_value.get("query") if isinstance(argument_value, dict) else None
+        result_value = cls._json_value(result)
+        records = result_value if isinstance(result_value, list) else []
+        observations = []
+        for item in records[:10]:
+            if not isinstance(item, dict):
+                continue
+            observations.append(
+                {
+                    "chunk_id": item.get("chunk_id", item.get("id")),
+                    "file_id": item.get("file_id"),
+                    "score": item.get("score"),
+                    "accepted": item.get("accepted"),
+                    "rejection_reason": item.get("rejection_reason"),
+                }
+            )
+        return {
+            "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest() if isinstance(query, str) else None,
+            "query_length": len(query) if isinstance(query, str) else None,
+            "result_count": len(records) if isinstance(result_value, list) else None,
+            "results": observations,
+        }
 
     async def close(self) -> None:
         await self._manager.close()

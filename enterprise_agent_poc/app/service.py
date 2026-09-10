@@ -18,6 +18,12 @@ class RunResult:
     text: str
 
 
+class AgentRunError(RuntimeError):
+    def __init__(self, message: str, *, run_id: str, conversation_id: str) -> None:
+        super().__init__(message)
+        self.run_id, self.conversation_id = run_id, conversation_id
+
+
 class AgentService:
     def __init__(self, store: POCStore, runtime: RuntimeProvider, settings: Settings) -> None:
         self._store = store
@@ -68,8 +74,12 @@ class AgentService:
             "skill_version": next(iter(profile.skill_manifest.values())),
             "mcp_calls": [],
             "knowledge_calls": [],
+            "knowledge_retrievals": [],
             "asset_calls": [],
             "tool_calls": [],
+            "lifecycle_events": [],
+            "tool_calls_completed": False,
+            "final_response_received": False,
             "token_usage": {"input_tokens": None, "output_tokens": None},
             "latency_ms": None,
             "estimated_cost": None,
@@ -92,11 +102,13 @@ class AgentService:
             turn = await self._runtime.run_turn(session, message)
             trace = self._completed_trace(baseline, turn)
             required_mcp_failed = any(call["status"].lower().endswith("failed") for call in trace["mcp_calls"])
-            status = "completed" if turn.status.lower() in {"completed", "success"} and not turn.error and not required_mcp_failed else "failed"
+            has_final_response = bool(turn.text.strip())
+            status = "completed" if turn.status.lower() in {"completed", "success"} and not turn.error and not required_mcp_failed and has_final_response else "failed"
             trace["status"] = status
             self._store.log_event(conversation_id, f"turn.{status}", {"run_id": run_id, "token_usage": trace["token_usage"], "latency_ms": turn.latency_ms})
             if status != "completed":
-                raise RuntimeError(self._safe_error(turn.error))
+                error = self._safe_error(turn.error) if turn.error else "Codex Turn 未返回最终正文。"
+                raise AgentRunError(error, run_id=run_id, conversation_id=conversation_id)
             self._store.finish_run_trace(run_id, status, trace, turn.thread_id)
             return RunResult(run_id=run_id, conversation_id=conversation_id, thread_id=turn.thread_id, text=turn.text)
         except Exception as exc:
@@ -104,7 +116,9 @@ class AgentService:
             trace["error"] = self._safe_error(str(exc))
             self._store.finish_run_trace(run_id, "failed", trace, session.thread_id)
             self._store.log_event(conversation_id, "turn.failed", {"run_id": run_id, "error": trace["error"]})
-            raise RuntimeError(trace["error"]) from exc
+            if isinstance(exc, AgentRunError):
+                raise
+            raise AgentRunError(trace["error"], run_id=run_id, conversation_id=conversation_id) from exc
 
     @staticmethod
     def _completed_trace(trace: dict, turn) -> dict:
@@ -112,7 +126,11 @@ class AgentService:
         calls = list(turn.mcp_calls)
         trace["mcp_calls"] = calls
         trace["tool_calls"] = [{"server": call["server"], "tool": call["tool"], "status": call["status"]} for call in calls]
+        trace["lifecycle_events"] = list(turn.lifecycle_events)
+        trace["tool_calls_completed"] = bool(calls) and all(call.get("status", "").lower() == "completed" for call in calls)
+        trace["final_response_received"] = bool(turn.text.strip())
         trace["knowledge_calls"] = [call for call in calls if call["tool"] == "knowledge_search"]
+        trace["knowledge_retrievals"] = [call["retrieval_observation"] for call in trace["knowledge_calls"] if call.get("retrieval_observation")]
         trace["asset_calls"] = [call for call in calls if call["tool"] == "asset_search"]
         trace["token_usage"] = {"input_tokens": turn.input_tokens, "output_tokens": turn.output_tokens}
         trace["latency_ms"] = turn.latency_ms

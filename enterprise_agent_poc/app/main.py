@@ -22,7 +22,7 @@ from app.storage import storage_provider
 from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
 from app.security import RuntimeTokenIssuer
 from app.service import AgentService
-from app.settings import settings
+from app.settings import safe_runtime_config_snapshot, settings
 from app.skills import SkillDeployment
 from app.store import POCStore
 
@@ -469,7 +469,7 @@ async def runtime_diagnostics(workbench_session: str | None = Cookie(default=Non
     last=store.latest_run_trace()
     latest_success=None
     if last and last["status"] == "completed": latest_success={"run_id":last["run_id"],"completed_at":last["completed_at"]}
-    return {"runtime_version":"openai-codex==0.147.0","provider":settings.model_provider_id,"model":settings.model_id,"base_url":settings.model_base_url,"wire_api":settings.model_wire_api,"api_key_present":bool(os.environ.get(settings.codex_api_key_env)),"api_key_fingerprint":_key_fingerprint(),"codex_process_profiles":len(manager._instances),"platform_mcp_url":settings.platform_mcp_url,"platform_mcp_configured":bool(settings.platform_mcp_url),"deepseek_auth_status":"not_probed","deepseek_responses_status":"not_probed","last_successful_turn":latest_success,"last_error":(last["payload"].get("error") if last and last["status"] == "failed" else None)}
+    return {"runtime_version":"openai-codex==0.147.0","provider":settings.model_provider_id,"model":settings.model_id,"base_url":settings.model_base_url,"wire_api":settings.model_wire_api,"api_key_present":bool(os.environ.get(settings.codex_api_key_env)),"api_key_fingerprint":_key_fingerprint(),"runtime_config":safe_runtime_config_snapshot(),"codex_process_profiles":len(manager._instances),"platform_mcp_url":settings.platform_mcp_url,"platform_mcp_configured":bool(settings.platform_mcp_url),"deepseek_auth_status":"not_probed","deepseek_responses_status":"not_probed","last_successful_turn":latest_success,"last_error":(last["payload"].get("error") if last and last["status"] == "failed" else None)}
 
 @app.post("/api/admin/runtime/test")
 async def runtime_test(payload: RuntimeTestRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
