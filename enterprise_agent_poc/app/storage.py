@@ -2,6 +2,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Iterable
 from uuid import uuid4
 from app.settings import Settings
 
@@ -14,6 +15,8 @@ class StorageProvider(ABC):
     def delete(self, key: str) -> None: ...
     @abstractmethod
     def signed_url(self, key: str) -> str: ...
+    @abstractmethod
+    def list_keys(self, prefix: str) -> Iterable[str]: ...
 
 class LocalStorage(StorageProvider):
     def __init__(self, root: Path) -> None: self.root = root
@@ -26,6 +29,11 @@ class LocalStorage(StorageProvider):
     def get(self, key: str) -> bytes: return self._path(key).read_bytes()
     def delete(self, key: str) -> None: self._path(key).unlink(missing_ok=True)
     def signed_url(self, key: str) -> str: return f"/api/v1/storage/{key}?v={uuid4().hex}"
+    def list_keys(self, prefix: str) -> Iterable[str]:
+        root = self.root.resolve()
+        if not root.exists():
+            return ()
+        return tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path.relative_to(root).as_posix().startswith(prefix))
 
 
 class OSSStorage(StorageProvider):
@@ -54,6 +62,11 @@ class OSSStorage(StorageProvider):
 
     def signed_url(self, key: str) -> str:
         return self._bucket().sign_url("GET", key, self._settings.oss_signed_url_expire_seconds)
+
+    def list_keys(self, prefix: str) -> Iterable[str]:
+        import oss2
+
+        return tuple(item.key for item in oss2.ObjectIterator(self._bucket(), prefix=prefix))
 
 
 def storage_provider(settings: Settings) -> StorageProvider:
