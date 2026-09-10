@@ -51,7 +51,7 @@
 
 ## 失败 Case 分析
 
-以下为仍未命中的 13 条正例。仅记录任务要求的评测结构，不包含查询正文、文件 ID 或 Chunk 正文。`scores` 顺序与 `actual_top_k_sections` 对齐，格式为 `vector/keyword/final`。
+以下为仍未命中的 12 条正例。仅记录任务要求的评测结构，不包含查询正文、文件 ID 或 Chunk 正文。`scores` 顺序与 `actual_top_k_sections` 对齐，格式为 `vector/keyword/final`。
 
 | case_id | expected_section | actual_top_k_sections | top_1_section | scores | section_match |
 | --- | --- | --- | --- | --- | --- |
@@ -74,6 +74,6 @@
 
 **BLOCKED。**
 
-Alias 发布已验证提升了 Section Recall 与 Grounded Precision，且无知识拒答保持稳定；但 Top-1 仅为 0.30，仍有 13/30 正例未命中，正例检索质量仍明显异常。按本轮任务要求，停止在此，不扩大 alias，不进入 Tenant A/B、浏览器 E2E、三个 Agent Grounding、Skill Registry 或 Agent Expansion。
+Alias 发布已验证提升了 Section Recall 与 Grounded Precision，且无知识拒答保持稳定；但 Top-1 仅为 0.30，仍有 12/30 正例未命中，正例检索质量仍明显异常。按本轮任务要求，停止在此，不扩大 alias，不进入 Tenant A/B、浏览器 E2E、三个 Agent Grounding、Skill Registry 或 Agent Expansion。
 
 下一轮应先基于上述失败 case 分析真实检索问题来源，再由新的、明确授权的任务决定是否调整排序、Chunk 或知识内容。

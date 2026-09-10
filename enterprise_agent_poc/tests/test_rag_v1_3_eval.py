@@ -19,6 +19,26 @@ def test_positive_case_requires_the_expected_section_not_just_any_result():
     assert right["passed"] is True
 
 
+def test_eval_case_records_v14_ranking_evidence():
+    case = {"id": "p1", "query": "嘉宾介绍", "expected_answerable": True, "expected_section": "嘉宾档案"}
+    result = evaluate_case(case, [{
+        "chunk_id": "chunk-1",
+        "section": "人物简介",
+        "query_intent": "嘉宾档案",
+        "canonical_section": "嘉宾档案",
+        "index_version": "rag-index-v2",
+        "metadata_schema_version": "knowledge-metadata-v1",
+        "vector_score": 0.5,
+        "keyword_score": 0.4,
+        "metadata_score": 1.0,
+        "score": 0.585,
+    }], 2.0)
+    assert result["query_intent"] == "嘉宾档案"
+    assert result["canonical_sections"] == ["嘉宾档案"]
+    assert result["scores"][0]["metadata_score"] == 1.0
+    assert result["scores"][0]["index_version"] == "rag-index-v2"
+
+
 def test_negative_case_passes_only_when_no_result_is_returned():
     case = {"id": "n1", "query": "不存在的问题", "expected_answerable": False, "expected_section": None}
     assert evaluate_case(case, [], 8.0)["passed"] is True

@@ -3,7 +3,8 @@ from dataclasses import replace
 
 import pytest
 
-from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, QueryAnswerabilityPolicy, RetrievalConfidencePolicy, require_semantic_runtime, retrieval_policy_diagnostic, runtime_diagnostic, set_embedding_probe
+from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, QueryAnswerabilityPolicy, RetrievalConfidencePolicy, require_semantic_runtime, retrieval_policy_diagnostic, runtime_diagnostic, sectionize, set_embedding_probe
+from app.knowledge_metadata import METADATA_SCHEMA_VERSION, RAG_INDEX_VERSION, KnowledgeQueryIntent, build_chunk_metadata, detect_query_intent, embedding_input, metadata_dict, metadata_score
 from app.product_store import ProductStore
 from app.settings import safe_runtime_config_snapshot, settings
 from scripts.verify_runtime_config import compare, parse_env_file
@@ -39,7 +40,13 @@ def test_text_file_is_parsed_chunked_indexed_and_retrieved_per_tenant(tmp_path):
     assert detail["status"] == "ready"
     assert detail["knowledge_base_id"]
     assert detail["chunk_count"] >= 1
-    assert product.knowledge_chunks("tenant-a", record["file_id"])
+    chunks = product.knowledge_chunks("tenant-a", record["file_id"])
+    assert chunks
+    chunk_metadata = metadata_dict(chunks[0]["metadata"])
+    assert chunk_metadata["source_file_id"] == record["file_id"]
+    assert chunk_metadata["source_filename"] == "秋季课程.txt"
+    assert chunk_metadata["index_version"] == RAG_INDEX_VERSION
+    assert chunk_metadata["metadata_schema_version"] == METADATA_SCHEMA_VERSION
 
     retrieval = KnowledgeRetrievalService(product, runtime_settings)
     assert any("每周诊断" in item["content"] for item in retrieval.search("tenant-a", "秋季数学诊断"))
@@ -97,6 +104,74 @@ def test_retrieval_confidence_policy_rejects_weak_unrelated_candidates():
     assert policy.decision(vector_score=0.526, keyword_score=0.125, final_score=0.3856) == (True, None)
     assert policy.decision(vector_score=0.2542, keyword_score=0, final_score=0.1652) == (False, "below_minimum_final_score")
     assert policy.decision(vector_score=0.35, keyword_score=0, final_score=0.215) == (False, "within_confidence_margin")
+
+
+def test_markdown_hierarchy_preserves_sheet_name_for_canonical_metadata():
+    sections = sectionize("# 嘉宾档案\n## 黎明简介\n姓名：黎明\n## 前期准备：确定嘉宾\n确认邀请名单")
+    assert sections[0]["sheet_name"] == "嘉宾档案"
+    assert sections[0]["section"] == "黎明简介"
+    profile = build_chunk_metadata(
+        source_file_id="file-1",
+        source_filename="knowledge.md",
+        sheet_name=sections[0]["sheet_name"],
+        section=sections[0]["section"],
+        title="企业知识",
+        content=sections[0]["text"],
+    )
+    assert profile["canonical_section"] == "嘉宾档案"
+    assert profile["record_type"] == "profile"
+    assert profile["entity_type"] == "person"
+    assert profile["person_name"] == "黎明"
+
+
+def test_structured_source_category_recovers_canonical_metadata_from_weak_title():
+    profile = build_chunk_metadata(
+        source_file_id="file-2",
+        source_filename="history.md",
+        sheet_name=None,
+        section="记录 87",
+        title="企业知识",
+        content="- 一级分类：历史日期索引\n- 原始日期：2020年10月",
+    )
+    assert profile["canonical_section"] == "历史日期索引"
+    assert profile["record_type"] == "date_index"
+    assert profile["year"] == 2020
+
+
+def test_structured_date_record_recovers_historical_index_without_category_label():
+    profile = build_chunk_metadata(
+        source_file_id="file-3",
+        source_filename="legacy.md",
+        sheet_name=None,
+        section="记录 42",
+        title="企业知识",
+        content="- 原始日期：2019/10/11\n- 标准日期：2019-10-11\n- 年份：2019\n- 序号：42",
+    )
+    assert profile["canonical_section"] == "历史日期索引"
+    assert profile["record_type"] == "date_index"
+
+
+def test_lightweight_query_intent_prefers_stronger_category_phrases():
+    assert detect_query_intent("如何安排一场教师交流会的排期？") is KnowledgeQueryIntent.EVENT_SESSION
+    assert detect_query_intent("项目有哪些资料说明？") is KnowledgeQueryIntent.AI_KNOWLEDGE
+    assert detect_query_intent("请推荐一些延伸阅读") is KnowledgeQueryIntent.RECOMMENDED_READING
+    assert detect_query_intent("这段自由文本没有分类信号") is KnowledgeQueryIntent.UNKNOWN
+
+
+def test_metadata_boost_is_explainable_and_never_a_hard_filter():
+    metadata = {"canonical_section": "嘉宾档案"}
+    assert metadata_score(KnowledgeQueryIntent.GUEST_PROFILE, metadata) == 1.0
+    assert metadata_score(KnowledgeQueryIntent.EVENT_WORKFLOW, metadata) == -0.25
+    assert metadata_score(KnowledgeQueryIntent.UNKNOWN, metadata) == 0.0
+
+
+def test_v2_embedding_input_adds_metadata_without_changing_source_content():
+    content = "这是未经修改的企业原文。"
+    metadata = {"canonical_section": "推荐阅读", "record_type": "reading", "section": "导读资料"}
+    vector_text = embedding_input(content, metadata)
+    assert vector_text.endswith(content)
+    assert "知识分类：推荐阅读" in vector_text
+    assert content == "这是未经修改的企业原文。"
 
 
 def test_query_answerability_policy_requires_evidence_for_sensitive_requests():

@@ -114,6 +114,7 @@ def evaluate_case(
     ):
         raise ValueError(f"正例 {case.get('id', '<unknown>')} 的 accepted_sections 必须是非空字符串列表。")
     retrieved_sections = [str(item.get("section") or "") for item in results]
+    canonical_sections = [str(item.get("canonical_section") or "") for item in results]
     section_match_at_k = bool(expected_answerable and set(accepted_sections).intersection(retrieved_sections))
     top_1_section_match = bool(expected_answerable and retrieved_sections and retrieved_sections[0] in accepted_sections)
     accepted = bool(results)
@@ -126,6 +127,8 @@ def evaluate_case(
         "retrieved_chunk_ids": [item.get("chunk_id", item.get("id")) for item in results],
         "file_ids": sorted({item["file_id"] for item in results if item.get("file_id")}),
         "retrieved_sections": retrieved_sections,
+        "query_intent": results[0].get("query_intent") if results else None,
+        "canonical_sections": canonical_sections,
         "accepted": accepted,
         "rejection_reason": rejection_reason,
         "rejection_detail": rejection_detail,
@@ -138,7 +141,11 @@ def evaluate_case(
                 "chunk_id": item.get("chunk_id", item.get("id")),
                 "vector_score": item.get("vector_score"),
                 "keyword_score": item.get("keyword_score"),
+                "metadata_score": item.get("metadata_score"),
                 "final_score": item.get("score"),
+                "canonical_section": item.get("canonical_section"),
+                "index_version": item.get("index_version"),
+                "metadata_schema_version": item.get("metadata_schema_version"),
                 "accepted": item.get("accepted", True),
                 "rejection_reason": item.get("rejection_reason"),
             }

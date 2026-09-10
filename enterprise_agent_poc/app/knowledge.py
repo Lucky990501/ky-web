@@ -9,6 +9,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.knowledge_metadata import (
+    RAG_INDEX_VERSION,
+    build_chunk_metadata,
+    detect_query_intent,
+    embedding_input,
+    keyword_score as structured_keyword_score,
+    metadata_dict,
+    metadata_score as calculate_metadata_score,
+    query_embedding_input,
+)
 from app.product_store import ProductStore
 from app.settings import Settings, safe_runtime_config_snapshot
 from app.storage import storage_provider
@@ -80,18 +90,29 @@ def normalize_text(text: str) -> str:
 
 def sectionize(text: str) -> list[dict]:
     title = "正文"
+    sheet_name: str | None = None
     parts: list[dict] = []
     buffer: list[str] = []
     for line in normalize_text(text).splitlines():
-        if re.match(r"^(#{1,6}\s+|[一二三四五六七八九十0-9]+[、.]\s*)", line.strip()):
+        stripped = line.strip()
+        markdown_heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        numbered_heading = re.match(r"^[一二三四五六七八九十0-9]+[、.]\s*(.+)$", stripped)
+        if markdown_heading or numbered_heading:
             if buffer:
-                parts.append({"text": "\n".join(buffer), "section": title})
-            title, buffer = re.sub(r"^#{1,6}\s+|^[一二三四五六七八九十0-9]+[、.]\s*", "", line).strip(), []
+                parts.append({"text": "\n".join(buffer), "section": title, "sheet_name": sheet_name})
+            if markdown_heading:
+                level, heading = len(markdown_heading.group(1)), markdown_heading.group(2).strip()
+                if level == 1:
+                    sheet_name = heading
+                title = heading
+            else:
+                title = numbered_heading.group(1).strip()
+            buffer = []
         else:
             buffer.append(line)
     if buffer:
-        parts.append({"text": "\n".join(buffer), "section": title})
-    return parts or [{"text": normalize_text(text), "section": "正文"}]
+        parts.append({"text": "\n".join(buffer), "section": title, "sheet_name": sheet_name})
+    return parts or [{"text": normalize_text(text), "section": "正文", "sheet_name": sheet_name}]
 
 
 class ChunkingStrategy:
@@ -108,7 +129,7 @@ class ChunkingStrategy:
                     pivot = max(part.rfind("\n"), part.rfind("。"), part.rfind("；"))
                     if pivot > self.size // 2:
                         part = text[:pivot + 1]
-                chunks.append({"content": part, "title": parsed.title, "section": source.get("section", "正文"), "page_number": source.get("page_number"), "chunk_index": len(chunks), "metadata": {"source": "enterprise_file"}})
+                chunks.append({"content": part, "title": parsed.title, "section": source.get("section", "正文"), "page_number": source.get("page_number"), "chunk_index": len(chunks), "metadata": {"source": "enterprise_file", "sheet_name": source.get("sheet_name")}})
                 if len(part) >= len(text):
                     break
                 text = text[max(1, len(part) - self.overlap):].lstrip()
@@ -319,30 +340,52 @@ def require_semantic_runtime(product: ProductStore, settings: Settings) -> None:
 
 
 class KnowledgeProcessingService:
+    EMBEDDING_BATCH_SIZE = 32
+
     def __init__(self, product: ProductStore, settings: Settings) -> None:
         self.product, self.settings = product, settings
         self.parser = DocumentParser(); self.chunker = ChunkingStrategy(settings.knowledge_chunk_size, settings.knowledge_chunk_overlap)
         self.embedding = embedding_provider_for(settings)
 
-    async def process(self, tenant_id: str, file_id: str) -> None:
+    async def process(self, tenant_id: str, file_id: str, *, force: bool = False, raise_errors: bool = False) -> None:
         record = self.product.knowledge_file(tenant_id, file_id)
-        if not record or record["status"] == "ready": return
+        if not record or (record["status"] == "ready" and not force): return
+        previous_status = record["status"]
         try:
             require_semantic_runtime(self.product, self.settings)
-            self.product.set_knowledge_file_status(tenant_id, file_id, "parsing")
+            if not force:
+                self.product.set_knowledge_file_status(tenant_id, file_id, "parsing")
             content = storage_provider(self.settings).get(record["storage_key"])
             parsed = await self.parser.parse(record.get("filename") or record["name"], content)
-            self.product.set_knowledge_file_status(tenant_id, file_id, "chunking", parsed_text=parsed.text)
+            if not force:
+                self.product.set_knowledge_file_status(tenant_id, file_id, "chunking", parsed_text=parsed.text)
             chunks = self.chunker.split(parsed)
-            self.product.set_knowledge_file_status(tenant_id, file_id, "embedding")
-            vectors = await self.embedding.embed_documents([item["content"] for item in chunks])
+            if not force:
+                self.product.set_knowledge_file_status(tenant_id, file_id, "embedding")
+            for item in chunks:
+                item["metadata"] = build_chunk_metadata(
+                    source_file_id=file_id,
+                    source_filename=record.get("filename") or record["name"],
+                    sheet_name=item.get("metadata", {}).get("sheet_name"),
+                    section=item.get("section"),
+                    title=item.get("title"),
+                    content=item["content"],
+                )
+            embedding_texts = [embedding_input(item["content"], item["metadata"]) for item in chunks]
+            vectors: list[list[float]] = []
+            for start in range(0, len(embedding_texts), self.EMBEDDING_BATCH_SIZE):
+                vectors.extend(await self.embedding.embed_documents(embedding_texts[start:start + self.EMBEDDING_BATCH_SIZE]))
             for item, vector in zip(chunks, vectors):
-                item.update({"embedding": vector, "embedding_provider": self.settings.embedding_provider, "embedding_model": self.settings.embedding_model, "embedding_version": "v1", "knowledge_base_id": record.get("knowledge_base_id")})
-            self.product.set_knowledge_file_status(tenant_id, file_id, "indexing")
+                item.update({"embedding": vector, "embedding_provider": self.settings.embedding_provider, "embedding_model": self.settings.embedding_model, "embedding_version": RAG_INDEX_VERSION, "knowledge_base_id": record.get("knowledge_base_id")})
+            if not force:
+                self.product.set_knowledge_file_status(tenant_id, file_id, "indexing")
             self.product.replace_knowledge_chunks(tenant_id, file_id, chunks)
             self.product.set_knowledge_file_status(tenant_id, file_id, "ready", chunk_count=len(chunks), embedding_provider=self.settings.embedding_provider, embedding_model=self.settings.embedding_model)
         except Exception as exc:
-            self.product.set_knowledge_file_status(tenant_id, file_id, "failed", error_message=str(exc)[:500])
+            recovery_status = "ready" if force and previous_status == "ready" else "failed"
+            self.product.set_knowledge_file_status(tenant_id, file_id, recovery_status, error_message=str(exc)[:500])
+            if raise_errors:
+                raise
 
 
 class KnowledgeRetrievalService:
@@ -359,19 +402,20 @@ class KnowledgeRetrievalService:
         if guard_reason:
             return RetrievalOutcome([], False, "query_guard", guard_reason)
         require_semantic_runtime(self.product, self.settings)
+        query_intent = detect_query_intent(query)
+        semantic_query = query_embedding_input(query, query_intent)
         if isinstance(self.embedding, OpenAICompatibleEmbeddingProvider):
-            query_vector = self.embedding.embed_query_sync(query)
+            query_vector = self.embedding.embed_query_sync(semantic_query)
         elif isinstance(self.embedding, LocalHashEmbeddingProvider):
-            query_vector = self.embedding._embed(query)
+            query_vector = self.embedding._embed(semantic_query)
         else:
             raise RuntimeError("Embedding Provider 不支持同步检索。")
-        terms = set(re.findall(r"[\u4e00-\u9fff]{1,2}|[a-zA-Z0-9_]+", query.lower()))
         try:
             with self.product._store.connection() as conn:
                 if self.product._store.is_postgres and self.settings.embedding_provider != "local-hash":
                     literal = "[" + ",".join(f"{value:.10g}" for value in query_vector) + "]"
                     rows = conn.execute(
-                        "SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,"
+                        "SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,c.metadata,c.embedding_version,"
                         "(1 - (c.embedding <=> ?::vector)) AS vector_score,f.name filename "
                         "FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id "
                         "WHERE c.tenant_id=? AND f.status='ready' AND c.embedding IS NOT NULL "
@@ -380,7 +424,7 @@ class KnowledgeRetrievalService:
                         (literal, tenant_id, self.settings.embedding_provider, self.settings.embedding_model, self.settings.embedding_dimension, literal, max(top_k * 4, 20)),
                     ).fetchall()
                 else:
-                    rows = conn.execute("SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,c.embedding,f.name filename FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id WHERE c.tenant_id=? AND f.status='ready'", (tenant_id,)).fetchall()
+                    rows = conn.execute("SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,c.embedding,c.metadata,c.embedding_version,f.name filename FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id WHERE c.tenant_id=? AND f.status='ready'", (tenant_id,)).fetchall()
         except Exception:
             rows = []
         if not rows:
@@ -393,16 +437,20 @@ class KnowledgeRetrievalService:
             return RetrievalOutcome(legacy_results, bool(legacy_results))
         results=[]
         confidence_reasons: list[str] = []
-        for row in rows:
+        for source_row in rows:
+            row = dict(source_row)
             if "vector_score" in row:
                 semantic = float(row["vector_score"] or 0)
             else:
                 vector=json.loads(row["embedding"] or "[]")
                 semantic=sum(a*b for a,b in zip(query_vector,vector))
-            text=((row["title"] or "")+" "+row["content"]).lower(); keyword=sum(term in text for term in terms)/max(1,len(terms)); score=0.65*semantic+0.35*keyword
+            metadata = metadata_dict(row.get("metadata"))
+            keyword = structured_keyword_score(query, title=row["title"] or "", section=row["section"] or "", content=row["content"], metadata=metadata)
+            metadata_relevance = calculate_metadata_score(query_intent, metadata)
+            score = 0.65 * semantic + 0.35 * keyword + (0.12 * metadata_relevance if metadata_relevance >= 0 else 0.03 * metadata_relevance)
             accepted, rejection_reason = self.policy.decision(vector_score=semantic, keyword_score=keyword, final_score=score)
             if accepted:
-                results.append({"chunk_id":row["id"],"file_id":row["file_id"],"filename":row["filename"],"title":row["title"],"content":row["content"][:1200],"section":row["section"],"page":row["page_number"],"vector_score":round(semantic,4),"keyword_score":round(keyword,4),"score":round(score,4),"accepted":True,"rejection_reason":rejection_reason})
+                results.append({"chunk_id":row["id"],"file_id":row["file_id"],"filename":row["filename"],"title":row["title"],"content":row["content"][:1200],"section":row["section"],"page":row["page_number"],"query_intent":query_intent.value,"canonical_section":metadata.get("canonical_section"),"metadata_score":round(metadata_relevance,4),"index_version":row.get("embedding_version") or metadata.get("index_version"),"metadata_schema_version":metadata.get("metadata_schema_version"),"vector_score":round(semantic,4),"keyword_score":round(keyword,4),"score":round(score,4),"accepted":True,"rejection_reason":rejection_reason})
             elif rejection_reason:
                 confidence_reasons.append(rejection_reason)
         guard_reason = self.answerability_policy.rejection_reason(query, results)
