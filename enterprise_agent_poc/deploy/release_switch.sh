@@ -7,6 +7,7 @@ base=/opt/enterprise-agent-workbench
 release_root="$base/releases/$release_id/enterprise_agent_poc"
 shared_env="$base/shared/enterprise-agent.env"
 runtime_venv="$base/venv"
+runtime_data_dir="$base/shared/runtime-data"
 services=(enterprise-agent-api enterprise-agent-mcp enterprise-agent-worker)
 
 case "$release_id" in
@@ -16,6 +17,8 @@ esac
 [[ -f "$shared_env" ]] || { echo "shared environment file missing" >&2; exit 2; }
 [[ "$(stat -c %a "$shared_env")" =~ ^[0-6]00$ ]] || { echo "shared environment file must not be group/world readable" >&2; exit 2; }
 [[ -x "$runtime_venv/bin/python" && -x "$runtime_venv/bin/uvicorn" ]] || { echo "managed runtime venv missing" >&2; exit 2; }
+mkdir -p "$runtime_data_dir"
+[[ -d "$runtime_data_dir" ]] || { echo "shared runtime data directory missing" >&2; exit 2; }
 
 current_link="$base/release-current"
 previous=$(readlink -f "$current_link" 2>/dev/null || true)
@@ -48,6 +51,7 @@ WorkingDirectory=$release_root
 EnvironmentFile=
 EnvironmentFile=$shared_env
 Environment=PYTHONPATH=$release_root
+Environment=ENTERPRISE_POC_DATA_DIR=$runtime_data_dir
 ExecStart=
 EOF
   if [[ "$service" == enterprise-agent-api ]]; then
