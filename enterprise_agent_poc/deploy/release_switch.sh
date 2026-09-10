@@ -61,7 +61,16 @@ ln -sfn "$release_root" "$current_link"
 systemctl daemon-reload
 systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
 for service in "${services[@]}"; do systemctl is-active --quiet "$service.service"; done
-curl --fail --silent --show-error http://127.0.0.1:18090/api/health >/dev/null
+for attempt in $(seq 1 30); do
+  if curl --fail --silent --show-error http://127.0.0.1:18090/api/health >/dev/null; then
+    break
+  fi
+  if [[ "$attempt" == 30 ]]; then
+    echo "API health did not become ready within 30 seconds" >&2
+    exit 1
+  fi
+  sleep 1
+done
 trap - ERR
 rm -rf "$backup"
 printf '{"status":"switched","release_id":"%s","previous_release":"%s"}\n' "$release_id" "${previous:-none}"
