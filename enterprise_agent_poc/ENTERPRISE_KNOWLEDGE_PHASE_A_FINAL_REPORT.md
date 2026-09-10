@@ -1,7 +1,8 @@
 # Enterprise Knowledge Phase A 最终生产验收
 
-验收日期：2026-09-10  
-验收范围：`Enterprise Knowledge｜Phase A Final Production Gate`  
+验收日期：2026-09-10
+
+验收范围：`Enterprise Knowledge｜Phase A Final Production Gate`
 生产租户：`zhiy-e-intelligence`
 
 ## 最终结论
