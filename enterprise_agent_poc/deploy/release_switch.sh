@@ -35,8 +35,8 @@ trap 'rollback; exit 1' ERR
 "$runtime_venv/bin/pip" check
 set -a; . "$shared_env"; set +a
 cd "$release_root"
-"$runtime_venv/bin/python" scripts/migrate.py up
-"$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env" | grep -q '"matches": true'
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py up
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env" | grep -q '"matches": true'
 
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"
@@ -46,6 +46,7 @@ for service in "${services[@]}"; do
 [Service]
 WorkingDirectory=$release_root
 EnvironmentFile=$shared_env
+Environment=PYTHONPATH=$release_root
 ExecStart=
 EOF
   if [[ "$service" == enterprise-agent-api ]]; then
