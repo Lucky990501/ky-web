@@ -80,6 +80,9 @@ def diagnose(tenant_id: str) -> dict:
             top_level[heading.strip()] += 1
     return {
         "tenant_id": tenant_id,
+        "embedding_provider": settings.embedding_provider,
+        "embedding_model": settings.embedding_model,
+        "embedding_dimension": settings.embedding_dimension,
         "file_count": len(files),
         "chunk_count": len(rows),
         "embedding_versions": dict(sorted(versions.items())),

@@ -32,7 +32,7 @@ class KnowledgeQueryIntent(str, Enum):
 
 
 _INTENT_SIGNALS: dict[KnowledgeQueryIntent, tuple[tuple[str, float], ...]] = {
-    KnowledgeQueryIntent.HISTORICAL_DATE: (("历史日期", 4), ("历史时间", 4), ("过往", 3), ("以往", 3), ("以前", 3), ("历史记录", 3), ("日期", 1)),
+    KnowledgeQueryIntent.HISTORICAL_DATE: (("以往活动时间", 6), ("过往活动时间", 6), ("历史活动时间", 6), ("历史日期", 4), ("历史时间", 4), ("过往", 3), ("以往", 3), ("以前", 3), ("历史记录", 3), ("日期", 1)),
     KnowledgeQueryIntent.EVENT_WORKFLOW: (("流程规则", 4), ("执行规范", 4), ("活动流程", 3), ("组织步骤", 3), ("注意事项", 3), ("落地", 2), ("流程", 2), ("规范", 2), ("规则", 1)),
     KnowledgeQueryIntent.USAGE: (("使用说明", 4), ("使用规则", 4), ("阅读方法", 4), ("如何使用", 3), ("怎么用", 3), ("工作流", 2), ("隐私", 2), ("字段", 2), ("用途", 2)),
     KnowledgeQueryIntent.AI_KNOWLEDGE: (("问答知识库", 5), ("问答库", 4), ("知识库", 3), ("问答资料", 3), ("资料说明", 3), ("活动问答", 3), ("报名", 2)),

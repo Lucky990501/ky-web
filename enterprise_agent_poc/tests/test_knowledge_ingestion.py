@@ -153,6 +153,7 @@ def test_structured_date_record_recovers_historical_index_without_category_label
 
 def test_lightweight_query_intent_prefers_stronger_category_phrases():
     assert detect_query_intent("如何安排一场教师交流会的排期？") is KnowledgeQueryIntent.EVENT_SESSION
+    assert detect_query_intent("如何找到以往活动时间？") is KnowledgeQueryIntent.HISTORICAL_DATE
     assert detect_query_intent("项目有哪些资料说明？") is KnowledgeQueryIntent.AI_KNOWLEDGE
     assert detect_query_intent("请推荐一些延伸阅读") is KnowledgeQueryIntent.RECOMMENDED_READING
     assert detect_query_intent("这段自由文本没有分类信号") is KnowledgeQueryIntent.UNKNOWN
