@@ -12,6 +12,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+if sys.path[0] != str(ROOT):
+    sys.path[:] = [str(ROOT), *[item for item in sys.path if item != str(ROOT)]]
+
 from app.knowledge import KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, require_semantic_runtime
 from app.product_store import ProductStore
 from app.settings import Settings
@@ -166,8 +170,7 @@ def main() -> int:
         if position + 1 >= len(args):
             raise ValueError("--section-aliases 需要一个 JSON 文件路径。")
         alias_path = Path(args[position + 1])
-    root = Path(__file__).resolve().parents[1]
-    dataset = json.loads((root / "evals" / "rag_v1_3_dataset.json").read_text(encoding="utf-8"))
+    dataset = json.loads((ROOT / "evals" / "rag_v1_3_dataset.json").read_text(encoding="utf-8"))
     if alias_path:
         payload = json.loads(alias_path.read_text(encoding="utf-8"))
         aliases = payload.get("aliases") if isinstance(payload, dict) else None

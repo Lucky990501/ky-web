@@ -64,3 +64,9 @@ def test_eval_preflight_dataset_requires_fixed_distribution_and_safe_failures():
     with pytest.raises(EvalPreflightError, match="eval_dataset_invalid"):
         validate_dataset([])
     assert safe_failure(EvalPreflightError("tenant_not_found")) == {"status": "failed", "error_type": "preflight_failed", "message": "tenant_not_found"}
+
+
+def test_eval_runner_resolves_the_repository_root_from_its_own_path():
+    from scripts import run_rag_v1_3_eval
+
+    assert (run_rag_v1_3_eval.ROOT / "app" / "knowledge.py").is_file()

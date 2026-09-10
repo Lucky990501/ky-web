@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if sys.path[0] != str(ROOT):
+    sys.path[:] = [str(ROOT), *[item for item in sys.path if item != str(ROOT)]]
 
 from app.knowledge import retrieval_policy_diagnostic
 from app.settings import Settings

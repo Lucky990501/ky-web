@@ -6,6 +6,7 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PYTHON_BIN=${ENTERPRISE_POC_PYTHON_BIN:-python}
 
 cd "$ROOT_DIR"
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 if [ ! -r .env.production ]; then
   printf '%s\n' '{"status":"failed","error_type":"preflight_failed","message":"production_environment_file_missing"}'
   exit 2
