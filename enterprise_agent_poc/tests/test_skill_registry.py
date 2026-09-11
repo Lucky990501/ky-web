@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -108,6 +109,35 @@ def test_published_version_is_immutable_and_rollback_changes_profile_manifest(tm
     assert registry.manifest_for_agent("image-agent") == {"poster-design": "1.0.0"}
 
 
+def test_registry_restart_preserves_an_upgraded_binding(tmp_path):
+    registry = registry_fixture(tmp_path)
+    imported = registry.import_archive("poster-design", "1.1.0", "Poster Design", "upgrade", skill_zip("poster-design", "v1.1"), "user-1")
+    registry.publish(imported["id"], "user-1")
+    registry.bind_agent("image-agent", "poster-design", "1.1.0", "user-1")
+
+    registry.initialize()
+
+    assert registry.manifest_for_agent("image-agent") == {"poster-design": "1.1.0"}
+
+
+def test_new_binding_requires_confirmation_and_can_be_unbound(tmp_path):
+    registry = registry_fixture(tmp_path)
+    with pytest.raises(SkillRegistryError, match="显式确认"):
+        registry.bind_agent("campaign-agent", "poster-design", "1.0.0", "user-1")
+
+    bound = registry.bind_agent(
+        "campaign-agent", "poster-design", "1.0.0", "user-1", allow_new_binding=True
+    )
+    assert bound["skill_manifest"]["poster-design"] == "1.0.0"
+
+    unbound = registry.unbind_agent("campaign-agent", "poster-design")
+    assert "poster-design" not in unbound["skill_manifest"]
+    assert registry.manifest_for_agent("campaign-agent") == {
+        "campaign-planning": "1.0.0",
+        "event-copywriting": "1.0.0",
+    }
+
+
 def test_three_agent_types_discover_only_their_published_bundled_skills(tmp_path):
     registry = registry_fixture(tmp_path)
     for agent_id in ("image-agent", "copywriting-agent", "campaign-agent"):
@@ -143,6 +173,7 @@ def test_runtime_deployment_rejects_manifest_path_traversal(tmp_path):
 
 
 def test_platform_skill_api_is_hidden_from_enterprise_users_and_accepts_native_zip():
+    slug = f"registry-api-{uuid4().hex[:8]}"
     with TestClient(app) as client:
         client.post("/api/v1/auth/login", json={"account": "admin@tenant-b.test", "password": "ChangeMe!2026"})
         assert client.get("/api/v1/platform/skills").status_code == 403
@@ -151,10 +182,16 @@ def test_platform_skill_api_is_hidden_from_enterprise_users_and_accepts_native_z
         assert client.get("/api/v1/me").json()["is_platform_admin"] is True
         response = client.post(
             "/api/v1/platform/skills/import",
-            data={"slug": "registry-api-test", "version": "1.0.0", "name": "Registry API Test", "description": "native"},
-            files={"file": ("registry-api-test.zip", skill_zip("registry-api-test"), "application/zip")},
+            data={"slug": slug, "version": "1.0.0", "name": "Registry API Test", "description": "native"},
+            files={"file": (f"{slug}.zip", skill_zip(slug), "application/zip")},
         )
         assert response.status_code == 201
-        assert response.json()["status"] == "draft"
+        imported = response.json()
+        assert imported["status"] == "draft"
         assert "storage_path" not in response.json()
-        assert any(item["slug"] == "registry-api-test" for item in client.get("/api/v1/platform/skills").json())
+        assert any(item["slug"] == slug for item in client.get("/api/v1/platform/skills").json())
+        assert client.post(f"/api/v1/platform/skill-versions/{imported['id']}/publish").status_code == 200
+        binding_url = f"/api/v1/platform/agents/image-agent/skills/{slug}"
+        assert client.put(binding_url, json={"version": "1.0.0"}).status_code == 409
+        assert client.put(binding_url, json={"version": "1.0.0", "allow_new_binding": True}).status_code == 200
+        assert client.delete(binding_url).status_code == 200

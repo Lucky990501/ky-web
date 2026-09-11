@@ -173,7 +173,7 @@ class SkillRegistry:
                 self._upsert_import(slug_dir.name, version_dir.name, slug_dir.name, "Bundled native Codex Skill", content, None, published=True)
         for agent in CATALOG.values():
             for slug, version in agent.skill_manifest.items():
-                self.bind_agent(agent.id, slug, version, None)
+                self.bind_agent(agent.id, slug, version, None, allow_new_binding=True, preserve_existing=True)
 
     def import_archive(self, slug: str, version: str, name: str, description: str, content: bytes, user_id: str) -> dict:
         if len(slug) > 80 or len(version) > 64:
@@ -273,23 +273,68 @@ class SkillRegistry:
             conn.execute("UPDATE skill_versions SET status='deprecated',deprecated_at=CURRENT_TIMESTAMP WHERE id=?", (version_id,))
         return self._public_version(self.version(version_id))
 
-    def bind_agent(self, agent_id: str, slug: str, version: str, user_id: str | None) -> dict:
+    @staticmethod
+    def _agent_manifest(conn, agent_id: str) -> dict[str, str]:
+        bindings = conn.execute(
+            "SELECT s.slug,v.version FROM agent_skill_bindings b "
+            "JOIN skills s ON s.id=b.skill_id JOIN skill_versions v ON v.id=b.skill_version_id "
+            "WHERE b.agent_id=? AND v.status='published' ORDER BY s.slug",
+            (agent_id,),
+        ).fetchall()
+        return {item["slug"]: item["version"] for item in bindings}
+
+    def bind_agent(
+        self,
+        agent_id: str,
+        slug: str,
+        version: str,
+        user_id: str | None,
+        *,
+        allow_new_binding: bool = False,
+        preserve_existing: bool = False,
+    ) -> dict:
         if agent_id not in CATALOG:
             raise LookupError("Agent Template 不存在。")
         with self._store.connection() as conn:
             row = conn.execute("SELECT s.id AS skill_id,v.id AS version_id FROM skills s JOIN skill_versions v ON v.skill_id=s.id WHERE s.slug=? AND v.version=? AND v.status='published'", (slug, version)).fetchone()
             if not row:
                 raise SkillRegistryError("只能绑定已发布的 Skill version。")
-            conn.execute("INSERT INTO agent_skill_bindings(agent_id,skill_id,skill_version_id,updated_by) VALUES (?,?,?,?) ON CONFLICT(agent_id,skill_id) DO UPDATE SET skill_version_id=excluded.skill_version_id,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP", (agent_id, row["skill_id"], row["version_id"], user_id))
-            bindings = conn.execute("SELECT s.slug,v.version FROM agent_skill_bindings b JOIN skills s ON s.id=b.skill_id JOIN skill_versions v ON v.id=b.skill_version_id WHERE b.agent_id=? AND v.status='published' ORDER BY s.slug", (agent_id,)).fetchall()
-            manifest = {item["slug"]: item["version"] for item in bindings}
+            existing = conn.execute(
+                "SELECT 1 FROM agent_skill_bindings WHERE agent_id=? AND skill_id=?",
+                (agent_id, row["skill_id"]),
+            ).fetchone()
+            if not existing and not allow_new_binding:
+                raise SkillRegistryError("新增 Agent-Skill 绑定需要显式确认。")
+            if not (existing and preserve_existing):
+                conn.execute(
+                    "INSERT INTO agent_skill_bindings(agent_id,skill_id,skill_version_id,updated_by) VALUES (?,?,?,?) "
+                    "ON CONFLICT(agent_id,skill_id) DO UPDATE SET skill_version_id=excluded.skill_version_id,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP",
+                    (agent_id, row["skill_id"], row["version_id"], user_id),
+                )
+            manifest = self._agent_manifest(conn, agent_id)
+            conn.execute("UPDATE agent_templates SET skill_manifest=? WHERE id=?", (json.dumps(manifest, sort_keys=True), agent_id))
+        return {"agent_id": agent_id, "skill_manifest": manifest}
+
+    def unbind_agent(self, agent_id: str, slug: str) -> dict:
+        if agent_id not in CATALOG:
+            raise LookupError("Agent Template 不存在。")
+        with self._store.connection() as conn:
+            skill = conn.execute("SELECT id FROM skills WHERE slug=?", (slug,)).fetchone()
+            if not skill:
+                raise LookupError("Skill 不存在。")
+            removed = conn.execute(
+                "DELETE FROM agent_skill_bindings WHERE agent_id=? AND skill_id=? RETURNING agent_id",
+                (agent_id, skill["id"]),
+            ).fetchone()
+            if not removed:
+                raise LookupError("Agent-Skill 绑定不存在。")
+            manifest = self._agent_manifest(conn, agent_id)
             conn.execute("UPDATE agent_templates SET skill_manifest=? WHERE id=?", (json.dumps(manifest, sort_keys=True), agent_id))
         return {"agent_id": agent_id, "skill_manifest": manifest}
 
     def manifest_for_agent(self, agent_id: str) -> dict[str, str]:
         with self._store.connection() as conn:
-            rows = conn.execute("SELECT s.slug,v.version FROM agent_skill_bindings b JOIN skills s ON s.id=b.skill_id JOIN skill_versions v ON v.id=b.skill_version_id WHERE b.agent_id=? AND v.status='published' ORDER BY s.slug", (agent_id,)).fetchall()
-        return {row["slug"]: row["version"] for row in rows} or dict(CATALOG[agent_id].skill_manifest)
+            return self._agent_manifest(conn, agent_id)
 
     def list_skills(self) -> list[dict]:
         with self._store.connection() as conn:

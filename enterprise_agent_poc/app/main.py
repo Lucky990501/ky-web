@@ -49,7 +49,9 @@ class KnowledgeQueryRequest(BaseModel): query: str = Field(min_length=1, max_len
 class AssetRequest(BaseModel): name: str = Field(min_length=1,max_length=120); asset_type: str; url: str = Field(min_length=1,max_length=2_000); tags: list[str]=[]; description: str=""
 class SaveGenerationRequest(BaseModel): name: str = Field(min_length=1,max_length=120)
 class RuntimeTestRequest(BaseModel): mode: str = Field(pattern="^(ok|enterprise_config)$")
-class SkillBindingRequest(BaseModel): version: str = Field(min_length=5, max_length=64)
+class SkillBindingRequest(BaseModel):
+    version: str = Field(min_length=5, max_length=64)
+    allow_new_binding: bool = False
 class ProfileUpdateRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     email: str = Field(min_length=3, max_length=254)
@@ -521,11 +523,26 @@ async def deprecate_platform_skill(version_id: str, workbench_session: str | Non
 async def bind_platform_skill(agent_id: str, skill_slug: str, payload: SkillBindingRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = require_platform_admin(workbench_session)
     try:
-        return skill_registry.bind_agent(agent_id, skill_slug, payload.version, principal.user_id)
+        return skill_registry.bind_agent(
+            agent_id,
+            skill_slug,
+            payload.version,
+            principal.user_id,
+            allow_new_binding=payload.allow_new_binding,
+        )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except SkillRegistryError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.delete("/api/v1/platform/agents/{agent_id}/skills/{skill_slug}")
+async def unbind_platform_skill(agent_id: str, skill_slug: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    require_platform_admin(workbench_session)
+    try:
+        return skill_registry.unbind_agent(agent_id, skill_slug)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/api/v1/storage/{storage_key:path}")
