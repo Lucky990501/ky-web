@@ -4,6 +4,8 @@
 
 验收环境：本地开发环境，尚未构建或部署新生产 Release。
 
+开发 commit：`f251e12584911c90288b12649b44320e0098ac2b`
+
 ## 已实现
 
 ### Registry 与 Migration
@@ -50,6 +52,7 @@
 | Python compileall | PASS |
 | JavaScript `node --check` | PASS |
 | 完整 pytest | `52 passed` |
+| 明确 commit 干净归档 pytest | `52 passed` |
 | Native ZIP 原样保留 | PASS |
 | ZIP 路径攻击拒绝 | PASS |
 | published 不可覆盖 | PASS |
@@ -62,12 +65,11 @@
 
 ## 未完成
 
-1. 尚未从明确 commit 构建新正式 Release。
-2. 尚未在生产 PostgreSQL 执行 migration `005`。
-3. 尚未指定并受控授权生产平台管理员。
-4. 尚未通过真实浏览器上传三个 Skill ZIP。
-5. 尚未完成生产 Publish → Bind → Runtime Sync → Codex Discovery → 真实 Turn。
-6. 尚未生成最终 `SKILL_REGISTRY_V1_REPORT.md`。
+1. 尚未在生产 PostgreSQL 执行 migration `005`。
+2. 尚未指定并受控授权生产平台管理员。
+3. 尚未通过真实浏览器上传三个 Skill ZIP。
+4. 尚未完成生产 Publish → Bind → Runtime Sync → Codex Discovery → 真实 Turn。
+5. 尚未生成最终 `SKILL_REGISTRY_V1_REPORT.md`。
 
 ## 结论
 
