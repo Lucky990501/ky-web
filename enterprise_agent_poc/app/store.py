@@ -227,6 +227,11 @@ class POCStore:
             row = conn.execute("SELECT * FROM conversations WHERE id=? AND tenant_id=?", (conversation_id, tenant_id)).fetchone()
         return dict(row) if row else None
 
+    def tenant_exists(self, tenant_id: str) -> bool:
+        with self.connection() as conn:
+            row = conn.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+        return row is not None
+
     def conversation_messages(self, conversation_id: str, tenant_id: str, limit: int = 20) -> list[dict]:
         with self.connection() as conn:
             rows = conn.execute(

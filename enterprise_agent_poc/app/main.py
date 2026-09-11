@@ -99,9 +99,12 @@ def current_user(workbench_session: str | None = Cookie(default=None)) -> UserPr
     if not workbench_session:
         raise HTTPException(401, "请先登录。")
     try:
-        return sessions.verify(workbench_session)
+        principal = sessions.verify(workbench_session)
     except AuthenticationError as exc:
         raise HTTPException(401, "登录已失效，请重新登录。") from exc
+    if not product_store.user_by_id(principal.user_id, principal.tenant_id):
+        raise HTTPException(401, "登录主体已不存在，请重新登录。")
+    return principal
 
 def require_admin(workbench_session: str | None) -> UserPrincipal:
     principal=current_user(workbench_session)

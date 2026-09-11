@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from uuid import uuid4
 
-from app.security import RuntimeTokenIssuer
+from app.security import RuntimeTokenIssuer, RuntimePrincipal, TokenError
 from app.store import POCStore
 from app.product_store import ProductStore
 from app.knowledge import KnowledgeRetrievalService
@@ -22,12 +22,12 @@ class PlatformMCPService:
         self._knowledge = KnowledgeRetrievalService(ProductStore(store), settings)
 
     def enterprise_config_get(self, bearer_token: str) -> dict:
-        principal = self._tokens.verify(bearer_token, "enterprise_config:read")
+        principal = self._principal(bearer_token, "enterprise_config:read")
         self._audit(principal.tenant_id, "enterprise_config_get", "completed")
         return self._store.enterprise_config(principal.tenant_id)
 
     def knowledge_search(self, bearer_token: str, query: str, limit: int = 5) -> list[dict]:
-        principal = self._tokens.verify(bearer_token, "knowledge:search")
+        principal = self._principal(bearer_token, "knowledge:search")
         try:
             results = self._knowledge.search(principal.tenant_id, query, limit)
         except Exception:
@@ -37,12 +37,12 @@ class PlatformMCPService:
         return results
 
     def asset_search(self, bearer_token: str, query: str, asset_type: str | None = None) -> list[dict]:
-        principal = self._tokens.verify(bearer_token, "assets:search")
+        principal = self._principal(bearer_token, "assets:search")
         self._audit(principal.tenant_id, "asset_search", "completed")
         return self._store.asset_search(principal.tenant_id, query, asset_type)
 
     async def image_generation(self, bearer_token: str, prompt: str, references: list[str], aspect_ratio: str) -> dict:
-        principal = self._tokens.verify(bearer_token, "image:generate")
+        principal = self._principal(bearer_token, "image:generate")
         self._audit(principal.tenant_id, "image_generation", "started")
         api_key = os.environ.get(self._settings.image_api_key_env)
         if not api_key:
@@ -107,3 +107,9 @@ class PlatformMCPService:
         # Server-side confirmation of an executed MCP tool. Deliberately omit
         # tool arguments and enterprise payloads from this cross-run audit.
         self._store.log_event(None, "mcp.tool", {"tenant_id": tenant_id, "tool": tool_name, "status": status})
+
+    def _principal(self, bearer_token: str, required_scope: str) -> RuntimePrincipal:
+        principal = self._tokens.verify(bearer_token, required_scope)
+        if not self._store.tenant_exists(principal.tenant_id):
+            raise TokenError("Runtime MCP token 对应的 Tenant 已不存在。")
+        return principal

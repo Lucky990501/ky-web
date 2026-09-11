@@ -47,3 +47,18 @@ def test_failed_knowledge_search_is_audited_as_failed(service):
     with pytest.raises(RuntimeError, match="embedding unavailable"):
         mcp.knowledge_search(token, "秋季")
     assert mcp._store.latest_mcp_audit("tenant-a", "knowledge_search")["status"] == "failed"
+
+
+def test_runtime_token_is_rejected_after_tenant_is_deleted(tmp_path):
+    store = POCStore(tmp_path / "poc.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute("INSERT INTO tenants(id,name,poc_api_key) VALUES (?,?,?)", ("temporary", "Temporary", "temporary-key"))
+    issuer = RuntimeTokenIssuer("this-is-a-long-enough-test-token-secret")
+    token = issuer.issue(RuntimePrincipal("temporary", "image-agent", "profile", ("knowledge:search",), int(time.time()) + 60))
+    from app.settings import Settings
+    mcp = PlatformMCPService(store, issuer, Settings.from_env())
+    with store.connection() as conn:
+        conn.execute("DELETE FROM tenants WHERE id=?", ("temporary",))
+    with pytest.raises(TokenError, match="Tenant 已不存在"):
+        mcp.knowledge_search(token, "测试")
