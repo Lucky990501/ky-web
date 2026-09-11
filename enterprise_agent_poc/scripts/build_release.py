@@ -18,8 +18,6 @@ ALLOWED = (
     "enterprise_agent_poc/scripts/",
     "enterprise_agent_poc/skill_packages/",
     "enterprise_agent_poc/deploy/",
-    "enterprise_agent_poc/evals/rag_v1_3_dataset.json",
-    "enterprise_agent_poc/evals/rag-section-aliases-v1.json",
     "enterprise_agent_poc/Dockerfile",
     "enterprise_agent_poc/docker-compose.yml",
     "enterprise_agent_poc/pyproject.toml",
