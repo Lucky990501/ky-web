@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -26,8 +27,11 @@ from scripts.run_rag_v1_3_eval import (
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    tenant_id = args[0] if args and not args[0].startswith("--") else "zhiy-e-intelligence"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("tenant_id", nargs="?", default="zhiy-e-intelligence")
+    parser.add_argument("--expected-chunks", type=int, default=287)
+    args = parser.parse_args()
+    tenant_id = args.tenant_id
     dataset = validate_dataset(json.loads((ROOT / "evals" / "rag_v1_3_dataset.json").read_text(encoding="utf-8")))
     alias_path = ROOT / "evals" / "rag-section-aliases-v1.json"
     alias_payload = json.loads(alias_path.read_text(encoding="utf-8"))
@@ -41,7 +45,7 @@ def main() -> int:
             "AND provider=? AND model=? AND dimension=?",
             (tenant_id, profile.index_version, profile.provider, profile.model, profile.dimension),
         ).fetchone()
-    if not indexed or int(indexed["count"]) != 287:
+    if not indexed or int(indexed["count"]) != args.expected_chunks:
         raise RuntimeError("candidate_index_not_ready")
     service = CandidateKnowledgeRetrievalService(product, settings, profile)
     probe = service.embedding.embed_query_sync("synthetic candidate evaluation readiness probe")
