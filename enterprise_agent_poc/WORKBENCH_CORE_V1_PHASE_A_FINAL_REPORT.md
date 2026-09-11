@@ -2,7 +2,7 @@
 
 验收日期：2026-09-11
 
-最终结论：**BLOCKED**
+最终结论：**PASS WITH ISSUES**
 
 ## Release Identity
 
@@ -29,11 +29,11 @@
 
 ## Browser E2E
 
-**BLOCKED（证据缺口）**。
+**PASS**。
 
-已通过并有浏览器截图：Login → Knowledge → Upload → Processing → ready → Retrieval Test。A/B 页面分别显示上传文件及专属检索正文，证明 UI 上传知识进入 Worker、Embedding 与 pgvector 后可被检索。
+浏览器截图覆盖 Login → Knowledge → Upload → Processing → ready → Retrieval Test；A/B 页面分别显示上传文件及专属检索正文。Tenant A 随后从浏览器进入 Copywriting Agent，对刚上传的知识提问并获得 grounded Final Response。
 
-尚缺同一 Browser Gate 的最后一段截图与关联证据：进入 Agent → 对刚上传文件提问 → `knowledge_search` → Final Response，并保存可关联的 `task_id`、`run_id`、`trace_id`。生产 API/Runtime 的 Agent Grounding 已通过，但不能代替文档明确要求的 Browser UI Gate。浏览器控制桥重试及重置后仍返回 `nodeRepl.fetch request failed`。
+最终 Browser Agent 证据：file ID `39b783fa-c89a-4977-b770-dff2da97770f`，task ID `2552cf82-1cfc-4625-a9a1-9398d121fb8a`，run ID / Trace 主键 `d8db1dec-4545-487d-8fb3-7b4f4fddd01c`，conversation ID `3be43303-ce22-4ba1-92f4-1e2be1461b38`，Codex thread ID `01a08e52-4dda-7ff2-8ef7-215b34a360a7`。生产 Trace 为 completed，`enterprise_config_get`、`asset_search`、`knowledge_search` 全部完成，`tool_calls_completed=true`、`final_response_received=true`；检索输出指向 `a测试.txt`，评分 `0.7342`。截图 SHA-256 为 `BF7E3A22337C64DBC462785DB4B63C8579E38782CBC28889D99D25C7146EABC5`。
 
 ## Agent Grounding
 
@@ -68,8 +68,8 @@ Copywriting、Campaign、Image 分别对不存在价格、不存在课程、不�
 
 ## Known Issues
 
-1. Browser → Agent 的同一 UI 会话最终回答截图和 `task_id` / `run_id` / `trace_id` 关联证据尚未补齐，这是当前唯一核心 Gate 阻塞项。
-2. Codex 内置浏览器控制桥当前返回 `nodeRepl.fetch request failed`；需要恢复控制桥或由用户人工完成该最后一段 UI 验收。
+1. Run Trace 的结构化 `knowledge_retrievals` 解析不了当前 MCP content wrapper，因而该字段出现 `result_count=null` / 空 results；同一 Trace 的 `knowledge_search.output_summary`、file ID、评分和最终页面已提供完整验收证据。建议后续单独修复可观测性解析，不调整 RAG V1.4。
+2. Codex 内置浏览器控制桥曾返回 `nodeRepl.fetch request failed`；本次最后一段由人工浏览器执行并保留脱敏截图，不影响产品链路结果。
 3. 生产安装仍复用受控 venv，因为当前镜像源没有 `openai-codex==0.147.0`；发布脚本会校验依赖与 `pip check`，后续仍建议建立内部 wheelhouse。
 4. “已有 previous release 时的故障注入 rollback”尚未在真实生产数据环境刻意演练；现有自动恢复与基础 rollback 已验证。
 
@@ -78,10 +78,15 @@ Copywriting、Campaign、Image 分别对不存在价格、不存在课程、不�
 | 核心门禁 | 结果 |
 | --- | --- |
 | Tenant A/B Isolation | PASS |
-| Browser Knowledge E2E | BLOCKED |
+| Browser Knowledge E2E | PASS |
 | 3 Agent Grounding | PASS |
 | No-answer Regression | PASS |
 | Thread Resume | PASS |
 | Cleanup | PASS |
 
-由于 Browser Knowledge E2E 仍缺规定证据，本报告结论只能为 **BLOCKED**。当前不写入 `Enterprise Knowledge: STABLE`、`Workbench Core V1: STABLE` 或 `Next Phase: Skill Registry V1`。补齐 Browser → Agent UI 证据并核对 Trace 后，可更新本报告并进行最终稳定状态声明。
+全部核心门禁已经通过。由于仍存在不阻断产品使用的可观测性、依赖供应与深度 rollback 演练事项，本报告最终结论为 **PASS WITH ISSUES**。
+
+- Enterprise Knowledge: **STABLE**
+- RAG Retrieval V1.4: **FROZEN**
+- Workbench Core V1: **STABLE**
+- Next Phase: **Skill Registry V1**
