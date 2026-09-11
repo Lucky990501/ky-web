@@ -23,6 +23,7 @@ from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
 from app.security import RuntimeTokenIssuer
 from app.service import AgentService
 from app.settings import safe_runtime_config_snapshot, settings
+from app.skill_registry import MAX_ARCHIVE_BYTES, SkillRegistry, SkillRegistryError
 from app.skills import SkillDeployment
 from app.store import POCStore
 
@@ -48,6 +49,7 @@ class KnowledgeQueryRequest(BaseModel): query: str = Field(min_length=1, max_len
 class AssetRequest(BaseModel): name: str = Field(min_length=1,max_length=120); asset_type: str; url: str = Field(min_length=1,max_length=2_000); tags: list[str]=[]; description: str=""
 class SaveGenerationRequest(BaseModel): name: str = Field(min_length=1,max_length=120)
 class RuntimeTestRequest(BaseModel): mode: str = Field(pattern="^(ok|enterprise_config)$")
+class SkillBindingRequest(BaseModel): version: str = Field(min_length=5, max_length=64)
 class ProfileUpdateRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     email: str = Field(min_length=3, max_length=254)
@@ -56,9 +58,14 @@ class ProfileUpdateRequest(BaseModel):
 
 store = POCStore(settings.database_url)
 token_issuer = RuntimeTokenIssuer(settings.token_secret)
-manager = CodexRuntimeManager(settings, SkillDeployment(Path(__file__).resolve().parents[1] / "skill_packages"), token_issuer)
+skill_registry = SkillRegistry(
+    store,
+    settings.data_dir / "skill-registry",
+    Path(__file__).resolve().parents[1] / "skill_packages",
+)
+manager = CodexRuntimeManager(settings, SkillDeployment(skill_registry.published_root), token_issuer)
 runtime = CodexRuntimeProvider(manager)
-agents = AgentService(store, runtime, settings)
+agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agent)
 product_store = ProductStore(store)
 task_service = TaskService(product_store, agents)
 knowledge_processing = KnowledgeProcessingService(product_store, settings)
@@ -70,6 +77,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     product_store.initialize()
+    skill_registry.initialize()
     if settings.environment == "production" and settings.embedding_provider != "local-hash":
         product_store.ensure_pgvector_schema(settings.embedding_dimension)
         try:
@@ -84,6 +92,9 @@ async def lifespan(_: FastAPI):
         product_store.create_user("tenant-a", "admin@tenant-a.test", hash_password("ChangeMe!2026"), "Tenant A 管理员", "enterprise_admin")
         product_store.create_user("tenant-a", "member@tenant-a.test", hash_password("ChangeMe!2026"), "Tenant A 成员", "member")
         product_store.create_user("tenant-b", "admin@tenant-b.test", hash_password("ChangeMe!2026"), "Tenant B 管理员", "enterprise_admin")
+        demo_admin = product_store.user_by_email("admin@tenant-a.test")
+        if demo_admin:
+            skill_registry.grant_platform_admin(demo_admin["id"])
     if settings.task_queue == "local":
         for task in product_store.recoverable_tasks():
             asyncio.create_task(task_service.execute(task))
@@ -112,6 +123,13 @@ def require_admin(workbench_session: str | None) -> UserPrincipal:
     return principal
 
 
+def require_platform_admin(workbench_session: str | None) -> UserPrincipal:
+    principal = current_user(workbench_session)
+    if not skill_registry.is_platform_admin(principal.user_id):
+        raise HTTPException(403, "仅平台管理员可操作 Skill Registry。")
+    return principal
+
+
 def profile_response(user: dict) -> dict:
     return {
         "user_id": user["id"],
@@ -121,6 +139,7 @@ def profile_response(user: dict) -> dict:
         "display_name": user["display_name"],
         "email": user["email"],
         "avatar_url": f"/api/v1/me/avatar?v={uuid4().hex}" if user.get("avatar_storage_key") else None,
+        "is_platform_admin": skill_registry.is_platform_admin(user["id"]),
     }
 
 
@@ -177,6 +196,7 @@ async def production_health() -> dict:
 @app.get("/enterprise-config", include_in_schema=False)
 @app.get("/knowledge", include_in_schema=False)
 @app.get("/assets", include_in_schema=False)
+@app.get("/platform/skills", include_in_schema=False)
 async def product_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
@@ -437,6 +457,75 @@ async def delete_asset(asset_id: str,workbench_session: str | None = Cookie(defa
     principal=require_admin(workbench_session)
     if not product_store.delete_asset(principal.tenant_id,asset_id): raise HTTPException(404,"素材不存在。")
     return {"status":"deleted"}
+
+
+@app.get("/api/v1/platform/skills")
+async def list_platform_skills(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+    require_platform_admin(workbench_session)
+    return skill_registry.list_skills()
+
+
+@app.post("/api/v1/platform/skills/import", status_code=201)
+async def import_platform_skill(
+    file: UploadFile = File(...),
+    slug: str = Form(...),
+    version: str = Form(...),
+    name: str = Form(...),
+    description: str = Form(default=""),
+    workbench_session: str | None = Cookie(default=None),
+) -> dict:
+    principal = require_platform_admin(workbench_session)
+    if Path(file.filename or "").suffix.lower() != ".zip":
+        raise HTTPException(415, "仅支持原生 Codex Skill ZIP。")
+    content = await file.read(MAX_ARCHIVE_BYTES + 1)
+    try:
+        return skill_registry.import_archive(slug.strip(), version.strip(), name, description, content, principal.user_id)
+    except SkillRegistryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/platform/skill-versions/{version_id}/test")
+async def test_platform_skill(version_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    require_platform_admin(workbench_session)
+    try:
+        return skill_registry.test_version(version_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SkillRegistryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/v1/platform/skill-versions/{version_id}/publish")
+async def publish_platform_skill(version_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_platform_admin(workbench_session)
+    try:
+        return skill_registry.publish(version_id, principal.user_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SkillRegistryError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/v1/platform/skill-versions/{version_id}/deprecate")
+async def deprecate_platform_skill(version_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    require_platform_admin(workbench_session)
+    try:
+        return skill_registry.deprecate(version_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SkillRegistryError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.put("/api/v1/platform/agents/{agent_id}/skills/{skill_slug}")
+async def bind_platform_skill(agent_id: str, skill_slug: str, payload: SkillBindingRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_platform_admin(workbench_session)
+    try:
+        return skill_registry.bind_agent(agent_id, skill_slug, payload.version, principal.user_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SkillRegistryError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/v1/storage/{storage_key:path}")

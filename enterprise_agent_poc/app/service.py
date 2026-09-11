@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Callable
 
 from app.domain import RuntimeProfile, RuntimeSession
 from app.runtime.base import RuntimeProvider, RuntimeStartError
@@ -25,20 +26,22 @@ class AgentRunError(RuntimeError):
 
 
 class AgentService:
-    def __init__(self, store: POCStore, runtime: RuntimeProvider, settings: Settings) -> None:
+    def __init__(self, store: POCStore, runtime: RuntimeProvider, settings: Settings, skill_manifest_resolver: Callable[[str], dict[str, str]] | None = None) -> None:
         self._store = store
         self._runtime = runtime
         self._settings = settings
+        self._skill_manifest_resolver = skill_manifest_resolver
 
     def profile_for(self, tenant_id: str, agent_id: str) -> RuntimeProfile:
         agent = get_agent(agent_id)
+        skill_manifest = self._skill_manifest_resolver(agent_id) if self._skill_manifest_resolver else agent.skill_manifest
         return RuntimeProfile.build(
             tenant_id=tenant_id,
             agent_id=agent_id,
             model_provider_id=self._settings.model_provider_id,
             model_id=self._settings.model_id,
             reasoning_effort=self._settings.reasoning_effort,
-            skill_manifest=agent.skill_manifest,
+            skill_manifest=skill_manifest,
         )
 
     async def run(self, tenant_id: str, agent_id: str, message: str, conversation_id: str | None = None) -> RunResult:

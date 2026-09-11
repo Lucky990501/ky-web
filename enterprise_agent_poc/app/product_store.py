@@ -67,7 +67,7 @@ class ProductStore:
         with self._store.connection() as conn:
             for agent in CATALOG.values():
                 conn.execute(
-                    "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,allows_image_generation) VALUES (?,?,?,?,?,'enabled','default',?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,description=excluded.description,icon=excluded.icon,credit_cost=excluded.credit_cost,skill_manifest=excluded.skill_manifest,allows_image_generation=excluded.allows_image_generation",
+                    "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,allows_image_generation) VALUES (?,?,?,?,?,'enabled','default',?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,description=excluded.description,icon=excluded.icon,credit_cost=excluded.credit_cost,allows_image_generation=excluded.allows_image_generation",
                     (agent.id, agent.name, agent.slug, agent.description, agent.icon, agent.credit_cost, json.dumps(agent.skill_manifest), agent.allows_image_generation),
                 )
             tenants = conn.execute("SELECT id FROM tenants").fetchall()

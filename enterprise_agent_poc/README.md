@@ -59,3 +59,16 @@ Invoke-RestMethod http://127.0.0.1:8090/api/v1/poc/runs -Method Post -Headers $h
 ## 边界
 
 这不是完整 SaaS：尚未包含登录、后台、上传/RAG pipeline、积分、SSE 和外部客户 API。它是这些能力之前必须先通过的 Runtime 隔离验证。
+
+## Skill Registry V1
+
+Phase A 稳定后，仓库开始提供原生 Codex Skill Registry：
+
+- 平台管理员可在 `/platform/skills` 上传包含 `SKILL.md`、`agents/`、`references/`、`scripts/`、`assets/` 的原生 ZIP；
+- Registry 只保存包、版本、状态和 Agent 绑定，不转换 Skill 内容；
+- 版本状态为 `draft`、`published`、`deprecated`，published 版本不能覆盖；
+- Agent 绑定可以升级或回滚到任意 published 版本；
+- Runtime Profile 从 Registry 解析 Skill Manifest，并只向该 Agent 的 `CODEX_HOME/skills` 同步已绑定版本；
+- 平台权限与企业管理员权限分离。生产环境先运行 migration `005_skill_registry_v1.sql`，再使用 `scripts/grant_platform_admin.py --email <账号>` dry-run，核对后添加 `--execute` 授权。
+
+Skill Registry 不包含企业知识。RAG Retrieval V1.4、Enterprise Knowledge 检索策略、Tenant Isolation 与 Codex Runtime Core 在该阶段保持冻结。
