@@ -8,10 +8,38 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.product_store import ProductStore
 from app.settings import settings
 from app.skill_registry import SkillRegistry
 from app.store import POCStore
+
+
+def grant_platform_admin_access(store: POCStore, registry: SkillRegistry, email: str, execute: bool) -> tuple[int, dict]:
+    normalized_email = email.strip().lower()
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT u.id,u.email,u.tenant_id,u.role,t.name AS tenant_name "
+            "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE LOWER(u.email)=LOWER(?)",
+            (normalized_email,),
+        ).fetchone()
+    if not row:
+        return 2, {"status": "not_found", "email": normalized_email}
+
+    user = dict(row)
+    result = {
+        "status": "dry_run",
+        "user_id": user["id"],
+        "email": user["email"],
+        "tenant_id": user["tenant_id"],
+        "tenant_name": user["tenant_name"],
+        "current_role": user["role"],
+    }
+    if execute:
+        # Deliberately do not initialize schemas here. Production migration 005
+        # must already exist; otherwise the grant fails instead of mutating an
+        # unprepared database through an administrative helper.
+        registry.grant_platform_admin(user["id"])
+        result["status"] = "granted"
+    return 0, result
 
 
 def main() -> int:
@@ -20,20 +48,10 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     store = POCStore(settings.database_url)
-    product_store = ProductStore(store)
-    product_store.initialize()
     registry = SkillRegistry(store, settings.data_dir / "skill-registry", ROOT / "skill_packages")
-    registry.initialize()
-    user = product_store.user_by_email(args.email.strip().lower())
-    if not user:
-        print(json.dumps({"status": "not_found", "email": args.email.strip().lower()}, ensure_ascii=False))
-        return 2
-    result = {"status": "ready" if args.execute else "dry_run", "user_id": user["id"], "email": user["email"], "tenant_id": user["tenant_id"]}
-    if args.execute:
-        registry.grant_platform_admin(user["id"])
-        result["status"] = "granted"
+    exit_code, result = grant_platform_admin_access(store, registry, args.email, args.execute)
     print(json.dumps(result, ensure_ascii=False))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

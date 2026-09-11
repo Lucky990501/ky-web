@@ -12,6 +12,7 @@ from app.product_store import ProductStore
 from app.skill_registry import NativeSkillArchive, SkillRegistry, SkillRegistryError
 from app.skills import SkillDeployment
 from app.store import POCStore
+from scripts.grant_platform_admin import grant_platform_admin_access
 
 
 def skill_zip(slug: str, marker: str = "v1") -> bytes:
@@ -38,6 +39,39 @@ def registry_fixture(tmp_path):
     registry = SkillRegistry(store, tmp_path / "data", bundled)
     registry.initialize()
     return registry
+
+
+def test_platform_admin_grant_dry_run_is_strictly_read_only(tmp_path):
+    store = POCStore(tmp_path / "grant.db")
+    store.seed_demo_data()
+    product_store = ProductStore(store)
+    product_store.initialize()
+    product_store.create_user("tenant-a", "admin@tenant-a.test", "unused", "Tenant A Admin", "enterprise_admin")
+    registry = SkillRegistry(store, tmp_path / "registry", tmp_path / "bundled")
+
+    exit_code, result = grant_platform_admin_access(store, registry, "ADMIN@TENANT-A.TEST", False)
+
+    assert exit_code == 0
+    assert result["status"] == "dry_run"
+    assert result["tenant_id"] == "tenant-a"
+    assert result["current_role"] == "enterprise_admin"
+    assert not registry.data_root.exists()
+    with store.connection() as conn:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='platform_admins'"
+        ).fetchone()
+    assert table is None
+
+
+def test_platform_admin_grant_execute_requires_initialized_registry(tmp_path):
+    registry = registry_fixture(tmp_path)
+    ProductStore(registry._store).create_user(
+        "tenant-a", "admin@tenant-a.test", "unused", "Tenant A Admin", "enterprise_admin"
+    )
+    exit_code, result = grant_platform_admin_access(registry._store, registry, "admin@tenant-a.test", True)
+    assert exit_code == 0
+    assert result["status"] == "granted"
+    assert registry.is_platform_admin(result["user_id"])
 
 
 def test_native_skill_zip_is_preserved_published_and_bound_to_runtime(tmp_path):
