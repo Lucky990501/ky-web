@@ -164,12 +164,12 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 ## 8. 当前开发状态
 
-### Git 快照（2026-09-10）
+### Git 与 Release 快照（2026-09-11）
 
-- 当前分支：`master`。
-- V1.4 已提交：`2bee63d feat: improve RAG v1.4 retrieval metadata`、`d015bc4 fix: refine historical RAG intent`。
-- GitHub `origin/master` 仍落后本地；最近推送因连接被重置失败，需补做同步。
-- 工作树仍有 V1.4 以前已存在的无关修改与未跟踪报告；不得丢弃、覆盖或重置。
+- 当前分支：`master`；本地与 `origin/master` 已同步至验收文档 commit `6da5e65be86d52c8c0ba3c7042629ecc9af69cbc`。
+- 当前生产代码 Release：`20260911-59d67ac`，代码 commit `59d67ac891a5aca57f1d2f41d9d0cf6cd0335bab`，Runtime `openai-codex==0.147.0`。
+- PostgreSQL migrations `001` 至 `004` 已记录应用，pending = 0；API、Platform MCP、Worker 与 `/api/health` 正常。
+- 工作树仍有 Phase A 以前已存在的无关修改和未跟踪文件；不得丢弃、覆盖或重置。
 
 ### Enterprise Knowledge V1.4 生产状态
 
@@ -180,19 +180,18 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 - 固定 40 条最终生产复评：answerable recall 1.00、section recall 0.8667、Top-1 0.6667、grounded precision 0.8667、no-answer rejection 1.00、case pass 0.90。
 - 剩余失败：r09、r16、r19、p08；均为 physical section / alias 口径失败，但 Top-1 canonical_section 正确。正式指标仍按原评测口径判失败。
 - API、MCP、Worker 均 active；`/api/health` 为 `status: ok`、`knowledge: ok`。
-- V1.4 结论为 `PASS WITH ISSUES`，阶段已结束，不得自动开始 Skill Registry。
-- Phase A 最终生产门禁（2026-09-10）为 `BLOCKED`：Tenant A/B、正式浏览器 E2E、三 Agent Grounding、无知识回归与 Thread Resume 缺少本轮生产证据；生产工作树仍不是可从 Commit + Migration + Environment 重建的干净 Release。详见 `enterprise_agent_poc/ENTERPRISE_KNOWLEDGE_PHASE_A_FINAL_REPORT.md`。
+- Phase A 最终生产门禁（2026-09-11）为 `PASS WITH ISSUES`：Tenant A/B Isolation、Browser Knowledge E2E、三个 Agent Grounding、No-answer Regression、Thread Resume 和 Cleanup 全部 PASS。详见 `enterprise_agent_poc/WORKBENCH_CORE_V1_PHASE_A_FINAL_REPORT.md`。
+- 稳定状态已经写入：Enterprise Knowledge `STABLE`、RAG Retrieval V1.4 `FROZEN`、Workbench Core V1 `STABLE`；允许下一阶段进入 Skill Registry V1，但不得把它与新的 RAG 调优混在同一变更中。
 
 ## 9. 待办事项
 
 ### RAG 验收与安全
 
-1. 补做本地 `master` 到 GitHub `origin/master` 的同步；不得 force push。
-2. 若继续提升 r09、r16、r19、p08，优先评估源转换修复、record_type 细分或 Parent-Child Retrieval；不要自动扩大 Alias。
-3. Alias 变更必须由知识内容负责人独立审核，不能从评测输出自动生成。
+1. 保持 RAG Retrieval V1.4 FROZEN；不要在 Skill Registry 阶段顺手调整检索算法、Alias 或评测口径。
+2. 修复 Run Trace 对当前 MCP content wrapper 的结构化解析，使 `knowledge_retrievals` 正确保存 result count、Chunk/File ID、评分及接受/拒绝原因；不得保存正文或凭据。
+3. Alias 变更仍必须由知识内容负责人独立审核，不能从评测输出自动生成。
 4. 保留 Reindex 数据库快照，待人工确认稳定期与删除策略；不要自动删除。
-5. 创建并清理临时 Tenant B，完成上传、检索、MCP Token 和 Agent Grounding 的隔离验收。
-6. 将脱敏后的 query、Chunk/File ID、评分、接受/拒绝原因和检索耗时持久化到 Run Trace。
+5. 若未来重新创建验收 Tenant，必须继续使用受控 Provision/Cleanup 工具，不得手工插入或借用普通 Tenant。
 
 ### 产品能力
 
@@ -205,10 +204,10 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 ### 工程与部署
 
-1. 增加统一 migration runner，实际应用 PostgreSQL `001` 至 `004`。
-2. 为 Docker Compose 明确 pgvector 镜像/安装方案。
-3. 增加 `.env.production.example`，并保持不含真实密钥。
-4. 统一 Docker Compose 与当前 systemd 生产试运行的发布标准。
+1. 建立包含 `openai-codex==0.147.0` 的内部 wheelhouse，减少生产发布对复用 venv 的依赖。
+2. 在低风险窗口补做“已有 previous release 时”的故障注入 rollback 演练。
+3. 为 Docker Compose 明确 pgvector 镜像/安装方案。
+4. 增加 `.env.production.example`，并保持不含真实密钥。
 5. 接入可审计的模型使用量和价格映射，避免猜测成本。
 
 ## 10. 重要设计决策
@@ -229,7 +228,10 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 - V1.4 仍有 r09、r16、r19、p08 四个 physical section / alias 失败；其 canonical Top-K 正确，不应把它们简单解释为类别召回失败。
 - 旧 Markdown 转换仍产生 124 个“记录 N”弱标题；V1.4 metadata 已恢复类别和年份，但展示 section 仍弱。
 - p08 仍受“源文件差异 / 数据冲突 / 切片策略”等维护类 section 排序影响。
-- GitHub 推送当前受网络连接重置影响，生产已部署版本暂时领先 `origin/master`。
+- Run Trace 的结构化 `knowledge_retrievals` 暂时无法解析当前 MCP content wrapper，会出现 `result_count=null` / 空 results；原始正文不应为解决该问题而扩大持久化范围。
+- Codex 内置浏览器控制桥曾持续返回 `nodeRepl.fetch request failed`；Phase A 最终 Browser Gate 已使用人工浏览器截图和生产 Trace 完成验收。
+- 生产发布仍复用受控 venv，因为镜像源没有 `openai-codex==0.147.0`；发布脚本会验证依赖和 `pip check`。
+- 有 previous release 时的深度故障注入 rollback 尚未在真实生产数据环境刻意演练；基础切换与自动恢复已验证。
 - `scripts/verify_runtime_config.py` 和管理员诊断的 `runtime_config` 仅返回 SHA-256 指纹和配置状态，可用于阻断 `.env.production` 与服务进程漂移，不能代替受控发布流程。
 - `knowledge_search` 已在检索实际成功后才记录 `completed`，失败时记录 `failed`。
 - `KnowledgeRetrievalService` 在无 Chunk 结果时会回退到旧 `knowledge_documents` 文本检索路径；它仍带 Tenant 条件，但需要明确其是否应参与严格生产 RAG。
@@ -243,12 +245,11 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 建议按以下顺序推进：
 
-1. **完成 Phase A 核心阻塞项**：建立临时 Tenant 的安全 Provision/Cleanup 能力，恢复正式浏览器 E2E，并在隔离租户中完成三 Agent、无知识和 Resume 的生产证据。
-2. **收口生产 Release**：从明确 commit 建立独立 release，应用可记录的 migrations、注入环境配置、健康检查并保留回滚点；不要覆盖当前历史工作树。
-3. **同步 Git 远端**：网络恢复后将本地 `master` 正常推送至 `origin/master`，禁止改写历史。
-4. **仅在 Phase A PASS 后进入 Skill Registry V1**：在此之前保持 RAG Retrieval V1.4 FROZEN，不新增 RAG 算法。
-5. **收口 Trace 与数据治理**：持久化必要的脱敏检索证据，制定内容保留策略。
-6. **补齐产品管理面**：成员、Tenant/Agent 管理、素材上传、账户安全和计费。
+1. **进入 Skill Registry V1**：先冻结范围、数据模型、版本/启停/回滚规则和验收门禁；保持 RAG Retrieval V1.4 FROZEN。
+2. **修复 Trace 可观测性解析**：只持久化脱敏检索证据，补充测试并确认不记录正文、Token 或隐藏推理。
+3. **补强发布工程**：建立内部 wheelhouse，并安排 previous-release 故障注入 rollback 演练。
+4. **补齐产品管理面**：成员、Tenant/Agent 管理、素材上传、账户安全和计费。
+5. **继续执行阶段验收纪律**：每完成一个独立阶段即更新 Markdown 验收文档；生产结论必须以当前 Release 与真实证据为准。
 
 ## 接管规则
 
