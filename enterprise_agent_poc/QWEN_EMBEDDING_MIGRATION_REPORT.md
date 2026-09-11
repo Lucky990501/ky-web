@@ -175,8 +175,10 @@ Release Candidate 已在本地生成并完成来源与敏感文件校验：
 | 项目 | 结果 |
 |---|---|
 | origin/master | `351ed6628dbd75d48f95f6b2f07cf867648f83ea` |
-| Release ID | `20260911-351ed66` |
-| Archive SHA-256 | `003804b0902dd54e3eba15ea9601ef69b4ed0e4823165c5c82258dfe03a423b9` |
+| Initial Release ID | `20260911-351ed66` |
+| Current Release ID | `20260911-9b6cb93` |
+| Current source commit | `9b6cb9384f61425e7b23a0a50caaa80bb97a72f2` |
+| Current Archive SHA-256 | `ad5a4bb306152d1738e8d01d6b819d67098b3a03e8ad2ccd981e8779ec410080` |
 | Release 禁止文件扫描 | 0 项 |
 | Migration 006 切换前 / 切换后 | pending / applied |
 | Migration pending | 0 |
@@ -184,11 +186,11 @@ Release Candidate 已在本地生成并完成来源与敏感文件校验：
 | active provider/model | `openai-compatible` / `text-embedding-3-small`，未修改 |
 | active dimension/index | 1536 / `rag-index-v2`，未修改 |
 
-已通过独立 Release 目录、shared environment、config verification、systemd controlled switch 和旧 Release 保留机制完成发布。即时及重启后 `/api/health` 均为 HTTP 200，但 `knowledge=degraded`：现行 `text-embedding-3-small` Gateway 的启动连通性探针失败。该问题发生在旧 active Provider，migration 006 未切换 Provider、Model 或 Index，也未修改 RAG 策略。
+已通过独立 Release 目录、shared environment、config verification、systemd controlled switch 和旧 Release 保留机制完成发布。初始 Release 曾因现行 Gateway 启动探针失败显示 `knowledge=degraded`；切换至参数化 288 Gate 的当前 Release 后，`/api/health` 为 `status=ok, knowledge=ok`。migration 006 未切换 Provider、Model 或 Index，也未修改 RAG 策略。
 
-## Stage 4｜Re-Embedding 预检
+## Stage 4｜288 Chunk Re-Embedding
 
-状态：`BLOCKED`
+状态：`PASS`
 
 首次流水线因凭据文件使用全角冒号分隔而在解析阶段标记 `TEST_INVALID`；兼容解析后再次执行，dry-run 在旧索引完整性 Gate 停止，未调用百炼、未写入候选向量。
 
@@ -200,18 +202,36 @@ Release Candidate 已在本地生成并完成来源与敏感文件校验：
 | `a测试.txt` | ready | 1 |
 | 合计 | ready | 288 |
 
-旧索引当前为 `288 total / 288 rag-index-v2 / 288 vectors / 288 model-valid`；候选索引为 0。原任务指定“当前 287 Chunk”，与生产实时状态相差 1 个 Chunk，因此安全门禁拒绝按 287 继续。两次失败后均确认临时凭据和执行器已删除，失败 summary 完整读取后也已删除。
+旧索引预检为 `288 total / 288 rag-index-v2 / 288 vectors / 288 model-valid`。原任务指定“当前 287 Chunk”，与生产实时状态相差 1 个 Chunk，因此安全门禁先按 287 拒绝继续。
 
-用户已确认以生产实时状态为准，将目标调整为全部 288 Chunk。固定40条 Eval runner 已改为显式接收 `--expected-chunks 288`，避免绕过数量门禁；隔离测试目录中的全量回归为 66 passed、1 条既有弃用警告。新的不可变 Release 尚待生成和发布。
+用户确认以生产实时状态为准后，当前 Release 使用显式 `--expected-chunks 288` 完成候选生成。数据库复核：
+
+| 检查项 | 结果 |
+|---|---:|
+| `rag-index-v2` 总数 / 有效向量 | 288 / 288 |
+| `rag-index-v3-qwen` 总数 / 有效向量 | 288 / 288 |
+| 旧 Profile | `openai-compatible / text-embedding-3-small / 1536 / active` |
+| 新 Profile | `aliyun-bailian / qwen3.7-text-embedding / 1536 / candidate` |
+| active index switched | false |
+| 旧向量删除或覆盖 | 0 |
+
+新旧向量存储在不同表与 index_version 下，候选检索显式过滤 tenant、provider、model、dimension 和 index_version，未发生 document/query vector 混用。
+
+## Stage 5｜固定40条 Eval
+
+状态：`BLOCKED`
+
+Re-Embedding 完成后，Eval runner 在读取固定数据集前停止并标记 `TEST_INVALID: FileNotFoundError`。根因是 Release 构建白名单遗漏 `evals/rag_v1_3_dataset.json` 与 `evals/rag-section-aliases-v1.json`；不是模型、向量或检索结果失败。
+
+已在本地将上述两个明确文件加入 Release 白名单，未包含历史 Eval results，也未修改数据集、Section Alias、Query Guard、Confidence Gate、Canonical Metadata 或 Metadata Boost。隔离目录全量测试为 66 passed、1 条既有弃用警告。修复尚待形成并发布新的不可变 commit。
 
 以下阶段均尚未执行：
 
-1. 发布支持显式 288 Chunk Gate 的新不可变 Release；
-2. 完成 Qwen 1536 维 Re-Embedding 并验证新旧向量完全隔离；
-3. 使用固定 `rag-v1.3` 40 条数据集进行不改策略的对照 Eval；
-4. 三个 Agent Grounding 回归；
-5. 满足全部切换条件后等待人工确认；
-6. 人工确认前不切换 active index，不删除旧索引。
+1. 发布包含两个固定 Eval 输入文件的新不可变 Release；
+2. 使用固定 `rag-v1.3` 40 条数据集进行不改策略的对照 Eval；
+3. 三个 Agent Grounding 回归；
+4. 满足全部切换条件后等待人工确认；
+5. 人工确认前不切换 active index，不删除旧索引。
 
 ## 下一阶段
 
