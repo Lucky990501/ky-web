@@ -56,7 +56,10 @@ def main() -> int:
         conn.execute("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE tenant_id=?)", (TEST_TENANT_ID,))
         conn.execute("DELETE FROM conversation_owners WHERE conversation_id IN (SELECT id FROM conversations WHERE tenant_id=?)", (TEST_TENANT_ID,))
         conn.execute("DELETE FROM execution_events WHERE conversation_id IN (SELECT id FROM conversations WHERE tenant_id=?)", (TEST_TENANT_ID,))
-        for table in ("run_traces", "generations", "assets", "knowledge_documents", "knowledge_bases", "knowledge_files", "tasks", "conversations", "credit_transactions", "tenant_agent_instances", "credit_accounts", "enterprise_configs", "users"):
+        conn.execute("DELETE FROM asset_metadata WHERE asset_id IN (SELECT id FROM assets WHERE tenant_id=?)", (TEST_TENANT_ID,))
+        # Delete children before parents even when a deployment has stricter
+        # legacy foreign keys without ON DELETE CASCADE.
+        for table in ("run_traces", "generations", "knowledge_chunks", "knowledge_documents", "knowledge_files", "knowledge_bases", "assets", "tasks", "conversations", "credit_transactions", "tenant_agent_instances", "credit_accounts", "enterprise_configs", "users"):
             conn.execute(f"DELETE FROM {table} WHERE tenant_id=?", (TEST_TENANT_ID,))
         conn.execute("DELETE FROM tenants WHERE id=?", (TEST_TENANT_ID,))
     runtime_root = settings.data_dir / "runtime" / TEST_TENANT_ID
