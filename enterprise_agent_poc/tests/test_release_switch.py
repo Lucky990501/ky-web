@@ -31,3 +31,13 @@ def test_release_switch_health_gate_requires_healthy_production_json():
     assert 'data.get("status") == "ok"' in source
     assert 'data.get("knowledge") == "ok"' in source
     assert 'data.get("environment") == "production"' in source
+
+
+def test_release_switch_health_timeout_rolls_back_before_exiting():
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    timeout_start = source.index('if [[ "$attempt" == 30 ]]; then')
+    timeout_end = source.index("  sleep 1", timeout_start)
+    timeout_block = source[timeout_start:timeout_end]
+
+    assert timeout_block.index("rollback") < timeout_block.index("exit 1")

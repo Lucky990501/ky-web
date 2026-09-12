@@ -83,6 +83,7 @@ for attempt in $(seq 1 30); do
   fi
   if [[ "$attempt" == 30 ]]; then
     echo "API health did not become ready within 30 seconds" >&2
+    rollback
     exit 1
   fi
   sleep 1
