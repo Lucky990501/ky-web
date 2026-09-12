@@ -1,5 +1,8 @@
 -- History/project listing and authenticated image reads introduced in V1.
 -- Keep this migration append-only: existing migration checksums are immutable.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
+
 CREATE INDEX IF NOT EXISTS idx_tasks_history
     ON tasks(tenant_id, user_id, conversation_id, created_at, id);
 

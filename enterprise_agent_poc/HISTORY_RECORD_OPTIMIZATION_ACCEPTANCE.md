@@ -73,6 +73,14 @@
 - 运行中的 SSE 轮询不查询 generation，仅在终态查询，减少数据库压力。
 - 静态资源版本升级为 `history-v1`，避免旧缓存遮蔽新功能。
 
+### 3.6 受控发布安全
+
+- systemd drop-in 仅在依赖、migration 和配置指纹预检通过后备份并进入切换阶段，前置失败不再误删现网配置或重启稳定服务。
+- 自动回滚会先关闭递归 ERR trap，并在单项恢复失败时继续完成其余恢复步骤。
+- 配置指纹按顶层 `matches` 严格判断；单个字段的 `matches=true` 不能掩盖整体不一致。
+- 健康门禁除 HTTP 成功外，还要求 `status=ok`、`knowledge=ok`、`environment=production`。
+- migration 007 设置有限 lock/statement timeout，无法安全取得锁时中止发布，不无限阻塞生产写入。
+
 ## 4. 修改文件
 
 - `app/product_store.py`
@@ -84,17 +92,22 @@
 - `app/static/workbench.css`
 - `app/static/index.html`
 - `migrations/postgres/007_history_storage_indexes.sql`
+- `deploy/release_switch.sh`
+- `scripts/verify_runtime_config.py`
 - `tests/test_history.py`
 - `tests/test_run_trace.py`
 - `tests/test_storage.py`
+- `tests/test_release_switch.py`
+- `tests/test_knowledge_ingestion.py`
 
 ## 5. 自动化验收
 
 - Python compileall：PASS
 - JavaScript `node --check`：PASS
+- Git Bash `bash -n deploy/release_switch.sh`：PASS
 - `git diff --check`：PASS
 - 历史、存储、任务定向回归：29 passed
-- 完整 pytest：83 passed，1 个既有 Starlette TestClient 弃用警告
+- 完整 pytest：86 passed，1 个既有 Starlette TestClient 弃用警告
 
 新增回归覆盖：
 
@@ -109,6 +122,7 @@
 - 跨租户或非法图片对象 Key 不得关联 generation、不得完成任务或触发扣费。
 - `/conversations` 及三个 Agent 项目路径的直接访问均返回当前应用壳。
 - 历史访问索引在 SQLite 和 append-only migration 中均存在。
+- 发布配置整体不一致时 CLI 返回非零；发布脚本备份时序、严格健康 JSON 和回滚防递归均有回归门禁。
 
 ## 6. 浏览器验收
 

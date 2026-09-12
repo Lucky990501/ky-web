@@ -53,8 +53,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--environment-file", required=True, type=Path)
     args = parser.parse_args()
-    print(json.dumps(compare(parse_env_file(args.environment_file), dict(__import__("os").environ)), ensure_ascii=False))
-    return 0
+    result = compare(parse_env_file(args.environment_file), dict(__import__("os").environ))
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result["matches"] else 2
 
 
 if __name__ == "__main__":

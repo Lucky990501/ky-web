@@ -20,30 +20,40 @@ esac
 mkdir -p "$runtime_data_dir"
 [[ -d "$runtime_data_dir" ]] || { echo "shared runtime data directory missing" >&2; exit 2; }
 
+"$runtime_venv/bin/python" -c 'import openai_codex'
+"$runtime_venv/bin/pip" check
+set -a; . "$shared_env"; set +a
+cd "$release_root"
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py up
+config_result=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env")
+printf '%s\n' "$config_result"
+CONFIG_RESULT="$config_result" "$runtime_venv/bin/python" -c 'import json, os; data = json.loads(os.environ["CONFIG_RESULT"]); raise SystemExit(0 if data.get("matches") is True else 2)'
+
 current_link="$base/release-current"
 previous=$(readlink -f "$current_link" 2>/dev/null || true)
 backup=$(mktemp -d "$base/.release-switch.XXXXXX")
+for service in "${services[@]}"; do
+  dropin="/etc/systemd/system/$service.service.d/release.conf"
+  if [[ -f "$dropin" ]]; then
+    cp "$dropin" "$backup/$service.conf"
+  fi
+done
 rollback() {
+  trap - ERR
+  set +e
   if [[ -n "$previous" && -d "$previous" ]]; then ln -sfn "$previous" "$current_link"; else rm -f "$current_link"; fi
   for service in "${services[@]}"; do
     dropin="/etc/systemd/system/$service.service.d/release.conf"
     if [[ -f "$backup/$service.conf" ]]; then install -D -m 0644 "$backup/$service.conf" "$dropin"; else rm -f "$dropin"; fi
   done
   systemctl daemon-reload
-  systemctl restart "${services[@]/%/.service}" || true
+  systemctl restart "${services[@]/%/.service}"
+  rm -rf "$backup"
 }
 trap 'rollback; exit 1' ERR
 
-"$runtime_venv/bin/python" -c 'import openai_codex'
-"$runtime_venv/bin/pip" check
-set -a; . "$shared_env"; set +a
-cd "$release_root"
-PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py up
-PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env" | grep -q '"matches": true'
-
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"
-  [[ -f "$dropin" ]] && cp "$dropin" "$backup/$service.conf"
   mkdir -p "$(dirname "$dropin")"
   cat > "$dropin" <<EOF
 [Service]
@@ -67,7 +77,8 @@ systemctl daemon-reload
 systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
 for service in "${services[@]}"; do systemctl is-active --quiet "$service.service"; done
 for attempt in $(seq 1 30); do
-  if curl --fail --silent --show-error http://127.0.0.1:18090/api/health >/dev/null; then
+  if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
+    | "$runtime_venv/bin/python" -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
     break
   fi
   if [[ "$attempt" == 30 ]]; then

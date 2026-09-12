@@ -6,8 +6,8 @@ import pytest
 from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, OpenAICompatibleEmbeddingProvider, QueryAnswerabilityPolicy, RetrievalConfidencePolicy, require_semantic_runtime, retrieval_policy_diagnostic, runtime_diagnostic, sectionize, set_embedding_probe
 from app.knowledge_metadata import METADATA_SCHEMA_VERSION, RAG_INDEX_VERSION, KnowledgeQueryIntent, build_chunk_metadata, detect_query_intent, embedding_input, metadata_dict, metadata_score
 from app.product_store import ProductStore
-from app.settings import safe_runtime_config_snapshot, settings
-from scripts.verify_runtime_config import compare, parse_env_file
+from app.settings import RUNTIME_CONFIG_ENV_NAMES, safe_runtime_config_snapshot, settings
+from scripts.verify_runtime_config import compare, main as verify_runtime_config_main, parse_env_file
 from app.storage import storage_provider
 from app.store import POCStore
 
@@ -218,3 +218,20 @@ def test_runtime_config_verifier_parses_and_compares_without_exposing_values(tmp
     assert same["matches"] is True
     assert changed["matches"] is False
     assert "embedding-v1" not in str(changed)
+
+
+def test_runtime_config_verifier_returns_nonzero_for_mismatch(tmp_path, monkeypatch, capsys):
+    path = tmp_path / ".env.production"
+    path.write_text("APP_ENV=production\nEMBEDDING_MODEL=embedding-v1\n", encoding="utf-8")
+    for name in RUNTIME_CONFIG_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("EMBEDDING_MODEL", "embedding-v1")
+    monkeypatch.setattr("sys.argv", ["verify_runtime_config.py", "--environment-file", str(path)])
+
+    assert verify_runtime_config_main() == 0
+    monkeypatch.setenv("EMBEDDING_MODEL", "embedding-v2")
+    assert verify_runtime_config_main() == 2
+    output = capsys.readouterr().out
+    assert "embedding-v1" not in output
+    assert "embedding-v2" not in output
