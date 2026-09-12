@@ -10,6 +10,12 @@ from app.agent_catalog import CATALOG, get_agent
 from app.store import POCStore
 
 
+class ResultPersistenceError(RuntimeError):
+    def __init__(self, stage: str) -> None:
+        super().__init__(f"运行结果持久化失败（stage={stage}）。")
+        self.stage = stage
+
+
 class ProductStore:
     def __init__(self, store: POCStore) -> None:
         self._store = store
@@ -179,12 +185,141 @@ class ProductStore:
         with self._store.connection() as conn:
             conn.execute("INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,?)", (conversation_id,user_id,title))
 
-    def add_message(self, conversation_id: str, role: str, content: str) -> None:
+    def add_message(self, conversation_id: str, role: str, content: str, *, message_id: str | None = None) -> str:
         """Persist user-visible chat content only; never persist hidden reasoning."""
         if role not in {"user", "assistant"}:
             raise ValueError("不支持的消息角色。")
+        message_id = message_id or str(uuid.uuid4())
         with self._store.connection() as conn:
-            conn.execute("INSERT INTO messages(id,conversation_id,role,content,created_at) VALUES (?,?,?,?,?)", (str(uuid.uuid4()), conversation_id, role, content[:12000], datetime.now(timezone.utc).isoformat()))
+            conn.execute("INSERT OR IGNORE INTO messages(id,conversation_id,role,content,created_at) VALUES (?,?,?,?,?)", (message_id, conversation_id, role, content[:12000], datetime.now(timezone.utc).isoformat()))
+        return message_id
+
+    def complete_task_success(
+        self,
+        task: dict,
+        *,
+        run_id: str,
+        conversation_id: str,
+        response: str,
+        trace_payload: dict,
+        image_storage_key: str | None = None,
+    ) -> dict:
+        """Atomically persist a successful product result and its final Trace.
+
+        Deterministic record IDs and task-scoped charging make replay safe after
+        a worker interruption. Provider execution is deliberately outside this
+        method, so a persistence retry never invokes the model or image tool.
+        """
+        task_id, tenant_id, user_id = task["id"], task["tenant_id"], task["user_id"]
+        assistant_message_id = f"task:{task_id}:assistant"
+        user_message_id = f"task:{task_id}:user"
+        generation_id = f"task:{task_id}:generation" if image_storage_key else None
+        stage = "task_validation"
+        try:
+            with self._store.connection() as conn:
+                current = conn.execute(
+                    "SELECT status,agent_id FROM tasks WHERE id=? AND tenant_id=? AND user_id=?",
+                    (task_id, tenant_id, user_id),
+                ).fetchone()
+                if not current:
+                    raise LookupError("任务不存在。")
+                if current["status"] == "completed":
+                    return {
+                        "assistant_message_id": assistant_message_id,
+                        "generation_id": generation_id,
+                        "replayed": True,
+                    }
+
+                stage = "conversation_owner"
+                conn.execute(
+                    "INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,'新会话')",
+                    (conversation_id, user_id),
+                )
+                if not task.get("conversation_id"):
+                    stage = "user_message"
+                    conn.execute(
+                        "INSERT OR IGNORE INTO messages(id,conversation_id,role,content,created_at) VALUES (?,?,'user',?,?)",
+                        (user_message_id, conversation_id, task["input_text"][:12000], datetime.now(timezone.utc).isoformat()),
+                    )
+
+                stage = "assistant_message"
+                conn.execute(
+                    "INSERT OR IGNORE INTO messages(id,conversation_id,role,content,created_at) VALUES (?,?,'assistant',?,?)",
+                    (assistant_message_id, conversation_id, response[:12000], datetime.now(timezone.utc).isoformat()),
+                )
+
+                stage = "artifact_association"
+                if get_agent(current["agent_id"]).allows_image_generation:
+                    if not image_storage_key:
+                        raise ValueError("图片任务缺少已持久化 storage key。")
+                    conn.execute(
+                        "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (generation_id, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gateway-managed-gpt-image-2", image_storage_key, "image/png"),
+                    )
+
+                stage = "task_result"
+                result_json = json.dumps(
+                    {"run_id": run_id, "assistant_message_id": assistant_message_id, "generation_id": generation_id},
+                    ensure_ascii=False,
+                )
+                conn.execute(
+                    "INSERT INTO task_results(task_id,final_response,result_json) VALUES (?,?,?) "
+                    "ON CONFLICT(task_id) DO UPDATE SET final_response=excluded.final_response,result_json=excluded.result_json",
+                    (task_id, response, result_json),
+                )
+
+                stage = "credit_charge"
+                charged = conn.execute("SELECT 1 FROM credit_transactions WHERE task_id=?", (task_id,)).fetchone()
+                if not charged:
+                    amount = get_agent(current["agent_id"]).credit_cost
+                    updated = conn.execute(
+                        "UPDATE credit_accounts SET balance=balance-?,updated_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND balance>=?",
+                        (amount, tenant_id, amount),
+                    )
+                    if updated.rowcount != 1:
+                        raise ValueError("任务完成时积分余额不足。")
+                    conn.execute(
+                        "INSERT INTO credit_transactions(id,tenant_id,user_id,task_id,amount,reason) VALUES (?,?,?,?,?,?)",
+                        (f"task:{task_id}:charge", tenant_id, user_id, task_id, -amount, get_agent(current["agent_id"]).slug),
+                    )
+
+                stage = "run_trace"
+                completed_trace = dict(trace_payload)
+                completed_trace.update(
+                    {
+                        "status": "completed",
+                        "partial_output": False,
+                        "assistant_message_saved": True,
+                        "assistant_message_id": assistant_message_id,
+                        "result_persistence_status": "completed",
+                        "result_persistence_error_stage": None,
+                        "artifact_saved": not get_agent(current["agent_id"]).allows_image_generation or bool(generation_id),
+                        "generation_id": generation_id,
+                        "error": None,
+                    }
+                )
+                updated_trace = conn.execute(
+                    "UPDATE run_traces SET status='completed',payload=?,completed_at=CURRENT_TIMESTAMP WHERE run_id=? AND tenant_id=?",
+                    (json.dumps(completed_trace, ensure_ascii=False), run_id, tenant_id),
+                )
+                if updated_trace.rowcount != 1:
+                    raise LookupError("Run Trace 不存在。")
+
+                stage = "task_status"
+                conn.execute(
+                    "UPDATE tasks SET status='completed',stage='completed',run_id=?,error_code=NULL,conversation_id=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND tenant_id=?",
+                    (run_id, conversation_id, task_id, tenant_id),
+                )
+                conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'completed','任务已完成，正文已返回')", (task_id,))
+        except Exception as exc:
+            if isinstance(exc, ResultPersistenceError):
+                raise
+            raise ResultPersistenceError(stage) from exc
+        return {
+            "assistant_message_id": assistant_message_id,
+            "generation_id": generation_id,
+            "replayed": False,
+        }
 
     def conversation_detail(self, tenant_id: str, user_id: str, conversation_id: str) -> dict | None:
         with self._store.connection() as conn:
@@ -271,9 +406,11 @@ class ProductStore:
             rows=conn.execute("SELECT * FROM generations WHERE tenant_id=? AND user_id=? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?",(tenant_id,user_id,limit)).fetchall()
         return [dict(row) for row in rows]
 
-    def create_generation(self, tenant_id: str, user_id: str, conversation_id: str, task_id: str, storage_key: str, provider: str, model: str) -> None:
+    def create_generation(self, tenant_id: str, user_id: str, conversation_id: str, task_id: str, storage_key: str, provider: str, model: str) -> str:
+        generation_id = f"task:{task_id}:generation"
         with self._store.connection() as conn:
-            conn.execute("INSERT INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()),tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,"image/png"))
+            conn.execute("INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)", (generation_id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,"image/png"))
+        return generation_id
 
     def can_read_storage(self, tenant_id: str, user_id: str, storage_key: str) -> bool:
         with self._store.connection() as conn:

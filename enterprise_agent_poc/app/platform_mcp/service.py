@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from uuid import uuid4
 
 from app.security import RuntimeTokenIssuer, RuntimePrincipal, TokenError
@@ -15,6 +18,11 @@ from app.store import POCStore
 class PlatformMCPService:
     """Tenant-scoped business tools. Tool arguments intentionally have no tenant_id."""
 
+    KNOWLEDGE_MAX_ATTEMPTS = 3
+    # Three underlying embedding calls can each consume the provider's 45s
+    # timeout; the aggregate budget still bounds calls plus backoff.
+    KNOWLEDGE_RETRY_BUDGET_SECONDS = 150.0
+
     def __init__(self, store: POCStore, token_issuer: RuntimeTokenIssuer, settings: Settings) -> None:
         self._store = store
         self._tokens = token_issuer
@@ -28,13 +36,26 @@ class PlatformMCPService:
 
     def knowledge_search(self, bearer_token: str, query: str, limit: int = 5) -> list[dict]:
         principal = self._principal(bearer_token, "knowledge:search")
-        try:
-            results = self._knowledge.search(principal.tenant_id, query, limit)
-        except Exception:
-            self._audit(principal.tenant_id, "knowledge_search", "failed")
-            raise
-        self._audit(principal.tenant_id, "knowledge_search", "completed")
-        return results
+        deadline = time.monotonic() + self.KNOWLEDGE_RETRY_BUDGET_SECONDS
+        for attempt in range(1, self.KNOWLEDGE_MAX_ATTEMPTS + 1):
+            try:
+                results = self._knowledge.search(principal.tenant_id, query, limit)
+            except Exception as exc:
+                retryable, error_type, retry_after = self._retry_policy(exc)
+                self._audit_attempt(principal.tenant_id, "knowledge_search", attempt, "failed", error_type)
+                if not retryable or attempt == self.KNOWLEDGE_MAX_ATTEMPTS:
+                    self._audit(principal.tenant_id, "knowledge_search", "failed")
+                    raise
+                delay = retry_after if retry_after is not None else float(2 ** (attempt - 1))
+                if delay < 0 or time.monotonic() + delay > deadline:
+                    self._audit(principal.tenant_id, "knowledge_search", "failed")
+                    raise
+                time.sleep(delay)
+            else:
+                self._audit_attempt(principal.tenant_id, "knowledge_search", attempt, "completed", None)
+                self._audit(principal.tenant_id, "knowledge_search", "completed")
+                return results
+        raise RuntimeError("knowledge_search retry loop ended unexpectedly")  # pragma: no cover
 
     def asset_search(self, bearer_token: str, query: str, asset_type: str | None = None) -> list[dict]:
         principal = self._principal(bearer_token, "assets:search")
@@ -107,6 +128,45 @@ class PlatformMCPService:
         # Server-side confirmation of an executed MCP tool. Deliberately omit
         # tool arguments and enterprise payloads from this cross-run audit.
         self._store.log_event(None, "mcp.tool", {"tenant_id": tenant_id, "tool": tool_name, "status": status})
+
+    def _audit_attempt(self, tenant_id: str, tool_name: str, attempt: int, status: str, error_type: str | None) -> None:
+        self._store.log_event(
+            None,
+            "mcp.tool.attempt",
+            {"tenant_id": tenant_id, "tool": tool_name, "attempt": attempt, "status": status, "error_type": error_type},
+        )
+
+    @staticmethod
+    def _retry_policy(exc: Exception) -> tuple[bool, str, float | None]:
+        """Classify transient transport failures without retaining response bodies."""
+        try:
+            import httpx
+        except ImportError:  # pragma: no cover - production dependency
+            return False, type(exc).__name__, None
+        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+            return True, "transport", None
+        if not isinstance(exc, httpx.HTTPStatusError):
+            return False, type(exc).__name__, None
+        status = exc.response.status_code
+        if status not in {429, 500, 502, 503, 504}:
+            return False, f"http_{status}", None
+        retry_after = PlatformMCPService._retry_after_seconds(exc.response.headers.get("Retry-After"))
+        return True, f"http_{status}", retry_after
+
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> float | None:
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                return None
 
     def _principal(self, bearer_token: str, required_scope: str) -> RuntimePrincipal:
         principal = self._tokens.verify(bearer_token, required_scope)

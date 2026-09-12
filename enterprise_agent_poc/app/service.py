@@ -20,9 +20,18 @@ class RunResult:
 
 
 class AgentRunError(RuntimeError):
-    def __init__(self, message: str, *, run_id: str, conversation_id: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        run_id: str,
+        conversation_id: str,
+        error_code: str = "runtime_error",
+        failure_stage: str = "runtime",
+    ) -> None:
         super().__init__(message)
         self.run_id, self.conversation_id = run_id, conversation_id
+        self.error_code, self.failure_stage = error_code, failure_stage
 
 
 class AgentService:
@@ -44,7 +53,15 @@ class AgentService:
             skill_manifest=skill_manifest,
         )
 
-    async def run(self, tenant_id: str, agent_id: str, message: str, conversation_id: str | None = None) -> RunResult:
+    async def run(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        message: str,
+        conversation_id: str | None = None,
+        *,
+        defer_result_persistence: bool = False,
+    ) -> RunResult:
         profile = self.profile_for(tenant_id, agent_id)
         agent = get_agent(agent_id)
         is_resume = bool(conversation_id)
@@ -77,7 +94,16 @@ class AgentService:
             "tool_calls": [],
             "lifecycle_events": [],
             "tool_calls_completed": False,
+            "required_tool_calls": {},
+            "required_tool_calls_completed": False,
+            "runtime_status": None,
             "final_response_received": False,
+            "final_response_length": 0,
+            "assistant_message_saved": False,
+            "assistant_message_id": None,
+            "result_persistence_status": "pending" if defer_result_persistence else "not_applicable",
+            "result_persistence_error_stage": None,
+            "partial_output": False,
             "token_usage": {"input_tokens": None, "output_tokens": None},
             "latency_ms": None,
             "estimated_cost": None,
@@ -120,20 +146,44 @@ class AgentService:
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
             turn = await self._runtime.run_turn(session, message)
-            trace = self._completed_trace(trace, turn)
+            trace = self._completed_trace(trace, turn, agent.allows_image_generation)
             trace["lifecycle_events"] = self._startup_events(profile) + trace["lifecycle_events"]
-            required_mcp_failed = any(call["status"].lower().endswith("failed") for call in trace["mcp_calls"])
             has_final_response = bool(turn.text.strip())
-            status = "completed" if turn.status.lower() in {"completed", "success"} and not turn.error and not required_mcp_failed and has_final_response else "failed"
+            runtime_completed = turn.status.lower() in {"completed", "success"} and not turn.error
+            if not runtime_completed:
+                raise AgentRunError(
+                    self._safe_error(turn.error) if turn.error else f"Codex Turn 终态为 {turn.status}。",
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    error_code="runtime_terminal_error",
+                    failure_stage="runtime_terminal",
+                )
+            if not trace["required_tool_calls_completed"]:
+                missing = ", ".join(name for name, item in trace["required_tool_calls"].items() if not item["satisfied"])
+                raise AgentRunError(
+                    f"必需工具依赖未完成：{missing}。",
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    error_code="required_tool_dependency_error",
+                    failure_stage="required_tools",
+                )
+            if not has_final_response:
+                raise AgentRunError(
+                    "Codex Turn 已结束，但未返回非空最终正文。",
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    error_code="empty_final_response",
+                    failure_stage="final_response",
+                )
+            status = "runtime_completed" if defer_result_persistence else "completed"
             trace["status"] = status
-            self._store.log_event(conversation_id, f"turn.{status}", {"run_id": run_id, "token_usage": trace["token_usage"], "latency_ms": turn.latency_ms})
-            if status != "completed":
-                error = self._safe_error(turn.error) if turn.error else "Codex Turn 未返回最终正文。"
-                raise AgentRunError(error, run_id=run_id, conversation_id=conversation_id)
+            self._store.log_event(conversation_id, "turn.completed", {"run_id": run_id, "token_usage": trace["token_usage"], "latency_ms": turn.latency_ms})
             self._store.finish_run_trace(run_id, status, trace, turn.thread_id)
             return RunResult(run_id=run_id, conversation_id=conversation_id, thread_id=turn.thread_id, text=turn.text)
         except Exception as exc:
             trace["status"] = "failed"
+            trace["partial_output"] = bool(trace.get("final_response_received"))
+            trace["failure_stage"] = getattr(exc, "failure_stage", "runtime_start" if isinstance(exc, RuntimeStartError) else "runtime")
             startup_events = self._startup_events(profile)
             lifecycle_events = list(trace.get("lifecycle_events", []))
             if lifecycle_events[: len(startup_events)] != startup_events:
@@ -146,7 +196,13 @@ class AgentService:
                 self._store.log_event(conversation_id, "turn.failed", {"run_id": run_id, "error": trace["error"]})
             if isinstance(exc, AgentRunError):
                 raise
-            raise AgentRunError(trace["error"], run_id=run_id, conversation_id=conversation_id) from exc
+            raise AgentRunError(
+                trace["error"],
+                run_id=run_id,
+                conversation_id=conversation_id,
+                error_code="runtime_start_error" if isinstance(exc, RuntimeStartError) else "runtime_error",
+                failure_stage=trace["failure_stage"],
+            ) from exc
 
     def _startup_events(self, profile: RuntimeProfile) -> list[dict]:
         getter = getattr(self._runtime, "startup_events", None)
@@ -162,14 +218,31 @@ class AgentService:
         return "\n".join(lines)[-12000:]
 
     @staticmethod
-    def _completed_trace(trace: dict, turn) -> dict:
+    def _completed_trace(trace: dict, turn, requires_image_generation: bool = False) -> dict:
         trace = {**trace}
         calls = list(turn.mcp_calls)
         trace["mcp_calls"] = calls
         trace["tool_calls"] = [{"server": call["server"], "tool": call["tool"], "status": call["status"]} for call in calls]
         trace["lifecycle_events"] = list(turn.lifecycle_events)
         trace["tool_calls_completed"] = bool(calls) and all(call.get("status", "").lower() == "completed" for call in calls)
+        required = ["enterprise_config_get", "knowledge_search", "asset_search"]
+        if requires_image_generation:
+            required.append("image_generation")
+        required_status = {}
+        for tool in required:
+            attempts = [call for call in calls if call.get("tool") == tool]
+            completed_attempts = sum(call.get("status", "").lower() == "completed" for call in attempts)
+            required_status[tool] = {
+                "attempts": len(attempts),
+                "completed_attempts": completed_attempts,
+                "failed_attempts": sum(call.get("status", "").lower().endswith("failed") for call in attempts),
+                "satisfied": completed_attempts > 0,
+            }
+        trace["required_tool_calls"] = required_status
+        trace["required_tool_calls_completed"] = all(item["satisfied"] for item in required_status.values())
+        trace["runtime_status"] = turn.status
         trace["final_response_received"] = bool(turn.text.strip())
+        trace["final_response_length"] = len(turn.text.strip())
         trace["knowledge_calls"] = [call for call in calls if call["tool"] == "knowledge_search"]
         trace["knowledge_retrievals"] = [call["retrieval_observation"] for call in trace["knowledge_calls"] if call.get("retrieval_observation")]
         trace["asset_calls"] = [call for call in calls if call["tool"] == "asset_search"]
@@ -189,6 +262,25 @@ class AgentService:
                 artifacts["image_prompt"] = call["input_summary"]
         trace["artifacts"] = artifacts
         return trace
+
+    def mark_persistence_failed(self, run_id: str, tenant_id: str, stage: str) -> None:
+        trace = self._store.run_trace(run_id, tenant_id)
+        if not trace:
+            return
+        payload = trace["payload"]
+        payload.update(
+            {
+                "status": "failed",
+                "partial_output": bool(payload.get("final_response_received")),
+                "assistant_message_saved": False,
+                "result_persistence_status": "failed",
+                "result_persistence_error_stage": stage,
+                "failure_stage": stage,
+                "error": "运行结果持久化失败；未将部分输出标记为成功。",
+            }
+        )
+        self._store.finish_run_trace(run_id, "failed", payload, trace.get("codex_thread_id"))
+        self._store.log_event(trace["conversation_id"], "result.persistence_failed", {"run_id": run_id, "stage": stage})
 
     @staticmethod
     def _safe_error(error: str | None) -> str:
