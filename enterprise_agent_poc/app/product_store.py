@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from app.agent_catalog import CATALOG, get_agent
 from app.store import POCStore
@@ -14,6 +15,45 @@ class ResultPersistenceError(RuntimeError):
     def __init__(self, stage: str) -> None:
         super().__init__(f"运行结果持久化失败（stage={stage}）。")
         self.stage = stage
+
+
+_GENERIC_CONVERSATION_TITLES = {"", "新会话", "新图片会话"}
+_PROJECT_TYPES = {
+    "image-agent": "图片生成项目",
+    "copywriting-agent": "文案创作项目",
+    "campaign-agent": "活动策划项目",
+}
+
+
+def _project_title(agent_id: str, prompt: str | None) -> str:
+    clean = " ".join(str(prompt or "").split())
+    if not clean:
+        return _PROJECT_TYPES.get(agent_id, "智能创作项目")
+    return clean if len(clean) <= 36 else f"{clean[:36]}…"
+
+
+def _agent_view(agent_id: str) -> dict:
+    try:
+        agent = get_agent(agent_id)
+        return {"id": agent.id, "name": agent.name, "icon": agent.icon}
+    except LookupError:
+        return {"id": agent_id, "name": "历史智能体", "icon": "bot"}
+
+
+def _generation_view(item: dict | None) -> dict | None:
+    if not item:
+        return None
+    result = dict(item)
+    storage_key = str(result.get("storage_key") or "").strip()
+    result["available"] = bool(storage_key)
+    if not storage_key:
+        result["content_url"] = None
+        result["image_url"] = None
+        return result
+    content_url = f"/api/v1/storage/{quote(storage_key, safe='/')}"
+    result["content_url"] = content_url
+    result["image_url"] = content_url
+    return result
 
 
 class ProductStore:
@@ -57,6 +97,11 @@ class ProductStore:
                 CREATE TABLE IF NOT EXISTS asset_metadata (asset_id TEXT PRIMARY KEY REFERENCES assets(id), description TEXT NOT NULL DEFAULT '', visibility TEXT NOT NULL DEFAULT 'enterprise');
                 CREATE TABLE IF NOT EXISTS agent_templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, description TEXT NOT NULL, icon TEXT NOT NULL, status TEXT NOT NULL, default_runtime_profile TEXT NOT NULL, credit_cost INTEGER NOT NULL, skill_manifest TEXT NOT NULL, allows_image_generation INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS tenant_agent_instances (tenant_id TEXT NOT NULL REFERENCES tenants(id), agent_id TEXT NOT NULL REFERENCES agent_templates(id), status TEXT NOT NULL, PRIMARY KEY(tenant_id,agent_id));
+                CREATE INDEX IF NOT EXISTS idx_tasks_history ON tasks(tenant_id,user_id,conversation_id,created_at,id);
+                CREATE INDEX IF NOT EXISTS idx_generations_history ON generations(tenant_id,user_id,conversation_id,created_at,id);
+                CREATE INDEX IF NOT EXISTS idx_generations_storage ON generations(tenant_id,storage_key);
+                CREATE INDEX IF NOT EXISTS idx_assets_tenant_url ON assets(tenant_id,url);
+                CREATE INDEX IF NOT EXISTS idx_conversation_owners_history ON conversation_owners(user_id,deleted_at,conversation_id);
             """)
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
             if "avatar_storage_key" not in columns:
@@ -214,6 +259,7 @@ class ProductStore:
         assistant_message_id = f"task:{task_id}:assistant"
         user_message_id = f"task:{task_id}:user"
         generation_id = f"task:{task_id}:generation" if image_storage_key else None
+        conversation_title = _project_title(task["agent_id"], task.get("input_text"))
         stage = "task_validation"
         try:
             with self._store.connection() as conn:
@@ -232,8 +278,12 @@ class ProductStore:
 
                 stage = "conversation_owner"
                 conn.execute(
-                    "INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,'新会话')",
-                    (conversation_id, user_id),
+                    "INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,?)",
+                    (conversation_id, user_id, conversation_title),
+                )
+                conn.execute(
+                    "UPDATE conversation_owners SET title=? WHERE conversation_id=? AND user_id=? AND title IN ('','新会话','新图片会话')",
+                    (conversation_title, conversation_id, user_id),
                 )
                 if not task.get("conversation_id"):
                     stage = "user_message"
@@ -250,7 +300,13 @@ class ProductStore:
 
                 stage = "artifact_association"
                 if get_agent(current["agent_id"]).allows_image_generation:
-                    if not image_storage_key:
+                    expected_prefix = f"generated/{tenant_id}/"
+                    if (
+                        not image_storage_key
+                        or not image_storage_key.startswith(expected_prefix)
+                        or "\\" in image_storage_key
+                        or any(part in {"", ".", ".."} for part in image_storage_key.split("/"))
+                    ):
                         raise ValueError("图片任务缺少已持久化 storage key。")
                     conn.execute(
                         "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -329,6 +385,14 @@ class ProductStore:
             ).fetchone()
             if not conversation:
                 return None
+            tasks = [
+                dict(item)
+                for item in conn.execute(
+                    "SELECT t.id,t.agent_id,t.input_text,t.status,t.stage,t.run_id,t.created_at,t.started_at,t.completed_at "
+                    "FROM tasks t WHERE t.conversation_id=? AND t.tenant_id=? AND t.user_id=? ORDER BY t.created_at,t.id",
+                    (conversation_id, tenant_id, user_id),
+                ).fetchall()
+            ]
             messages = conn.execute("SELECT id,role,content,created_at FROM messages WHERE conversation_id=? ORDER BY created_at,id", (conversation_id,)).fetchall()
             if not messages:
                 # Conversations created before message persistence still have a
@@ -348,9 +412,44 @@ class ProductStore:
                     if task["final_response"]:
                         restored.append({"id": f"legacy-assistant-{task['id']}", "role": "assistant", "content": task["final_response"], "created_at": task["completed_at"] or task["created_at"]})
                 messages = restored
+            generations = [
+                _generation_view(dict(item))
+                for item in conn.execute(
+                    "SELECT id,task_id,storage_key,mime_type,width,height,created_at FROM generations "
+                    "WHERE tenant_id=? AND user_id=? AND conversation_id=? AND deleted_at IS NULL "
+                    "AND storage_key IS NOT NULL AND TRIM(storage_key)<>'' ORDER BY created_at,id",
+                    (tenant_id, user_id, conversation_id),
+                ).fetchall()
+            ]
             runs = conn.execute("SELECT run_id,status,created_at,completed_at,payload FROM run_traces WHERE conversation_id=? AND tenant_id=? ORDER BY created_at", (conversation_id, tenant_id)).fetchall()
         result = dict(conversation)
-        result["messages"] = [dict(item) for item in messages]
+        agent = _agent_view(result["agent_id"])
+        first_prompt = tasks[0]["input_text"] if tasks else None
+        display_title = _project_title(result["agent_id"], first_prompt) if result["title"] in _GENERIC_CONVERSATION_TITLES else result["title"]
+        result["stored_title"] = result["title"]
+        result["title"] = display_title
+        result["agent"] = agent
+        result["project"] = {"id": result["id"], "name": display_title, "type": _PROJECT_TYPES.get(result["agent_id"], "历史创作项目")}
+        result["tasks"] = tasks
+        result["task_count"] = len(tasks)
+        result["generations"] = generations
+        result["image_count"] = len(generations)
+        generation_by_task = {item["task_id"]: item for item in generations}
+        message_items = [dict(item) for item in messages]
+        for message in message_items:
+            message_id = str(message["id"])
+            task_id = None
+            if message_id.startswith("task:") and message_id.count(":") >= 2:
+                task_id = message_id.split(":", 2)[1]
+            elif message_id.startswith("legacy-user-"):
+                task_id = message_id.removeprefix("legacy-user-")
+            elif message_id.startswith("legacy-assistant-"):
+                task_id = message_id.removeprefix("legacy-assistant-")
+            if task_id:
+                message["task_id"] = task_id
+                if message["role"] == "assistant" and task_id in generation_by_task:
+                    message["generation"] = generation_by_task[task_id]
+        result["messages"] = message_items
         result["runs"] = [{"run_id": item["run_id"], "status": item["status"], "created_at": item["created_at"], "completed_at": item["completed_at"]} for item in runs]
         return result
 
@@ -368,8 +467,19 @@ class ProductStore:
         with self._store.connection() as conn:
             row = conn.execute("SELECT t.*, r.final_response FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id WHERE t.id=? AND t.tenant_id=? AND t.user_id=?", (task_id,tenant_id,user_id)).fetchone()
             events = conn.execute("SELECT stage,message,created_at FROM task_events WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
+            generation = None
+            if row and row["status"] in {"completed", "failed", "cancelled"}:
+                generation = conn.execute(
+                    "SELECT id,task_id,storage_key,mime_type,width,height,created_at FROM generations "
+                    "WHERE task_id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL "
+                    "AND storage_key IS NOT NULL AND TRIM(storage_key)<>'' LIMIT 1",
+                    (task_id, tenant_id, user_id),
+                ).fetchone()
         if not row: return None
-        result = dict(row); result["events"] = [dict(x) for x in events]; return result
+        result = dict(row)
+        result["events"] = [dict(x) for x in events]
+        result["generation"] = _generation_view(dict(generation)) if generation else None
+        return result
 
     def task_events_since(self, task_id: str, tenant_id: str, user_id: str, after_id: int = 0) -> list[dict]:
         with self._store.connection() as conn:
@@ -385,26 +495,98 @@ class ProductStore:
             row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return dict(row) if row else None
 
-    def conversations(self, tenant_id: str, user_id: str, limit: int = 50) -> list[dict]:
+    def conversations(self, tenant_id: str, user_id: str, limit: int = 50, offset: int = 0) -> list[dict]:
         with self._store.connection() as conn:
-            rows = conn.execute("SELECT c.id,c.agent_id,c.runtime_thread_id,o.title,c.created_at FROM conversations c JOIN conversation_owners o ON o.conversation_id=c.id WHERE c.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL ORDER BY c.created_at DESC LIMIT ?", (tenant_id,user_id,limit)).fetchall()
+            rows = conn.execute(
+                "SELECT c.id,c.agent_id,c.runtime_thread_id,o.title,c.created_at,"
+                "COALESCE(MAX(COALESCE(t.completed_at,t.started_at,t.created_at)),c.created_at) AS updated_at "
+                "FROM conversations c JOIN conversation_owners o ON o.conversation_id=c.id "
+                "LEFT JOIN tasks t ON t.conversation_id=c.id AND t.tenant_id=c.tenant_id AND t.user_id=o.user_id "
+                "WHERE c.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL "
+                "GROUP BY c.id,c.agent_id,c.runtime_thread_id,o.title,c.created_at "
+                "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (tenant_id, user_id, limit, offset),
+            ).fetchall()
             conversations = [dict(row) for row in rows]
-            # Keep the query portable across SQLite and PostgreSQL while exposing
-            # only the current user's most recent image for each conversation.
-            for conversation in conversations:
-                generation = conn.execute(
-                    "SELECT id,storage_key,mime_type,created_at FROM generations "
-                    "WHERE tenant_id=? AND user_id=? AND conversation_id=? AND deleted_at IS NULL "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (tenant_id, user_id, conversation["id"]),
-                ).fetchone()
-                conversation["latest_generation"] = dict(generation) if generation else None
+            if not conversations:
+                return []
+            conversation_ids = [item["id"] for item in conversations]
+            placeholders = ",".join("?" for _ in conversation_ids)
+            task_rows = conn.execute(
+                "SELECT id,conversation_id,input_text,status,stage,created_at,started_at,completed_at FROM tasks "
+                f"WHERE tenant_id=? AND user_id=? AND conversation_id IN ({placeholders}) ORDER BY conversation_id,created_at,id",
+                (tenant_id, user_id, *conversation_ids),
+            ).fetchall()
+            generation_rows = conn.execute(
+                "SELECT id,conversation_id,task_id,storage_key,mime_type,width,height,created_at FROM generations "
+                f"WHERE tenant_id=? AND user_id=? AND conversation_id IN ({placeholders}) AND deleted_at IS NULL "
+                "AND storage_key IS NOT NULL AND TRIM(storage_key)<>'' ORDER BY conversation_id,created_at,id",
+                (tenant_id, user_id, *conversation_ids),
+            ).fetchall()
+
+        task_state: dict[str, dict] = {}
+        for row in task_rows:
+            item = dict(row)
+            state = task_state.setdefault(item["conversation_id"], {"first": item, "latest": item, "count": 0})
+            state["count"] += 1
+            item_activity = str(item.get("completed_at") or item.get("started_at") or item.get("created_at") or "")
+            latest = state["latest"]
+            latest_activity = str(latest.get("completed_at") or latest.get("started_at") or latest.get("created_at") or "")
+            if (item_activity, item["id"]) >= (latest_activity, latest["id"]):
+                state["latest"] = item
+
+        generation_state: dict[str, dict] = {}
+        for row in generation_rows:
+            item = dict(row)
+            state = generation_state.setdefault(item["conversation_id"], {"latest": item, "count": 0})
+            state["latest"] = item
+            state["count"] += 1
+
+        for conversation in conversations:
+            tasks = task_state.get(conversation["id"], {})
+            generations = generation_state.get(conversation["id"], {})
+            first_task = tasks.get("first")
+            latest_task = tasks.get("latest")
+            agent = _agent_view(conversation["agent_id"])
+            first_prompt = first_task["input_text"] if first_task else None
+            display_title = _project_title(conversation["agent_id"], first_prompt) if conversation["title"] in _GENERIC_CONVERSATION_TITLES else conversation["title"]
+            conversation["stored_title"] = conversation["title"]
+            conversation["title"] = display_title
+            conversation["agent"] = agent
+            conversation["project"] = {"id": conversation["id"], "name": display_title, "type": _PROJECT_TYPES.get(conversation["agent_id"], "历史创作项目")}
+            conversation["latest_task"] = latest_task
+            conversation["latest_prompt"] = str(latest_task["input_text"] if latest_task else first_prompt or "")[:160]
+            conversation["latest_status"] = latest_task["status"] if latest_task else None
+            conversation["task_count"] = tasks.get("count", 0)
+            conversation["image_count"] = generations.get("count", 0)
+            conversation["latest_generation"] = _generation_view(generations.get("latest"))
         return conversations
 
     def generations(self, tenant_id: str, user_id: str, limit: int = 50) -> list[dict]:
         with self._store.connection() as conn:
-            rows=conn.execute("SELECT * FROM generations WHERE tenant_id=? AND user_id=? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?",(tenant_id,user_id,limit)).fetchall()
-        return [dict(row) for row in rows]
+            rows = conn.execute(
+                "SELECT g.*,t.agent_id,t.input_text,o.title AS conversation_title,o.conversation_id AS owner_conversation_id FROM generations g "
+                "LEFT JOIN tasks t ON t.id=g.task_id AND t.tenant_id=g.tenant_id AND t.user_id=g.user_id "
+                "LEFT JOIN conversation_owners o ON o.conversation_id=g.conversation_id AND o.user_id=g.user_id AND o.deleted_at IS NULL "
+                "WHERE g.tenant_id=? AND g.user_id=? AND g.deleted_at IS NULL "
+                "AND g.storage_key IS NOT NULL AND TRIM(g.storage_key)<>'' ORDER BY g.created_at DESC LIMIT ?",
+                (tenant_id, user_id, limit),
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = _generation_view(dict(row))
+            agent_id = item.get("agent_id") or "image-agent"
+            agent = _agent_view(agent_id)
+            title = item.get("conversation_title")
+            if title in _GENERIC_CONVERSATION_TITLES:
+                title = _project_title(agent_id, item.get("input_text"))
+            item["agent"] = agent
+            item["project_available"] = bool(item.get("owner_conversation_id"))
+            item["project"] = ({"id": item["conversation_id"], "name": title or _project_title(agent_id, item.get("input_text")), "type": _PROJECT_TYPES.get(agent_id, "历史创作项目")} if item["project_available"] else None)
+            item["prompt"] = str(item.get("input_text") or "")[:160]
+            item.pop("owner_conversation_id", None)
+            results.append(item)
+        return results
 
     def create_generation(self, tenant_id: str, user_id: str, conversation_id: str, task_id: str, storage_key: str, provider: str, model: str) -> str:
         generation_id = f"task:{task_id}:generation"
@@ -412,10 +594,21 @@ class ProductStore:
             conn.execute("INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)", (generation_id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,"image/png"))
         return generation_id
 
-    def can_read_storage(self, tenant_id: str, user_id: str, storage_key: str) -> bool:
+    def readable_generation(self, tenant_id: str, user_id: str, storage_key: str) -> dict | None:
+        canonical_url = f"/api/v1/storage/{quote(storage_key, safe='/')}"
+        legacy_url = f"/api/v1/storage/{storage_key}"
         with self._store.connection() as conn:
-            row=conn.execute("SELECT 1 FROM generations WHERE tenant_id=? AND user_id=? AND storage_key=? AND deleted_at IS NULL",(tenant_id,user_id,storage_key)).fetchone()
-        return bool(row)
+            row = conn.execute(
+                "SELECT id,task_id,conversation_id,storage_key,mime_type,width,height,created_at FROM generations "
+                "WHERE tenant_id=? AND storage_key=? AND "
+                "((user_id=? AND deleted_at IS NULL) OR EXISTS "
+                "(SELECT 1 FROM assets a WHERE a.tenant_id=? AND a.url IN (?,?))) LIMIT 1",
+                (tenant_id, storage_key, user_id, tenant_id, canonical_url, legacy_url),
+            ).fetchone()
+        return _generation_view(dict(row)) if row else None
+
+    def can_read_storage(self, tenant_id: str, user_id: str, storage_key: str) -> bool:
+        return self.readable_generation(tenant_id, user_id, storage_key) is not None
 
     def delete_generation(self, tenant_id: str, user_id: str, generation_id: str) -> dict | None:
         with self._store.connection() as conn:
@@ -427,7 +620,7 @@ class ProductStore:
         with self._store.connection() as conn:
             generation=conn.execute("SELECT * FROM generations WHERE id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL",(generation_id,tenant_id,user_id)).fetchone()
             if not generation: return None
-            asset_id=str(uuid.uuid4()); conn.execute("INSERT INTO assets(id,tenant_id,name,asset_type,tags,url) VALUES (?,?,?,?,?,?)",(asset_id,tenant_id,name[:120],"poster_reference",json.dumps(["generated"]),f"/api/v1/storage/{generation['storage_key']}")); conn.execute("INSERT INTO asset_metadata(asset_id,description) VALUES (?,?)",(asset_id,"由个人生成记录保存"))
+            asset_id=str(uuid.uuid4()); conn.execute("INSERT INTO assets(id,tenant_id,name,asset_type,tags,url) VALUES (?,?,?,?,?,?)",(asset_id,tenant_id,name[:120],"poster_reference",json.dumps(["generated"]),f"/api/v1/storage/{quote(str(generation['storage_key']), safe='/')}")); conn.execute("INSERT INTO asset_metadata(asset_id,description) VALUES (?,?)",(asset_id,"由个人生成记录保存"))
         return {"id":asset_id,"name":name,"type":"poster_reference"}
 
     def update_enterprise_config(self, tenant_id: str, payload: dict) -> dict:
@@ -505,7 +698,15 @@ class ProductStore:
         return {"id":asset_id,"name":name,"type":asset_type}
 
     def delete_asset(self, tenant_id: str, asset_id: str) -> bool:
-        with self._store.connection() as conn: cursor=conn.execute("DELETE FROM assets WHERE id=? AND tenant_id=?",(asset_id,tenant_id))
+        with self._store.connection() as conn:
+            asset = conn.execute("SELECT id FROM assets WHERE id=? AND tenant_id=?", (asset_id, tenant_id)).fetchone()
+            if not asset:
+                return False
+            # asset_metadata predates ON DELETE CASCADE in production. Remove
+            # the dependent row in the same transaction so deleting an asset
+            # also revokes the enterprise-wide image grant deterministically.
+            conn.execute("DELETE FROM asset_metadata WHERE asset_id=?", (asset_id,))
+            cursor = conn.execute("DELETE FROM assets WHERE id=? AND tenant_id=?", (asset_id, tenant_id))
         return cursor.rowcount == 1
 
     def charge_success(self, tenant_id: str, user_id: str, task_id: str) -> None:

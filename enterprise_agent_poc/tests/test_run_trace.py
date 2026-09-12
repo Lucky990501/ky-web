@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+from openai_codex.generated.v2_all import McpToolCallResult
+
 from app.domain import RuntimeSession, RuntimeTurn
 from app.runtime.codex_provider import CodexRuntimeProvider
 from app.service import AgentService, AgentRunError
@@ -63,9 +65,16 @@ class RecoveringRuntime(FakeRuntime):
 
 
 class ToolRetryRuntime(FakeRuntime):
-    def __init__(self, *, exhaust: bool = False, image: bool = False):
+    def __init__(
+        self,
+        *,
+        exhaust: bool = False,
+        image: bool = False,
+        image_storage_key: str = "generated/tenant-a/reused.png",
+    ):
         self.exhaust = exhaust
         self.image = image
+        self.image_storage_key = image_storage_key
         self.turn_count = 0
 
     async def run_turn(self, session, message):
@@ -83,7 +92,8 @@ class ToolRetryRuntime(FakeRuntime):
                     "server": "platform",
                     "tool": "image_generation",
                     "input_summary": "poster",
-                    "output_summary": "{'storage_key': 'generated/tenant-a/reused.png'}",
+                    "output_summary": None,
+                    "artifact": {"storage_key": self.image_storage_key},
                     "status": "completed",
                     "error": None,
                 }
@@ -138,6 +148,59 @@ def test_retrieval_observation_does_not_persist_query_or_chunk_content():
     assert "企业内部资料" not in str(observation)
     assert "不应保存" not in str(observation)
     assert observation["results"] == [{"chunk_id": "chunk-1", "file_id": "file-1", "score": 0.8, "accepted": True, "rejection_reason": None}]
+
+
+def test_image_artifact_uses_sdk_structured_content_without_persisting_full_result():
+    result = McpToolCallResult(
+        content=[{"type": "text", "text": "provider output " + "x" * 900}],
+        structured_content={
+            "provider_reference": "must-not-be-persisted",
+            "results": [
+                {
+                    "storage_key": "generated/tenant-a/structured-result.png",
+                    "provider_url": "https://provider.invalid/private",
+                }
+            ],
+        },
+    )
+
+    assert len(CodexRuntimeProvider._summary(result)) == 600
+    assert CodexRuntimeProvider._image_artifact(result) == {
+        "storage_key": "generated/tenant-a/structured-result.png"
+    }
+    assert "provider_reference" not in str(CodexRuntimeProvider._image_artifact(result))
+
+
+def test_image_storage_key_prefers_artifact_and_keeps_legacy_summary_fallback():
+    structured_trace = {
+        "payload": {
+            "mcp_calls": [
+                {
+                    "tool": "image_generation",
+                    "status": "completed",
+                    "artifact": {"storage_key": "generated/tenant-a/new.png"},
+                    "output_summary": None,
+                }
+            ]
+        }
+    }
+    legacy_trace = {
+        "payload": {
+            "mcp_calls": [
+                {
+                    "tool": "image_generation",
+                    "status": "completed",
+                    "output_summary": "{'storage_key': 'generated/tenant-a/legacy.png'}",
+                }
+            ]
+        }
+    }
+
+    assert TaskService._image_storage_key(structured_trace) == "generated/tenant-a/new.png"
+    assert TaskService._image_storage_key(legacy_trace) == "generated/tenant-a/legacy.png"
+    assert CodexRuntimeProvider._image_artifact(
+        {"structuredContent": {"results": [{"storage_key": "https://invalid.example/image.png"}]}}
+    ) is None
 
 
 def test_startup_failure_creates_a_safe_trace_before_thread_exists(tmp_path, monkeypatch):
@@ -297,3 +360,28 @@ def test_image_postprocessing_retry_reuses_runtime_result_and_is_idempotent(tmp_
     assert counts == {"assistant": 1, "generation": 1, "charge": 1}
     assert trace["assistant_message_saved"] is True
     assert trace["artifact_saved"] is True
+
+
+def test_image_artifact_cannot_cross_the_task_tenant_boundary(tmp_path, monkeypatch):
+    runtime = ToolRetryRuntime(
+        image=True,
+        image_storage_key="generated/tenant-b/foreign.png",
+    )
+    store, product, task, _, service = product_task_fixture(
+        tmp_path, monkeypatch, "image-agent", runtime
+    )
+
+    asyncio.run(service.execute(task))
+
+    saved = product.task_for_worker(task["id"])
+    with store.connection() as conn:
+        generation_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM generations WHERE task_id=?", (task["id"],)
+        ).fetchone()["n"]
+        charge_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM credit_transactions WHERE task_id=?", (task["id"],)
+        ).fetchone()["n"]
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "result_persistence_error"
+    assert generation_count == 0
+    assert charge_count == 0

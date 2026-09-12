@@ -9,7 +9,8 @@ from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Response
+from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -18,7 +19,7 @@ from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_pas
 from app.product_service import TaskService
 from app.product_store import ProductStore
 from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, embedding_provider_for, runtime_diagnostic, set_embedding_probe
-from app.storage import storage_provider
+from app.storage import StorageObjectNotFound, StorageUnavailable, storage_provider
 from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
 from app.security import RuntimeTokenIssuer
 from app.service import AgentService
@@ -193,6 +194,8 @@ async def production_health() -> dict:
 @app.get("/login", include_in_schema=False)
 @app.get("/workspace", include_in_schema=False)
 @app.get("/agents/image", include_in_schema=False)
+@app.get("/agents/copywriting", include_in_schema=False)
+@app.get("/agents/campaign", include_in_schema=False)
 @app.get("/conversations", include_in_schema=False)
 @app.get("/generations", include_in_schema=False)
 @app.get("/enterprise-config", include_in_schema=False)
@@ -320,22 +323,27 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
         for _ in range(180):
             for item in product_store.task_events_since(task_id, principal.tenant_id, principal.user_id, last_id):
                 last_id = item["id"]
-                yield f"event: progress\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                yield f"event: progress\ndata: {json.dumps(jsonable_encoder(item), ensure_ascii=False)}\n\n"
             task = product_store.task(task_id, principal.tenant_id, principal.user_id)
             if not task:
                 yield "event: error\ndata: {\"message\":\"任务不存在。\"}\n\n"
                 return
             if task["status"] in {"completed", "failed", "cancelled"}:
-                yield f"event: complete\ndata: {json.dumps({'status': task['status'], 'message': task.get('user_message'), 'final_response': task.get('final_response'), 'conversation_id': task.get('conversation_id')}, ensure_ascii=False)}\n\n"
+                terminal = {"status": task["status"], "message": task.get("user_message"), "final_response": task.get("final_response"), "conversation_id": task.get("conversation_id"), "generation": task.get("generation")}
+                yield f"event: complete\ndata: {json.dumps(jsonable_encoder(terminal), ensure_ascii=False)}\n\n"
                 return
             await asyncio.sleep(0.7)
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/v1/conversations")
-async def list_conversations(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+async def list_conversations(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    workbench_session: str | None = Cookie(default=None),
+) -> list[dict]:
     principal = current_user(workbench_session)
-    return product_store.conversations(principal.tenant_id, principal.user_id)
+    return product_store.conversations(principal.tenant_id, principal.user_id, limit, offset)
 
 @app.get("/api/v1/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
@@ -548,12 +556,22 @@ async def unbind_platform_skill(agent_id: str, skill_slug: str, workbench_sessio
 @app.get("/api/v1/storage/{storage_key:path}")
 async def get_storage(storage_key: str, workbench_session: str | None = Cookie(default=None)):
     principal = current_user(workbench_session)
-    if not product_store.can_read_storage(principal.tenant_id, principal.user_id, storage_key):
+    generation = product_store.readable_generation(principal.tenant_id, principal.user_id, storage_key)
+    if not generation:
         raise HTTPException(404, "图片不存在。")
     try:
-        return Response(storage_provider(settings).get(storage_key), media_type="image/png")
-    except FileNotFoundError as exc:
+        mime_type = generation.get("mime_type") or "image/png"
+        if not str(mime_type).startswith("image/"):
+            mime_type = "image/png"
+        return Response(
+            storage_provider(settings).get(storage_key),
+            media_type=mime_type,
+            headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+        )
+    except StorageObjectNotFound as exc:
         raise HTTPException(404, "图片文件不存在。") from exc
+    except StorageUnavailable as exc:
+        raise HTTPException(503, "图片存储暂时不可用，请稍后重试。") from exc
 
 
 @app.get("/api/v1/poc/runtime-baseline")

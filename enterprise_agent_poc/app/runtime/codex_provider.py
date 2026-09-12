@@ -310,6 +310,13 @@ class CodexRuntimeProvider(RuntimeProvider):
                     "duration_ms": getattr(item, "duration_ms", None),
                     "error": self._summary(getattr(item, "error", None)),
                 }
+                if tool == "image_generation":
+                    artifact = self._image_artifact(tool_result)
+                    if artifact:
+                        # Persist only the platform-owned object key. The full
+                        # tool result may contain provider metadata or URLs and
+                        # remains outside the durable product trace.
+                        call["artifact"] = artifact
                 if tool == "knowledge_search":
                     call["retrieval_observation"] = self._retrieval_observation(arguments, tool_result)
                 mcp_calls.append(call)
@@ -350,6 +357,35 @@ class CodexRuntimeProvider(RuntimeProvider):
                 return json.loads(value)
             except json.JSONDecodeError:
                 return None
+        return None
+
+    @classmethod
+    def _image_artifact(cls, result: object) -> dict[str, str] | None:
+        """Extract the allowlisted image key from an SDK MCP result."""
+        structured = getattr(result, "structured_content", None)
+        if structured is None and isinstance(result, dict):
+            structured = result.get("structured_content", result.get("structuredContent"))
+        structured = cls._json_value(structured) or structured
+        if not isinstance(structured, dict):
+            return None
+        records = structured.get("results")
+        if not isinstance(records, list):
+            return None
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            storage_key = record.get("storage_key")
+            if not isinstance(storage_key, str):
+                continue
+            storage_key = storage_key.strip()
+            parts = storage_key.split("/")
+            if (
+                storage_key.startswith("generated/")
+                and len(storage_key) <= 1024
+                and "\\" not in storage_key
+                and all(part not in {"", ".", ".."} for part in parts)
+            ):
+                return {"storage_key": storage_key}
         return None
 
     @classmethod

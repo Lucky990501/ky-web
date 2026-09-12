@@ -120,11 +120,19 @@ class TaskService:
 
     @staticmethod
     def _image_storage_key(trace: dict) -> str | None:
-        output = " ".join(
-            call.get("output_summary") or ""
+        completed_calls = [
+            call
             for call in trace["payload"].get("mcp_calls", [])
             if call.get("tool") == "image_generation" and call.get("status", "").lower() == "completed"
-        )
+        ]
+        for call in completed_calls:
+            artifact = call.get("artifact")
+            storage_key = artifact.get("storage_key") if isinstance(artifact, dict) else None
+            if isinstance(storage_key, str) and storage_key.strip():
+                return storage_key.strip()
+        # Existing traces only contain a redacted output summary. Keep this
+        # parser as a recovery fallback while all new runs use artifact above.
+        output = " ".join(call.get("output_summary") or "" for call in completed_calls)
         match = re.search(r"storage_key['\"]?\s*[:=]\s*['\"]([^'\"]+)", output)
         return match.group(1) if match else None
 
