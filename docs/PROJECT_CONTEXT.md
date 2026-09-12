@@ -1,6 +1,6 @@
 # 项目长期上下文
 
-> 供后续 Codex 接管本仓库时优先阅读。最后整理：2026-09-10。
+> 供后续 Codex 接管本仓库时优先阅读。最后整理：2026-09-12。
 >
 > 本文以当前代码、Git 历史和仓库内验收报告为依据。报告中的线上验证属于历史记录；若与当前代码冲突，以当前代码为准。密钥、真实租户数据和运行时数据库均不写入本文。
 
@@ -9,9 +9,9 @@
 本仓库同时保留两条产品线：
 
 1. **锟元 AI 官网与旧工作台**：面向官网访客、留资、账号、旧版安全文本工作台和后台内容管理。
-2. **企业 AI Agent 工作台 POC**（`enterprise_agent_poc/`）：验证并产品化多租户企业 Agent Runtime。目标是在同一套 Skill 下，让每个企业仅能访问自己的品牌配置、知识库和素材，并由 Codex Runtime + Platform MCP 完成文案、活动策划和图片生成。
+2. **企业 AI Agent 工作台**（`enterprise_agent_poc/`）：由早期 Runtime 隔离 POC 演进而来，现已包含登录、任务队列、项目历史、知识库、Skill Registry、生成图片持久化和生产发布链路。目录名与部分兼容 API 仍保留 `poc`，不能据此把当前系统描述为仅 SQLite 演示。
 
-当前 Git 最近开发的主线是第二条。它的 README 明确说明：该 POC 独立于旧 DSH 工作台，尚未替换旧线上运行器。
+当前 Git 最近开发的主线是第二条。它与旧 DSH 工作台仍是两套独立运行链路；当前生产 Release 运行的是 `enterprise_agent_poc/`，但这不表示旧官网与旧工作台代码已从仓库移除。
 
 ## 2. 系统架构
 
@@ -52,7 +52,7 @@ Platform MCP（streamable HTTP）
 | 对象存储 | 阿里云 OSS（生产）、本地文件系统（开发） |
 | 前端 | 原生 HTML、CSS、JavaScript、内置 Lucide；无 Node/React/Next.js |
 | 旧后台 | Python 标准库 HTTP Server、PostgreSQL/SQLite、scrypt |
-| 部署 | 新 POC 提供 Docker Compose；历史生产报告记录 systemd + Nginx + PostgreSQL + Redis 试运行 |
+| 部署 | 本地提供 Docker Compose；生产采用独立 Release 目录、共享受管 venv/环境/运行数据、systemd 三服务、Nginx、PostgreSQL、Redis 和 OSS |
 
 没有根级 `package.json`、根级 `README.md`、`CLAUDE.md` 或 Node 前端工程。新 POC 的依赖定义在 `enterprise_agent_poc/pyproject.toml`。
 
@@ -73,7 +73,8 @@ Platform MCP（streamable HTTP）
 │  │  ├─ service.py / product_service.py       # Agent 与任务编排
 │  │  ├─ product_store.py / store.py           # 产品表与 DB 适配层
 │  │  ├─ knowledge.py                          # 摄取、Embedding、检索、置信度
-│  │  ├─ agent_catalog.py / skills.py          # Agent Catalog 与 Skill 部署
+│  │  ├─ agent_catalog.py / skill_registry.py  # Agent Catalog 与 Skill Registry
+│  │  ├─ skills.py                             # 已发布 Skill 到 Runtime 的部署
 │  │  ├─ runtime/                              # Codex Runtime 抽象与实现
 │  │  ├─ platform_mcp/                         # MCP Server 与业务工具
 │  │  ├─ task_queue.py / worker.py             # Redis 异步执行
@@ -98,6 +99,7 @@ Platform MCP（streamable HTTP）
 - `app/main.py`：登录、工作台、Agent 任务、SSE、会话、生成记录、企业配置、知识库、素材、存储读取、运行时诊断和 POC API。
 - `app/product_store.py`：用户、积分、任务、会话、消息、生成记录、知识文件、素材和 Agent Template；所有用户可见查询均带 Tenant/User 边界。
 - `app/product_service.py`：将异步 Task 状态推进为加载上下文、启动 Runtime、完成或失败；成功才扣积分。
+- `app/skill_registry.py`：校验原生 Skill ZIP，管理版本状态、包校验和、平台管理员权限及 Agent-Skill 绑定。
 
 ### 运行时与会话
 
@@ -109,7 +111,7 @@ Platform MCP（streamable HTTP）
 
 - `app/store.py`：SQLite/PostgreSQL DB-API 兼容层、基础租户和 Run Trace。
 - `app/task_queue.py`、`app/worker.py`：Redis 队列的任务/知识文件消费；本地开发可切换为进程内任务。
-- `app/storage.py`：本地文件系统与 OSS 适配器；生成图下载需要 Tenant + 用户归属校验。
+- `app/storage.py`：本地文件系统与私有 OSS 适配器。浏览器不直接使用 Provider 临时地址，而是经 `/api/v1/storage/{storage_key}` 的登录态鉴权读取。
 
 ### 旧系统
 
@@ -145,6 +147,15 @@ Platform MCP（streamable HTTP）
 
 Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工具；图片 Agent 在明确成图请求时再调用图片生成。企业规则优先于用户要求，资料不足时不得编造事实。
 
+### Skill Registry
+
+- `/platform/skills` 与 `/api/v1/platform/*` 只允许独立 `platform_admin` 权限访问，不等同于企业管理员权限。
+- 原生 ZIP 必须含根目录 `SKILL.md`；Registry 校验路径、文件类型、大小、编码和 SHA-256，并保留原始包，不转换 Skill 内容。
+- 版本状态为 `draft`、`published`、`deprecated`；已发布或废弃版本不可覆盖，仍被 Agent 绑定的版本不可废弃。
+- Agent 只可绑定已发布版本；新增绑定要求显式确认，也支持解除绑定。启动时 bundled Skill 仅补齐缺失绑定，不覆盖已有升级。
+- Runtime Profile 从 Registry 查询当前 manifest，`SkillDeployment` 只把 manifest 中的确定版本同步到该 Profile 的 `CODEX_HOME/skills`，并删除不在 manifest 中的 Skill。
+- PostgreSQL migration `005_skill_registry_v1.sql` 已在生产应用。仓库现有报告记录了生产发布和部分真实操作，但没有宣告 Upload → Publish → Bind → Runtime Sync → Real Turn → Upgrade/Rollback 全链路最终 PASS；后续不得把“代码与发布已存在”写成“完整 Gate 已通过”。
+
 ## 7. 已完成功能
 
 代码可确认完成：
@@ -152,7 +163,11 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 - Cookie 登录、管理员/成员权限、个人资料与头像。
 - 多 Tenant、Tenant Agent Instance、Agent 启停校验、积分扣费。
 - 图片、文案、活动策划 Agent 的 Catalog 与独立 Conversation/Thread。
-- 任务创建、持久化阶段事件、SSE、恢复队列、会话历史、生成图库和素材保存。
+- 任务创建、持久化阶段事件、SSE、恢复队列、项目历史、生成图库和素材保存。
+- 一个 Conversation 作为一个创作项目：历史按图片生成、文案创作、活动策划智能体归类，展示项目名、最近需求、任务状态、执行次数、图片数和最近活动时间；通用旧标题按首条需求生成只读展示标题。
+- `/conversations`、Agent 项目页、刷新与浏览器前进/后退共享当前 Conversation 状态；2026-09-12 生产登录态复验已通过。
+- 新图片任务优先从 Runtime MCP 结构化结果提取并持久化 allowlist `storage_key`，旧 Trace 仅保留摘要解析作为恢复兼容路径。
+- 会话列表、详情、任务终态与“我的生成”统一返回应用内 `content_url` / `image_url`；读取时按 Tenant 与用户归属鉴权，已保存为企业素材的图片按同 Tenant 素材授权读取。响应使用已保存 MIME、`private, no-store` 和 `nosniff`。
 - 企业配置和 URL 型素材管理。
 - PDF/DOCX/TXT/MD 上传、解析、切块、Embedding、索引、重试、检索测试。
 - 生产语义检索诊断：PostgreSQL、pgvector、Embedding 配置/探针和 fallback 状态。
@@ -164,24 +179,26 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 ## 8. 当前开发状态
 
-### Git 与 Release 快照（2026-09-11）
+### Git 与 Release 快照（2026-09-12）
 
-- 当前分支：`master`；本地与 `origin/master` 已同步至验收文档 commit `6da5e65be86d52c8c0ba3c7042629ecc9af69cbc`。
-- 当前生产代码 Release：`20260911-59d67ac`，代码 commit `59d67ac891a5aca57f1d2f41d9d0cf6cd0335bab`，Runtime `openai-codex==0.147.0`。
-- PostgreSQL migrations `001` 至 `004` 已记录应用，pending = 0；API、Platform MCP、Worker 与 `/api/health` 正常。
-- 工作树仍有 Phase A 以前已存在的无关修改和未跟踪文件；不得丢弃、覆盖或重置。
+- 本轮上下文刷新基线 commit：`2dc56932f1775575bf4c0b429f698657c240d6ad`；本轮文档编辑从该 `master` / `origin/master` 同步点开始。
+- 当前生产 Release：`20260912-0f18a23`；生产 source commit：`0f18a233111c95442dbbadee4df51841c51e019d`；Runtime：`openai-codex==0.147.0`。
+- 本轮上下文刷新完成后的 docs-only commit 会继续推进 `origin/master`，但不会改变当前生产 Release 或生产 source commit；不能把最新 Git 文档 HEAD 当作已部署的生产 source。
+- PostgreSQL migrations `001` 至 `007` 已应用，pending = 0。`006_embedding_profiles.sql` 作为 append-only 历史 migration 保留；当前活动 Embedding 与 RAG 基线见下一节。
+- 生产 `release-current`、API、Platform MCP 与 Worker 指向上述 Release；本机与公网健康检查记录为 HTTP 200，`status=ok`、`knowledge=ok`、`environment=production`。
+- 历史项目分类、`/conversations` 直接打开与刷新、历史及项目内图片、项目页刷新保持同一 Conversation、浏览器后退/前进已在生产登录态复验并通过。详细脱敏证据见 `enterprise_agent_poc/HISTORY_RECORD_OPTIMIZATION_ACCEPTANCE.md`。
 
-### Enterprise Knowledge V1.4 生产状态
+### Enterprise Knowledge V1.4 已记录生产状态
 
 - 生产租户：`zhiy-e-intelligence`；1 个知识文件、287 个 Chunk。
-- 索引已全量重建为 `rag-index-v2`，Embedding 为 `text-embedding-3-small` / 1536，metadata schema 为 `knowledge-metadata-v1`。
+- 当前活动 RAG index 为 `rag-index-v2`，Embedding 为 `text-embedding-3-small` / 1536，metadata schema 为 `knowledge-metadata-v1`。
 - 287/287 Chunk 具有 canonical_section、record/entity type、来源、section、sheet、index/schema version；year、person_name、event_name 按适用记录允许为空。
 - 数据库回滚快照：`rag_index_backup_v1_4_2bee63d_20260910`；代码备份：`/opt/enterprise-agent-workbench/backups/rag-v1-4-2bee63d-20260910`。
 - 固定 40 条最终生产复评：answerable recall 1.00、section recall 0.8667、Top-1 0.6667、grounded precision 0.8667、no-answer rejection 1.00、case pass 0.90。
 - 剩余失败：r09、r16、r19、p08；均为 physical section / alias 口径失败，但 Top-1 canonical_section 正确。正式指标仍按原评测口径判失败。
-- API、MCP、Worker 均 active；`/api/health` 为 `status: ok`、`knowledge: ok`。
+- 2026-09-12 最新发布验收记录 API、MCP、Worker 均健康，且本次没有修改 Embedding、RAG、pgvector 或执行 Reindex。
 - Phase A 最终生产门禁（2026-09-11）为 `PASS WITH ISSUES`：Tenant A/B Isolation、Browser Knowledge E2E、三个 Agent Grounding、No-answer Regression、Thread Resume 和 Cleanup 全部 PASS。详见 `enterprise_agent_poc/WORKBENCH_CORE_V1_PHASE_A_FINAL_REPORT.md`。
-- 稳定状态已经写入：Enterprise Knowledge `STABLE`、RAG Retrieval V1.4 `FROZEN`、Workbench Core V1 `STABLE`；允许下一阶段进入 Skill Registry V1，但不得把它与新的 RAG 调优混在同一变更中。
+- 稳定状态已经写入：Enterprise Knowledge `STABLE`、RAG Retrieval V1.4 `FROZEN`、Workbench Core V1 `STABLE`。Skill Registry V1 此后已实现并进入生产 source；其完整生产全链路最终 Gate 仍应独立收口，不得与新的 RAG 调优混在同一变更中。
 
 ## 9. 待办事项
 
@@ -205,9 +222,9 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 ### 工程与部署
 
 1. 建立包含 `openai-codex==0.147.0` 的内部 wheelhouse，减少生产发布对复用 venv 的依赖。
-2. 在低风险窗口补做“已有 previous release 时”的故障注入 rollback 演练。
+2. 在低风险窗口补做生产故障注入 rollback 演练；当前健康超时回滚分支已有定向回归测试，但本次成功切换未主动制造生产故障。
 3. 为 Docker Compose 明确 pgvector 镜像/安装方案。
-4. 增加 `.env.production.example`，并保持不含真实密钥。
+4. 保持现有 `.env.production.example` 与运行配置项同步，并确保不含真实密钥。
 5. 接入可审计的模型使用量和价格映射，避免猜测成本。
 
 ## 10. 重要设计决策
@@ -229,9 +246,9 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 - 旧 Markdown 转换仍产生 124 个“记录 N”弱标题；V1.4 metadata 已恢复类别和年份，但展示 section 仍弱。
 - p08 仍受“源文件差异 / 数据冲突 / 切片策略”等维护类 section 排序影响。
 - Run Trace 的结构化 `knowledge_retrievals` 暂时无法解析当前 MCP content wrapper，会出现 `result_count=null` / 空 results；原始正文不应为解决该问题而扩大持久化范围。
-- Codex 内置浏览器控制桥曾持续返回 `nodeRepl.fetch request failed`；Phase A 最终 Browser Gate 已使用人工浏览器截图和生产 Trace 完成验收。
+- 较早报告中的浏览器控制桥失败属于历史阻塞；2026-09-12 已在生产登录态 Chrome 完成历史记录与图片链路复验，不应继续把旧阻塞描述为当前状态。
 - 生产发布仍复用受控 venv，因为镜像源没有 `openai-codex==0.147.0`；发布脚本会验证依赖和 `pip check`。
-- 有 previous release 时的深度故障注入 rollback 尚未在真实生产数据环境刻意演练；基础切换与自动恢复已验证。
+- 本次生产成功切换没有主动故障注入；健康超时分支已修正为显式调用 rollback，并由定向测试覆盖。真实生产故障演练仍需独立计划。
 - `scripts/verify_runtime_config.py` 和管理员诊断的 `runtime_config` 仅返回 SHA-256 指纹和配置状态，可用于阻断 `.env.production` 与服务进程漂移，不能代替受控发布流程。
 - `knowledge_search` 已在检索实际成功后才记录 `completed`，失败时记录 `failed`。
 - `KnowledgeRetrievalService` 在无 Chunk 结果时会回退到旧 `knowledge_documents` 文本检索路径；它仍带 Tenant 条件，但需要明确其是否应参与严格生产 RAG。
@@ -245,7 +262,7 @@ Agent 指令要求首轮按企业配置 → 知识 → 素材的顺序调用工�
 
 建议按以下顺序推进：
 
-1. **进入 Skill Registry V1**：先冻结范围、数据模型、版本/启停/回滚规则和验收门禁；保持 RAG Retrieval V1.4 FROZEN。
+1. **收口 Skill Registry V1 最终 Gate**：基于当前实现补齐并记录 Upload → Validate → Publish → Bind → Runtime Sync → Real Turn → Upgrade/Rollback 的生产全链路证据；保持 RAG Retrieval V1.4 FROZEN。
 2. **修复 Trace 可观测性解析**：只持久化脱敏检索证据，补充测试并确认不记录正文、Token 或隐藏推理。
 3. **补强发布工程**：建立内部 wheelhouse，并安排 previous-release 故障注入 rollback 演练。
 4. **补齐产品管理面**：成员、Tenant/Agent 管理、素材上传、账户安全和计费。
