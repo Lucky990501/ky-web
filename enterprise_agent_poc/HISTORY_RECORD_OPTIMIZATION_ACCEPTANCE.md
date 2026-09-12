@@ -1,7 +1,7 @@
 # 历史记录与图片渲染优化验收报告
 
 日期：2026-09-12
-状态：本地开发验收 PASS；尚未推送或部署生产
+状态：生产受控发布 PASS；生产登录态浏览器复验待补；总体 PASS WITH ISSUES
 
 ## 1. 本轮目标
 
@@ -79,6 +79,7 @@
 - 自动回滚会先关闭递归 ERR trap，并在单项恢复失败时继续完成其余恢复步骤。
 - 配置指纹按顶层 `matches` 严格判断；单个字段的 `matches=true` 不能掩盖整体不一致。
 - 健康门禁除 HTTP 成功外，还要求 `status=ok`、`knowledge=ok`、`environment=production`。
+- 健康检查超时分支会在 `exit 1` 前显式执行回滚，不依赖 Bash `ERR` trap 处理显式退出。
 - migration 007 设置有限 lock/statement timeout，无法安全取得锁时中止发布，不无限阻塞生产写入。
 
 ## 4. 修改文件
@@ -107,7 +108,7 @@
 - Git Bash `bash -n deploy/release_switch.sh`：PASS
 - `git diff --check`：PASS
 - 历史、存储、任务定向回归：29 passed
-- 完整 pytest：86 passed，1 个既有 Starlette TestClient 弃用警告
+- 完整 pytest：87 passed，1 个既有 Starlette TestClient 弃用警告
 
 新增回归覆盖：
 
@@ -138,18 +139,75 @@
 - 移动端“返回工作台”可见且高度 44px：PASS
 - 临时服务、数据库和对象目录在验收后已停止并清理
 
-## 7. 边界与待发布事项
+## 7. 生产受控发布与验收
+
+### 7.1 Release Identity
+
+- Release ID：`20260912-0f18a23`
+- Source commit：`0f18a233111c95442dbbadee4df51841c51e019d`
+- `origin/master` 发布时指向：`0f18a233111c95442dbbadee4df51841c51e019d`
+- Archive SHA-256：`59677daca96c78e3daf9f1481a4b346e8874f84e74993738d59bdfb4827e8355`
+- Release manifest 的 release ID、source commit 与 archive SHA-256 一致。
+- 发布归档共选择 65 个 Git 文件，tar 内 86 个文件/目录条目；`.env`、Key、Token 和运行数据命中数均为 0。
+- 新 Release 位于独立目录 `/opt/enterprise-agent-workbench/releases/20260912-0f18a23`，未覆盖生产工作树。
+- 上一 Release `20260912-cd40f8f` 仍保留，可用于回滚。
+
+### 7.2 首次切换异常与恢复
+
+- 首次尝试切换 `20260912-94ca10d` 时，严格健康门禁观测到 `knowledge=degraded`，因此未接受该切换。
+- 对比确认 `cd40f8f..94ca10d` 之间 `app/knowledge.py`、`app/settings.py` 及启动 Embedding 探针代码未变；新 Gate 首次暴露了既有的单次启动探针脆弱性。
+- 随后执行的 3 次脱敏合成文本短探针全部成功，返回维度均为 1536，延迟为 2425.2–2970.8 ms，支持“启动时瞬时可用性失败”的判断。
+- 当时健康超时分支使用显式 `exit 1`，未触发 `ERR` trap；实际使用精确备份人工恢复上一 Release，三个服务和内/公网健康均恢复。该次不记为“自动回滚通过”。
+- Follow-up commit `0f18a233111c95442dbbadee4df51841c51e019d` 使超时分支先显式 `rollback` 再退出，并增加回归测试；完整 pytest 更新为 87 passed，远程 `bash -n` PASS。
+
+### 7.3 Migration 007
+
+- 候选 Release 视角：001–007 全部 applied，pending = 0，`unknown_history_versions=[]`。
+- 007 名称：`history_storage_indexes.sql`。
+- 007 数据库记录 checksum：`d051a826539acbd4e39f326bfde982f60bbf78e9944c7895a6e59e9e7e099abb`。
+- `idx_tasks_history`、`idx_generations_history`、`idx_generations_storage`、`idx_assets_tenant_url`、`idx_conversation_owners_history` 均为 B-tree、非唯一、`indisvalid=true`、`indisready=true`。
+- 迁移前后业务表记录数保持：Tasks 46、Generations 12、Assets 1、Conversation Owners 20；超过 60 秒的长事务为 0。
+
+### 7.4 受控切换与生产健康
+
+- 配置指纹：expected = runtime，`matches=true`，不输出任何凭据值。
+- `release-current` 指向 `/opt/enterprise-agent-workbench/releases/20260912-0f18a23/enterprise_agent_poc`。
+- API / Platform MCP / Worker：全部 `active/running`，`Result=success`，`NRestarts=0`。
+- 三个 systemd `WorkingDirectory` 及进程 cwd 均指向新 Release。
+- 本机与公网 `/api/health`：HTTP 200，`status=ok`、`knowledge=ok`、`environment=production`。
+- Runtime：`openai-codex==0.147.0`。
+- `/conversations` 生产页面已返回 `workbench.js?v=history-v1` 和 `workbench.css?v=history-v1`。
+- 本次成功切换未做生产故障注入；回滚分支已由定向回归测试覆盖，不将其误记为生产故障演练。
+
+### 7.5 冻结项核对
+
+- Provider：`openai-compatible`
+- Model：`text-embedding-3-small`
+- Dimension：`1536`
+- RAG index：`rag-index-v2`
+- 旧生产基线与新 Release 间 `app/knowledge.py`、`app/settings.py` 无差异；007 仅新增历史与图片鉴权所需 B-tree 索引。
+- 未 Reindex，未修改 pgvector、Embedding 配置或 RAG 检索策略。
+
+### 7.6 生产浏览器证据
+
+- 静态页面与新资源版本已经公网 HTTP 验证。
+- 本轮浏览器自动化连接两次返回 `nodeRepl.fetch request failed`，新建页签超时并重置运行时，因此未能获取登录态 UI 的项目分类和 OSS 图片 DOM 证据。
+- 该项记为验收证据缺口，不解读为产品功能失败；需用生产登录态手工补验 `/conversations` 刷新恢复、图片加载、项目详情和前进/后退。
+
+## 8. 边界与已知问题
 
 - 未修改 Embedding Provider、Embedding Model、RAG、Query Guard、Confidence Gate、pgvector 或知识检索策略。
-- 新增的 007 仅包含历史业务表和图片鉴权所需 B-tree 索引，尚未在任何生产数据库执行。
 - 未修改或恢复任何已清理的 Embedding 实验。
-- 未推送 Git、未构建 Release、未部署生产。
-- 生产真实历史数据与 OSS 图片仍需在受控 Release 部署后做一次浏览器复验。
 - 搜索和筛选作用于当前已加载的历史批次；超过 50 条时需先点击“加载更多”。
 - 已退役智能体的旧项目可以安全展示，但不允许恢复到已不存在的智能体继续执行。
+- 启动 Embedding readiness 仍是单次探针，瞬时 Provider 故障会使严格 Release Gate 安全地拒绝切换；本轮保持冻结边界，未改动该逻辑。
+- 生产登录态浏览器复验因自动化连接不可用而待补。
 
-## 8. 验收结论
+## 9. 验收结论
 
-本地功能、权限、兼容性、性能、真实图片渲染和响应式浏览器验收均通过。
+- 本地功能、权限、兼容性、性能、真实图片渲染与响应式浏览器验收：PASS。
+- Git 发布、独立 Release、Migration 007、配置指纹、systemd 切换、内/公网健康和旧 Release 保留：PASS。
+- Embedding/RAG 冻结项：PASS。
+- 生产登录态 UI 真实历史与 OSS 图片复验：待补证据。
 
-**结论：PASS（等待生产受控发布授权）**
+**结论：PASS WITH ISSUES（生产受控发布已完成；待补登录态浏览器证据）**
