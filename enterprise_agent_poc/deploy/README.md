@@ -1,39 +1,91 @@
-# Gate 3.3 deployment
+# Workbench controlled deployment
 
-The production stack is Docker Compose based and intentionally has no exposed
-PostgreSQL, Redis, or Platform MCP ports. The host Nginx terminates TLS and
-proxies to the loopback-only Compose Nginx listener (`127.0.0.1:18080`).
+Workbench production uses immutable Release directories and a controlled
+systemd switch. Never copy a development working tree over the production
+tree, overwrite `release-current`, or copy a developer `.env` to the server.
 
-## Server preparation
+## Cross-platform source policy
 
-1. Clone the approved Git commit into a dedicated release directory; do not
-   reuse the release root or Nginx site of the existing `ky_web` website.
-2. Copy `.env.production.example` to `.env.production` on the server, set the
-   database/Redis/session secrets, and inject DeepSeek, gateway and OSS keys
-   from the server secret store. The file must be mode `0600` and never enter
-   Git.
-3. Run `docker compose --env-file .env.production up -d --build`.
-4. Configure a dedicated HTTPS Nginx virtual host that proxies only to
-   `http://127.0.0.1:18080`. Platform MCP remains on the Docker network.
-5. Verify `/api/v1/poc/health`, database migration, Redis worker logs and an
-   authenticated browser task before directing traffic to the new host.
+Windows, macOS, and Linux checkouts are governed by the repository
+`.gitattributes`. Cross-platform source, SQL, shell, configuration, and
+documentation files use LF; Windows-native `.bat` and `.cmd` files use CRLF;
+binary files are excluded from text conversion.
+
+Each clone should use repository-local Git settings rather than changing the
+developer's global Git configuration:
+
+```bash
+git config --local core.autocrlf false
+git config --local core.eol lf
+```
+
+Before changing development machines, commit and push on the first machine.
+On the next machine, require a clean worktree and synchronize with:
+
+```bash
+git fetch origin
+git checkout master
+git pull --ff-only origin master
+git status
+```
+
+## Reproducible Release build
+
+Build from one explicit, clean Git commit. `build_release.py` selects only the
+release whitelist, uses deterministic gzip metadata, rejects tracked secrets
+and platform metadata, and can write a Release manifest containing the source
+commit, archive SHA-256, selected files, and build platform:
+
+```bash
+python scripts/build_release.py \
+  --commit <40-character-commit> \
+  --output <release-id>.tar.gz \
+  --release-id <release-id> \
+  --manifest-output <release-id>.manifest.json
+```
+
+The archive and manifest must be independently checksum-verified after upload
+and unpacked into `/opt/enterprise-agent-workbench/releases/<release-id>`.
+
+## Migration checksum gate
+
+Migration checksums normalize only `CRLF` and isolated `CR` to `LF`. No spaces,
+blank lines, comments, case, encoding, or SQL content are otherwise changed.
+New migrations record the canonical LF SHA-256. Historical Windows checksums
+remain untouched and may be accepted only as
+`LEGACY_LINE_ENDING_COMPATIBLE` when they exactly match the deterministic CRLF
+form of the current canonical bytes.
+
+Production `migration status` must contain only `EXACT_MATCH`,
+`LEGACY_LINE_ENDING_COMPATIBLE`, or an explicitly expected `PENDING` migration.
+Any `CHECKSUM_MISMATCH`, unknown history version, invalid filename, duplicate
+version, or sequence gap blocks the Release. Do not update
+`schema_migrations`, rerun an applied migration, or use a force bypass.
+
+## Production switch sequence
+
+1. Confirm the current Release and API/MCP/Worker health on the Linux server.
+2. Verify the uploaded archive SHA-256 and Release manifest.
+3. Run candidate `scripts/migrate.py status`; reject mismatches and unknowns.
+4. Verify runtime dependency health and the shared configuration fingerprint.
+5. Run `deploy/release_switch.sh <release-id>` as root.
+6. Require API, MCP, and Worker to be active and `/api/health` to report
+   `status=ok`, `knowledge=ok`, and `environment=production`.
+7. Complete authenticated browser acceptance. The switch script automatically
+   restores the previous Release if its controlled health gate fails.
 
 ## Runtime configuration verification
 
-The release environment file is the authoritative source for one release. Do
-not separately inject any of the RAG/database/embedding variables through a
-systemd unit, shell profile, or an old deployment directory. Before a RAG
-acceptance run, execute the verifier in a process that inherited the same
-environment as the API service:
+The shared production environment file is authoritative. Do not separately
+inject RAG, database, or embedding variables through a systemd unit, shell
+profile, or old deployment directory. Execute the verifier in a process that
+inherited the same environment as the API service:
 
-```powershell
-python scripts/verify_runtime_config.py --environment-file .env.production
+```bash
+python scripts/verify_runtime_config.py \
+  --environment-file /opt/enterprise-agent-workbench/shared/enterprise-agent.env
 ```
 
-It prints only presence flags and SHA-256 fingerprints, never values or
-secrets. `matches` must be `true`. For an already-running API, compare its
-admin-only `/api/admin/runtime/diagnostics` `runtime_config.fingerprint` with
-the verifier's `expected_fingerprint`; a mismatch blocks the acceptance run.
-
-The existing workspace server settings are a connection reference only. They
-must not be copied into this project or used to overwrite the existing site.
+The verifier prints presence flags and fingerprints, never secret values.
+`matches` must be `true`. Production secrets, database credentials, tokens,
+and private keys must never be copied back to a development machine.

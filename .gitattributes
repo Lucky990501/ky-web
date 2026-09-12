@@ -1,1 +1,59 @@
-enterprise_agent_poc/deploy/*.sh text eol=lf
+* text=auto
+
+# Cross-platform source and configuration files are canonical LF in Git and worktrees.
+*.py             text eol=lf
+*.sql            text eol=lf
+*.sh             text eol=lf
+*.js             text eol=lf
+*.ts             text eol=lf
+*.tsx            text eol=lf
+*.jsx            text eol=lf
+*.css            text eol=lf
+*.html           text eol=lf
+*.json           text eol=lf
+*.md             text eol=lf
+*.yaml           text eol=lf
+*.yml            text eol=lf
+*.toml           text eol=lf
+*.ini            text eol=lf
+*.cfg            text eol=lf
+*.conf           text eol=lf
+*.txt            text eol=lf
+*.xml            text eol=lf
+*.svg            text eol=lf
+*.ps1            text eol=lf
+*.env.example    text eol=lf
+.env*.example    text eol=lf
+Dockerfile       text eol=lf
+
+# Windows-native command files retain CRLF.
+*.bat            text eol=crlf
+*.cmd            text eol=crlf
+
+# Binary formats must never be subject to line-ending conversion.
+*.png            binary
+*.jpg            binary
+*.jpeg           binary
+*.gif            binary
+*.webp           binary
+*.avif           binary
+*.ico            binary
+*.zip            binary
+*.tar            binary
+*.gz             binary
+*.tgz            binary
+*.pdf            binary
+*.docx           binary
+*.xlsx           binary
+*.pptx           binary
+*.woff           binary
+*.woff2          binary
+*.ttf            binary
+*.mp3            binary
+*.mp4            binary
+*.mov            binary
+*.webm           binary
+*.wav            binary
+*.db             binary
+*.sqlite         binary
+*.sqlite3        binary

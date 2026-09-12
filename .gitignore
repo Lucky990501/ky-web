@@ -1,9 +1,55 @@
-# Local deployment credentials and transient release artifacts
+# Local deployment credentials and secrets
 .deploy-secrets.local
+.deploy-bridge/
 .env
 .env.*
-*.egg-info/
-.deploy-bridge/
-*.bundle
+!.env.example
+!.env.*.example
+*.key
+*.pem
+*.token
+
+# Runtime data and local databases
+.runtime-data/
+**/.runtime-data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python environments, caches, and build outputs
+.venv/
+venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Node and frontend tooling
+node_modules/
+
+# Release archives and transient probes
+*.bundle
+*.tar
+*.tar.gz
+*.tgz
+*.tmp
+*.temp
+
+# macOS and Windows metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Editor and IDE temporary files
+.idea/
+*.swp
+*.swo
+*~
