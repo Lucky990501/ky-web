@@ -148,6 +148,16 @@ class PlatformMCPService:
         if not isinstance(exc, httpx.HTTPStatusError):
             return False, type(exc).__name__, None
         status = exc.response.status_code
+        # A 429 can mean exhausted quota, not temporary rate limiting. Classify
+        # the machine code internally; never audit the provider response body.
+        try:
+            body = exc.response.json()
+            error = body.get("error", {}) if isinstance(body, dict) else {}
+            code = (error.get("code") or error.get("type")) if isinstance(error, dict) else None
+        except ValueError:
+            code = None
+        if code in {"insufficient_quota", "quota_exhausted", "quota_exceeded", "billing_hard_limit_reached"}:
+            return False, "quota_exhausted", None
         if status not in {429, 500, 502, 503, 504}:
             return False, f"http_{status}", None
         retry_after = PlatformMCPService._retry_after_seconds(exc.response.headers.get("Retry-After"))

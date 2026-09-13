@@ -5,6 +5,7 @@ import re
 from app.agent_catalog import get_agent
 from app.product_store import ProductStore, ResultPersistenceError
 from app.service import AgentRunError, AgentService
+from app.storage import storage_provider
 
 
 class TaskService:
@@ -18,7 +19,7 @@ class TaskService:
         task_id, tenant_id = task["id"], task["tenant_id"]
         agent = get_agent(task["agent_id"])
         current = self._store.task_for_worker(task_id) or task
-        if current.get("status") == "completed":
+        if current.get("status") in {"completed", "cancelled"}:
             return
         if current.get("run_id"):
             prior_trace = self._agents._store.run_trace(current["run_id"], tenant_id)
@@ -39,6 +40,11 @@ class TaskService:
                         conversation_id=prior_trace["conversation_id"],
                     )
                 return
+
+        # A failed runtime must not be replayed by a duplicate queue delivery.
+        # Only the proven persistence-only recovery above can resume this task.
+        if current.get("status") == "failed":
+            return
 
         self._store.set_task(task_id, tenant_id, "running", "loading_context", "正在加载企业上下文")
         try:
@@ -112,10 +118,12 @@ class TaskService:
         payload = trace["payload"]
         return bool(
             str(payload.get("runtime_status") or "").lower() in {"completed", "success"}
+            and payload.get("runtime_completed") is True
             and payload.get("required_tool_calls_completed")
             and payload.get("final_response_received")
             and str(payload.get("final_result") or "").strip()
             and payload.get("result_persistence_status") == "failed"
+            and not payload.get("final_response_persisted")
         )
 
     @staticmethod
@@ -137,12 +145,26 @@ class TaskService:
         return match.group(1) if match else None
 
     def _persist_result(self, task: dict, trace: dict) -> dict:
-        payload = trace["payload"]
+        current = self._store.task_for_worker(task["id"])
+        payload = dict(trace["payload"])
+        storage_key = self._image_storage_key(trace)
+        if get_agent(task["agent_id"]).allows_image_generation and (not current or current["status"] != "completed"):
+            # Reuse the generated object. Never invoke image_generation during
+            # result recovery, even if this read or the DB transaction fails.
+            if (not storage_key or not storage_key.startswith(f"generated/{task['tenant_id']}/")
+                    or "\\" in storage_key or any(part in {"", ".", ".."} for part in storage_key.split("/"))):
+                raise ResultPersistenceError("artifact_association")
+            try:
+                if not storage_provider(self._agents._settings).get(storage_key):
+                    raise ValueError("empty artifact")
+            except Exception as exc:
+                raise ResultPersistenceError("artifact_verification") from exc
+            payload["artifact_available"] = True
         return self._store.complete_task_success(
             task,
             run_id=trace["run_id"],
             conversation_id=trace["conversation_id"],
             response=str(payload["final_result"]),
             trace_payload=payload,
-            image_storage_key=self._image_storage_key(trace),
+            image_storage_key=storage_key,
         )

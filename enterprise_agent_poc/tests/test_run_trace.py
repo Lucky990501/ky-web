@@ -104,6 +104,7 @@ class ToolRetryRuntime(FakeRuntime):
 def product_task_fixture(tmp_path, monkeypatch, agent_id: str, runtime):
     monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{tmp_path / 'product.db'}")
+    monkeypatch.setenv("ENTERPRISE_POC_OBJECT_STORAGE_DIR", str(tmp_path / "objects"))
     store = POCStore(tmp_path / "product.db")
     store.seed_demo_data()
     product = ProductStore(store)
@@ -332,6 +333,8 @@ def test_received_response_but_database_save_failure_is_not_reported_as_success(
 def test_image_postprocessing_retry_reuses_runtime_result_and_is_idempotent(tmp_path, monkeypatch):
     runtime = ToolRetryRuntime(image=True)
     store, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "image-agent", runtime)
+    from app.storage import storage_provider
+    storage_provider(service._agents._settings).put(runtime.image_storage_key, b"existing-image", "image/png")
     original = product.complete_task_success
 
     def fail_once(*_args, **_kwargs):

@@ -266,10 +266,12 @@ class POCStore:
             )
 
     def finish_run_trace(self, run_id: str, status: str, payload: dict, thread_id: str | None = None) -> None:
+        # Failed traces cannot acquire success evidence through this generic
+        # writer. Persistence-only recovery uses complete_task_success instead.
         with self.connection() as conn:
             conn.execute(
-                "UPDATE run_traces SET status=?, payload=?, codex_thread_id=COALESCE(?, codex_thread_id), completed_at=CURRENT_TIMESTAMP WHERE run_id=?",
-                (status, json.dumps(payload, ensure_ascii=False), thread_id, run_id),
+                "UPDATE run_traces SET status=?, payload=?, codex_thread_id=COALESCE(?, codex_thread_id), completed_at=CURRENT_TIMESTAMP WHERE run_id=? AND status<>'completed' AND NOT (status='failed' AND ? IN ('completed','runtime_completed'))",
+                (status, json.dumps(payload, ensure_ascii=False), thread_id, run_id, status),
             )
 
     def run_trace(self, run_id: str, tenant_id: str) -> dict | None:

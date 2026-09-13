@@ -221,7 +221,9 @@ class ProductStore:
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:
         with self._store.connection() as conn:
-            conn.execute("UPDATE tasks SET status=?,stage=?,run_id=COALESCE(?,run_id),error_code=?,conversation_id=COALESCE(?,conversation_id),started_at=CASE WHEN ?='running' THEN CURRENT_TIMESTAMP ELSE started_at END,completed_at=CASE WHEN ? IN ('completed','failed','cancelled') THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=? AND tenant_id=?", (status,stage,run_id,error_code,conversation_id,status,status,task_id,tenant_id))
+            updated = conn.execute("UPDATE tasks SET status=?,stage=?,run_id=COALESCE(?,run_id),error_code=?,conversation_id=COALESCE(?,conversation_id),started_at=CASE WHEN ?='running' THEN CURRENT_TIMESTAMP ELSE started_at END,completed_at=CASE WHEN ? IN ('completed','failed','cancelled') THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=? AND tenant_id=? AND status NOT IN ('completed','cancelled') AND NOT (status='failed' AND ?='completed')", (status,stage,run_id,error_code,conversation_id,status,status,task_id,tenant_id,status))
+            if updated.rowcount != 1:
+                return
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,?,?)", (task_id,stage,message))
             if response is not None:
                 conn.execute("INSERT INTO task_results(task_id,final_response,result_json) VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET final_response=excluded.final_response,result_json=excluded.result_json", (task_id,response,json.dumps({"run_id":run_id},ensure_ascii=False)))
@@ -263,18 +265,37 @@ class ProductStore:
         stage = "task_validation"
         try:
             with self._store.connection() as conn:
+                # Serialize duplicate final events before message/credit writes.
+                if not self._store.is_postgres:
+                    conn.execute("BEGIN IMMEDIATE")
                 current = conn.execute(
-                    "SELECT status,agent_id FROM tasks WHERE id=? AND tenant_id=? AND user_id=?",
+                    "SELECT status,agent_id,run_id,conversation_id FROM tasks WHERE id=? AND tenant_id=? AND user_id=?" + (" FOR UPDATE" if self._store.is_postgres else ""),
                     (task_id, tenant_id, user_id),
                 ).fetchone()
                 if not current:
                     raise LookupError("任务不存在。")
+                stage = "completion_evidence"
+                if current["status"] == "cancelled" or (current["run_id"] and current["run_id"] != run_id) or (current["conversation_id"] and current["conversation_id"] != conversation_id):
+                    raise ValueError("Task/Run association mismatch.")
                 if current["status"] == "completed":
                     return {
                         "assistant_message_id": assistant_message_id,
                         "generation_id": generation_id,
                         "replayed": True,
                     }
+
+                saved_trace = conn.execute("SELECT status,payload FROM run_traces WHERE run_id=? AND tenant_id=? AND conversation_id=? AND agent_id=?", (run_id,tenant_id,conversation_id,current["agent_id"])).fetchone()
+                evidence = json.loads(saved_trace["payload"]) if saved_trace else {}
+                if (not saved_trace or saved_trace["status"] not in {"runtime_completed", "failed"}
+                        or evidence.get("runtime_completed") is not True
+                        or evidence.get("runtime_status") not in {"completed", "success"}
+                        or evidence.get("required_tool_calls_completed") is not True
+                        or evidence.get("final_response_received") is not True
+                        or not response.strip() or response != evidence.get("final_result")
+                        or (saved_trace["status"] == "failed" and evidence.get("result_persistence_status") != "failed")):
+                    raise ValueError("Missing successful runtime/final response evidence.")
+                if get_agent(current["agent_id"]).allows_image_generation and trace_payload.get("artifact_available") is not True:
+                    raise ValueError("Missing verified image artifact.")
 
                 stage = "conversation_owner"
                 conn.execute(
@@ -297,6 +318,9 @@ class ProductStore:
                     "INSERT OR IGNORE INTO messages(id,conversation_id,role,content,created_at) VALUES (?,?,'assistant',?,?)",
                     (assistant_message_id, conversation_id, response[:12000], datetime.now(timezone.utc).isoformat()),
                 )
+                assistant = conn.execute("SELECT conversation_id,role,content FROM messages WHERE id=?", (assistant_message_id,)).fetchone()
+                if not assistant or assistant["conversation_id"] != conversation_id or assistant["role"] != "assistant" or assistant["content"] != response[:12000]:
+                    raise ValueError("Existing final message conflicts with runtime result.")
 
                 stage = "artifact_association"
                 if get_agent(current["agent_id"]).allows_image_generation:
@@ -312,6 +336,9 @@ class ProductStore:
                         "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)",
                         (generation_id, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gateway-managed-gpt-image-2", image_storage_key, "image/png"),
                     )
+                    generation = conn.execute("SELECT task_id,conversation_id,storage_key FROM generations WHERE id=?", (generation_id,)).fetchone()
+                    if not generation or generation["task_id"] != task_id or generation["conversation_id"] != conversation_id or generation["storage_key"] != image_storage_key:
+                        raise ValueError("Existing generation conflicts with runtime result.")
 
                 stage = "task_result"
                 result_json = json.dumps(
@@ -340,16 +367,20 @@ class ProductStore:
                     )
 
                 stage = "run_trace"
-                completed_trace = dict(trace_payload)
+                completed_trace = dict(evidence)
                 completed_trace.update(
                     {
                         "status": "completed",
                         "partial_output": False,
                         "assistant_message_saved": True,
+                        "final_response_persisted": True,
                         "assistant_message_id": assistant_message_id,
                         "result_persistence_status": "completed",
                         "result_persistence_error_stage": None,
+                        "failure_stage": None,
                         "artifact_saved": not get_agent(current["agent_id"]).allows_image_generation or bool(generation_id),
+                        "artifact_available": True if generation_id else None,
+                        "artifact_completed": True if get_agent(current["agent_id"]).allows_image_generation else None,
                         "generation_id": generation_id,
                         "error": None,
                     }

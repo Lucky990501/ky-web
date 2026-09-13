@@ -300,6 +300,7 @@ class CodexRuntimeProvider(RuntimeProvider):
                 # stable status vocabulary in the product trace.
                 status = str(getattr(raw_tool_status, "value", raw_tool_status)).rsplit(".", 1)[-1].lower()
                 arguments = getattr(item, "arguments", None)
+                parsed_arguments = self._json_value(arguments)
                 tool_result = getattr(item, "result", None)
                 call = {
                     "server": server,
@@ -309,6 +310,11 @@ class CodexRuntimeProvider(RuntimeProvider):
                     "status": status,
                     "duration_ms": getattr(item, "duration_ms", None),
                     "error": self._summary(getattr(item, "error", None)),
+                    # Match retries by full arguments, not the truncated display
+                    # summary. Do not retain additional enterprise content.
+                    "dependency_id": hashlib.sha256(json.dumps(parsed_arguments if parsed_arguments is not None else arguments, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest(),
+                    "result_is_error": bool(getattr(tool_result, "is_error", False) or
+                                            (isinstance(tool_result, dict) and (tool_result.get("isError") or tool_result.get("is_error")))),
                 }
                 if tool == "image_generation":
                     artifact = self._image_artifact(tool_result)
@@ -326,7 +332,8 @@ class CodexRuntimeProvider(RuntimeProvider):
             lifecycle_events.append({"event": "model_resumed"})
         if text.strip():
             lifecycle_events.append({"event": "final_response_received", "length": len(text)})
-        raw_status = getattr(getattr(result, "status", None), "value", str(getattr(result, "status", "completed")))
+        raw_status = getattr(result, "status", None)
+        raw_status = str(getattr(raw_status, "value", raw_status) or "unknown").rsplit(".", 1)[-1].lower()
         lifecycle_events.append({"event": "turn_completed", "status": raw_status, "has_final_response": bool(text.strip())})
         return RuntimeTurn(
             thread_id=session.thread_id,

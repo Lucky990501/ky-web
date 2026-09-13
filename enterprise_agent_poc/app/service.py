@@ -97,8 +97,12 @@ class AgentService:
             "required_tool_calls": {},
             "required_tool_calls_completed": False,
             "runtime_status": None,
+            "runtime_completed": False,
             "final_response_received": False,
+            "final_response_persisted": False,
             "final_response_length": 0,
+            "artifact_required": agent.allows_image_generation,
+            "artifact_completed": False if agent.allows_image_generation else None,
             "assistant_message_saved": False,
             "assistant_message_id": None,
             "result_persistence_status": "pending" if defer_result_persistence else "not_applicable",
@@ -149,7 +153,7 @@ class AgentService:
             trace = self._completed_trace(trace, turn, agent.allows_image_generation)
             trace["lifecycle_events"] = self._startup_events(profile) + trace["lifecycle_events"]
             has_final_response = bool(turn.text.strip())
-            runtime_completed = turn.status.lower() in {"completed", "success"} and not turn.error
+            runtime_completed = trace["runtime_completed"]
             if not runtime_completed:
                 raise AgentRunError(
                     self._safe_error(turn.error) if turn.error else f"Codex Turn 终态为 {turn.status}。",
@@ -225,22 +229,31 @@ class AgentService:
         trace["tool_calls"] = [{"server": call["server"], "tool": call["tool"], "status": call["status"]} for call in calls]
         trace["lifecycle_events"] = list(turn.lifecycle_events)
         trace["tool_calls_completed"] = bool(calls) and all(call.get("status", "").lower() == "completed" for call in calls)
-        required = ["enterprise_config_get", "knowledge_search", "asset_search"]
-        if requires_image_generation:
-            required.append("image_generation")
+        # Observed MCP requests are the conservative dependency evidence; we do
+        # not infer semantic dependencies from model prose or impose tool order.
+        required = list(dict.fromkeys(call["tool"] for call in calls))
         required_status = {}
         for tool in required:
             attempts = [call for call in calls if call.get("tool") == tool]
-            completed_attempts = sum(call.get("status", "").lower() == "completed" for call in attempts)
+            completed_attempts = sum(AgentService._call_completed(call) for call in attempts)
+            final_attempts = {}
+            for call in attempts:
+                # Older traces have no full-argument fingerprint. Keep their
+                # tool-level fallback explicit rather than invent query IDs.
+                key = (call.get("server"), call.get("dependency_id", "legacy-tool"))
+                final_attempts[key] = call
             required_status[tool] = {
                 "attempts": len(attempts),
                 "completed_attempts": completed_attempts,
                 "failed_attempts": sum(call.get("status", "").lower().endswith("failed") for call in attempts),
-                "satisfied": completed_attempts > 0,
+                "satisfied": bool(final_attempts) and all(AgentService._call_completed(call) for call in final_attempts.values()),
             }
         trace["required_tool_calls"] = required_status
         trace["required_tool_calls_completed"] = all(item["satisfied"] for item in required_status.values())
-        trace["runtime_status"] = turn.status
+        trace["required_tool_dependency_source"] = "observed_mcp_requests"
+        trace["artifact_required"] = requires_image_generation
+        trace["runtime_status"] = str(getattr(turn.status, "value", turn.status) or "unknown").rsplit(".", 1)[-1].lower()
+        trace["runtime_completed"] = trace["runtime_status"] in {"completed", "success"} and not turn.error
         trace["final_response_received"] = bool(turn.text.strip())
         trace["final_response_length"] = len(turn.text.strip())
         trace["knowledge_calls"] = [call for call in calls if call["tool"] == "knowledge_search"]
@@ -263,9 +276,14 @@ class AgentService:
         trace["artifacts"] = artifacts
         return trace
 
+    @staticmethod
+    def _call_completed(call: dict) -> bool:
+        status = str(getattr(call.get("status"), "value", call.get("status")) or "unknown").rsplit(".", 1)[-1].lower()
+        return status == "completed" and not call.get("error") and not call.get("result_is_error")
+
     def mark_persistence_failed(self, run_id: str, tenant_id: str, stage: str) -> None:
         trace = self._store.run_trace(run_id, tenant_id)
-        if not trace:
+        if not trace or trace["status"] == "completed":
             return
         payload = trace["payload"]
         payload.update(
@@ -273,6 +291,7 @@ class AgentService:
                 "status": "failed",
                 "partial_output": bool(payload.get("final_response_received")),
                 "assistant_message_saved": False,
+                "final_response_persisted": False,
                 "result_persistence_status": "failed",
                 "result_persistence_error_stage": stage,
                 "failure_stage": stage,
