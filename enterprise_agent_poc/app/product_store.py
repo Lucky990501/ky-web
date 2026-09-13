@@ -116,14 +116,24 @@ class ProductStore:
 
     def _seed_agent_catalog(self) -> None:
         with self._store.connection() as conn:
+            # Pre-008 adapters remain compatible. Never overwrite a productized
+            # definition; converting the three legacy identities is NOT Stage 1.
+            if self._store.is_postgres:
+                has_source = conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='agent_templates' AND column_name='definition_source'").fetchone() is not None
+            else:
+                has_source = "definition_source" in {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")}
+            legacy_guard = " WHERE agent_templates.definition_source='legacy'" if has_source else ""
             for agent in CATALOG.values():
                 conn.execute(
-                    "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,allows_image_generation) VALUES (?,?,?,?,?,'enabled','default',?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,description=excluded.description,icon=excluded.icon,credit_cost=excluded.credit_cost,allows_image_generation=excluded.allows_image_generation",
+                    "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,allows_image_generation) VALUES (?,?,?,?,?,'enabled','default',?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,description=excluded.description,icon=excluded.icon,credit_cost=excluded.credit_cost,allows_image_generation=excluded.allows_image_generation" + legacy_guard,
                     (agent.id, agent.name, agent.slug, agent.description, agent.icon, agent.credit_cost, json.dumps(agent.skill_manifest), agent.allows_image_generation),
                 )
             tenants = conn.execute("SELECT id FROM tenants").fetchall()
+            seedable_ids = {r["id"] for r in conn.execute("SELECT id FROM agent_templates WHERE definition_source='legacy'")} if has_source else set(CATALOG)
             for tenant in tenants:
                 for agent in CATALOG.values():
+                    if agent.id not in seedable_ids:
+                        continue
                     conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status) VALUES (?,?,'enabled') ON CONFLICT(tenant_id,agent_id) DO NOTHING", (tenant["id"], agent.id))
 
     def ensure_pgvector_schema(self, dimension: int) -> None:
@@ -190,7 +200,8 @@ class ProductStore:
 
     def agents(self, tenant_id: str) -> list[dict]:
         with self._store.connection() as conn:
-            rows = conn.execute("SELECT t.id,t.name,t.slug,t.description,t.icon,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? ORDER BY t.id", (tenant_id,)).fetchall()
+            # Stage 1 catalog drafts / configured instances are not runnable.
+            rows = conn.execute("SELECT t.id,t.name,t.slug,t.description,t.icon,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? WHERE t.id IN (?,?,?) ORDER BY t.id", (tenant_id, *CATALOG)).fetchall()
         return [{**dict(row), "enabled": dict(row).get("tenant_status") == "enabled"} for row in rows]
 
     def agent_enabled(self, tenant_id: str, agent_id: str) -> bool:

@@ -10,7 +10,7 @@ const source = fs.readFileSync(process.env.WORKBENCH_JS_SOURCE || path.join(__di
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function harness(pathname = '/platform/skills', state = null) {
   const pending = [];
-  const navs = ['workspace', 'profile', 'platform-skills'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
+  const navs = ['workspace', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
   const document = {
     querySelector(selector){if(selector === '#main')return this.main; return {};},
     querySelectorAll(selector){return selector === '[data-page]' ? navs : [];},
@@ -45,13 +45,13 @@ function harness(pathname = '/platform/skills', state = null) {
     for(let i=0;i<5;i++){
       for(const request of pending.filter(x=>!x.done)){
         request.done=true;
-        request.resolve(request.url==='/api/v1/workspace'?{brand_name:'Test',credit_balance:100,agents:[],recent_conversations:[]}:[]);
+        request.resolve(request.url==='/api/v1/workspace'?{brand_name:'Test',credit_balance:100,agents:[],recent_conversations:[]}:request.url==='/api/v1/platform/agents/options'?{model_configs:[],tool_capabilities:[]}:[]);
       }
       await flush();
     }
   }
   function consistent(page,heading){
-    assert.equal(location.pathname,page === 'profile'?'/profile':'/platform/skills');
+    assert.equal(location.pathname,page === 'profile'?'/profile':page==='platform-agents'?'/platform/agents':'/platform/skills');
     assert.equal(document.main.dataset.page,page);
     assert.ok(document.main.innerHTML.includes(`<h1>${heading}</h1>`));
     assert.deepEqual(navs.filter(x=>x.classList.active).map(x=>x.dataset.page),[page]);
@@ -114,5 +114,30 @@ test('existing agent conversation restoration and platform authorization remain 
   assert.equal(h.run('activeConversationId'),'conversation-test');
   assert.equal(h.run('activeAgentId'),'copywriting-agent');
   h.location.pathname='/platform/skills'; h.run('me.is_platform_admin=false');
+  assert.equal(h.run('pageFromNavigation()'),'workspace');
+});
+
+test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
+  const h=harness('/platform/agents',{page:'profile'});
+  assert.equal(h.run('pageFromNavigation()'),'platform-agents');
+  await Promise.all([h.run('render(pageFromNavigation())'),h.settle()]);
+  h.consistent('platform-agents','Agent 管理');
+  assert.ok(h.document.main.innerHTML.includes('Runtime Test Pending'));
+  assert.ok(h.document.main.innerHTML.includes('真实 Runtime Test'));
+});
+test('Agent management profile navigation/back/forward remains route-consistent',async()=>{
+  const h=harness('/platform/agents');
+  await Promise.all([h.run("navigate('platform-agents',{replace:true})"),h.settle()]);
+  await Promise.all([h.run("navigate('profile')"),h.settle()]);
+  h.history.move(-1);await h.settle();h.consistent('platform-agents','Agent 管理');
+  h.history.move(1);await h.settle();h.consistent('profile','个人中心');
+});
+test('late Agent control-plane fetch cannot overwrite newer profile view',async()=>{
+  const h=harness('/platform/agents'),old=h.run("navigate('platform-agents')");
+  const current=h.run("navigate('profile')");h.respond('/api/v1/workspace',{brand_name:'Test'});await current;
+  await h.settle();await old;h.consistent('profile','个人中心');
+});
+test('Stage 1 management navigation remains platform-admin only',()=>{
+  const h=harness('/platform/agents');h.run('me.is_platform_admin=false');
   assert.equal(h.run('pageFromNavigation()'),'workspace');
 });

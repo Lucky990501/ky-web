@@ -186,10 +186,13 @@ def test_repository_migrations_match_legacy_production_crlf_checksums():
     }
 
     checksums = {path.name[:3]: migrate.migration_checksums(path) for path in migrate.migration_files()}
-    actual = {version: item["legacy_crlf_checksum"] for version, item in checksums.items()}
+    # Historical production checksums stay strict when expand-only migrations
+    # are appended. New migrations have no historical production checksum yet.
+    assert expected.keys() <= checksums.keys()
+    actual = {version: checksums[version]["legacy_crlf_checksum"] for version in expected}
 
     assert actual == expected
     assert {
-        migrate.compatibility_status(expected[version], item)
-        for version, item in checksums.items()
+        migrate.compatibility_status(expected[version], checksums[version])
+        for version in expected
     } == {migrate.LEGACY_LINE_ENDING_COMPATIBLE}

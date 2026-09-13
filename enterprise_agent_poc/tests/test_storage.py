@@ -64,7 +64,7 @@ def test_history_storage_indexes_exist_in_sqlite_and_append_only_migration(tmp_p
         ).fetchall()
 
     assert expected <= {row["name"] for row in rows}
-    migration = migration_files()[-1]
+    migration = next(path for path in migration_files() if path.name == "007_history_storage_indexes.sql")
     assert migration.name == "007_history_storage_indexes.sql"
     source = migration.read_text(encoding="utf-8")
     assert "SET LOCAL lock_timeout = '5s'" in source

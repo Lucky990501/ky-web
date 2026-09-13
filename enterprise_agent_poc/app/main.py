@@ -11,11 +11,13 @@ from pathlib import Path
 
 from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_password, verify_password
+from app.agent_catalog_api import catalog_router
+from app.agent_productization import AgentCatalogError, AgentProductization
 from app.product_service import TaskService
 from app.product_store import ProductStore
 from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, embedding_provider_for, runtime_diagnostic, set_embedding_probe
@@ -70,6 +72,7 @@ manager = CodexRuntimeManager(settings, SkillDeployment(skill_registry.published
 runtime = CodexRuntimeProvider(manager)
 agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agent)
 product_store = ProductStore(store)
+agent_catalog_control = AgentProductization(store, settings.environment)
 task_service = TaskService(product_store, agents)
 knowledge_processing = KnowledgeProcessingService(product_store, settings)
 knowledge_retrieval = KnowledgeRetrievalService(product_store, settings)
@@ -131,6 +134,14 @@ def require_platform_admin(workbench_session: str | None) -> UserPrincipal:
     if not skill_registry.is_platform_admin(principal.user_id):
         raise HTTPException(403, "仅平台管理员可操作 Skill Registry。")
     return principal
+
+
+app.include_router(catalog_router(agent_catalog_control, require_platform_admin))
+
+
+@app.exception_handler(AgentCatalogError)
+async def agent_catalog_error(_, exc: AgentCatalogError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
 
 def profile_response(user: dict) -> dict:
@@ -203,6 +214,7 @@ async def production_health() -> dict:
 @app.get("/assets", include_in_schema=False)
 @app.get("/profile", include_in_schema=False)
 @app.get("/platform/skills", include_in_schema=False)
+@app.get("/platform/agents", include_in_schema=False)
 async def product_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
