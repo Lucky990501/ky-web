@@ -23,11 +23,11 @@ function login() {
 
 const baseNavs = [['workspace','layout-dashboard','工作台'],['image','wand-sparkles','AI 创作'],['history','history','历史记录'],['generations','folder-open','我的生成'],['knowledge','book-open','知识库'],['assets','image','素材库'],['members','users','成员管理'],['enterprise','settings','企业设置'],['profile','user-round','个人中心']];
 const pageRoutes = Object.freeze({workspace:'/workspace',image:'/agents/image',copywriting:'/agents/copywriting',campaign:'/agents/campaign',history:'/conversations',generations:'/generations',knowledge:'/knowledge',assets:'/assets',enterprise:'/enterprise-config',profile:'/profile','platform-skills':'/platform/skills','platform-agents':'/platform/agents'});
-const pageFromPath = path => Object.entries(pageRoutes).find(([,route])=>route===path)?.[0]||null;
+const pageFromPath = path => Object.entries(pageRoutes).find(([,route])=>route===path)?.[0]||( /^\/agents\/[a-zA-Z0-9-]+$/.test(path) ? `agent:${path.slice(8)}` : null);
 const navigationState = page => ({page,activeAgentId,activeConversationId});
 const allowedPage = page => ['platform-skills','platform-agents'].includes(page)&&!me?.is_platform_admin?'workspace':page;
 function navigate(page,{replace=false}={}){
-  const target=allowedPage(page),path=pageRoutes[target]||location.pathname,state=navigationState(target),current=window.history.state||{};
+  const target=allowedPage(page),path=pageRoutes[target]||(target.startsWith('agent:')?`/agents/${encodeURIComponent(target.slice(6))}`:location.pathname),state=navigationState(target),current=window.history.state||{};
   const same=location.pathname===path&&current.page===state.page&&current.activeAgentId===state.activeAgentId&&current.activeConversationId===state.activeConversationId;
   window.history[replace||same?'replaceState':'pushState'](state,'',path);
   return render(target);
@@ -36,6 +36,7 @@ function pageFromNavigation(state=window.history.state){
   const page=allowedPage(pageFromPath(location.pathname)||state?.page||'workspace');
   if(state&&Object.prototype.hasOwnProperty.call(state,'activeAgentId'))activeAgentId=state.activeAgentId||'image-agent';
   if(state&&Object.prototype.hasOwnProperty.call(state,'activeConversationId'))activeConversationId=state.activeConversationId||null;
+  if(page.startsWith('agent:'))activeAgentId=page.slice(6);
   return page;
 }
 window.addEventListener('popstate',event=>{if(me)render(pageFromNavigation(event.state));});
@@ -59,13 +60,14 @@ async function render(page) {
   const previousMain = document.querySelector('#main'), main = previousMain.cloneNode(false);
   previousMain.replaceWith(main);
   main.dataset.page = page;
-  document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === page));
+  document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === (page.startsWith('agent:')?'image':page)));
   main.innerHTML = pageLoading();
   try {
     if (page === 'workspace') return await workspaceV2(main);
     if (page === 'image') return await agentWorkspaceV2(main,'image-agent');
     if (page === 'copywriting') return await agentWorkspaceV2(main,'copywriting-agent');
     if (page === 'campaign') return await agentWorkspaceV2(main,'campaign-agent');
+    if (page.startsWith('agent:')) return await agentWorkspaceV2(main,page.slice(6));
     if (page === 'history') return await conversationHistory(main);
     if (page === 'generations') return await generations(main);
     if (page === 'knowledge') return await knowledgeV2(main);
@@ -107,7 +109,7 @@ async function conversationHistory(main,offset=0,loaded=[]){
   main.querySelector('#history-load-more')?.addEventListener('click',()=>conversationHistory(main,offset+pageSize,items));
   bindNavigation();refreshIcons();
 }
-const agentPage=id=>id==='image-agent'?'image':id==='copywriting-agent'?'copywriting':'campaign';
+const agentPage=id=>id==='image-agent'?'image':id==='copywriting-agent'?'copywriting':id==='campaign-agent'?'campaign':`agent:${id}`;
 const agentPlaceholder=agentId=>agentId==='image-agent'?'描述你想创作的图片，例如：帮我做一张秋季招生海报':agentId==='copywriting-agent'?'描述需要的文案，例如：写一篇秋季招生公众号推文':'描述需要策划的活动，例如：制定国庆招生开放日方案';
 const formatHistoryTime=value=>String(value||'').replace('T',' ').slice(0,16);
 const taskStatusLabel=status=>({queued:'排队中',running:'进行中',completed:'已完成',failed:'失败',cancelled:'已取消'})[status]||'暂无任务';
@@ -117,19 +119,25 @@ const messageHtml = item => `<article class="chat-message ${item.role==='user'?'
 const taskStageLabel = stage => ({queued:'任务已进入队列',loading_context:'正在加载企业上下文',starting_runtime:'正在启动智能体',generating:'正在创作内容',completed:'正文已生成'})[stage] || '正在处理任务';
 async function agentWorkspaceV2(main, agentId) {
   activeAgentId=agentId;
-  const data=await api('/api/v1/workspace'),agent=(data.agents||[]).find(x=>x.id===agentId);
+  const data=await api('/api/v1/workspace');
+  let agent=agentPage(agentId).startsWith('agent:')?await api(`/api/v1/agents/${encodeURIComponent(agentId)}`).catch(()=>null):(data.agents||[]).find(x=>x.id===agentId);
   if(main.dataset.page!==agentPage(agentId))return;
-  if(!agent||!agent.enabled){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
+  if((!agent||!agent.enabled)&&!activeConversationId){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
   const conversations=(await api('/api/v1/conversations')).filter(x=>x.agent_id===agentId);
   let detail=activeConversationId?await api(`/api/v1/conversations/${activeConversationId}`).catch(()=>null):null;
   if(main.dataset.page!==agentPage(agentId))return;
   if(activeConversationId&&detail?.agent_id!==agentId){activeConversationId=null;detail=null;}
+  const canRun=agent?.enabled===true;
+  if(!canRun&&!detail){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
+  agent={...agent,...detail?.agent,enabled:canRun};
   const history=detail?.messages||[],attachedIds=new Set(history.map(item=>item.generation?.id).filter(Boolean));
   const remainingImages=(detail?.generations||[]).filter(item=>!attachedIds.has(item.id));
   const historicalImages=remainingImages.length?`<section class="conversation-artifacts"><h3>${icon('images',18)}本项目生成图片 <span>${remainingImages.length}</span></h3><div>${remainingImages.map(item=>image(item,detail?.project?.name||'历史生成图片')).join('')}</div></section>`:'';
   const historyMarkup=history.length?`${history.map(messageHtml).join('')}${historicalImages}`:`<div class="assistant-intro">${icon('bot',24)}<div><b>你好，我是${escapeHtml(agent.name)}</b><p>我会在企业品牌规范、知识库和素材范围内完成本次创作。</p></div></div>`;
   main.innerHTML=`<div class="creation-layout"><aside class="conversation-rail"><button class="button primary full" id="new-chat">${icon('plus')}新建项目</button><div class="conversation-rail-heading"><h3>${escapeHtml((conversations[0]?.project?.type)||'创作项目')}</h3><button class="link-button" data-go="history">全部历史</button></div>${conversations.map(x=>conversationRowHtml(x,'data-select-agent-conversation',activeConversationId===x.id)).join('')||'<div class="empty-state">暂无历史项目</div>'}</aside><section class="creation-main"><div class="agent-heading"><div>${icon(agent.icon||'bot',28)}<div><h1>${detail?escapeHtml(detail.project?.name||detail.title):escapeHtml(agent.name)}</h1><p>${detail?`${escapeHtml(detail.project?.type||'创作项目')} · ${detail.task_count||0} 次执行${detail.image_count?` · ${detail.image_count} 张图片`:''}`:`${escapeHtml(agent.description)} · ${agent.credit_cost} 积分 / 次`}</p></div></div><button class="button secondary history-shortcut" data-go="history">${icon('history')}历史项目</button></div><div id="chat-body" class="chat-body" aria-live="polite">${historyMarkup}</div><form class="composer" id="composer"><textarea id="prompt" required placeholder="${escapeHtml(agentPlaceholder(agentId))}"></textarea><div><span>将自动使用企业品牌、知识库与素材库</span><button class="button primary" type="submit">${icon('send')}发送</button></div></form></section><aside class="creation-right"><section class="panel"><h3>当前智能体</h3><p><b>${escapeHtml(agent.name)}</b></p><p class="muted">Skill：${escapeHtml(Object.keys(JSON.parse(agent.skill_manifest||'{}')).join(' / '))}</p></section><section class="panel"><h3>${detail?'当前项目':'本次执行'}</h3><p><b>${escapeHtml(detail?.project?.name||'新建项目')}</b></p><p class="muted">${detail?`最近保存：${escapeHtml(formatHistoryTime(detail.tasks?.at(-1)?.completed_at||detail.created_at))}`:'进度只展示服务端已保存的任务阶段，不展示模型隐藏推理。'}</p></section></aside></div>`;
   main.querySelector('#new-chat').onclick=()=>{activeConversationId=null;navigate(agentPage(agentId));}; main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.selectAgentConversation;navigate(agentPage(agentId));}); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); refreshIcons();
+  if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
+  if(!canRun){main.querySelector('#new-chat').disabled=true;main.querySelector('#composer').innerHTML='<p role="status">智能体已停用，历史项目只读；不能创建任务或继续执行。</p>';main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
   bindNavigation();
 }
 async function submitAgentTaskV2(event,agentId,main){event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim();if(!text)return;input.value='';const body=document.querySelector('#chat-body');body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div>${escapeHtml(text)}</div></article><section class="task-card task-card-live" id="task-status"><div class="task-progress"><span class="spin">${icon('loader-circle')}</span><b>任务已进入队列</b></div><p>正在准备执行…</p></section>`);body.scrollTop=body.scrollHeight;refreshIcons();const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});streamTask(task.id,agentId,main);}catch(error){document.querySelector('#task-status')?.replaceWith(Object.assign(document.createElement('p'),{className:'error',textContent:error.message}));}}
@@ -210,6 +218,8 @@ async function platformAgents(main) {
   const [templates, options, skills] = await Promise.all([api(root), api(`${root}/options`), api('/api/v1/platform/skills')]);
   main.innerHTML = `${header('Agent 管理','Stage 1 控制面 · 不切换现有 Agent · Runtime Test Pending','bot')}<section class="panel agent-control"><p role="status">本地测试发布不代表生产可运行。真实 Runtime Test 和 Execution Resolver 留待 Stage 2。</p><form id="agent-create"><h2>创建 Template</h2><label>名称<input name="name" required maxlength="120"></label><label>Slug<input name="slug" required maxlength="100" pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></label><label>分类<input name="category" value="general" required maxlength="80"></label><label>说明<input name="description" maxlength="2000"></label><button class="button primary">创建 Template</button></form><p id="agent-error" class="form-error" role="alert"></p></section><section class="panel agent-control"><h2>Agent 列表</h2>${templates.map(t=>`<button class="button secondary" data-agent-template="${escapeHtml(t.id)}">${escapeHtml(t.name)} · ${escapeHtml(t.definition_source)} · ${escapeHtml(t.lifecycle_status)}</button>`).join('')}</section><section id="agent-detail" class="panel agent-control"><p>选择 Template 查看 Revision。</p></section>`;
   const error = main.querySelector('#agent-error');
+  main.querySelector('.page-header p').textContent='Stage 2 控制面 · Execution Context · 真实 Runtime Test';
+  main.querySelector('[role="status"]').textContent='只有当前配置的真实 Runtime Test 通过，才允许运行就绪发布和 Tenant Enable；本地验收不代表已部署生产。';
   let detailGeneration = 0;
   const perform = async action => { error.textContent = ''; try { await action(); } catch (err) { error.textContent = err.message; } };
   main.querySelector('#agent-create').onsubmit = event => {
@@ -228,8 +238,19 @@ async function platformAgents(main) {
     const endpoint = v ? `${root}/${encodeURIComponent(t.id)}/versions/${encodeURIComponent(v.id)}` : null;
     const disabled = editable?'':'disabled';
     box.innerHTML = `<h2>${escapeHtml(t.name)}</h2><button class="button secondary" id="agent-new-revision">创建新 Draft ${v?'（复制当前 Revision）':''}</button>${t.versions.map(item=>`<button class="button secondary" data-agent-revision="${escapeHtml(item.id)}">Revision ${item.revision} · ${escapeHtml(item.status)}${item.publication_scope?' · '+escapeHtml(item.publication_scope):''}</button>`).join('')}${v?`<h3>Revision ${v.revision} · ${escapeHtml(v.status)}</h3><p>Runtime Test Pending · production_ready = false</p><p>Fingerprint：<code>${escapeHtml(v.configuration_fingerprint)}</code></p><form id="agent-draft"><label>名称<input name="name" value="${escapeHtml(v.name)}" required maxlength="120" ${disabled}></label><label>说明<input name="description" value="${escapeHtml(v.description)}" maxlength="2000" ${disabled}></label><label>分类<input name="category" value="${escapeHtml(v.category)}" required maxlength="80" ${disabled}></label><label>Persona<textarea name="persona" maxlength="16000" rows="5" ${disabled}>${escapeHtml(v.persona)}</textarea></label><label>Model Config${select('model_config_id',options.model_configs,v.model_config_id,!editable)}</label>${[['enterprise_config_requirement','企业配置'],['knowledge_requirement','知识库'],['asset_requirement','素材']].map(([key,label])=>`<label>${label} Requirement${select(key,['none','optional','required'],v[key],!editable)}</label>`).join('')}<label>Output Policy${select('output_policy',['text','image_required'],v.output_policy,!editable)}</label><label>Credit Cost<input name="credit_cost" type="number" min="1" max="1000000" value="${v.credit_cost}" required ${disabled}></label><button class="button primary" ${disabled}>保存 Draft</button></form><form id="agent-skill-bindings"><h3>Published Skill Version（S2 引用，不复制 ZIP）</h3>${skills.map(s=>`<label>${escapeHtml(s.name)}<select data-agent-skill="${escapeHtml(s.id)}" ${disabled}><option value="">未绑定</option>${s.versions.filter(sv=>sv.status==='published'||v.skills.some(b=>b.skill_version_id===sv.id)).map(sv=>`<option value="${escapeHtml(sv.id)}" ${v.skills.some(b=>b.skill_version_id===sv.id)?'selected':''}>${escapeHtml(sv.version)} · ${escapeHtml(sv.status)}</option>`).join('')}</select></label>`).join('')}<button class="button secondary" ${disabled}>保存 Skill Binding</button></form><form id="agent-tool-bindings"><h3>Tool Capability（无 Binding = denied）</h3>${options.tool_capabilities.map(tool=>`<label>${escapeHtml(tool.name)}${select(tool.id,tool.implemented?['denied','optional','required']:['denied'],v.tools.find(b=>b.tool_capability_id===tool.id)?.invocation_requirement||'denied',!editable||!tool.implemented)}${tool.implemented?'':' · 未实现，不可绑定'}</label>`).join('')}<button class="button secondary" ${disabled}>保存 Tool Binding</button></form><h3>Validation Result</h3>${v.tests.map(test=>`<p>${escapeHtml(test.test_type)} · ${escapeHtml(test.status)} · ${escapeHtml(test.configuration_fingerprint.slice(0,12))}</p><pre>${escapeHtml(test.result_json)}</pre>`).join('')||'<p>未验证</p>'}<button id="agent-validate" class="button secondary" ${disabled}>Validation（非真实 Runtime Test）</button><button id="agent-publish" class="button secondary" ${disabled}>仅本地测试发布（不可生产运行）</button><button class="button secondary" disabled>生产发布：Runtime Test Pending</button>${v.status==='published'?'<button id="agent-deprecate" class="button secondary">Deprecated（不切换现有 Instance）</button>':''}`:'<p>尚无 Revision。</p>'}`;
-    const reload = () => showDetail(t.id,v?.id);
-    box.querySelector('#agent-new-revision').onclick = ()=>perform(async()=>{const next=await api(`${root}/${t.id}/versions`,{method:'POST',body:JSON.stringify(v?{from_version_id:v.id}:{})}); await showDetail(t.id,next.versions[0].id);});
+    const reload = () => generation===detailGeneration ? showDetail(t.id,v?.id) : Promise.resolve();
+    if(v)box.innerHTML=box.innerHTML.replace('Runtime Test Pending · production_ready = false',`Runtime Test: ${escapeHtml(v.runtime_test_status)} · production_ready = ${v.production_ready===true}`);
+    if(v){
+      box.querySelectorAll('button[disabled]').forEach(node=>{if(node.textContent==='生产发布：Runtime Test Pending')node.remove();});
+      box.insertAdjacentHTML('beforeend',`<section id="agent-execution"><h3>Stage 2 Execution</h3><p>Runtime Test: ${escapeHtml(v.runtime_test_status)} · 当前配置 production_ready = ${v.production_ready===true}</p>${editable?'<button type="button" id="agent-runtime-test" class="button secondary">执行真实 Runtime Test（隔离 Tenant）</button><label><input type="checkbox" id="agent-runtime-publish-confirm">确认发布已通过真实 Runtime Test 的当前配置</label><button type="button" id="agent-runtime-publish" class="button primary" disabled>发布运行就绪 Revision</button>':''}${v.status==='published'?'<label>Tenant ID<input id="agent-instance-tenant" required></label><button type="button" id="agent-instance-configure" class="button secondary">配置 Tenant Instance</button><button type="button" id="agent-instance-enable" class="button primary">Enable Instance</button><button type="button" id="agent-instance-disable" class="button secondary">Disable Instance</button>':''}</section>`);
+      box.querySelector('#agent-runtime-test')?.addEventListener('click',event=>{const btn=event.currentTarget;btn.disabled=true;perform(async()=>{await api(`${endpoint}/test`,{method:'POST'});await reload();}).finally(()=>{btn.disabled=false;});});
+      box.querySelector('#agent-runtime-publish-confirm')?.addEventListener('change',event=>{box.querySelector('#agent-runtime-publish').disabled=!event.target.checked||v.production_ready!==true;});
+      box.querySelector('#agent-runtime-publish')?.addEventListener('click',()=>perform(async()=>{await api(`${endpoint}/publish`,{method:'POST',body:JSON.stringify({mode:'production'})});await reload();}));
+      const instancePath=()=>`${root}/${encodeURIComponent(t.id)}/instances/${encodeURIComponent(box.querySelector('#agent-instance-tenant').value.trim())}`;
+      box.querySelector('#agent-instance-configure')?.addEventListener('click',()=>perform(async()=>{await api(instancePath(),{method:'PUT',body:JSON.stringify({agent_template_version_id:v.id,overrides:{}})});error.textContent='Instance configured';}));
+      for(const action of ['enable','disable'])box.querySelector(`#agent-instance-${action}`)?.addEventListener('click',()=>perform(async()=>{await api(`${instancePath()}/${action}`,{method:'POST'});pageCache.clear();error.textContent=`Instance ${action}d`;}));
+    }
+    box.querySelector('#agent-new-revision').onclick = ()=>perform(async()=>{const next=await api(`${root}/${t.id}/versions`,{method:'POST',body:JSON.stringify(v?{from_version_id:v.id}:{})}); if(generation===detailGeneration)await showDetail(t.id,next.versions[0].id);});
     box.querySelectorAll('[data-agent-revision]').forEach(node=>node.onclick=()=>perform(()=>showDetail(t.id,node.dataset.agentRevision)));
     if (editable) {
       box.querySelector('#agent-draft').onsubmit = event=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.target));data.credit_cost=Number(data.credit_cost);perform(async()=>{await api(endpoint,{method:'PATCH',body:JSON.stringify(data)});await reload();});};

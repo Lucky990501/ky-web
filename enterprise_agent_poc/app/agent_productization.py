@@ -56,6 +56,8 @@ class AgentProductization:
     def __init__(self, store: POCStore, environment: str = "development"):
         self.store = store
         self.environment = environment
+        self.execution_resolver = None
+        self.runtime_tester = None
 
     def ensure_initialized(self):
         # Stage 1 local schema belongs to control-plane use, not legacy API
@@ -67,6 +69,8 @@ class AgentProductization:
             required = {"agent_template_versions", "agent_template_version_skills", "tool_capabilities", "agent_template_version_tools", "agent_template_tests"}
             if not required <= tables or "current_published_version_id" not in columns:
                 self.initialize()
+            if self.execution_resolver:
+                self.execution_resolver.initialize_local()
 
     def initialize(self) -> None:
         """SQLite local adapter only. PostgreSQL 008 must be applied externally."""
@@ -188,6 +192,9 @@ class AgentProductization:
         version["tests"] = [dict(r) for r in conn.execute("SELECT * FROM agent_template_tests WHERE agent_template_version_id=? ORDER BY created_at DESC,id", (version["id"],))]
         version["runtime_test_status"] = "Runtime Test Pending"
         version["production_ready"] = False  # No execution resolver / real Runtime Test in Stage 1.
+        if self.execution_resolver:
+            version["production_ready"] = bool(self.execution_resolver._runtime_passed(conn,version))
+            version["runtime_test_status"] = "passed" if version["production_ready"] else "Runtime Test Pending"
         return version
 
     def create_template(self, payload, actor):
@@ -366,9 +373,12 @@ class AgentProductization:
             test = conn.execute("SELECT id FROM agent_template_tests WHERE agent_template_version_id=? AND configuration_fingerprint=? AND test_type='validation' AND status='passed'", (version_id, version["configuration_fingerprint"])).fetchone()
             if not test:
                 raise AgentCatalogError("Current configuration validation required", 409)
-            if mode != "local_test" or self.environment == "production":
+            runtime_ready = self.execution_resolver and self.execution_resolver._runtime_passed(conn, version)
+            if mode == "production" and not runtime_ready:
                 raise AgentCatalogError("Runtime Test Pending: Stage 1 cannot publish production-ready revisions", 409)
-            conn.execute("UPDATE agent_template_versions SET status='published',publication_scope='local_test',published_at=CURRENT_TIMESTAMP,updated_by=? WHERE id=?", (actor, version_id))
+            if mode == "local_test" and self.environment == "production":
+                raise AgentCatalogError("Runtime Test Pending: local_test publish is forbidden in production", 409)
+            conn.execute("UPDATE agent_template_versions SET status='published',publication_scope=?,published_at=CURRENT_TIMESTAMP,updated_by=? WHERE id=?", (mode, actor, version_id))
             conn.execute("UPDATE agent_templates SET current_published_version_id=?,lifecycle_status='published',published_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,updated_by=? WHERE id=?", (version_id, actor, template_id))
         return self.detail(template_id)
 
@@ -396,6 +406,41 @@ class AgentProductization:
             if not conn.execute("SELECT id FROM tenants WHERE id=?", (tenant_id,)).fetchone():
                 raise AgentCatalogError("Tenant not found", 404)
             instance_id = str(uuid.uuid4())
-            conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status,instance_id,agent_template_version_id,overrides_json,created_at,updated_at) VALUES (?,?,'configured',?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(tenant_id,agent_id) DO UPDATE SET agent_template_version_id=excluded.agent_template_version_id,overrides_json=excluded.overrides_json,updated_at=CURRENT_TIMESTAMP", (tenant_id, template_id, instance_id, version_id, canonical(overrides)))
+            conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status,instance_id,agent_template_version_id,overrides_json,created_at,updated_at) VALUES (?,?,'configured',?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(tenant_id,agent_id) DO UPDATE SET status='configured',agent_template_version_id=excluded.agent_template_version_id,overrides_json=excluded.overrides_json,updated_at=CURRENT_TIMESTAMP", (tenant_id, template_id, instance_id, version_id, canonical(overrides)))
             row = dict(conn.execute("SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, template_id)).fetchone())
         return {**row, "execution_enabled": False, "runtime_test_status": "Runtime Test Pending"}
+
+    def set_instance_status(self, template_id, tenant_id, status):
+        if status not in {"enabled", "disabled"} or not self.execution_resolver:
+            raise AgentCatalogError("Execution Resolver unavailable", 409)
+        blocked_error = None
+        with self.store.connection() as conn:
+            if not self.store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
+            self._productized(self._template(conn, template_id, lock=True))
+            instance = conn.execute("SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?" + (" FOR UPDATE" if self.store.is_postgres else ""), (tenant_id,template_id)).fetchone()
+            if not instance:
+                raise AgentCatalogError("Instance not found", 404)
+            if status == "enabled":
+                try:
+                    version = self._version(conn, template_id, instance["agent_template_version_id"])
+                    if version["status"] != "published" or not self.execution_resolver._runtime_passed(conn, version):
+                        raise AgentCatalogError("Published revision / current real Runtime Test required", 409)
+                    errors = self._validation_errors(conn, version)
+                    if errors:
+                        raise AgentCatalogError("; ".join(errors), 409)
+                    self.execution_resolver._skills(conn, version["id"])
+                    self.execution_resolver._ready(conn, tenant_id, version)
+                    model = MODEL_CONFIGS[version["model_config_id"]]
+                    settings = self.execution_resolver.settings
+                    if (settings.model_provider_id,settings.model_id,settings.reasoning_effort) != (model["provider"],model["model"],model["reasoning_effort"]):
+                        raise AgentCatalogError("Approved model configuration mismatch",409)
+                except (AgentCatalogError, LookupError, ValueError) as exc:
+                    # Persist the fail-closed control-plane state, then report
+                    # rejection outside this transaction. No history is erased.
+                    blocked_error = exc
+                    status = "blocked"
+            conn.execute("UPDATE tenant_agent_instances SET status=?,updated_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND agent_id=?", (status,tenant_id,template_id))
+        if blocked_error:
+            raise AgentCatalogError("Instance blocked: enable prerequisite failed",409) from blocked_error
+        return {"tenant_id":tenant_id,"agent_id":template_id,"status":status}

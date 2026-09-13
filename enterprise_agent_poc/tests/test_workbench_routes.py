@@ -17,7 +17,7 @@ def test_workbench_route_and_async_view_regressions():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('path', ['/profile', '/platform/skills', '/workspace', '/conversations', '/generations', '/knowledge', '/assets'])
+@pytest.mark.parametrize('path', ['/profile', '/platform/skills', '/workspace', '/conversations', '/generations', '/knowledge', '/assets', '/agents/social-content-agent'])
 def test_static_routes_reuse_the_same_workbench_entry_without_redirect(path):
     # These entry routes don't require startup or a database connection.
     client = TestClient(app)

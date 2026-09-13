@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.agent_catalog import get_agent
+from app.agent_catalog import CATALOG
 from app.product_store import ProductStore, ResultPersistenceError
 from app.service import AgentRunError, AgentService
 from app.storage import storage_provider
@@ -14,10 +14,12 @@ class TaskService:
     def __init__(self, store: ProductStore, agents: AgentService) -> None:
         self._store = store
         self._agents = agents
+        self.pre_execute_guard = None
 
     async def execute(self, task: dict) -> None:
+        if self.pre_execute_guard:
+            self.pre_execute_guard()
         task_id, tenant_id = task["id"], task["tenant_id"]
-        agent = get_agent(task["agent_id"])
         current = self._store.task_for_worker(task_id) or task
         if current.get("status") in {"completed", "cancelled"}:
             return
@@ -48,6 +50,13 @@ class TaskService:
 
         self._store.set_task(task_id, tenant_id, "running", "loading_context", "正在加载企业上下文")
         try:
+            agent = self._store.task_definition(task)
+            execution_options = {}
+            if self._store.execution_resolver and task["agent_id"] not in CATALOG:
+                with self._store._store.connection() as conn:
+                    context = self._store.execution_resolver.task_context(conn, task)
+                    self._store.execution_resolver.check_context(conn, context)
+                execution_options["execution_context"] = context
             if task.get("conversation_id"):
                 self._store.add_message(
                     task["conversation_id"],
@@ -62,6 +71,7 @@ class TaskService:
                 task["input_text"],
                 task["conversation_id"],
                 defer_result_persistence=True,
+                **execution_options,
             )
             trace = self._agents._store.run_trace(result.run_id, tenant_id)
             if not trace:
@@ -148,7 +158,7 @@ class TaskService:
         current = self._store.task_for_worker(task["id"])
         payload = dict(trace["payload"])
         storage_key = self._image_storage_key(trace)
-        if get_agent(task["agent_id"]).allows_image_generation and (not current or current["status"] != "completed"):
+        if self._store.task_definition(task).allows_image_generation and (not current or current["status"] != "completed"):
             # Reuse the generated object. Never invoke image_generation during
             # result recovery, even if this read or the DB transaction fails.
             if (not storage_key or not storage_key.startswith(f"generated/{task['tenant_id']}/")

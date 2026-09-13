@@ -22,6 +22,11 @@ class RuntimeProfile:
     skill_manifest: dict[str, str]
     sandbox: SandboxPolicy
     runtime_version: str
+    profile_hash_version: str = "v1"
+    execution_context_id: str | None = None
+    instance_id: str | None = None
+    tool_scopes: tuple[str, ...] = ()
+    required_tools: tuple[str, ...] = ()
 
     @classmethod
     def build(

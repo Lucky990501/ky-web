@@ -144,6 +144,11 @@ os.execv({sys.executable!r}, [{sys.executable!r}, *args])
     wrong = tmp_path / "wrong"
     wrong.mkdir()
     env = os.environ.copy()
+    # Host-boundary fixture gets its configuration solely from shared_env,
+    # not the surrounding Stage 2 pytest process's isolated Settings.
+    from app.settings import RUNTIME_CONFIG_ENV_NAMES
+    for name in RUNTIME_CONFIG_ENV_NAMES:
+        env.pop(name,None)
     env.pop("ENTERPRISE_POC_DATA_DIR", None)
     env.update(PATH=str(boundary) + os.pathsep + os.environ["PATH"], PYTHONDONTWRITEBYTECODE="1",
                DEEPSEEK_API_KEY="local-test-placeholder", GATEWAY_API_TOKEN="local-test-placeholder",

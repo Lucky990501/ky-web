@@ -61,9 +61,17 @@ class AgentService:
         conversation_id: str | None = None,
         *,
         defer_result_persistence: bool = False,
+        execution_context: dict | None = None,
     ) -> RunResult:
-        profile = self.profile_for(tenant_id, agent_id)
-        agent = get_agent(agent_id)
+        if execution_context is None:
+            profile = self.profile_for(tenant_id, agent_id)
+            agent = get_agent(agent_id)
+        else:
+            from app.agent_execution import definition, profile as context_profile
+            if execution_context["tenant_id"] != tenant_id or execution_context["agent_id"] != agent_id:
+                raise PermissionError("Execution context identity mismatch")
+            profile = context_profile(execution_context)
+            agent = definition(execution_context)
         is_resume = bool(conversation_id)
         if conversation_id:
             existing = self._store.conversation(conversation_id, tenant_id)
@@ -85,8 +93,8 @@ class AgentService:
             "model": profile.model_id,
             "reasoning_effort": profile.reasoning_effort,
             "skills": [{"name": name, "version": version} for name, version in profile.skill_manifest.items()],
-            "skill_name": next(iter(profile.skill_manifest)),
-            "skill_version": next(iter(profile.skill_manifest.values())),
+            "skill_name": next(iter(profile.skill_manifest), None),
+            "skill_version": next(iter(profile.skill_manifest.values()), None),
             "mcp_calls": [],
             "knowledge_calls": [],
             "knowledge_retrievals": [],
@@ -123,6 +131,8 @@ class AgentService:
                 "knowledge_context_used": [],
             },
         }
+        if execution_context:
+            baseline.update(execution_context_id=execution_context["id"], profile_hash_version="v2", configuration_fingerprint=execution_context["configuration_fingerprint"])
         # A startup may fail before Codex returns a thread.  Persist a minimal
         # trace first so the task keeps an auditable run_id without inventing a
         # thread id or storing provider exceptions/secrets.
@@ -144,13 +154,22 @@ class AgentService:
                         raise RuntimeError("会话 Thread 绑定并发更新失败。")
             else:
                 session = await self._runtime.create_session(profile, agent.instructions)
-                self._store.save_conversation(
-                    conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version
-                )
+                if execution_context:
+                    with self._store.connection() as conn:
+                        conn.execute("INSERT INTO conversations(id,tenant_id,agent_id,runtime_profile_id,runtime_thread_id,runtime_version) VALUES (?,?,?,?,?,?)", (conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version))
+                        conn.execute("INSERT INTO conversation_agent_contexts VALUES (?,?)", (conversation_id, execution_context["id"]))
+                else:
+                    self._store.save_conversation(
+                        conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version
+                    )
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
             turn = await self._runtime.run_turn(session, message)
             trace = self._completed_trace(trace, turn, agent.allows_image_generation)
+            if execution_context:
+                for tool in profile.required_tools:
+                    trace["required_tool_calls"].setdefault(tool, {"attempts": 0, "completed_attempts": 0, "failed_attempts": 0, "satisfied": False})
+                trace["required_tool_calls_completed"] = all(item["satisfied"] for item in trace["required_tool_calls"].values())
             trace["lifecycle_events"] = self._startup_events(profile) + trace["lifecycle_events"]
             has_final_response = bool(turn.text.strip())
             runtime_completed = trace["runtime_completed"]

@@ -182,4 +182,7 @@ class PlatformMCPService:
         principal = self._tokens.verify(bearer_token, required_scope)
         if not self._store.tenant_exists(principal.tenant_id):
             raise TokenError("Runtime MCP token 对应的 Tenant 已不存在。")
+        if principal.execution_context_id:
+            from app.agent_execution import authorize_tool
+            authorize_tool(self._store, principal, required_scope)
         return principal

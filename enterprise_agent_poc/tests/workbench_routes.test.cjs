@@ -7,20 +7,52 @@ const {test} = require('node:test');
 // Execute the actual frontend without auto-boot, using only a small DOM/history
 // boundary double. No renderer or routing function is replaced in route tests.
 const source = fs.readFileSync(process.env.WORKBENCH_JS_SOURCE || path.join(__dirname, '../app/static/workbench.js'), 'utf8').replace(/boot\(\);\s*$/, '');
+
+test('generic agent pathname wins over stale agent and page history state',()=>{
+  const h=harness('/agents/social-content-agent',{page:'campaign',activeAgentId:'campaign-agent'});
+  assert.equal(h.run('pageFromNavigation()'),'agent:social-content-agent');
+  assert.equal(h.run('activeAgentId'),'social-content-agent');
+  assert.equal(h.run("agentPage('social-content-agent')"),'agent:social-content-agent');
+  assert.equal(h.run("agentPage('unknown')"),'agent:unknown');
+  for(const [id,page] of [['image-agent','image'],['copywriting-agent','copywriting'],['campaign-agent','campaign']])assert.equal(h.run(`agentPage('${id}')`),page);
+});
+
+test('generic direct refresh routes request dynamic metadata and do not render Campaign',async()=>{
+  const h=harness('/agents/unknown');
+  const pending=h.run('render(pageFromNavigation())');
+  h.respond('/api/v1/workspace',{agents:[],credit_balance:100});await flush();
+  h.respond('/api/v1/agents/unknown',null);await pending;
+  assert.equal(h.document.main.dataset.page,'agent:unknown');
+  assert.deepEqual(h.navs.filter(x=>x.classList.active).map(x=>x.dataset.page),['image']);
+  assert.ok(h.document.main.innerHTML.includes('该智能体暂未启用'));
+  assert.ok(!h.document.main.innerHTML.includes('活动策划'));
+});
 const flush = () => new Promise(resolve => setImmediate(resolve));
+test('disabled productized conversation remains readable without run controls',async()=>{
+  const h=harness('/agents/fourth',{activeConversationId:'saved'});
+  const pending=h.run('render(pageFromNavigation())');
+  h.respond('/api/v1/workspace',{agents:[]});await flush();
+  h.respond('/api/v1/agents/fourth',null);await flush();
+  h.respond('/api/v1/conversations',[]);await flush();
+  h.respond('/api/v1/conversations/saved',{agent_id:'fourth',agent:{name:'固定第四智能体',icon:'bot',skill_manifest:'{}'},project:{name:'已保存项目'},messages:[{role:'assistant',content:'已持久化正文'}]});
+  await pending;
+  assert.ok(h.document.main.innerHTML.includes('已持久化正文'));
+  assert.equal(h.document.main.querySelector('#new-chat').disabled,true);
+  assert.ok(h.document.main.querySelector('#composer').innerHTML.includes('历史项目只读'));
+});
 function harness(pathname = '/platform/skills', state = null) {
   const pending = [];
-  const navs = ['workspace', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
+  const navs = ['workspace', 'image', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
   const document = {
     querySelector(selector){if(selector === '#main')return this.main; return {};},
     querySelectorAll(selector){return selector === '[data-page]' ? navs : [];},
     addEventListener(){},
   };
   class View {
-    constructor(){this.dataset={}; this.innerHTML='';}
+    constructor(){this.dataset={}; this.innerHTML=''; this.nodes=new Map();}
     cloneNode(){return new View();}
     replaceWith(view){assert.equal(document.main,this); document.main=view;}
-    querySelector(){return {};}
+    querySelector(selector){if(!this.nodes.has(selector))this.nodes.set(selector,{});return this.nodes.get(selector);}
     querySelectorAll(){return [];}
   }
   document.main = new View();

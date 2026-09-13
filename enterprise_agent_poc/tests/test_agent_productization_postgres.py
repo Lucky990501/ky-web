@@ -65,7 +65,7 @@ def pg_catalog(tmp_path, approved_bundle, monkeypatch):
         old_bindings = [dict(r) for r in conn.execute("SELECT * FROM agent_skill_bindings ORDER BY agent_id,skill_id").fetchall()]
         old_skills = [dict(r) for r in conn.execute("SELECT * FROM skills ORDER BY id").fetchall()]
         old_packages = [dict(r) for r in conn.execute("SELECT * FROM skill_packages ORDER BY id").fetchall()]
-    assert migrate.up(store) == 0  # Real runner applies only 008 here.
+    assert migrate.up(store) == 0  # Real runner applies expand-only 008 and 009.
     control = AgentProductization(store)
     return SimpleNamespace(store=store, product=product, registry=registry, control=control, actor=actor,
                            old_templates=old_templates, old_instances=old_instances, old_bindings=old_bindings,
@@ -75,13 +75,13 @@ def pg_catalog(tmp_path, approved_bundle, monkeypatch):
 def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
     assert migrate.status(pg_catalog.store) == 0
     status = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 9)]
+    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 10)]
     assert status["pending"] == status["checksum_mismatch"] == 0
     assert all(r["status"] == "applied" for r in status["migrations"])
     with pg_catalog.store.connection() as conn:
         tables = {r["table_name"] for r in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'").fetchall()}
         assert {"agent_template_versions", "agent_template_version_skills", "tool_capabilities", "agent_template_version_tools", "agent_template_tests"} <= tables
-        assert not {"agent_execution_contexts", "conversation_agent_contexts", "task_agent_contexts"} & tables
+        assert {"agent_execution_contexts", "conversation_agent_contexts", "task_agent_contexts"} <= tables
         columns = {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='agent_templates'").fetchall()}
         assert {"definition_source", "category", "lifecycle_status", "current_published_version_id", "created_at", "updated_at", "published_at", "created_by", "updated_by"} <= columns
         instance_columns = {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='tenant_agent_instances'").fetchall()}
@@ -91,7 +91,7 @@ def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
         conn.execute(migrate.migration_files()[-1].read_text())
     assert migrate.up(pg_catalog.store) == 0
     with pg_catalog.store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 8
+        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 9
 
 
 def test_postgres_all_new_foreign_keys_enforced(pg_catalog):
@@ -247,11 +247,10 @@ def test_postgres_existing_agent_http_contract_and_productized_not_runnable(pg_c
             response = client.post(f"/api/v1/agents/{agent_id}/runs", json={"message": "Synthetic HTTP contract only"})
             assert response.status_code == 202
             assert response.json()["agent_id"] == agent_id
-        # Preserve the existing unknown-CATALOG-ID behavior, not a new 404
-        # contract. agent_enabled raises LookupError before the handler's try.
+        # Stage 2 rejects unknown or unenabled productized IDs with 404.
         unknown = client.post("/api/v1/agents/not-a-catalog-agent/runs", json={"message": "Must not execute"})
         productized = client.post(f"/api/v1/agents/{t}/runs", json={"message": "Must not execute"})
-        assert unknown.status_code == productized.status_code == 500
+        assert unknown.status_code == productized.status_code == 404
     with pg_catalog.store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE agent_id=?", (t,)).fetchone()["n"] == 0
     assert executed == ["image-agent", "copywriting-agent", "campaign-agent"]

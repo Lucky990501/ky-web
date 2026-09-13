@@ -9,7 +9,7 @@ from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response
+from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_password, verify_password
 from app.agent_catalog_api import catalog_router
 from app.agent_productization import AgentCatalogError, AgentProductization
+from app.agent_execution import ExecutionResolver
+from app.agent_runtime_test import AgentRuntimeTest
 from app.product_service import TaskService
 from app.product_store import ProductStore
 from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, embedding_provider_for, runtime_diagnostic, set_embedding_probe
@@ -74,6 +76,10 @@ agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agen
 product_store = ProductStore(store)
 agent_catalog_control = AgentProductization(store, settings.environment)
 task_service = TaskService(product_store, agents)
+execution_resolver = ExecutionResolver(store,skill_registry,agent_catalog_control,settings,os.environ.get("STAGE2_RUNTIME_TEST_TENANT_ID"))
+product_store.execution_resolver = execution_resolver
+agent_catalog_control.execution_resolver = execution_resolver
+agent_catalog_control.runtime_tester = AgentRuntimeTest(execution_resolver,product_store,task_service)
 knowledge_processing = KnowledgeProcessingService(product_store, settings)
 knowledge_retrieval = KnowledgeRetrievalService(product_store, settings)
 sessions = SessionIssuer(settings.token_secret)
@@ -207,6 +213,7 @@ async def production_health() -> dict:
 @app.get("/agents/image", include_in_schema=False)
 @app.get("/agents/copywriting", include_in_schema=False)
 @app.get("/agents/campaign", include_in_schema=False)
+@app.get("/agents/{agent_id}", include_in_schema=False)
 @app.get("/conversations", include_in_schema=False)
 @app.get("/generations", include_in_schema=False)
 @app.get("/enterprise-config", include_in_schema=False)
@@ -298,9 +305,14 @@ async def list_agents(workbench_session: str | None = Cookie(default=None)) -> l
 
 
 @app.post("/api/v1/agents/{agent_id}/runs", status_code=202)
-async def create_agent_task(agent_id: str, payload: AgentTaskRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: Request, workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = current_user(workbench_session)
-    if not product_store.agent_enabled(principal.tenant_id, agent_id):
+    from app.agent_catalog import CATALOG
+    if agent_id not in CATALOG and set(await request.json()) - {"message","conversation_id"}:
+        raise HTTPException(422,"执行配置只能由服务端解析。")
+    # Historical v2 resume is checked against its pinned Context inside the
+    # atomic creator, not against today's list of versions eligible for NEW runs.
+    if not (agent_id not in CATALOG and payload.conversation_id) and not product_store.agent_enabled(principal.tenant_id, agent_id):
         raise HTTPException(404, "该智能体尚未为当前企业启用。")
     try:
         task = product_store.create_task(principal.tenant_id, principal.user_id, agent_id, payload.message, payload.conversation_id)
@@ -316,6 +328,15 @@ async def create_agent_task(agent_id: str, payload: AgentTaskRequest, workbench_
     else:
         asyncio.create_task(task_service.execute(task))
     return task
+
+
+@app.get("/api/v1/agents/{agent_id}")
+async def agent_metadata(agent_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    agent = next((a for a in product_store.agents(principal.tenant_id) if a["id"] == agent_id and a["enabled"]),None)
+    if not agent:
+        raise HTTPException(404,"该智能体暂不可用。")
+    return agent
 
 
 @app.get("/api/v1/tasks/{task_id}")

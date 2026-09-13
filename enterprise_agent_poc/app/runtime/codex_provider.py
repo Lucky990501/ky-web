@@ -55,6 +55,8 @@ class CodexRuntimeManager:
         scopes = ["enterprise_config:read", "knowledge:search", "assets:search"]
         if profile.agent_id == "image-agent":
             scopes.append("image:generate")
+        if profile.profile_hash_version == "v2":
+            scopes = list(profile.tool_scopes)
         token = self._token_issuer.issue(
             RuntimePrincipal(
                 tenant_id=profile.tenant_id,
@@ -62,6 +64,8 @@ class CodexRuntimeManager:
                 runtime_profile_id=profile.id,
                 scopes=tuple(scopes),
                 expires_at=token_expires_at,
+                execution_context_id=profile.execution_context_id,
+                instance_id=profile.instance_id,
             )
         )
         codex_home.mkdir(parents=True, exist_ok=True)
@@ -163,6 +167,15 @@ class CodexRuntimeManager:
                 self._start_event(profile, "runtime_process_created")
                 stage = "app_server"
                 await codex.__aenter__()
+                if profile.profile_hash_version == "v2":
+                    from openai_codex.generated.v2_all import SkillsListResponse
+                    stage = "skill_discovery"
+                    discovered = await codex._client.request("skills/list", {"cwds":[str(workspace)],"forceReload":True}, response_model=SkillsListResponse)
+                    names = {s.name for entry in discovered.data for s in entry.skills if s.enabled}
+                    for name in profile.skill_manifest:
+                        if name not in names:
+                            raise RuntimeError("Bound Skill not discovered by Codex")
+                        self._start_event(profile,"skill_discovered",skill=name)
                 if profile.model_provider_id != "deepseek":
                     await codex.login_api_key(api_key)
                 self._start_event(profile, "app_server_ready")
@@ -289,6 +302,14 @@ class CodexRuntimeProvider(RuntimeProvider):
         mcp_calls: list[dict] = []
         for wrapped_item in result.items:
             item = getattr(wrapped_item, "root", wrapped_item)
+            if getattr(profile,"profile_hash_version","v1") == "v2" and getattr(item,"exit_code",None) == 0:
+                for wrapped_action in getattr(item,"command_actions",()):
+                    action = getattr(wrapped_action,"root",wrapped_action)
+                    if getattr(action,"type",None) == "read":
+                        path = str(getattr(getattr(action,"path",None),"root",getattr(action,"path","")))
+                        for name in profile.skill_manifest:
+                            if path.replace('\\','/').endswith(f"/{name}/SKILL.md"):
+                                lifecycle_events.append({"event":"skill_read","skill":name})
             # Only structured tool observations are retained. Reasoning items and
             # their hidden content are intentionally excluded from the trace.
             tool = getattr(item, "tool", None)

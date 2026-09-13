@@ -40,6 +40,10 @@ def _agent_view(agent_id: str) -> dict:
         return {"id": agent_id, "name": "历史智能体", "icon": "bot"}
 
 
+def _project_type(agent: dict) -> str:
+    return _PROJECT_TYPES.get(agent["id"], "历史创作项目" if agent["name"] == "历史智能体" else f"{agent['name']}项目")
+
+
 def _generation_view(item: dict | None) -> dict | None:
     if not item:
         return None
@@ -59,6 +63,36 @@ def _generation_view(item: dict | None) -> dict | None:
 class ProductStore:
     def __init__(self, store: POCStore) -> None:
         self._store = store
+        self.execution_resolver = None
+
+    def _history_agent(self, conversation_id: str, tenant_id: str, agent_id: str) -> dict:
+        agent = _agent_view(agent_id)
+        if agent_id in CATALOG or not self.execution_resolver or not conversation_id:
+            return agent
+        with self._store.connection() as conn:
+            context = conn.execute(
+                "SELECT c.tool_policy_snapshot,c.skill_manifest_snapshot,c.credit_cost,c.output_policy FROM conversation_agent_contexts m "
+                "JOIN agent_execution_contexts c ON c.id=m.context_id "
+                "WHERE m.conversation_id=? AND c.tenant_id=? AND c.agent_id=?",
+                (conversation_id, tenant_id, agent_id),
+            ).fetchone()
+        if context:
+            display = json.loads(context["tool_policy_snapshot"])["display"]
+            return {"id": agent_id, "name": display["name"], "icon": display["icon"],
+                    "skill_manifest": context["skill_manifest_snapshot"], "credit_cost": context["credit_cost"],
+                    "output_policy": context["output_policy"]}
+        return agent
+
+    def task_definition(self, task: dict, conn=None):
+        if task["agent_id"] in CATALOG:
+            return get_agent(task["agent_id"])
+        if not self.execution_resolver:
+            raise LookupError("Execution resolver unavailable")
+        from app.agent_execution import definition
+        if conn is not None:
+            return definition(self.execution_resolver.task_context(conn, task))
+        with self._store.connection() as connection:
+            return definition(self.execution_resolver.task_context(connection, task))
 
     def initialize(self) -> None:
         self._store.initialize()
@@ -202,20 +236,48 @@ class ProductStore:
         with self._store.connection() as conn:
             # Stage 1 catalog drafts / configured instances are not runnable.
             rows = conn.execute("SELECT t.id,t.name,t.slug,t.description,t.icon,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? WHERE t.id IN (?,?,?) ORDER BY t.id", (tenant_id, *CATALOG)).fetchall()
-        return [{**dict(row), "enabled": dict(row).get("tenant_status") == "enabled"} for row in rows]
+        result = [{**dict(row), "enabled": dict(row).get("tenant_status") == "enabled"} for row in rows]
+        if self.execution_resolver:
+            with self._store.connection() as conn:
+                columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")} if not self._store.is_postgres else {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='agent_templates'")}
+                if "definition_source" in columns:
+                    candidates = conn.execute("SELECT v.*,i.overrides_json FROM agent_templates t JOIN tenant_agent_instances i ON i.agent_id=t.id JOIN agent_template_versions v ON v.id=i.agent_template_version_id WHERE i.tenant_id=? AND i.status='enabled' AND t.definition_source='productized' AND v.status='published'", (tenant_id,)).fetchall()
+                    for row in candidates:
+                        v = dict(row)
+                        try:
+                            if not self.execution_resolver._runtime_passed(conn, v):
+                                continue
+                            self.execution_resolver._ready(conn, tenant_id, v)
+                            manifest, _ = self.execution_resolver._skills(conn, v["id"])
+                            overrides = json.loads(v["overrides_json"] or "{}")
+                            result.append({"id": v["agent_template_id"], "name": overrides.get("display_name") or v["name"], "description": v["description"], "icon": v["icon"], "slug": v["agent_template_id"], "credit_cost": v["credit_cost"], "skill_manifest": json.dumps(manifest), "allows_image_generation": v["output_policy"] == "image_required", "output_policy": v["output_policy"], "placeholder": "描述你希望创作的内容…", "enabled": True, "definition_source": "productized"})
+                        except (ValueError, LookupError):
+                            continue
+        return result
 
     def agent_enabled(self, tenant_id: str, agent_id: str) -> bool:
-        get_agent(agent_id)
+        if agent_id not in CATALOG:
+            return any(a["id"] == agent_id and a["enabled"] for a in self.agents(tenant_id))
         with self._store.connection() as conn:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, _test_revision=None, _test_id=None) -> dict:
         with self._store.connection() as conn:
+            context = None
+            if agent_id not in CATALOG:
+                if not self.execution_resolver:
+                    raise LookupError("Execution resolver unavailable")
+                if not self._store.is_postgres:
+                    conn.execute("BEGIN IMMEDIATE")
+                context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision)
+                from app.agent_execution import definition
+                agent = definition(context)
+            else:
+                agent = get_agent(agent_id)
             credit = conn.execute("SELECT balance FROM credit_accounts WHERE tenant_id=?", (tenant_id,)).fetchone()
-            agent = get_agent(agent_id)
             instance = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
-            if not instance or instance["status"] != "enabled":
+            if not instance or (instance["status"] != "enabled" and _test_revision is None):
                 raise LookupError("该智能体尚未为当前企业启用。")
             if not credit or credit["balance"] < agent.credit_cost:
                 raise ValueError("insufficient_credit")
@@ -228,6 +290,12 @@ class ProductStore:
             task_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?, 'queued', '任务已进入队列')", (task_id,))
+            if context:
+                conn.execute("INSERT INTO task_agent_contexts VALUES (?,?)", (task_id, context["id"]))
+            if _test_revision:
+                if not _test_id or not context:
+                    raise PermissionError("Controlled Runtime Test association required")
+                conn.execute("INSERT INTO agent_template_tests(id,agent_template_version_id,configuration_fingerprint,test_type,task_id,status,result_json) VALUES (?,?,?,'runtime',?,'failed',?)", (_test_id,_test_revision,context["configuration_fingerprint"],task_id,json.dumps({"runtime_test_status":"pending"})))
         return self.task(task_id, tenant_id, user_id) or {}
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:
@@ -285,6 +353,12 @@ class ProductStore:
                 ).fetchone()
                 if not current:
                     raise LookupError("任务不存在。")
+                agent = self.task_definition({**task, "agent_id": current["agent_id"]}, conn)
+                if current["agent_id"] not in CATALOG:
+                    context = self.execution_resolver.task_context(conn, task)
+                    association = conn.execute("SELECT context_id FROM conversation_agent_contexts WHERE conversation_id=?", (conversation_id,)).fetchone()
+                    if not association or association["context_id"] != context["id"]:
+                        raise ValueError("Task / conversation context mismatch")
                 stage = "completion_evidence"
                 if current["status"] == "cancelled" or (current["run_id"] and current["run_id"] != run_id) or (current["conversation_id"] and current["conversation_id"] != conversation_id):
                     raise ValueError("Task/Run association mismatch.")
@@ -305,7 +379,7 @@ class ProductStore:
                         or not response.strip() or response != evidence.get("final_result")
                         or (saved_trace["status"] == "failed" and evidence.get("result_persistence_status") != "failed")):
                     raise ValueError("Missing successful runtime/final response evidence.")
-                if get_agent(current["agent_id"]).allows_image_generation and trace_payload.get("artifact_available") is not True:
+                if agent.allows_image_generation and trace_payload.get("artifact_available") is not True:
                     raise ValueError("Missing verified image artifact.")
 
                 stage = "conversation_owner"
@@ -334,7 +408,7 @@ class ProductStore:
                     raise ValueError("Existing final message conflicts with runtime result.")
 
                 stage = "artifact_association"
-                if get_agent(current["agent_id"]).allows_image_generation:
+                if agent.allows_image_generation:
                     expected_prefix = f"generated/{tenant_id}/"
                     if (
                         not image_storage_key
@@ -365,7 +439,7 @@ class ProductStore:
                 stage = "credit_charge"
                 charged = conn.execute("SELECT 1 FROM credit_transactions WHERE task_id=?", (task_id,)).fetchone()
                 if not charged:
-                    amount = get_agent(current["agent_id"]).credit_cost
+                    amount = agent.credit_cost
                     updated = conn.execute(
                         "UPDATE credit_accounts SET balance=balance-?,updated_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND balance>=?",
                         (amount, tenant_id, amount),
@@ -374,7 +448,7 @@ class ProductStore:
                         raise ValueError("任务完成时积分余额不足。")
                     conn.execute(
                         "INSERT INTO credit_transactions(id,tenant_id,user_id,task_id,amount,reason) VALUES (?,?,?,?,?,?)",
-                        (f"task:{task_id}:charge", tenant_id, user_id, task_id, -amount, get_agent(current["agent_id"]).slug),
+                        (f"task:{task_id}:charge", tenant_id, user_id, task_id, -amount, agent.slug),
                     )
 
                 stage = "run_trace"
@@ -389,9 +463,9 @@ class ProductStore:
                         "result_persistence_status": "completed",
                         "result_persistence_error_stage": None,
                         "failure_stage": None,
-                        "artifact_saved": not get_agent(current["agent_id"]).allows_image_generation or bool(generation_id),
+                        "artifact_saved": not agent.allows_image_generation or bool(generation_id),
                         "artifact_available": True if generation_id else None,
-                        "artifact_completed": True if get_agent(current["agent_id"]).allows_image_generation else None,
+                        "artifact_completed": True if agent.allows_image_generation else None,
                         "generation_id": generation_id,
                         "error": None,
                     }
@@ -465,13 +539,13 @@ class ProductStore:
             ]
             runs = conn.execute("SELECT run_id,status,created_at,completed_at,payload FROM run_traces WHERE conversation_id=? AND tenant_id=? ORDER BY created_at", (conversation_id, tenant_id)).fetchall()
         result = dict(conversation)
-        agent = _agent_view(result["agent_id"])
+        agent = self._history_agent(result["id"], tenant_id, result["agent_id"])
         first_prompt = tasks[0]["input_text"] if tasks else None
         display_title = _project_title(result["agent_id"], first_prompt) if result["title"] in _GENERIC_CONVERSATION_TITLES else result["title"]
         result["stored_title"] = result["title"]
         result["title"] = display_title
         result["agent"] = agent
-        result["project"] = {"id": result["id"], "name": display_title, "type": _PROJECT_TYPES.get(result["agent_id"], "历史创作项目")}
+        result["project"] = {"id": result["id"], "name": display_title, "type": _project_type(agent)}
         result["tasks"] = tasks
         result["task_count"] = len(tasks)
         result["generations"] = generations
@@ -589,13 +663,13 @@ class ProductStore:
             generations = generation_state.get(conversation["id"], {})
             first_task = tasks.get("first")
             latest_task = tasks.get("latest")
-            agent = _agent_view(conversation["agent_id"])
+            agent = self._history_agent(conversation["id"], tenant_id, conversation["agent_id"])
             first_prompt = first_task["input_text"] if first_task else None
             display_title = _project_title(conversation["agent_id"], first_prompt) if conversation["title"] in _GENERIC_CONVERSATION_TITLES else conversation["title"]
             conversation["stored_title"] = conversation["title"]
             conversation["title"] = display_title
             conversation["agent"] = agent
-            conversation["project"] = {"id": conversation["id"], "name": display_title, "type": _PROJECT_TYPES.get(conversation["agent_id"], "历史创作项目")}
+            conversation["project"] = {"id": conversation["id"], "name": display_title, "type": _project_type(agent)}
             conversation["latest_task"] = latest_task
             conversation["latest_prompt"] = str(latest_task["input_text"] if latest_task else first_prompt or "")[:160]
             conversation["latest_status"] = latest_task["status"] if latest_task else None
@@ -618,13 +692,13 @@ class ProductStore:
         for row in rows:
             item = _generation_view(dict(row))
             agent_id = item.get("agent_id") or "image-agent"
-            agent = _agent_view(agent_id)
+            agent = self._history_agent(item.get("conversation_id"), tenant_id, agent_id)
             title = item.get("conversation_title")
             if title in _GENERIC_CONVERSATION_TITLES:
                 title = _project_title(agent_id, item.get("input_text"))
             item["agent"] = agent
             item["project_available"] = bool(item.get("owner_conversation_id"))
-            item["project"] = ({"id": item["conversation_id"], "name": title or _project_title(agent_id, item.get("input_text")), "type": _PROJECT_TYPES.get(agent_id, "历史创作项目")} if item["project_available"] else None)
+            item["project"] = ({"id": item["conversation_id"], "name": title or _project_title(agent_id, item.get("input_text")), "type": _project_type(agent)} if item["project_available"] else None)
             item["prompt"] = str(item.get("input_text") or "")[:160]
             item.pop("owner_conversation_id", None)
             results.append(item)

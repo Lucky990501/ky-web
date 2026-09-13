@@ -61,10 +61,24 @@ def catalog_router(catalog: AgentProductization, require_platform_admin) -> APIR
     def tools(template_id: str, version_id: str, payload: BindingList, principal=Depends(admin)):
         return catalog.bind_tools(template_id, version_id, payload.bindings, principal.user_id)
 
-    @router.post("/{template_id}/versions/{version_id}/test")
     @router.post("/{template_id}/versions/{version_id}/validation")
     def validation(template_id: str, version_id: str, principal=Depends(admin)):
         return catalog.validate(template_id, version_id, principal.user_id)
+
+    @router.post("/{template_id}/versions/{version_id}/test")
+    async def runtime_test(template_id: str, version_id: str, principal=Depends(admin)):
+        if not catalog.runtime_tester:
+            from app.agent_productization import AgentCatalogError
+            raise AgentCatalogError("Runtime Test Pending: Execution Resolver unavailable",409)
+        return await catalog.runtime_tester.run(template_id,version_id,principal.user_id)
+
+    @router.post("/{template_id}/instances/{tenant_id}/enable")
+    def enable(template_id: str, tenant_id: str, principal=Depends(admin)):
+        return catalog.set_instance_status(template_id,tenant_id,"enabled")
+
+    @router.post("/{template_id}/instances/{tenant_id}/disable")
+    def disable(template_id: str, tenant_id: str, principal=Depends(admin)):
+        return catalog.set_instance_status(template_id,tenant_id,"disabled")
 
     @router.post("/{template_id}/versions/{version_id}/publish")
     def publish(template_id: str, version_id: str, payload: PublishRequest, principal=Depends(admin)):
