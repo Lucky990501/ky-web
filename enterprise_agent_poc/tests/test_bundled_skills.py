@@ -373,7 +373,7 @@ def test_release_build_blocks_forbidden_files(bundle_git_repo, tmp_path, monkeyp
 
 def test_preflight_cli_sanitizes_driver_exception(monkeypatch, capsys):
     monkeypatch.setattr(SkillRegistry, "verify_bootstrap", lambda self: (_ for _ in ()).throw(RuntimeError("postgresql://private:secret-token@host/db")))
-    assert verify_bundled_skills.main() == 2
+    assert verify_bundled_skills.main([]) == 2
     output = capsys.readouterr().out
     assert "BLOCKED" in output
     assert "secret-token" not in output and "postgresql://" not in output
@@ -383,7 +383,7 @@ def test_preflight_does_not_initialize_missing_database(tmp_path, monkeypatch):
     missing = tmp_path / "absent.db"
     monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{missing}")
     monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "absent-data"))
-    assert verify_bundled_skills.main() == 2
+    assert verify_bundled_skills.main([]) == 2
     assert not missing.exists()
     assert not (tmp_path / "absent-data").exists()
 
@@ -520,10 +520,48 @@ def test_preflight_cli_passes_all_checks_and_writes_nothing(tmp_path, monkeypatc
     before = snapshot(registry)
     monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{store.database_path}")
     monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(data_dir))
-    assert verify_bundled_skills.main() == 0
+    assert verify_bundled_skills.main([]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "ok" and result["mode"] == "reuse"
     assert len(result["checks"]) == 6
+    assert snapshot(registry) == before
+
+
+@pytest.mark.parametrize("bad_input", ["missing", "relative", "candidate", "wrong"])
+def test_production_cli_requires_explicit_existing_non_release_data_dir(registry, monkeypatch, capsys, bad_input):
+    before = snapshot(registry)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", registry._store.database_url)
+    monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(registry.data_root.parent))
+    monkeypatch.setattr(verify_bundled_skills, "ROOT", registry.bundled_root.parent)
+    argv = {
+        "missing": [], "relative": ["--data-dir", ".runtime-data"],
+        "candidate": ["--data-dir", str(registry.bundled_root.parent)],
+        "wrong": ["--data-dir", str(registry.data_root.parent / "wrong")],
+    }[bad_input]
+    assert verify_bundled_skills.main(argv) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "BLOCKED"
+    assert snapshot(registry) == before
+
+
+def test_explicit_production_data_dir_wins_over_environment_and_preserves_upgrades(tmp_path, monkeypatch, capsys):
+    store = POCStore(tmp_path / "explicit.db")
+    store.seed_demo_data()
+    ProductStore(store).initialize()
+    data = tmp_path / "shared"
+    registry = SkillRegistry(store, data / "skill-registry", Path(__file__).resolve().parents[1] / "skill_packages")
+    registry.initialize()
+    upgrade(registry, "campaign-planning", "campaign-agent")
+    upgrade(registry, "poster-design", "image-agent")
+    before = snapshot(registry)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", store.database_url)
+    monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "wrong"))
+    assert verify_bundled_skills.main(["--data-dir", str(data)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["data_dir_resolved"] is True and len(result["checks"]) == 6
+    assert any(b["skill_slug"] == "campaign-planning" and b["version"] == "1.2.0" for b in result["bindings"])
+    assert any(b["skill_slug"] == "poster-design" and b["version"] == "1.2.0" for b in result["bindings"])
     assert snapshot(registry) == before
 
 
