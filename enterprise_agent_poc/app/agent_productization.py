@@ -78,6 +78,10 @@ class AgentProductization:
             return
         migration = Path(__file__).resolve().parents[1] / "migrations/postgres/008_agent_productization_catalog.sql"
         sql = migration.read_text(encoding="utf-8").split("-- Match the stable")[0]
+        # Fresh isolated SQLite databases implement the same 010 status domain.
+        # Never rebuild a developer's existing database implicitly.
+        sql = sql.replace("status IN ('passed','failed','invalidated')",
+                          "status IN ('queued','running','passed','failed','invalidated')")
         with self.store.connection() as conn:
             for statement in sql.split(";"):
                 statement = re.sub(r"--[^\n]*", "", statement).strip()
@@ -191,10 +195,12 @@ class AgentProductization:
         version["tools"] = [dict(r) for r in conn.execute("SELECT tool_capability_id,invocation_requirement FROM agent_template_version_tools WHERE agent_template_version_id=? ORDER BY tool_capability_id", (version["id"],))]
         version["tests"] = [dict(r) for r in conn.execute("SELECT * FROM agent_template_tests WHERE agent_template_version_id=? ORDER BY created_at DESC,id", (version["id"],))]
         version["runtime_test_status"] = "Runtime Test Pending"
+        runtime_tests=[x for x in version['tests'] if x['test_type']=='runtime' and x['configuration_fingerprint']==version['configuration_fingerprint']]
+        if runtime_tests:version['runtime_test_status']=runtime_tests[0]['status']
         version["production_ready"] = False  # No execution resolver / real Runtime Test in Stage 1.
         if self.execution_resolver:
             version["production_ready"] = bool(self.execution_resolver._runtime_passed(conn,version))
-            version["runtime_test_status"] = "passed" if version["production_ready"] else "Runtime Test Pending"
+            if version['production_ready']:version['runtime_test_status']='passed'
         return version
 
     def create_template(self, payload, actor):
@@ -202,8 +208,14 @@ class AgentProductization:
         if not isinstance(payload, dict) or set(payload) - allowed:
             raise AgentCatalogError("Invalid Template fields")
         slug = payload.get("slug", "")
+        from app.agent_catalog import CATALOG
         if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug) or len(slug) > 100:
             raise AgentCatalogError("Invalid slug")
+        if slug in {*CATALOG,*(a.slug for a in CATALOG.values()),'image','campaign'}:
+            raise AgentCatalogError("Reserved legacy Agent reference", 409)
+        try:uuid.UUID(slug)
+        except ValueError:pass
+        else:raise AgentCatalogError('Public slug cannot be an internal UUID',409)
         fields = self._fields({k: v for k, v in payload.items() if k != "slug"})
         template_id = str(uuid.uuid4())
         with self.store.connection() as conn:

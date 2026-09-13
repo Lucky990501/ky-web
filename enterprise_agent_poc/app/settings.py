@@ -20,6 +20,11 @@ RUNTIME_CONFIG_ENV_NAMES = (
     "ENTERPRISE_POC_MCP_URL",
     "REDIS_URL",
     "ENTERPRISE_POC_TASK_QUEUE",
+    "ENTERPRISE_POC_TASK_QUEUE_NAMESPACE",
+    "ENTERPRISE_POC_AGENT_RUNTIME_TEST_PRODUCTION_ENABLED",
+    "ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TENANT_IDS",
+    "ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TEMPLATE_SLUGS",
+    "ENTERPRISE_POC_AGENT_RUNTIME_TEST_TENANT_ID",
     "EMBEDDING_PROVIDER",
     "EMBEDDING_MODEL",
     "EMBEDDING_DIMENSION",
@@ -109,6 +114,11 @@ class Settings:
     embedding_base_url: str
     knowledge_allow_fallback: bool
     knowledge_max_upload_bytes: int
+    agent_runtime_test_production_enabled: bool = False
+    agent_runtime_test_allowed_tenant_ids: tuple[str, ...] = ()
+    agent_runtime_test_allowed_template_slugs: tuple[str, ...] = ()
+    agent_runtime_test_tenant_id: str | None = None
+    task_queue_namespace: str = "enterprise-agent"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -121,6 +131,11 @@ class Settings:
             database_raw_path = Path(database_url.removeprefix("sqlite:///"))
             database_path = database_raw_path if database_raw_path.is_absolute() else PROJECT_ROOT / database_raw_path
         return cls(
+            agent_runtime_test_production_enabled=os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_PRODUCTION_ENABLED", "false").lower() == "true",
+            agent_runtime_test_allowed_tenant_ids=tuple(x.strip() for x in os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TENANT_IDS", "").split(",") if x.strip()),
+            agent_runtime_test_allowed_template_slugs=tuple(x.strip() for x in os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TEMPLATE_SLUGS", "").split(",") if x.strip()),
+            agent_runtime_test_tenant_id=os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_TENANT_ID") or None,
+            task_queue_namespace=os.environ.get("ENTERPRISE_POC_TASK_QUEUE_NAMESPACE", "enterprise-agent"),
             data_dir=data_dir,
             database_url=database_url,
             database_path=database_path,

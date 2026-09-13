@@ -28,6 +28,21 @@ test('generic direct refresh routes request dynamic metadata and do not render C
   assert.ok(!h.document.main.innerHTML.includes('活动策划'));
 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
+test('workspace advertises public Productized slug without changing Legacy references',async()=>{
+  const h=harness('/workspace');const pending=h.run("render('workspace')");
+  h.respond('/api/v1/workspace',{agents:[
+    {id:'image-agent',slug:'image-generation',name:'Legacy',enabled:true,credit_cost:20},
+    {id:'internal-uuid',slug:'social-content-agent',conversation_path:'/agents/social-content-agent',definition_source:'productized',name:'Social',enabled:true,credit_cost:3}
+  ],credit_balance:100});await pending;
+  assert.ok(h.document.main.innerHTML.includes('data-agent="image-agent"'),h.document.main.innerHTML);
+  assert.ok(h.document.main.innerHTML.includes('data-agent="social-content-agent"'));
+  assert.ok(!h.document.main.innerHTML.includes('data-agent="internal-uuid"'));
+});
+test('saved Productized project navigation uses public slug while preserving internal identity',()=>{
+  const h=harness();h.run("saved={id:'saved',agent_id:'internal-uuid',agent:{name:'Social',slug:'social-content-agent'}}");
+  assert.ok(h.run("conversationRowHtml(saved,'data-agent-conversation')").includes('data-agent-id="social-content-agent"'));
+  assert.ok(h.run('historyCardHtml(saved)').includes('data-history-agent="social-content-agent"'));
+});
 test('disabled productized conversation remains readable without run controls',async()=>{
   const h=harness('/agents/fourth',{activeConversationId:'saved'});
   const pending=h.run('render(pageFromNavigation())');
@@ -44,7 +59,7 @@ function harness(pathname = '/platform/skills', state = null) {
   const pending = [];
   const navs = ['workspace', 'image', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
   const document = {
-    querySelector(selector){if(selector === '#main')return this.main; return {};},
+    querySelector(selector){if(selector === '#main')return this.main; if(selector==='#side-credit')return null; return {};},
     querySelectorAll(selector){return selector === '[data-page]' ? navs : [];},
     addEventListener(){},
   };

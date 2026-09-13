@@ -15,7 +15,14 @@ class RedisTaskQueue:
     knowledge_pending = "enterprise-agent:knowledge:pending"
     knowledge_processing = "enterprise-agent:knowledge:processing"
 
-    def __init__(self, redis_url: str) -> None:
+    def __init__(self, redis_url: str, namespace: str = "enterprise-agent") -> None:
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", namespace):
+            raise RuntimeError("Invalid task queue namespace")
+        self.pending = f"{namespace}:tasks:pending"
+        self.processing = f"{namespace}:tasks:processing"
+        self.knowledge_pending = f"{namespace}:knowledge:pending"
+        self.knowledge_processing = f"{namespace}:knowledge:processing"
         from redis import Redis
         self._client = Redis.from_url(redis_url, decode_responses=True)
 
@@ -23,7 +30,7 @@ class RedisTaskQueue:
     def from_settings(cls, settings: Settings) -> "RedisTaskQueue":
         if not settings.redis_url:
             raise RuntimeError("Redis Queue 已启用但未配置 REDIS_URL。")
-        return cls(settings.redis_url)
+        return cls(settings.redis_url, settings.task_queue_namespace)
 
     def ping(self) -> bool:
         return bool(self._client.ping())

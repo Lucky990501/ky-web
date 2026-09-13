@@ -91,7 +91,9 @@ class ExecutionResolver:
         rows = conn.execute("SELECT x.result_json,c.id AS context_id,r.payload FROM agent_template_tests x JOIN tasks t ON t.id=x.task_id AND t.status='completed' JOIN task_agent_contexts m ON m.task_id=t.id JOIN agent_execution_contexts c ON c.id=m.context_id AND c.agent_template_version_id=x.agent_template_version_id AND c.configuration_fingerprint=x.configuration_fingerprint JOIN run_traces r ON r.run_id=t.run_id AND r.status='completed' AND r.tenant_id=t.tenant_id WHERE x.agent_template_version_id=? AND x.configuration_fingerprint=? AND x.test_type='runtime' AND x.status='passed'", (version["id"],version["configuration_fingerprint"])).fetchall()
         for row in rows:
             result, trace = json.loads(row["result_json"]),json.loads(row["payload"])
-            if result.get("execution_chain") == "codex-runtime-persisted" and trace.get("execution_context_id") == row["context_id"] and trace.get("final_response_persisted") is True and result.get("skill_discovery_passed") is True:
+            if (result.get("execution_chain") == "codex-runtime-persisted" and trace.get("execution_context_id") == row["context_id"]
+                    and completion_evidence(trace) and result.get("skill_discovery_passed") is True
+                    and (version['output_policy']!='image_required' or trace.get('artifact_completed') is True)):
                 return True
         return False
 
@@ -104,7 +106,7 @@ class ExecutionResolver:
         test = test_revision is not None
         if not instance or (not test and instance["status"] != "enabled"):
             raise LookupError("该智能体尚未为当前企业启用。")
-        if test and (self.settings.environment == "production" or tenant != self.test_tenant_id or instance["status"] != "configured"):
+        if test and (not self.test_allowed(conn, tenant, agent_id) or instance["status"] != "configured"):
             raise PermissionError("Runtime test requires explicit isolated test tenant")
         if conversation_id:
             row = conn.execute("SELECT c.* FROM conversation_agent_contexts m JOIN agent_execution_contexts c ON c.id=m.context_id JOIN conversations v ON v.id=m.conversation_id JOIN conversation_owners o ON o.conversation_id=v.id WHERE v.id=? AND v.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL AND c.agent_id=? AND c.instance_id=? AND c.tenant_id=v.tenant_id AND c.runtime_profile_id=v.runtime_profile_id", (conversation_id, tenant, user, agent_id, instance["instance_id"])).fetchone()
@@ -134,7 +136,7 @@ class ExecutionResolver:
         policy = {"scopes": sorted(TOOL_CAPABILITIES[r["tool_capability_id"]]["required_scope"] for r in tools),
                   "required_tools": ["enterprise_config_get" if r["tool_capability_id"] == "config_get" else r["tool_capability_id"] for r in tools if r["invocation_requirement"] == "required"],
                   "bindings": tools, "skill_refs": refs, "runtime_test": test,
-                  "display": {"name": overrides.get("display_name") or version["name"], "description": version["description"], "icon": version["icon"], "slug": agent_id}}
+                  "display": {"name": overrides.get("display_name") or version["name"], "description": version["description"], "icon": version["icon"], "slug": self.catalog._template(conn,agent_id)['slug']}}
         context = {"id": str(uuid4()), "tenant_id": tenant, "agent_id": agent_id, "instance_id": instance["instance_id"],
                    "agent_template_version_id": version["id"], "definition_source": "productized", "configuration_fingerprint": version["configuration_fingerprint"],
                    "persona_snapshot": persona, "runtime_provider": model["runtime_provider"], "model_config_id": model["id"],
@@ -150,8 +152,28 @@ class ExecutionResolver:
         policy = json.loads(context["tool_policy_snapshot"])
         self._skills(conn, context["agent_template_version_id"], historical=True, fixed=policy["skill_refs"])
         instance = conn.execute("SELECT * FROM tenant_agent_instances WHERE instance_id=? AND tenant_id=? AND agent_id=?", (context["instance_id"], context["tenant_id"], context["agent_id"])).fetchone()
-        if not instance or (instance["status"] != "enabled" and not (instance["status"] == "configured" and policy["runtime_test"] and context["tenant_id"] == self.test_tenant_id and self.settings.environment != "production")):
+        if policy['runtime_test'] and not self.test_allowed(conn,context['tenant_id'],context['agent_id']):
+            raise PermissionError("Runtime Test policy no longer permits execution")
+        if not instance or (instance["status"] != "enabled" and not (instance["status"] == "configured" and policy["runtime_test"] and self.test_allowed(conn,context['tenant_id'],context['agent_id']))):
             raise PermissionError("Instance no longer executable")
+
+    def test_allowed(self, conn, tenant, agent_id):
+        if tenant != self.test_tenant_id or not tenant:
+            return False
+        if self.settings.environment != 'production':
+            return True  # The API additionally requires the unchanged isolation gate.
+        s=self.settings
+        template=self.catalog._template(conn,agent_id)
+        return (s.agent_runtime_test_production_enabled and s.task_queue == 'redis'
+                and tenant in s.agent_runtime_test_allowed_tenant_ids
+                and template['definition_source']=='productized'
+                and template['slug'] in s.agent_runtime_test_allowed_template_slugs)
+
+
+def completion_evidence(payload):
+    return all(payload.get(k) is True for k in ('runtime_completed','required_tool_calls_completed',
+               'final_response_received','final_response_persisted')) and (
+               not payload.get('artifact_required') or payload.get('artifact_completed') is True)
 
 
 def authorize_tool(store, principal, scope):

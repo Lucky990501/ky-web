@@ -71,14 +71,15 @@ class ProductStore:
             return agent
         with self._store.connection() as conn:
             context = conn.execute(
-                "SELECT c.tool_policy_snapshot,c.skill_manifest_snapshot,c.credit_cost,c.output_policy FROM conversation_agent_contexts m "
+                "SELECT c.tool_policy_snapshot,c.skill_manifest_snapshot,c.credit_cost,c.output_policy,t.slug FROM conversation_agent_contexts m "
                 "JOIN agent_execution_contexts c ON c.id=m.context_id "
+                "JOIN agent_templates t ON t.id=c.agent_id "
                 "WHERE m.conversation_id=? AND c.tenant_id=? AND c.agent_id=?",
                 (conversation_id, tenant_id, agent_id),
             ).fetchone()
         if context:
             display = json.loads(context["tool_policy_snapshot"])["display"]
-            return {"id": agent_id, "name": display["name"], "icon": display["icon"],
+            return {"id": agent_id, "slug":context['slug'],"conversation_path":f"/agents/{context['slug']}", "name": display["name"], "icon": display["icon"],
                     "skill_manifest": context["skill_manifest_snapshot"], "credit_cost": context["credit_cost"],
                     "output_policy": context["output_policy"]}
         return agent
@@ -241,7 +242,7 @@ class ProductStore:
             with self._store.connection() as conn:
                 columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")} if not self._store.is_postgres else {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='agent_templates'")}
                 if "definition_source" in columns:
-                    candidates = conn.execute("SELECT v.*,i.overrides_json FROM agent_templates t JOIN tenant_agent_instances i ON i.agent_id=t.id JOIN agent_template_versions v ON v.id=i.agent_template_version_id WHERE i.tenant_id=? AND i.status='enabled' AND t.definition_source='productized' AND v.status='published'", (tenant_id,)).fetchall()
+                    candidates = conn.execute("SELECT v.*,i.overrides_json,t.slug AS public_slug FROM agent_templates t JOIN tenant_agent_instances i ON i.agent_id=t.id JOIN agent_template_versions v ON v.id=i.agent_template_version_id WHERE i.tenant_id=? AND i.status='enabled' AND t.definition_source='productized' AND v.status='published'", (tenant_id,)).fetchall()
                     for row in candidates:
                         v = dict(row)
                         try:
@@ -250,10 +251,15 @@ class ProductStore:
                             self.execution_resolver._ready(conn, tenant_id, v)
                             manifest, _ = self.execution_resolver._skills(conn, v["id"])
                             overrides = json.loads(v["overrides_json"] or "{}")
-                            result.append({"id": v["agent_template_id"], "name": overrides.get("display_name") or v["name"], "description": v["description"], "icon": v["icon"], "slug": v["agent_template_id"], "credit_cost": v["credit_cost"], "skill_manifest": json.dumps(manifest), "allows_image_generation": v["output_policy"] == "image_required", "output_policy": v["output_policy"], "placeholder": "描述你希望创作的内容…", "enabled": True, "definition_source": "productized"})
+                            result.append({"id": v["agent_template_id"], "name": overrides.get("display_name") or v["name"], "description": v["description"], "icon": v["icon"], "slug": v["public_slug"], "conversation_path": f"/agents/{v['public_slug']}", "credit_cost": v["credit_cost"], "skill_manifest": json.dumps(manifest), "allows_image_generation": v["output_policy"] == "image_required", "output_policy": v["output_policy"], "placeholder": "描述你希望创作的内容…", "enabled": True, "definition_source": "productized"})
                         except (ValueError, LookupError):
                             continue
         return result
+
+    def resolve_agent_reference(self, reference):
+        from app.agent_reference import resolve_agent_reference
+        with self._store.connection() as conn:
+            return resolve_agent_reference(conn,reference)
 
     def agent_enabled(self, tenant_id: str, agent_id: str) -> bool:
         if agent_id not in CATALOG:
@@ -262,7 +268,7 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, _test_revision=None, _test_id=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, _test_revision=None, _test_id=None, _test_fingerprint=None) -> dict:
         with self._store.connection() as conn:
             context = None
             if agent_id not in CATALOG:
@@ -271,6 +277,8 @@ class ProductStore:
                 if not self._store.is_postgres:
                     conn.execute("BEGIN IMMEDIATE")
                 context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision)
+                if _test_fingerprint is not None and context['configuration_fingerprint'] != _test_fingerprint:
+                    raise ValueError('Runtime Test fingerprint changed before task creation')
                 from app.agent_execution import definition
                 agent = definition(context)
             else:
@@ -295,7 +303,7 @@ class ProductStore:
             if _test_revision:
                 if not _test_id or not context:
                     raise PermissionError("Controlled Runtime Test association required")
-                conn.execute("INSERT INTO agent_template_tests(id,agent_template_version_id,configuration_fingerprint,test_type,task_id,status,result_json) VALUES (?,?,?,'runtime',?,'failed',?)", (_test_id,_test_revision,context["configuration_fingerprint"],task_id,json.dumps({"runtime_test_status":"pending"})))
+                conn.execute("INSERT INTO agent_template_tests(id,agent_template_version_id,configuration_fingerprint,test_type,task_id,status,result_json) VALUES (?,?,?,'runtime',?,'queued',?)", (_test_id,_test_revision,context["configuration_fingerprint"],task_id,json.dumps({"runtime_test_status":"queued"})))
         return self.task(task_id, tenant_id, user_id) or {}
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:

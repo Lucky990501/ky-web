@@ -22,7 +22,7 @@ def test_real_001_009_first_apply_status_idempotent(pg_execution,capsys):
     c=pg_execution
     assert migrate.status(c.store)==0
     state=json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert len(state['migrations'])==9 and state['pending']==state['checksum_mismatch']==0
+    assert len(state['migrations'])==10 and state['pending']==state['checksum_mismatch']==0
     assert all(x['status']=='applied' for x in state['migrations'])
     with c.store.connection() as conn:
         before=[dict(r) for r in conn.execute('SELECT * FROM schema_migrations ORDER BY version')]

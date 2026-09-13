@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from scripts.stage2_isolation import bootstrap, assert_isolated, IsolationError
+from scripts.stage2_isolation import bootstrap, assert_isolated, assert_worker_isolated, IsolationError
 
 
 def main():
@@ -19,9 +19,10 @@ def main():
         return
     # Hard gate has already passed; a second check guards each initialization.
     def gate():
-        assert_isolated(settings,config["root"],config["snapshot"])
+        checker=assert_worker_isolated if config.get('mode')=='redis-postgres' else assert_isolated
+        checker(settings,config["root"],config["snapshot"])
     gate()
-    if args.role in {"api","worker"}:
+    if args.role == 'worker' or (args.role=='api' and config.get('mode')!='redis-postgres'):
         secret_file = Path(config["credential_file"])
         if secret_file.stat().st_mode & 0o077:
             raise IsolationError("Test credential file permissions must be 600; BLOCK")
@@ -42,7 +43,13 @@ def main():
         store.initialize()
         create_mcp().run(transport="streamable-http")
     elif args.role == "worker":
-        raise IsolationError("Preview uses the API's local TaskService worker; separate worker forbidden")
+        if config.get('mode')!='redis-postgres':
+            raise IsolationError("Preview uses the API's local TaskService worker; separate worker forbidden")
+        import asyncio
+        from app.main import task_service
+        task_service.pre_execute_guard=gate
+        from app.worker import run
+        asyncio.run(run())
     else:
         from app.main import store, product_store, agent_catalog_control, skill_registry
         gate()
@@ -54,7 +61,7 @@ def main():
             store.seed_demo_data()
             gate()
             product_store.initialize()
-            tenant = os.environ["STAGE2_RUNTIME_TEST_TENANT_ID"]
+            tenant = settings.agent_runtime_test_tenant_id or os.environ["STAGE2_RUNTIME_TEST_TENANT_ID"]
             with store.connection() as conn:
                 conn.execute("INSERT OR IGNORE INTO tenants(id,name,poc_api_key) VALUES (?, 'Stage 2 合成测试', 'stage2-nonfunctional-fixture')",(tenant,))
                 conn.execute("INSERT OR IGNORE INTO enterprise_configs VALUES (?, '{\"brand_name\":\"Stage 2 合成品牌\"}')",(tenant,))
@@ -62,6 +69,8 @@ def main():
             product_store.create_user(tenant,"runtime@stage2.test",hash_password("Stage2Local!2026"),"Runtime Test","enterprise_admin")
             gate()
             skill_registry.initialize()
+            if config.get('mode')=='redis-postgres':
+                skill_registry.grant_platform_admin(product_store.user_by_email('runtime@stage2.test')['id'])
             gate()
             agent_catalog_control.ensure_initialized()
             return

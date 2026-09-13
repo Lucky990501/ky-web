@@ -75,7 +75,7 @@ def pg_catalog(tmp_path, approved_bundle, monkeypatch):
 def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
     assert migrate.status(pg_catalog.store) == 0
     status = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 10)]
+    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 11)]
     assert status["pending"] == status["checksum_mismatch"] == 0
     assert all(r["status"] == "applied" for r in status["migrations"])
     with pg_catalog.store.connection() as conn:
@@ -91,7 +91,7 @@ def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
         conn.execute(migrate.migration_files()[-1].read_text())
     assert migrate.up(pg_catalog.store) == 0
     with pg_catalog.store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 9
+        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 10
 
 
 def test_postgres_all_new_foreign_keys_enforced(pg_catalog):

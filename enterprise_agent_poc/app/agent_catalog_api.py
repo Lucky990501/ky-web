@@ -21,6 +21,11 @@ class InstanceRequest(BaseModel):
     overrides: dict = Field(default_factory=dict)
 
 
+class RuntimeTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    configuration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def catalog_router(catalog: AgentProductization, require_platform_admin) -> APIRouter:
     router = APIRouter(prefix="/api/v1/platform/agents", tags=["Agent Productization Stage 1"])
 
@@ -65,12 +70,12 @@ def catalog_router(catalog: AgentProductization, require_platform_admin) -> APIR
     def validation(template_id: str, version_id: str, principal=Depends(admin)):
         return catalog.validate(template_id, version_id, principal.user_id)
 
-    @router.post("/{template_id}/versions/{version_id}/test")
-    async def runtime_test(template_id: str, version_id: str, principal=Depends(admin)):
+    @router.post("/{template_id}/versions/{version_id}/test", status_code=202)
+    async def runtime_test(template_id: str, version_id: str, payload: RuntimeTestRequest, principal=Depends(admin)):
         if not catalog.runtime_tester:
             from app.agent_productization import AgentCatalogError
             raise AgentCatalogError("Runtime Test Pending: Execution Resolver unavailable",409)
-        return await catalog.runtime_tester.run(template_id,version_id,principal.user_id)
+        return await catalog.runtime_tester.run(template_id,version_id,principal.user_id,payload.configuration_fingerprint)
 
     @router.post("/{template_id}/instances/{tenant_id}/enable")
     def enable(template_id: str, tenant_id: str, principal=Depends(admin)):

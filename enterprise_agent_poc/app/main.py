@@ -76,10 +76,16 @@ agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agen
 product_store = ProductStore(store)
 agent_catalog_control = AgentProductization(store, settings.environment)
 task_service = TaskService(product_store, agents)
-execution_resolver = ExecutionResolver(store,skill_registry,agent_catalog_control,settings,os.environ.get("STAGE2_RUNTIME_TEST_TENANT_ID"))
+execution_resolver = ExecutionResolver(store,skill_registry,agent_catalog_control,settings,settings.agent_runtime_test_tenant_id or (os.environ.get("STAGE2_RUNTIME_TEST_TENANT_ID") if settings.environment != 'production' else None))
 product_store.execution_resolver = execution_resolver
 agent_catalog_control.execution_resolver = execution_resolver
 agent_catalog_control.runtime_tester = AgentRuntimeTest(execution_resolver,product_store,task_service)
+task_service.runtime_test_lifecycle = agent_catalog_control.runtime_tester
+if settings.task_queue == 'redis':
+    def enqueue_runtime_test(task_id):
+        from app.task_queue import RedisTaskQueue
+        RedisTaskQueue.from_settings(settings).enqueue(task_id)
+    agent_catalog_control.runtime_tester.enqueue = enqueue_runtime_test
 knowledge_processing = KnowledgeProcessingService(product_store, settings)
 knowledge_retrieval = KnowledgeRetrievalService(product_store, settings)
 sessions = SessionIssuer(settings.token_secret)
@@ -307,6 +313,10 @@ async def list_agents(workbench_session: str | None = Cookie(default=None)) -> l
 @app.post("/api/v1/agents/{agent_id}/runs", status_code=202)
 async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: Request, workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = current_user(workbench_session)
+    try:
+        agent_id=product_store.resolve_agent_reference(agent_id)
+    except LookupError as exc:
+        raise HTTPException(404,'该智能体暂不可用。') from exc
     from app.agent_catalog import CATALOG
     if agent_id not in CATALOG and set(await request.json()) - {"message","conversation_id"}:
         raise HTTPException(422,"执行配置只能由服务端解析。")
@@ -333,6 +343,10 @@ async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: R
 @app.get("/api/v1/agents/{agent_id}")
 async def agent_metadata(agent_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = current_user(workbench_session)
+    try:
+        agent_id=product_store.resolve_agent_reference(agent_id)
+    except LookupError as exc:
+        raise HTTPException(404,'该智能体暂不可用。') from exc
     agent = next((a for a in product_store.agents(principal.tenant_id) if a["id"] == agent_id and a["enabled"]),None)
     if not agent:
         raise HTTPException(404,"该智能体暂不可用。")

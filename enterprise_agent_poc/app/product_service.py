@@ -15,8 +15,21 @@ class TaskService:
         self._store = store
         self._agents = agents
         self.pre_execute_guard = None
+        self.runtime_test_lifecycle = None
 
     async def execute(self, task: dict) -> None:
+        if self.pre_execute_guard:
+            self.pre_execute_guard()
+        if self.runtime_test_lifecycle:
+            if self.runtime_test_lifecycle.started(task) is False:
+                return
+        try:
+            await self._execute(task)
+        finally:
+            if self.runtime_test_lifecycle:
+                self.runtime_test_lifecycle.finished(task)
+
+    async def _execute(self, task: dict) -> None:
         if self.pre_execute_guard:
             self.pre_execute_guard()
         task_id, tenant_id = task["id"], task["tenant_id"]
