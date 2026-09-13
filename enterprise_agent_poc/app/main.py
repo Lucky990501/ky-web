@@ -201,6 +201,7 @@ async def production_health() -> dict:
 @app.get("/enterprise-config", include_in_schema=False)
 @app.get("/knowledge", include_in_schema=False)
 @app.get("/assets", include_in_schema=False)
+@app.get("/profile", include_in_schema=False)
 @app.get("/platform/skills", include_in_schema=False)
 async def product_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")

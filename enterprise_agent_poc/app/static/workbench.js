@@ -22,7 +22,7 @@ function login() {
 }
 
 const baseNavs = [['workspace','layout-dashboard','工作台'],['image','wand-sparkles','AI 创作'],['history','history','历史记录'],['generations','folder-open','我的生成'],['knowledge','book-open','知识库'],['assets','image','素材库'],['members','users','成员管理'],['enterprise','settings','企业设置'],['profile','user-round','个人中心']];
-const pageRoutes = Object.freeze({workspace:'/workspace',image:'/agents/image',copywriting:'/agents/copywriting',campaign:'/agents/campaign',history:'/conversations',generations:'/generations',knowledge:'/knowledge',assets:'/assets',enterprise:'/enterprise-config','platform-skills':'/platform/skills'});
+const pageRoutes = Object.freeze({workspace:'/workspace',image:'/agents/image',copywriting:'/agents/copywriting',campaign:'/agents/campaign',history:'/conversations',generations:'/generations',knowledge:'/knowledge',assets:'/assets',enterprise:'/enterprise-config',profile:'/profile','platform-skills':'/platform/skills'});
 const pageFromPath = path => Object.entries(pageRoutes).find(([,route])=>route===path)?.[0]||null;
 const navigationState = page => ({page,activeAgentId,activeConversationId});
 const allowedPage = page => page==='platform-skills'&&!me?.is_platform_admin?'workspace':page;
@@ -33,7 +33,7 @@ function navigate(page,{replace=false}={}){
   return render(target);
 }
 function pageFromNavigation(state=window.history.state){
-  const page=allowedPage(state?.page||pageFromPath(location.pathname)||'workspace');
+  const page=allowedPage(pageFromPath(location.pathname)||state?.page||'workspace');
   if(state&&Object.prototype.hasOwnProperty.call(state,'activeAgentId'))activeAgentId=state.activeAgentId||'image-agent';
   if(state&&Object.prototype.hasOwnProperty.call(state,'activeConversationId'))activeConversationId=state.activeConversationId||null;
   return page;
@@ -55,7 +55,9 @@ const stageMap = {queued:'正在理解需求',loading_context:'正在读取企�
 const pageLoading = () => `<section class="page-loading" aria-live="polite" aria-busy="true"><div class="skeleton-title"><i></i><span></span></div><div class="skeleton-subtitle"></div><div class="skeleton-layout"><article><div class="skeleton-banner"></div><div class="skeleton-row"><i></i><i></i><i></i></div><div class="skeleton-panel"></div></article><aside><div class="skeleton-card"></div><div class="skeleton-card"></div></aside></div><p>正在加载页面内容…</p></section>`;
 
 async function render(page) {
-  const main = document.querySelector('#main');
+  // Give each route its own DOM: late responses can only update a detached view.
+  const previousMain = document.querySelector('#main'), main = previousMain.cloneNode(false);
+  previousMain.replaceWith(main);
   main.dataset.page = page;
   document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === page));
   main.innerHTML = pageLoading();
