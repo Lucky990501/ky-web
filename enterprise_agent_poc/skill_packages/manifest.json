@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "historical_source_commit": "0f18a233111c95442dbbadee4df51841c51e019d",
+  "skills": [
+    {
+      "skill_slug": "campaign-planning",
+      "version": "1.0.0",
+      "source_identity": {"path": "campaign-planning/1.0.0", "files": [{"path": "SKILL.md", "sha256": "426f2ed147c30b83d21b6abd3d4591c0101cd3b98f9b02bc8603118ee52f2ea3", "git_mode": "100644"}]},
+      "artifact_sha256": "37794f8842774bf08ee2478b07c6d248f229c96ced26dd75099337015feb91c0",
+      "artifact_path": "campaign-planning/1.0.0.zip",
+      "bootstrap_default": ["campaign-agent"],
+      "builder_policy": "legacy-production-zip-v1",
+      "legacy_artifact": true
+    },
+    {
+      "skill_slug": "event-copywriting",
+      "version": "1.0.0",
+      "source_identity": {"path": "event-copywriting/1.0.0", "files": [{"path": "SKILL.md", "sha256": "a5d230413c233b16995f70ec9452bb2ba018053635091c33167e6e44b1e822ff", "git_mode": "100644"}]},
+      "artifact_sha256": "c4c04d4972156f72560d07bbc8dea6aaa48f3e65873035b8924d2e8f9edb01ad",
+      "artifact_path": "event-copywriting/1.0.0.zip",
+      "bootstrap_default": ["campaign-agent"],
+      "builder_policy": "legacy-production-zip-v1",
+      "legacy_artifact": true
+    },
+    {
+      "skill_slug": "marketing-copywriting",
+      "version": "1.0.0",
+      "source_identity": {"path": "marketing-copywriting/1.0.0", "files": [{"path": "SKILL.md", "sha256": "02ea7a868db96a99c025d6c2f7671869adbd988274ed66ce4d728f1fb79aa674", "git_mode": "100644"}]},
+      "artifact_sha256": "706b0ca1b63e9a0f6c4e4651f851777c834f4f7e82e828087647e13990a3fc7e",
+      "artifact_path": "marketing-copywriting/1.0.0.zip",
+      "bootstrap_default": ["copywriting-agent"],
+      "builder_policy": "legacy-production-zip-v1",
+      "legacy_artifact": true
+    },
+    {
+      "skill_slug": "poster-design",
+      "version": "1.0.0",
+      "source_identity": {"path": "poster-design/1.0.0", "files": [{"path": "SKILL.md", "sha256": "b70f470cd1b455f8170cf409109ef37f2524db4322518db1df57e05482eac14b", "git_mode": "100644"}]},
+      "artifact_sha256": "82689e8361d60ddc1e09e4a16ac35fff5e84825b9bdc1c2a96490cd8c9e7a957",
+      "artifact_path": "poster-design/1.0.0.zip",
+      "bootstrap_default": ["image-agent"],
+      "builder_policy": "legacy-production-zip-v1",
+      "legacy_artifact": true
+    },
+    {
+      "skill_slug": "social-copywriting",
+      "version": "1.0.0",
+      "source_identity": {"path": "social-copywriting/1.0.0", "files": [{"path": "SKILL.md", "sha256": "4e62a73f7cd274c41be57050b09a80dba63f2626f27e085ab1ce8d17b5aa951a", "git_mode": "100644"}]},
+      "artifact_sha256": "2fd4024753bd1535c2dd6ec983d1082e2f17a6d61c987cdd25f9b06ec4137f6a",
+      "artifact_path": "social-copywriting/1.0.0.zip",
+      "bootstrap_default": ["copywriting-agent"],
+      "builder_policy": "legacy-production-zip-v1",
+      "legacy_artifact": true
+    }
+  ]
+}

@@ -24,6 +24,7 @@ mkdir -p "$runtime_data_dir"
 "$runtime_venv/bin/pip" check
 set -a; . "$shared_env"; set +a
 cd "$release_root"
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_bundled_skills.py
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py status
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py up
 config_result=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env")

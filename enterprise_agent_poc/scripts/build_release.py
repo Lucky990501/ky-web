@@ -11,6 +11,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.bundled_skills import forbidden_path, secret_content, validate_git_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
@@ -37,20 +41,32 @@ def validate_commit(revision: str) -> str:
     return resolved
 
 
-def build(commit: str, output: Path) -> dict:
-    names = git("ls-tree", "-r", "--name-only", commit).splitlines()
-    selected = [name for name in names if any(name == allowed or name.startswith(allowed) for allowed in ALLOWED)]
+def preflight(commit: str) -> list[str]:
+    validate_git_bundle(REPO, commit)
+    tree = {}
+    for record in subprocess.check_output(["git", "-C", str(REPO), "ls-tree", "-r", "-z", commit]).split(b"\0"):
+        if record:
+            header, name = record.split(b"\t", 1)
+            mode, kind, oid = header.decode().split()
+            tree[name.decode()] = (mode, kind, oid)
+    selected = [name for name in tree if any(name == allowed or name.startswith(allowed) for allowed in ALLOWED)]
     rejected = [
         name
         for name in selected
-        if name.lower().endswith((".env", ".pem", ".key"))
-        or "/.runtime-data/" in name
-        or Path(name).name in {".DS_Store", ".AppleDouble", ".LSOverride", "Thumbs.db", "Desktop.ini"}
+        if forbidden_path(name) or tree[name][0] not in {"100644", "100755"} or tree[name][1] != "blob"
     ]
     if rejected:
         raise RuntimeError(f"发布包包含禁止文件：{rejected}")
     if not selected:
         raise RuntimeError("该 commit 没有可发布的 Workbench 文件。")
+    for name in selected:
+        if secret_content(subprocess.check_output(["git", "-C", str(REPO), "cat-file", "blob", tree[name][2]])):
+            raise RuntimeError(f"发布文件含禁止的秘密材料：{name}")
+    return selected
+
+
+def build(commit: str, output: Path) -> dict:
+    selected = preflight(commit)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw = Path(temp_dir) / "source.tar"
@@ -99,7 +115,8 @@ def main() -> int:
         parser.error("--release-id 与 --manifest-output 必须同时提供。")
     commit = validate_commit(args.commit)
     if args.dry_run:
-        print(json.dumps({"status": "dry_run", "commit": commit, "allowed_paths": ALLOWED}, ensure_ascii=False))
+        selected = preflight(commit)
+        print(json.dumps({"status": "dry_run", "commit": commit, "allowed_paths": ALLOWED, "selected_files": selected}, ensure_ascii=False))
         return 0
     result = build(commit, args.output)
     if args.manifest_output:

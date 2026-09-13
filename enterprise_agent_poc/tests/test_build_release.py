@@ -4,7 +4,8 @@ import tarfile
 from scripts import build_release
 
 
-def test_release_archive_is_reproducible_and_source_backed(tmp_path):
+def test_release_archive_is_reproducible_and_source_backed(tmp_path, bundle_git_repo, monkeypatch):
+    monkeypatch.setattr(build_release, "REPO", bundle_git_repo)
     commit = build_release.validate_commit("HEAD")
     first_path = tmp_path / "first.tar.gz"
     second_path = tmp_path / "second.tar.gz"
@@ -22,6 +23,8 @@ def test_release_archive_is_reproducible_and_source_backed(tmp_path):
     with tarfile.open(first_path) as archive:
         names = archive.getnames()
     assert "enterprise_agent_poc/app/main.py" in names
+    assert "enterprise_agent_poc/skill_packages/manifest.json" in names
+    assert "enterprise_agent_poc/skill_packages/poster-design/1.0.0.zip" in names
     assert not any(name.endswith((".env", ".pem", ".key")) for name in names)
 
     manifest_path = tmp_path / "release-manifest.json"

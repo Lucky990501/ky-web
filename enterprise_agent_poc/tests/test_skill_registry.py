@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import shutil
 import zipfile
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -32,11 +34,7 @@ def registry_fixture(tmp_path):
     store.seed_demo_data()
     ProductStore(store).initialize()
     bundled = tmp_path / "bundled"
-    for agent in CATALOG.values():
-        for slug, version in agent.skill_manifest.items():
-            source = bundled / slug / version
-            source.mkdir(parents=True, exist_ok=True)
-            (source / "SKILL.md").write_text(f"# {slug}\n", encoding="utf-8")
+    shutil.copytree(Path(__file__).resolve().parents[1] / "skill_packages", bundled)
     registry = SkillRegistry(store, tmp_path / "data", bundled)
     registry.initialize()
     return registry

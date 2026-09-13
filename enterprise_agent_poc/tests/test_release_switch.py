@@ -13,10 +13,11 @@ def test_release_switch_snapshots_dropins_before_enabling_rollback_trap():
     first_dropin_write = source.index('cat > "$dropin"')
     dependency_preflight = source.index('"$runtime_venv/bin/python" -c')
     migration_status = source.index('scripts/migrate.py status')
+    skill_preflight = source.index('scripts/verify_bundled_skills.py')
     migration_preflight = source.index('scripts/migrate.py up')
     config_preflight = source.index('scripts/verify_runtime_config.py')
 
-    assert dependency_preflight < migration_status < migration_preflight < config_preflight
+    assert dependency_preflight < skill_preflight < migration_status < migration_preflight < config_preflight
     assert config_preflight < backup_created < dropin_copied < trap_enabled
     assert trap_enabled < first_dropin_write
     assert source[trap_enabled:].count('cp "$dropin" "$backup/$service.conf"') == 0

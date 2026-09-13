@@ -3,15 +3,19 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import stat
+import sqlite3
 import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from app.agent_catalog import CATALOG
-from app.store import POCStore
+from app.bundled_skills import BundledSkillError, sha256, validate_bundle
+from app.store import POCStore, _PostgresConnection
 
 
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -128,14 +132,32 @@ class SkillRegistry:
         self.published_root = data_root / "published"
 
     def initialize(self) -> None:
-        self.data_root.mkdir(parents=True, exist_ok=True)
-        schema = self._postgres_schema() if self._store.is_postgres else self._sqlite_schema()
         with self._store.connection() as conn:
-            if self._store.is_postgres:
-                conn.execute(schema)
-            else:
-                conn.executescript(schema)
+            present = self._schema_tables(conn)
+            if present and len(present) != 5:
+                raise SkillRegistryError("Partial Skill Registry schema; manual bootstrap required.")
+            if not present:
+                if self._store.is_postgres:
+                    conn.execute("SELECT pg_advisory_xact_lock(714360105)")
+                    present = self._schema_tables(conn)
+                    if present and len(present) != 5:
+                        raise SkillRegistryError("Partial Skill Registry schema; manual bootstrap required.")
+                if not present:
+                    schema = self._postgres_schema() if self._store.is_postgres else self._sqlite_schema()
+                    if self._store.is_postgres:
+                        conn.execute(schema)
+                    else:
+                        conn.executescript(schema)
         self._seed_bundled()
+
+    def _schema_tables(self, conn) -> set[str]:
+        names = "'skills','skill_versions','skill_packages','agent_skill_bindings','platform_admins'"
+        # There are five Registry-owned tables; indexes are not counted.
+        if self._store.is_postgres:
+            rows = conn.execute(f"SELECT table_name AS name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name IN ({names})").fetchall()
+        else:
+            rows = conn.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name IN ({names})").fetchall()
+        return {row["name"] for row in rows}
 
     @staticmethod
     def _postgres_schema() -> str:
@@ -153,27 +175,160 @@ class SkillRegistry:
         CREATE INDEX IF NOT EXISTS idx_agent_skill_bindings_agent ON agent_skill_bindings(agent_id);
         """
 
-    @staticmethod
-    def _zip_directory(slug: str, source: Path) -> bytes:
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for path in sorted(item for item in source.rglob("*") if item.is_file()):
-                relative = path.relative_to(source).as_posix()
-                info = zipfile.ZipInfo(f"{slug}/{relative}", date_time=(1980, 1, 1, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
-                archive.writestr(info, path.read_bytes())
-        return buffer.getvalue()
-
     def _seed_bundled(self) -> None:
-        for slug_dir in sorted(path for path in self.bundled_root.iterdir() if path.is_dir()):
-            for version_dir in sorted(path for path in slug_dir.iterdir() if path.is_dir()):
-                if not (version_dir / "SKILL.md").is_file() or not VERSION_RE.fullmatch(version_dir.name):
-                    continue
-                content = self._zip_directory(slug_dir.name, version_dir)
-                self._upsert_import(slug_dir.name, version_dir.name, slug_dir.name, "Bundled native Codex Skill", content, None, published=True)
-        for agent in CATALOG.values():
-            for slug, version in agent.skill_manifest.items():
-                self.bind_agent(agent.id, slug, version, None, allow_new_binding=True, preserve_existing=True)
+        entries = self._approved_entries()
+        with self._read_connection() as conn:
+            result = self._verify_registry(conn, entries, allow_empty=True)
+        if result["mode"] == "reuse":
+            return
+        # Serialize first installation and commit Registry/default bindings as
+        # one transaction. No upsert, publish, or fallback to checkout packing.
+        with self._store.connection() as conn:
+            if self._store.is_postgres:
+                conn.execute("SELECT pg_advisory_xact_lock(714360105)")
+            else:
+                conn.execute("BEGIN IMMEDIATE")
+            if self._verify_registry(conn, entries, allow_empty=True)["mode"] == "reuse":
+                return
+            if any(root.exists() and any(root.iterdir()) for root in
+                   (self.packages_root, self.published_root, self.drafts_root)):
+                raise SkillRegistryError("Unregistered Skill files; manual bootstrap required.")
+            artifacts = {}
+            for entry in entries:
+                content = (self.bundled_root / entry["artifact_path"]).read_bytes()
+                if sha256(content) != entry["artifact_sha256"]:
+                    raise SkillRegistryError("Artifact changed during first-install validation; BLOCK.")
+                NativeSkillArchive.inspect(content, entry["skill_slug"])
+                artifacts[entry["artifact_path"]] = content
+            versions = {}
+            for entry in entries:
+                slug, version = entry["skill_slug"], entry["version"]
+                content = artifacts[entry["artifact_path"]]
+                skill_id = versions.get(slug, {}).get("skill_id") or str(uuid.uuid4())
+                version_id = str(uuid.uuid4())
+                package_dir = self.packages_root / version_id
+                package_dir.mkdir(parents=True, exist_ok=False)
+                package_path = package_dir / f"{entry['artifact_sha256']}.zip"
+                package_path.write_bytes(content)
+                target = self.published_root / slug / version
+                if target.exists():
+                    raise SkillRegistryError("Unregistered published cache; manual bootstrap required.")
+                temporary = target.with_name(f"{version}.tmp-{uuid.uuid4().hex}")
+                temporary.parent.mkdir(parents=True, exist_ok=True)
+                NativeSkillArchive.extract(content, slug, temporary)
+                temporary.replace(target)
+                if slug not in versions:
+                    conn.execute("INSERT INTO skills(id,slug,name,description) VALUES (?,?,?,?)", (skill_id, slug, slug, "Bundled native Codex Skill"))
+                    versions[slug] = {"skill_id": skill_id}
+                conn.execute("INSERT INTO skill_versions(id,skill_id,version,status,checksum,published_at) VALUES (?,?,?,'published',?,CURRENT_TIMESTAMP)", (version_id, skill_id, version, entry["artifact_sha256"]))
+                conn.execute("INSERT INTO skill_packages(id,skill_version_id,storage_path,sha256,size_bytes) VALUES (?,?,?,?,?)", (str(uuid.uuid4()), version_id, str(package_path), entry["artifact_sha256"], len(content)))
+                for agent_id in entry["bootstrap_default"]:
+                    conn.execute("INSERT INTO agent_skill_bindings(agent_id,skill_id,skill_version_id) VALUES (?,?,?)", (agent_id, skill_id, version_id))
+            for agent_id in CATALOG:
+                conn.execute("UPDATE agent_templates SET skill_manifest=? WHERE id=?", (json.dumps(self._agent_manifest(conn, agent_id), sort_keys=True), agent_id))
+
+    def _approved_entries(self) -> list[dict]:
+        try:
+            entries = validate_bundle(self.bundled_root)
+            if any(agent not in CATALOG for entry in entries for agent in entry["bootstrap_default"]):
+                raise BundledSkillError("unknown bootstrap agent")
+            return entries
+        except (BundledSkillError, OSError) as exc:
+            raise SkillRegistryError(str(exc)) from exc
+
+    @contextmanager
+    def _read_connection(self):
+        """No schema creation, mkdir, credential output, or writable transaction."""
+        if self._store.is_postgres:
+            from psycopg import connect
+            from psycopg.rows import dict_row
+            with connect(self._store.database_url, row_factory=dict_row,
+                         options="-c default_transaction_read_only=on") as connection:
+                yield _PostgresConnection(connection)
+        else:
+            path = self._store.database_path
+            if path is None:
+                raise SkillRegistryError("Registry database missing.")
+            connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=ON")
+            try:
+                yield connection
+            finally:
+                connection.close()
+
+    def verify_bootstrap(self) -> dict:
+        """Release preflight: requires installed Registry and never initializes."""
+        entries = self._approved_entries()
+        with self._read_connection() as conn:
+            if len(self._schema_tables(conn)) != 5:
+                raise SkillRegistryError("Registry schema missing; preflight BLOCK.")
+            return self._verify_registry(conn, entries, allow_empty=False)
+
+    def _verify_registry(self, conn, entries: list[dict], *, allow_empty: bool) -> dict:
+        rows = conn.execute("SELECT v.id,v.skill_id,v.version,v.status,v.checksum,s.slug,p.storage_path,p.sha256 AS package_sha256,p.size_bytes FROM skill_versions v LEFT JOIN skills s ON s.id=v.skill_id LEFT JOIN skill_packages p ON p.skill_version_id=v.id").fetchall()
+        bindings = conn.execute("SELECT b.agent_id,b.skill_id,v.id AS version_id,v.skill_id AS version_skill_id,v.version,v.status,s.slug,a.id AS agent_exists FROM agent_skill_bindings b LEFT JOIN skill_versions v ON v.id=b.skill_version_id LEFT JOIN skills s ON s.id=b.skill_id LEFT JOIN agent_templates a ON a.id=b.agent_id").fetchall()
+        empty = not rows and not bindings and conn.execute("SELECT COUNT(*) AS n FROM skills").fetchone()["n"] == 0 and conn.execute("SELECT COUNT(*) AS n FROM skill_packages").fetchone()["n"] == 0
+        if empty:
+            if not allow_empty:
+                raise SkillRegistryError("Registry absent; explicit first-install bootstrap required.")
+            return {"status": "ok", "mode": "first_install", "versions": [], "bindings": []}
+        by_key = {(row["slug"], row["version"]): row for row in rows}
+        by_id = {row["id"]: row for row in rows}
+        checked, versions = set(), []
+        for entry in entries:
+            row = by_key.get((entry["skill_slug"], entry["version"]))
+            if row is None:
+                raise SkillRegistryError("Partial existing Registry; missing bundled version; manual bootstrap required.")
+            if row["status"] == "draft":
+                raise SkillRegistryError("Bundled draft conflict; manual action required.")
+            if row["status"] not in {"published", "deprecated"}:
+                raise SkillRegistryError("Invalid Registry version status.")
+            self._verify_package(row, expected=entry["artifact_sha256"])
+            checked.add(row["id"])
+            versions.append({"skill_slug": row["slug"], "version": row["version"], "status": row["status"], "checksum": row["checksum"]})
+        for binding in bindings:
+            if binding["agent_id"] not in CATALOG or not binding["agent_exists"] or binding["skill_id"] != binding["version_skill_id"] or binding["status"] != "published":
+                raise SkillRegistryError("Invalid current Agent Binding; preflight BLOCK.")
+            if binding["version_id"] not in checked:
+                self._verify_package(by_id[binding["version_id"]])
+                checked.add(binding["version_id"])
+        return {"status": "ok", "mode": "reuse",
+                "checks": ["bundled_source_lock", "bundled_artifact_lock", "registry_package_identity",
+                           "published_cache", "current_bindings", "no_bundled_draft_conflict"],
+                "versions": versions,
+                "bindings": [{"agent_id": b["agent_id"], "skill_slug": b["slug"], "version": b["version"]} for b in bindings]}
+
+    def _verify_package(self, row, expected: str | None = None) -> None:
+        try:
+            package = Path(row["storage_path"])
+            if package.is_symlink() or not package.resolve().is_relative_to(self.packages_root.resolve()) or package.stat().st_size > MAX_ARCHIVE_BYTES:
+                raise SkillRegistryError("Registry package path/size invalid.")
+            content = package.read_bytes()
+            actual = sha256(content)
+            if actual != row["checksum"] or actual != row["package_sha256"] or len(content) != row["size_bytes"] or (expected is not None and actual != expected):
+                raise SkillRegistryError("Registry package identity mismatch; preflight BLOCK.")
+            NativeSkillArchive.inspect(content, row["slug"])
+            target = self.published_root / row["slug"] / row["version"]
+            if not target.is_dir() or target.is_symlink() or not target.resolve().is_relative_to(self.published_root.resolve()):
+                raise SkillRegistryError("Published cache missing or unsafe; preflight BLOCK.")
+            paths = list(target.rglob("*"))
+            if any(path.is_symlink() for path in paths):
+                raise SkillRegistryError("Published cache symlink; preflight BLOCK.")
+            files = {path.relative_to(target).as_posix(): path for path in paths if path.is_file()}
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                payload = {str(PurePosixPath(info.filename).relative_to(row["slug"])): archive.read(info)
+                           for info in archive.infolist() if not info.is_dir()}
+                executable = {str(PurePosixPath(info.filename).relative_to(row["slug"])): (info.external_attr >> 16) & 0o111
+                              for info in archive.infolist() if not info.is_dir()}
+            if set(files) != set(payload) or any(files[name].read_bytes() != data for name, data in payload.items()):
+                raise SkillRegistryError("Published cache differs from immutable package; preflight BLOCK.")
+            if os.name != "nt" and any(files[name].stat().st_mode & 0o111 != bits for name, bits in executable.items()):
+                raise SkillRegistryError("Published cache executable permissions differ; preflight BLOCK.")
+        except (OSError, TypeError, ValueError, zipfile.BadZipFile) as exc:
+            if isinstance(exc, SkillRegistryError):
+                raise
+            raise SkillRegistryError("Registry package/cache unreadable; preflight BLOCK.") from exc
 
     def import_archive(self, slug: str, version: str, name: str, description: str, content: bytes, user_id: str) -> dict:
         if len(slug) > 80 or len(version) > 64:
