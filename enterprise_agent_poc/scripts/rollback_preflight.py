@@ -155,20 +155,26 @@ def data_contract_floors(declaration, schema_lock):
     return [floor]
 
 
-def active_contract_floors(rows, floors):
+def active_contract_floors(rows, floors, trusted_items):
     from scripts import migrate
+    source_items = {item['version']: item for item in trusted_items}
     active = []
     for floor in floors:
         migration = floor['activation_migration']
+        item = source_items.get(migration['version'])
+        require(item is not None
+                and item['name'] == migration['filename'][4:]
+                and item['canonical_checksum'] == migration['canonical_sha256'],
+                'active_data_contract_migration_identity')
         row = next((item for item in rows if item['version'] == migration['version']), None)
         if row and row['name'] == migration['filename'][4:] and migrate.compatibility_status(
-                row['checksum'], migration) in {migrate.EXACT_MATCH, migrate.LEGACY_LINE_ENDING_COMPATIBLE}:
+                row['checksum'], item) in {migrate.EXACT_MATCH, migrate.LEGACY_LINE_ENDING_COMPATIBLE}:
             active.append(floor['contract_id'])
     return active
 
 
 def read_history(database_url, postgres_major, *, plan=False, target_id=None, target_commit=None,
-                 contract=None, floors=None, own_reference=None):
+                 contract=None, floors=None, own_reference=None, trusted_items=None):
     from psycopg import connect
     from psycopg.rows import dict_row
     require(database_url.startswith(('postgresql://', 'postgres://')), 'postgresql_required')
@@ -196,7 +202,12 @@ def read_history(database_url, postgres_major, *, plan=False, target_id=None, ta
             raise RollbackBlocked(str(exc)) from None
         epoch = next(e for e in contract['epochs'] if e['epoch'] == state['epoch'])
         reference = {'release_id': target_id, 'source_commit': target_commit}
-        active_floors = active_contract_floors(rows, floors or [])
+        require(isinstance(trusted_items, list) and trusted_items, 'trusted_contract_source')
+        history_prefix = plan or len(rows) < len(trusted_items)
+        check_history(rows, trusted_items, plan=history_prefix)
+        active_floors = active_contract_floors(rows, floors or [], trusted_items)
+        if active_floors and reference != own_reference:
+            raise RollbackBlocked('rollback_target_below_member_account_status_floor')
         if reference == contract['epochs'][0]['minimum_target'] and state['epoch_rank'] > 1:
             raise RollbackBlocked('rollback_target_below_data_compatibility_floor')
         require(reference in epoch['allowed_targets'] or (bool(active_floors) and reference == own_reference),
@@ -239,13 +250,14 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     schema_lock = contract['schema_migrations']
     floors = data_contract_floors(declaration, schema_lock)
     own_reference = {'release_id': own_manifest['release_id'], 'source_commit': own_manifest['source_commit']}
+    trusted_items = check_sources(trusted_root, schema_lock)
     # Read epoch before opening or validating the requested target Artifact.
     if database_url is None:
         from scripts.migrate import settings
         database_url = settings.database_url
     rows, state, epoch_source, active_floors = read_history(
         database_url, 16, plan=plan, target_id=target_id, target_commit=target_commit,
-        contract=contract, floors=floors, own_reference=own_reference)
+        contract=contract, floors=floors, own_reference=own_reference, trusted_items=trusted_items)
     targets = declaration['approved_targets']
     require(isinstance(targets, list) and len({t['release_id'] for t in targets}) == len(targets), 'approved_target_set')
     matching = [t for t in targets if t['release_id'] == target_id and t['source_commit'] == target_commit]
@@ -283,13 +295,10 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     if 'member_account_status_v1' in active_floors:
         require(self_target and 'member_account_status_v1' in declaration['supported_data_contracts'],
                 'rollback_target_below_member_account_status_floor')
-    trusted_items = check_sources(trusted_root, schema_lock)
     target_items = check_sources(target_root, target_lock)
     # A pre-012 database remains an exact, trusted prefix.  It has not yet
     # activated the member-status floor, so it retains the established 011
     # rollback behavior.  Any unknown or altered 012 still fails below.
-    history_prefix = plan or len(rows) < len(trusted_items)
-    check_history(rows, trusted_items, plan=history_prefix)
     require(len(rows) >= len(target_items), 'target_required_migrations_missing')
     check_history(rows[:len(target_items)], target_items)
     return {'status': 'rollback_plan_passed' if plan else 'rollback_preflight_passed',

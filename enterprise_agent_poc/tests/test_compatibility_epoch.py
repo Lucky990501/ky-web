@@ -200,15 +200,49 @@ def test_member_status_floor_schema012_blocks_old_artifacts_and_accepts_declared
     h = pg_current
     h['store'] = h['fresh_database'](count=12)
     _set_productized_epoch(h['store'])
-    # The pre-existing productized epoch floor continues to block 6ab.
-    with pytest.raises(h['gate'].RollbackBlocked, match='rollback_target_below_data_compatibility_floor'):
-        pg_gate(h)
-    for release_id, source_commit in ((BD_ID, BD_COMMIT), (B930_ID, B930_COMMIT)):
+    for release_id, source_commit in ((h['old_id'], h['commit']), (BD_ID, BD_COMMIT), (B930_ID, B930_COMMIT)):
         with pytest.raises(h['gate'].RollbackBlocked, match='rollback_target_below_member_account_status_floor'):
             pg_gate(h, target_id=release_id, commit=source_commit)
     candidate = pg_gate(h, target_id='fixture-new', commit='f' * 40)
     assert candidate['status'] == 'rollback_preflight_passed'
     assert candidate['active_data_contract_floors'] == ['member_account_status_v1']
+
+
+@pytest.mark.parametrize('release_id,source_commit,returncode,check', [
+    ('20260913-6abccad', '6abccad4db3e4802810380fae2082a30473f229c', 2,
+     'rollback_target_below_member_account_status_floor'),
+    (BD_ID, BD_COMMIT, 2, 'rollback_target_below_member_account_status_floor'),
+    (B930_ID, B930_COMMIT, 2, 'rollback_target_below_member_account_status_floor'),
+    ('fixture-new', 'f' * 40, 0, 'rollback_preflight_passed'),
+])
+def test_member_status_floor_schema012_real_cli_path(pg_current, release_id, source_commit, returncode, check):
+    h = pg_current
+    h['store'] = h['fresh_database'](count=12)
+    _set_productized_epoch(h['store'])
+    result = subprocess.run(
+        [sys.executable, str(h['helper']), '--target-release-id', release_id,
+         '--target-source-commit', source_commit],
+        env={**h['env'], 'ENTERPRISE_POC_DATABASE_URL': h['store'].database_url},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == returncode
+    assert 'KeyError' not in result.stderr
+    payload = json.loads(result.stdout)
+    assert payload['status'] == ('BLOCKED' if returncode else check)
+    assert payload.get('check', check) == check
+
+
+def test_member_status_floor_canonical_declaration_mismatch_fails_closed(pg_current):
+    h = pg_current
+    h['store'] = h['fresh_database'](count=12)
+    _set_productized_epoch(h['store'])
+    declaration = h['new'] / 'deploy' / 'rollback_compatibility.json'
+    payload = json.loads(declaration.read_text())
+    payload['data_contract_floors'][0]['activation_migration']['canonical_sha256'] = '0' * 64
+    declaration.write_text(json.dumps(payload))
+    h['pack']()
+    with pytest.raises(h['gate'].RollbackBlocked, match='data_contract_floor_declaration'):
+        pg_gate(h, target_id=B930_ID, commit=B930_COMMIT)
 
 
 @pytest.mark.parametrize('fault,check', [('unknown012', 'history_filename'), ('checksum012', 'history_checksum')])
