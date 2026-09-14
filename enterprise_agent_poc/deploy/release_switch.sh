@@ -2,9 +2,9 @@
 # Controlled systemd release switch. Run only as root on the production host.
 set -euo pipefail
 
-release_id="${1:?usage: release_switch.sh <release-id> [--preflight-only]}"
+release_id="${1:?usage: release_switch.sh <trusted-release-id> [--preflight-only | --rollback-preflight <target-release-id> <target-source-commit>]}"
 mode="${2:-}"
-[[ $# -le 2 && ( -z "$mode" || "$mode" == "--preflight-only" ) ]] || { echo "invalid release mode" >&2; exit 2; }
+[[ ( $# -le 2 && ( -z "$mode" || "$mode" == "--preflight-only" ) ) || ( $# -eq 4 && "$mode" == "--rollback-preflight" ) ]] || { echo "invalid release mode" >&2; exit 2; }
 base=/opt/enterprise-agent-workbench
 release_root="$base/releases/$release_id/enterprise_agent_poc"
 shared_env="$base/shared/enterprise-agent.env"
@@ -63,16 +63,36 @@ printf '%s\n' "$migration_result"
 config_result=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env")
 printf '%s\n' "$config_result"
 CONFIG_RESULT="$config_result" "$runtime_venv/bin/python" -c 'import json, os; data = json.loads(os.environ["CONFIG_RESULT"]); raise SystemExit(0 if data.get("matches") is True else 2)'
+if [[ "$mode" == "--rollback-preflight" ]]; then
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$3" --target-source-commit "$4"
+  exit 0
+fi
 if [[ "$mode" == "--preflight-only" ]]; then
   printf '{"status":"preflight_passed","release_id":"%s","data_dir_resolved":true}\n' "$release_id"
   exit 0
 fi
+
+# Prove that the previous application is approved for the COMPLETE planned
+# schema before committing migrations or touching any service configuration.
+current_link="$base/release-current"
+previous=$(readlink -f "$current_link" 2>/dev/null || true)
+[[ -n "$previous" && -d "$previous" ]] || { echo "approved rollback target missing" >&2; exit 2; }
+rollback_target_id=$(basename "$(dirname "$previous")")
+rollback_target_commit=$("$runtime_venv/bin/python" -c '
+import json, re, sys
+try:
+    value=json.load(open(sys.argv[1]))["source_commit"]
+    if not re.fullmatch("[0-9a-f]{40}", value): raise ValueError()
+    print(value)
+except Exception:
+    raise SystemExit(2)
+' "$base/releases/$rollback_target_id/$rollback_target_id.manifest.json")
+[[ "$previous" == "$base/releases/$rollback_target_id/enterprise_agent_poc" ]] || { echo "rollback target outside controlled release path" >&2; exit 2; }
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$rollback_target_id" --target-source-commit "$rollback_target_commit" --check-plan
 if MIGRATION_RESULT="$migration_result" "$runtime_venv/bin/python" -c 'import json, os; raise SystemExit(0 if json.loads(os.environ["MIGRATION_RESULT"])["pending"] > 0 else 1)'; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py up
 fi
 
-current_link="$base/release-current"
-previous=$(readlink -f "$current_link" 2>/dev/null || true)
 backup=$(mktemp -d "$base/.release-switch.XXXXXX")
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"
@@ -83,14 +103,33 @@ done
 rollback() {
   trap - ERR
   set +e
-  if [[ -n "$previous" && -d "$previous" ]]; then ln -sfn "$previous" "$current_link"; else rm -f "$current_link"; fi
+  # Never invoke the old runner: its future-history rejection is intentional.
+  # Failure preserves backup/new state for manual intervention; no restore,
+  # drop-in mutation, or restart is allowed until this trusted gate passes.
+  if ! PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$rollback_target_id" --target-source-commit "$rollback_target_commit"; then
+    printf '{"status":"rollback_BLOCKED","services_restored":false}\n' >&2
+    return 1
+  fi
+  ln -sfn "$previous" "$current_link" || return 1
   for service in "${services[@]}"; do
     dropin="/etc/systemd/system/$service.service.d/release.conf"
-    if [[ -f "$backup/$service.conf" ]]; then install -D -m 0644 "$backup/$service.conf" "$dropin"; else rm -f "$dropin"; fi
+    if [[ -f "$backup/$service.conf" ]]; then install -D -m 0644 "$backup/$service.conf" "$dropin" || return 1; else rm -f "$dropin" || return 1; fi
   done
-  systemctl daemon-reload
-  systemctl restart "${services[@]/%/.service}"
-  rm -rf "$backup"
+  systemctl daemon-reload || return 1
+  systemctl restart "${services[@]/%/.service}" || return 1
+  for service in "${services[@]}"; do systemctl is-active --quiet "$service.service" || return 1; done
+  for attempt in $(seq 1 30); do
+    if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
+      | "$runtime_venv/bin/python" -c 'import json, sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
+      printf '{"status":"rolled_back","application_release":"%s","schema_rollback":false}\n' "$rollback_target_id"
+      rm -rf "$backup"
+      return 0
+    fi
+    sleep 1
+  done
+  printf '{"status":"rollback_health_BLOCKED","schema_rollback":false}\n' >&2
+  # Keep backup on failed rollback health too; never claim recovery succeeded.
+  return 1
 }
 trap 'rollback; exit 1' ERR
 

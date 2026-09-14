@@ -102,6 +102,7 @@ def switch_harness(tmp_path):
     shared_env.chmod(0o600)
     old = base / "releases/old/enterprise_agent_poc"
     old.mkdir(parents=True)
+    (old.parent / 'old.manifest.json').write_text(json.dumps({'source_commit': 'a' * 40}))
     (base / "release-current").symlink_to(old, target_is_directory=True)
     executable = tmp_path / "release_switch.sh"
     source = SCRIPT.read_text().replace("base=/opt/enterprise-agent-workbench", f'base="{base}"')
@@ -115,6 +116,9 @@ from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ["SWITCH_TEST_EVENTS"], "a") as f:
     f.write(json.dumps(args) + "\\n")
+if args and args[0] == "scripts/rollback_preflight.py":
+    print(json.dumps({{"status": "rollback_plan_passed" if "--check-plan" in args else "rollback_preflight_passed", "read_only": True}}))
+    sys.exit(0)
 if args and args[0] == "-":
     source = sys.stdin.read()
     assert "default_transaction_read_only=on" in source
@@ -227,3 +231,340 @@ def test_shared_env_conflicting_data_dir_blocks_without_overriding_configuration
     assert (h["base"] / "release-current").resolve() == h["old"]
     assert not h["systemd"].exists()
     assert h["snapshot"]() == before
+
+
+# Real migration history + immutable historical Release. Host operations alone
+# are adapted; no fake migration records are fed to the rollback helper.
+@pytest.fixture
+def pg_rollback_catalog(request, tmp_path, approved_bundle):
+    if not os.environ.get('STAGE1_POSTGRES_ROOT') or not os.environ.get('ROLLBACK_OLD_ARTIFACT_ROOT'):
+        pytest.skip('Explicit private PostgreSQL and immutable historical artifact fixtures required')
+    import psycopg
+    from psycopg import sql
+    from types import SimpleNamespace
+    from urllib.parse import urlencode
+    from datetime import datetime, timedelta, timezone
+    import uuid
+    from scripts import migrate
+    root = Path(os.environ['STAGE1_POSTGRES_ROOT']).resolve()
+    assert root.parent == Path('/private/tmp') and root.name.startswith('ky-web-stage1-postgres.')
+    assert root.stat().st_uid == os.getuid()
+    assert (root / 'stage1-isolated.marker').read_text().strip() == 'ky-web-stage1-local-only'
+    socket = root / 'socket'
+    assert socket.stat().st_mode & 0o077 == 0
+    args = dict(dbname='postgres', host=str(socket), port=54329, user='stage1_fixture')
+
+    def fresh_database(count=10, fault=None):
+        name = 'rollback_' + uuid.uuid4().hex
+        with psycopg.connect(**args, autocommit=True) as admin:
+            assert 160000 <= int(admin.execute('SHOW server_version_num').fetchone()[0]) < 170000
+            assert Path(admin.execute('SHOW data_directory').fetchone()[0]).resolve() == root / 'cluster'
+            assert admin.execute('SHOW listen_addresses').fetchone()[0] == ''
+            admin.execute(sql.SQL('CREATE DATABASE {} TEMPLATE template0').format(sql.Identifier(name)))
+        query = urlencode({k: args[k] for k in ('host', 'port', 'user')})
+        store = POCStore(f'postgresql:///{name}?{query}')
+        # Build the actual schema first. Malformed cases INSERT initial history
+        # into a fresh database; never UPDATE/delete approved migration history.
+        paths = migrate.migration_files()[:count]
+        with store.connection() as c:
+            for p in paths:
+                c.execute(p.read_text())
+            primary_key = '' if fault == 'duplicate_history' else ' PRIMARY KEY'
+            c.execute('CREATE TABLE schema_migrations (version TEXT' + primary_key +
+                      ', name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())')
+            start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            rows = []
+            for i, p in enumerate(paths):
+                version, filename = p.name[:3], p.name[4:]
+                checksum = migrate.migration_checksums(p)['canonical_checksum']
+                if fault == 'crlf' and i < 7:
+                    checksum = migrate.migration_checksums(p)['legacy_crlf_checksum']
+                if fault == 'checksum' + version:
+                    checksum = '0' * 64
+                if fault == 'name008' and version == '008':
+                    filename = 'other.sql'
+                if fault == 'missing' + version:
+                    continue
+                applied = start + timedelta(seconds=i)
+                if fault == 'applied_order' and i == 0:
+                    applied += timedelta(days=1)
+                rows.append((version, filename, checksum, applied))
+            if fault == 'unknown011':
+                rows.append(('011', 'unapproved.sql', '0' * 64, start + timedelta(seconds=11)))
+            if fault == 'duplicate_history':
+                rows.append(rows[8])
+            for row in rows:
+                c.execute('INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (?,?,?,?)', row)
+        return store
+
+    fault = getattr(request.node, 'callspec', SimpleNamespace(params={})).params.get('fault')
+    if request.node.name == 'test_postgres_legacy_crlf_history_still_strictly_compatible':
+        fault = 'crlf'
+    store = fresh_database(fault=fault)
+    store.seed_demo_data()
+    product = ProductStore(store)
+    product.initialize()
+    registry = SkillRegistry(store, tmp_path / 'controlled/shared/runtime-data/skill-registry', approved_bundle)
+    registry.initialize()
+    return SimpleNamespace(store=store, registry=registry, fresh_database=fresh_database)
+
+
+@pytest.fixture
+def pg_rollback_harness(pg_rollback_catalog, tmp_path):
+    pg_catalog = pg_rollback_catalog
+    import tarfile
+    from scripts import rollback_preflight as gate
+    artifact_root = Path(os.environ['ROLLBACK_OLD_ARTIFACT_ROOT']).resolve()
+    assert artifact_root.parent == Path('/private/tmp')
+    project = SCRIPT.parents[1]
+    base = tmp_path / 'controlled'
+    releases = base / 'releases'
+    old_id = '20260913-6abccad'
+    commit = '6abccad4db3e4802810380fae2082a30473f229c'
+    old_dir = releases / old_id
+    old_dir.mkdir(parents=True)
+    for suffix in ('tar.gz', 'manifest.json'):
+        shutil.copyfile(artifact_root / f'{old_id}.{suffix}', old_dir / f'{old_id}.{suffix}')
+    with tarfile.open(old_dir / f'{old_id}.tar.gz') as archive:
+        archive.extractall(old_dir, filter='data')
+    old = old_dir / 'enterprise_agent_poc'
+    new = releases / 'fixture-new' / 'enterprise_agent_poc'
+    shutil.copytree(project, new, ignore=shutil.ignore_patterns('.venv', '.runtime-data', '__pycache__', '.pytest_cache', 'tests', 'skill_sources', '*.md', '.env*'))
+    # *.md ignore is inappropriate for immutable bundled inputs: copy exact bundle.
+    shutil.rmtree(new / 'skill_packages')
+    shutil.copytree(project / 'skill_packages', new / 'skill_packages')
+    helper = new / 'scripts/rollback_preflight.py'
+    helper.write_text(helper.read_text().replace("BASE = Path('/opt/enterprise-agent-workbench')", f'BASE = Path({str(base)!r})'))
+    systemd = tmp_path / 'systemd'
+    switch = new / 'deploy/release_switch.sh'
+    switch.write_text(switch.read_text().replace('base=/opt/enterprise-agent-workbench', f'base="{base}"').replace('/etc/systemd/system/', str(systemd) + '/'))
+    data = base / 'shared/runtime-data'
+    assert pg_catalog.registry.data_root == data / 'skill-registry'
+    env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TMPDIR') if k in os.environ}
+    env.update(APP_ENV='production', ENTERPRISE_POC_DATABASE_URL=pg_catalog.store.database_url,
+               ENTERPRISE_POC_DATA_DIR=str(data), DEEPSEEK_API_KEY='unused-test-placeholder',
+               GATEWAY_API_TOKEN='unused-test-placeholder', PYTHONDONTWRITEBYTECODE='1')
+    import shlex
+    shared = base / 'shared/enterprise-agent.env'
+    shared.write_text('\n'.join(k + '=' + shlex.quote(v) for k, v in env.items() if k not in ('PATH', 'LANG', 'TMPDIR')) + '\n')
+    shared.chmod(0o600)
+    venv = base / 'venv/bin'
+    write_executable(venv / 'python', f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    for name in ('pip', 'uvicorn'):
+        write_executable(venv / name, f'#!/bin/sh\nexec "{Path(sys.executable).with_name(name)}" "$@"\n')
+    (base / 'release-current').symlink_to(old, target_is_directory=True)
+    dropins = {}
+    for name in ('enterprise-agent-api', 'enterprise-agent-mcp', 'enterprise-agent-worker'):
+        p = systemd / f'{name}.service.d/release.conf'
+        p.parent.mkdir(parents=True)
+        p.write_text('[Service]\nWorkingDirectory=' + str(old) + '\n')
+        dropins[name] = p.read_bytes()
+    boundary = tmp_path / 'boundary'
+    events = tmp_path / 'host-events.jsonl'
+    write_executable(boundary / 'stat', f'#!{sys.executable}\nimport os,sys\nprint(oct(os.stat(sys.argv[-1]).st_mode&0o777)[2:])\n')
+    write_executable(boundary / 'systemctl', f'''#!{sys.executable}
+import json,sys
+from pathlib import Path
+with Path({str(events)!r}).open('a') as f:
+    f.write(json.dumps({{'args':sys.argv[1:],'target':str(Path({str(base / 'release-current')!r}).resolve())}})+'\\n')
+''')
+    write_executable(boundary / 'curl', f'''#!{sys.executable}
+import json,os
+from pathlib import Path
+old=Path({str(base / 'release-current')!r}).resolve()==Path({str(old)!r})
+print(json.dumps({{'status':'ok' if old and os.environ.get('FAIL_OLD_HEALTH')!='true' else 'error','knowledge':'ok','environment':'production'}}))
+''')
+    write_executable(boundary / 'sleep', '#!/bin/sh\nexit 0\n')
+    write_executable(boundary / 'install', f'''#!{sys.executable}
+import sys,shutil
+from pathlib import Path
+assert sys.argv[1:4]==['-D','-m','0644']
+p=Path(sys.argv[-1]);assert p.is_relative_to(Path({str(systemd)!r}))
+p.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(sys.argv[-2],p);p.chmod(0o644)
+''')
+    env['PATH'] = str(boundary) + os.pathsep + env['PATH']
+
+    def pack_trusted_fixture():
+        # Synthetic test archive, not build_release or a candidate production build.
+        archive = new.parent / 'fixture-new.tar.gz'
+        files = sorted(p for p in new.rglob('*') if p.is_file() and '__pycache__' not in p.parts)
+        with tarfile.open(archive, 'w:gz', pax_headers={'comment': 'f' * 40}) as tar:
+            for p in files:
+                tar.add(p, arcname=p.relative_to(new.parent).as_posix(), recursive=False)
+        manifest = {'release_id': 'fixture-new', 'source_commit': 'f' * 40,
+                    'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    'selected_files': [p.relative_to(new.parent).as_posix() for p in files],
+                    'selected_file_count': len(files), 'build_platform': 'isolated-test-fixture'}
+        (new.parent / 'fixture-new.manifest.json').write_text(json.dumps(manifest))
+
+    def snapshot():
+        with pg_catalog.store.connection() as conn:
+            tables = [('schema_migrations', 'version'), ('skills', 'id'), ('skill_versions', 'id'), ('skill_packages', 'id'), ('agent_skill_bindings', 'agent_id,skill_id')]
+            rows = {t: [dict(r) for r in conn.execute(f'SELECT * FROM {t} ORDER BY {order}')] for t, order in tables}
+        files = {p.relative_to(data).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in data.rglob('*') if p.is_file()}
+        return rows, files
+
+    pack_trusted_fixture()
+    return dict(base=base, new=new, old=old, old_id=old_id, commit=commit, gate=gate, env=env,
+                switch=switch, helper=helper, systemd=systemd, events=events, dropins=dropins,
+                store=pg_catalog.store, snapshot=snapshot, pack=pack_trusted_fixture,
+                fresh_database=pg_catalog.fresh_database)
+
+
+def pg_gate(h, *, plan=False, target_id=None, commit=None):
+    return h['gate'].verify(h['base'], h['new'], target_id or h['old_id'], commit or h['commit'],
+                            plan=plan, database_url=h['store'].database_url)
+
+
+def pg_entry(h, mode='--rollback-preflight', **changes):
+    args = ['bash', str(h['switch']), 'fixture-new']
+    if mode:
+        args.append(mode)
+    if mode == '--rollback-preflight':
+        args.extend([changes.pop('target_id', h['old_id']), changes.pop('commit', h['commit'])])
+    return subprocess.run(args, env={**h['env'], **changes}, capture_output=True, text=True, timeout=60)
+
+
+def test_postgres_approved_old_target_complete_schema_and_real_entry_read_only(pg_rollback_harness):
+    h = pg_rollback_harness
+    before = h['snapshot']()
+    result = pg_gate(h)
+    assert result['status'] == 'rollback_preflight_passed'
+    assert result['applied_versions'] == [f'{i:03}' for i in range(1, 11)]
+    assert result['target_known_versions'] == [f'{i:03}' for i in range(1, 8)]
+    assert result['old_runner_invoked'] is False
+    assert pg_entry(h).returncode == 0
+    assert before == h['snapshot']() and not h['events'].exists()
+    assert (h['base'] / 'release-current').resolve() == h['old']
+
+
+@pytest.mark.parametrize('fault', ['unknown011', 'checksum010', 'name008', 'missing009', 'checksum002',
+                                  'applied_order', 'duplicate_history', 'commit', 'release_id', 'manifest_missing',
+                                  'manifest_abnormal', 'archive', 'source_file', 'target_outside', 'evidence', 'baseline_drift', 'parent_env'])
+def test_postgres_malicious_history_and_identity_block_before_any_host_write(pg_rollback_harness, fault):
+    h = pg_rollback_harness
+    kwargs = {}
+    if fault == 'commit': kwargs['commit'] = 'a' * 40
+    elif fault == 'release_id': kwargs['target_id'] = 'unapproved'
+    elif fault == 'manifest_missing': (h['old'].parent / (h['old_id'] + '.manifest.json')).unlink()
+    elif fault == 'manifest_abnormal': (h['old'].parent / (h['old_id'] + '.manifest.json')).write_text('{"source_commit":"wrong"}')
+    elif fault == 'parent_env': (h['old'].parent / '.env').write_text('# Unapproved empty environment input; no credentials\n')
+    elif fault == 'archive':
+        p = h['old'].parent / (h['old_id'] + '.tar.gz');p.write_bytes(p.read_bytes() + b'tampered')
+    elif fault == 'source_file':
+        p = h['old'] / 'migrations/postgres/001_workbench_v1.sql';p.write_bytes(p.read_bytes() + b'-- changed\n')
+    elif fault == 'target_outside':
+        outside = h['base'].parent / 'outside-target';shutil.move(h['old'].parent, outside)
+        h['old'].parent.symlink_to(outside, target_is_directory=True)
+    elif fault in {'evidence', 'baseline_drift'}:
+        p = h['new'] / 'deploy/rollback_compatibility.json';d = json.loads(p.read_text())
+        if fault == 'evidence':d['approved_targets'][0]['compatibility_evidence']['checks']['api'] = 'FAIL'
+        else:d['baseline']['migrations'][-1]['canonical_sha256'] = '0' * 64
+        p.write_text(json.dumps(d));h['pack']()
+    before = h['snapshot']()
+    dropins = {str(p):p.read_bytes() for p in h['systemd'].rglob('*.conf')}
+    r = pg_entry(h, **kwargs)
+    assert r.returncode == 2
+    assert before == h['snapshot']() and not h['events'].exists()
+    assert dropins == {str(p):p.read_bytes() for p in h['systemd'].rglob('*.conf')}
+
+
+def test_postgres_legacy_crlf_history_still_strictly_compatible(pg_rollback_harness):
+    h = pg_rollback_harness
+    before = h['snapshot']()
+    assert pg_gate(h)['status'] == 'rollback_preflight_passed' and h['snapshot']() == before
+
+
+def test_postgres_old_runner_stays_failed_new_normal_runner_strict_and_preflight_unchanged(pg_rollback_harness):
+    h = pg_rollback_harness
+    from scripts import migrate
+    old = subprocess.run([sys.executable, str(h['old'] / 'scripts/migrate.py'), 'status'], env=h['env'], capture_output=True, text=True)
+    assert old.returncode == 2
+    assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010']
+    assert pg_entry(h, '--preflight-only').returncode == 0
+    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('011','unknown.sql',?)", ('0' * 64,))
+    assert migrate.status(h['store']) == 2
+    with pytest.raises(RuntimeError, match='未知'):migrate.up(h['store'])
+    assert not h['events'].exists()
+
+
+def test_postgres_pre_switch_plan_allows_only_an_applied_prefix_not_full_rollback(pg_rollback_harness):
+    h = pg_rollback_harness
+    # Genuine seven-migration schema, not a ten-migration DB disguised as seven.
+    h['store'] = h['fresh_database'](count=7)
+    assert pg_gate(h, plan=True)['status'] == 'rollback_plan_passed'
+    with pytest.raises(h['gate'].RollbackBlocked):pg_gate(h)
+    h['store'] = h['fresh_database'](count=7, fault='missing006')
+    with pytest.raises(h['gate'].RollbackBlocked):pg_gate(h, plan=True)
+
+
+def test_postgres_switch_health_fail_runs_trusted_gate_restores_old_then_health(pg_rollback_harness):
+    h = pg_rollback_harness;before = h['snapshot']()
+    r = pg_entry(h, '')
+    assert r.returncode == 1 and 'rollback_preflight_passed' in r.stdout and 'rolled_back' in r.stdout
+    assert 'schema_rollback":false' in r.stdout
+    events = [json.loads(l) for l in h['events'].read_text().splitlines()]
+    restarts = [e for e in events if e['args'][0] == 'restart']
+    assert len(restarts) == 2 and restarts[0]['target'] == str(h['new']) and restarts[1]['target'] == str(h['old'])
+    assert (h['base'] / 'release-current').resolve() == h['old']
+    for name, b in h['dropins'].items():assert (h['systemd'] / f'{name}.service.d/release.conf').read_bytes() == b
+    assert h['snapshot']() == before
+
+
+def test_postgres_rollback_failed_gate_after_new_health_failure_does_not_restore_or_restart(pg_rollback_harness):
+    h = pg_rollback_harness
+    # Trigger corruption at the OS failure boundary AFTER plan & forward switch.
+    curl = Path(h['env']['PATH'].split(os.pathsep)[0]) / 'curl'
+    write_executable(curl, f'''#!{sys.executable}
+import json,psycopg
+from pathlib import Path
+if Path({str(h['base'] / 'release-current')!r}).resolve()==Path({str(h['new'])!r}):
+    with psycopg.connect({h['store'].database_url!r}) as c:
+        c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('011','unapproved.sql',%s) ON CONFLICT DO NOTHING",('0'*64,))
+print(json.dumps({{'status':'error','knowledge':'ok','environment':'production'}}))
+''')
+    r = pg_entry(h, '')
+    assert r.returncode == 1 and 'rollback_BLOCKED' in r.stderr and 'rolled_back' not in r.stdout
+    events = [json.loads(l) for l in h['events'].read_text().splitlines()]
+    assert len([e for e in events if e['args'][0] == 'restart']) == 1
+    assert all(e['target'] == str(h['new']) for e in events)
+    assert (h['base'] / 'release-current').resolve() == h['new']
+    assert list(h['base'].glob('.release-switch.*'))  # Snapshot retained for humans.
+
+
+def test_postgres_old_health_failure_cannot_be_reported_as_successful_rollback(pg_rollback_harness):
+    h = pg_rollback_harness
+    r = pg_entry(h, '', FAIL_OLD_HEALTH='true')
+    assert r.returncode == 1 and 'rollback_health_BLOCKED' in r.stderr and '"status":"rolled_back"' not in r.stdout
+    assert (h['base'] / 'release-current').resolve() == h['old']
+    assert list(h['base'].glob('.release-switch.*'))
+
+
+def test_rollback_gate_order_is_fail_closed_and_old_runner_is_not_the_authority():
+    source = SCRIPT.read_text()
+    plan = source.index('--check-plan')
+    up = source.index('scripts/migrate.py up')
+    backup = source.index('backup=$(mktemp')
+    rollback = source[source.index('rollback() {'):source.index("trap 'rollback; exit 1' ERR")]
+    assert plan < up < backup
+    assert rollback.index('scripts/rollback_preflight.py') < rollback.index('ln -sfn') < rollback.index('systemctl restart') < rollback.index('curl --fail')
+    assert 'scripts/migrate.py' not in rollback
+    assert 'rollback_BLOCKED' in rollback and 'rollback_health_BLOCKED' in rollback
+
+
+def test_postgres_unapproved_rollback_plan_blocks_forward_before_any_service_write(pg_rollback_harness):
+    h = pg_rollback_harness
+    (h['old'].parent / (h['old_id'] + '.manifest.json')).write_text('{"source_commit":"' + 'a' * 40 + '"}')
+    before = h['snapshot']()
+    r = pg_entry(h, '')
+    assert r.returncode == 2 and not h['events'].exists()
+    assert (h['base'] / 'release-current').resolve() == h['old'] and h['snapshot']() == before
+
+
+def test_postgres_legacy_only_evidence_does_not_authorize_productized_pilot_data(pg_rollback_harness):
+    h = pg_rollback_harness
+    # Isolated synthetic control-plane row only; no runtime or production Agent.
+    with h['store'].connection() as c:
+        c.execute("INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('synthetic-pilot','Synthetic','synthetic-pilot','Isolated fixture','test','active','test',1,'[]','productized')")
+    r = pg_entry(h)
+    assert r.returncode == 2 and 'evidence_legacy_data_scope' in r.stdout and not h['events'].exists()

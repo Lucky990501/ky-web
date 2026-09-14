@@ -66,13 +66,61 @@ version, or sequence gap blocks the Release. Do not update
 
 1. Confirm the current Release and API/MCP/Worker health on the Linux server.
 2. Verify the uploaded archive SHA-256 and Release manifest.
-3. Run candidate `scripts/migrate.py status`; reject mismatches and unknowns.
+3. Run candidate `deploy/release_switch.sh <release-id> --preflight-only`; its
+   read-only migration gate rejects mismatches/unknowns without status CLI DDL.
 4. Verify runtime dependency health and the shared configuration fingerprint.
 5. Run `deploy/release_switch.sh <release-id>` as root.
 6. Require API, MCP, and Worker to be active and `/api/health` to report
    `status=ok`, `knowledge=ok`, and `environment=production`.
-7. Complete authenticated browser acceptance. The switch script automatically
-   restores the previous Release if its controlled health gate fails.
+7. Complete authenticated browser acceptance. On health failure the switch
+   script restores the previous application only after trusted rollback gates
+   pass; a blocked/failed recovery retains its snapshot for manual intervention.
+
+## Approved-schema application rollback
+
+After schema upgrades, run deployment/rollback tooling that knows the complete
+approved schema baseline. Never edit an old Release, rewrite migration history,
+run down migrations, or bypass unknown/checksum protection. Old `migrate.py
+status/up` and old release entry points intentionally continue to reject future
+history; they are NOT the rollback-preflight authority.
+
+From a trusted, independently archive-verified Release, check the old target:
+
+```bash
+bash deploy/release_switch.sh <trusted-release-id> --rollback-preflight \
+  <approved-target-release-id> <approved-target-40-character-source-commit>
+```
+
+This mode is read-only and performs no service/link/drop-in changes. It uses
+the same shared configuration/DATA_DIR and normal Skill/config checks, then
+`scripts/rollback_preflight.py` verifies the entire applied history, the target's
+own historical migration identities, both controlled archive/file identities,
+and the reviewed `deploy/rollback_compatibility.json` declaration. Caller-provided
+directories or compatibility declarations are not accepted.
+
+Declarations pin exact migration filenames/checksums, old source/Manifest/archive
+identity and evidence fingerprints. Updating an approved schema or rollback
+target requires a reviewed new declaration and isolated compatibility evidence;
+neither a larger version number nor an arbitrary future range grants permission.
+The V1 evidence is PostgreSQL 16 isolated legacy startup/minimal Fake Runtime
+execution, not production Provider/RAG certification.
+Its `legacy_only` data scope blocks old-target rollback if Productized Template
+rows exist; Pilot-data rollback requires a separately approved application-aware
+target/evidence. Do not delete or relabel Pilot records to pass this gate.
+
+Normal `--preflight-only` remains read-only and may show pending migrations.
+Before a real forward switch, an additional plan gate validates the applied
+prefix and the complete approved future baseline/rollback target **before up**.
+On switch/health failure, the full read-only rollback gate must pass before
+restoring the old application and restarting services. Old production health
+must then pass; otherwise do not report rollback success. A blocked rollback
+retains its snapshot and requires manual intervention rather than an
+unconditional unsafe old restart.
+
+Successful rollback means **application Release = old, schema baseline = newer**.
+No schema rollback occurs. New deployment tooling remains authoritative for
+subsequent deployments. This entry point exposes independent rollback-preflight,
+not an unaudited manual switch/force-recovery command.
 
 ## Runtime configuration verification
 
