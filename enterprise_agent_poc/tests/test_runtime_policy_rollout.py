@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,11 @@ ORIGINAL = ("# fixture configuration\r\nAPP_ENV=production\r\n"
             "\r\n".join(k + "=" + v for k, v in zip(policy.KEYS, ("false", "", "", ""))) + "\r\n").encode()
 
 
+@pytest.fixture(autouse=True)
+def isolated_readiness_clock(monkeypatch):
+    monkeypatch.setattr(policy, "READINESS_INTERVAL_SECONDS", 0)
+
+
 class FakeServices:
     def __init__(self, env):
         self.env = env
@@ -32,11 +38,41 @@ class FakeServices:
         self.fail_once = set()
         self.always_fail = False
         self.health_failure = False
+        self.public_health_failure = False
         self.mismatch = False
+        self.policy_mismatch = False
+        self.cwd_mismatch = False
         self.identity_change = False
+        self.restart_cycle = 0
+        self.verification_attempt = 0
+        self.verification_counts = {"apply": 0, "rollback": 0}
+        self.readiness_delays = {"apply": {}, "rollback": {}}
+        self.never_ready = {"apply": set(), "rollback": set()}
+
+    def begin_verification(self):
+        self.verification_attempt += 1
+        phase = self._phase()
+        if phase:
+            self.verification_counts[phase] += 1
+
+    def _phase(self):
+        if self.restart_cycle == 1:
+            return "apply"
+        if self.restart_cycle >= 2:
+            return "rollback"
+        return None
+
+    def _ready(self, gate):
+        phase = self._phase()
+        if phase is None:
+            return True
+        return gate not in self.never_ready[phase] and self.verification_attempt > self.readiness_delays[phase].get(gate, 0)
 
     def inspect(self, *, require_active=True):
         policy.require(not require_active or not self.inactive, "SERVICE_INACTIVE")
+        if (self.cwd_mismatch and self.restart_cycle and
+                policy.parse(self.env.read_bytes()).get(policy.KEYS[0]) == "true"):
+            raise policy.Blocked("SERVICE_APPLICATION_MISMATCH")
         return self.identity, self.environments
 
     def restart(self, service):
@@ -44,18 +80,41 @@ class FakeServices:
         if service in self.fail_once or self.always_fail:
             self.fail_once.discard(service)
             self.inactive.add(service)
+            if service == policy.SERVICES[-1]:
+                self.restart_cycle += 1
+                self.verification_attempt = 0
             raise policy.Blocked("SERVICE_RESTART_FAILED")
         self.inactive.discard(service)
         index = policy.SERVICES.index(service)
         values = policy.parse(self.env.read_bytes())
         if self.mismatch and values.get(policy.KEYS[0]) == "true":
             values["APP_ENV"] = "mismatch"
+        if self.policy_mismatch and values.get(policy.KEYS[0]) == "true":
+            values[policy.KEYS[1]] = "wrong-tenant"
         self.environments[index] = values
         if self.identity_change and values.get(policy.KEYS[0]) == "true":
             self.identity = "changed-application"
+        if service == policy.SERVICES[-1]:
+            self.restart_cycle += 1
+            self.verification_attempt = 0
+
+    def local_health(self):
+        return self._ready("local_health") and not (
+            self.health_failure and policy.parse(self.env.read_bytes()).get(policy.KEYS[0]) == "true")
+
+    def public_health(self):
+        return self._ready("public_health") and not (
+            self.public_health_failure and policy.parse(self.env.read_bytes()).get(policy.KEYS[0]) == "true")
+
+    def mcp_ready(self, port=8091):
+        assert port == 8091
+        return self._ready("mcp_ready")
+
+    def worker_ready(self):
+        return self._ready("worker_ready")
 
     def health(self):
-        return not (self.health_failure and policy.parse(self.env.read_bytes()).get(policy.KEYS[0]) == "true")
+        return self.local_health() and self.public_health()
 
 
 class NativeLayoutServices:
@@ -92,6 +151,19 @@ class NativeLayoutServices:
         raise AssertionError("read-only native fixture must not restart services")
 
     def health(self):
+        return True
+
+    def local_health(self):
+        return True
+
+    def public_health(self):
+        return True
+
+    def mcp_ready(self, port=8091):
+        assert port == 8091
+        return True
+
+    def worker_ready(self):
         return True
 
 
@@ -354,6 +426,216 @@ def test_health_or_fingerprint_failure_restores_exact_bytes(fixture, failure):
     assert rollout.env.read_bytes() == ORIGINAL
     assert journal(rollout)["state"] == "rolled_back"
     assert rollout.status()["policy_enabled"] is False
+
+
+@pytest.mark.parametrize("gate,delay", [
+    ("local_health", 2),
+    ("mcp_ready", 3),
+    ("worker_ready", 4),
+    ("public_health", 2),
+])
+def test_delayed_service_readiness_eventually_applies(fixture, gate, delay):
+    rollout, services = fixture
+    services.readiness_delays["apply"][gate] = delay
+    result = apply(rollout)
+    assert result["status"] == "verified"
+    assert result["gates"][gate] is True
+    assert journal(rollout)["state"] == "verified"
+
+
+def test_api_connection_refused_then_recovers(fixture):
+    rollout, services = fixture
+    services.readiness_delays["apply"]["local_health"] = 3
+    assert apply(rollout)["status"] == "verified"
+
+
+def test_services_become_ready_at_different_attempts(fixture):
+    rollout, services = fixture
+    services.readiness_delays["apply"].update(
+        local_health=1, public_health=3, mcp_ready=2, worker_ready=4)
+    result = apply(rollout)
+    assert result["status"] == "verified"
+    assert services.verification_attempt == 5
+
+
+@pytest.mark.parametrize("gate,stage", [
+    ("local_health", "local_health"),
+    ("worker_ready", "worker_ready"),
+])
+def test_readiness_timeout_rolls_back_and_records_stage(fixture, gate, stage):
+    rollout, services = fixture
+    services.never_ready["apply"].add(gate)
+    with pytest.raises(policy.Blocked, match="POLICY_ROLLOUT_FAILED_ROLLED_BACK"):
+        apply(rollout)
+    record = journal(rollout)
+    assert record["state"] == "rolled_back"
+    assert record["original_failure_stage"] == stage
+    assert record["original_failure_code"] == "SERVICE_READINESS_TIMEOUT"
+    assert record["rollback_failure_stage"] is None
+    assert rollout.env.read_bytes() == ORIGINAL
+    assert services.verification_counts["apply"] == policy.READINESS_MAX_ATTEMPTS
+
+
+@pytest.mark.parametrize("failure,stage,code,cli_code", [
+    ("cwd_mismatch", "application_identity", "SERVICE_APPLICATION_MISMATCH",
+     "CRITICAL_CONFIG_ROLLBACK_FAILED"),
+    ("mismatch", "process_fingerprint", "CONFIG_FINGERPRINT_MISMATCH",
+     "POLICY_ROLLOUT_FAILED_ROLLED_BACK"),
+    ("policy_mismatch", "policy_semantics", "POLICY_SEMANTICS_MISMATCH",
+     "POLICY_ROLLOUT_FAILED_ROLLED_BACK"),
+])
+def test_non_retryable_verification_failure_blocks_immediately(fixture, failure, stage, code, cli_code):
+    rollout, services = fixture
+    setattr(services, failure, True)
+    with pytest.raises(policy.Blocked, match=cli_code):
+        apply(rollout)
+    record = journal(rollout)
+    assert record["state"] == ("rollback_failed" if failure == "cwd_mismatch" else "rolled_back")
+    assert record["original_failure_stage"] == stage
+    assert record["original_failure_code"] == code
+    assert services.verification_counts["apply"] == 1
+
+
+def test_apply_failure_exact_restore_waits_for_delayed_recovery(fixture):
+    rollout, services = fixture
+    services.mismatch = True
+    services.readiness_delays["rollback"].update(local_health=2, worker_ready=3)
+    with pytest.raises(policy.Blocked, match="POLICY_ROLLOUT_FAILED_ROLLED_BACK"):
+        apply(rollout)
+    record = journal(rollout)
+    assert rollout.env.read_bytes() == ORIGINAL
+    assert record["state"] == "rolled_back"
+    assert record["original_failure_stage"] == "process_fingerprint"
+    assert record["rollback_failure_stage"] is None
+    assert [item["state"] for item in record["transition_timestamps"]][-1] == "rolled_back"
+
+
+def test_rollback_readiness_timeout_is_critical_and_auditable(fixture):
+    rollout, services = fixture
+    services.mismatch = True
+    services.never_ready["rollback"].add("worker_ready")
+    with pytest.raises(policy.Blocked, match="CRITICAL_CONFIG_ROLLBACK_FAILED"):
+        apply(rollout)
+    record = journal(rollout)
+    assert rollout.env.read_bytes() == ORIGINAL
+    assert record["state"] == "rollback_failed"
+    assert record["original_failure_stage"] == "process_fingerprint"
+    assert record["original_failure_code"] == "CONFIG_FINGERPRINT_MISMATCH"
+    assert record["rollback_failure_stage"] == "worker_ready"
+    assert record["rollback_failure_code"] == "SERVICE_READINESS_TIMEOUT"
+
+
+def test_legacy_rollback_failed_current_pre_recovers_without_env_replace(fixture, monkeypatch):
+    rollout, services = fixture
+    services.always_fail = True
+    with pytest.raises(policy.Blocked, match="CRITICAL_CONFIG_ROLLBACK_FAILED"):
+        apply(rollout)
+    record = journal(rollout)
+    path = rollout.operations / (record["operation_id"] + ".json")
+    legacy = {key: value for key, value in record.items() if key in policy.LEGACY_JOURNAL_FIELDS}
+    legacy["state"] = "rollback_failed"
+    path.write_bytes(json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode())
+    path.chmod(0o600)
+    assert journal(rollout).get("original_failure_stage", "unavailable") == "unavailable"
+    before = rollout.env.read_bytes(), rollout.env.stat().st_ino, rollout.env.stat().st_mtime_ns
+    real_atomic, env_replacements = rollout._atomic, []
+
+    def atomic(path, *args, **kwargs):
+        if path == rollout.env:
+            env_replacements.append(path)
+        return real_atomic(path, *args, **kwargs)
+
+    monkeypatch.setattr(rollout, "_atomic", atomic)
+    services.always_fail = False
+    result = rollout.restore(record["operation_id"])
+    after = rollout.env.read_bytes(), rollout.env.stat().st_ino, rollout.env.stat().st_mtime_ns
+    recovered = journal(rollout)
+    assert result["status"] == "rolled_back" and result["config_rewritten"] is False
+    assert before == after and not env_replacements
+    assert len(list(rollout.operations.glob("*.backup"))) == 1
+    assert recovered["state"] == "rolled_back" and recovered["journal_version"] == 2
+    assert recovered["original_failure_stage"] is None
+    assert recovered["rollback_failure_stage"] is None
+
+
+def test_systemd_boundary_mcp_readiness_uses_expected_port(monkeypatch, tmp_path):
+    boundary = policy.SystemdBoundary(tmp_path)
+    calls = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(policy.socket, "create_connection",
+                        lambda address, timeout: calls.append((address, timeout)) or Connection())
+    assert boundary.mcp_ready(8123) is True
+    assert calls == [(('127.0.0.1', 8123), 2)]
+
+
+def test_systemd_boundary_worker_ready_is_current_pid_scoped(monkeypatch, tmp_path):
+    boundary = policy.SystemdBoundary(tmp_path)
+    boundary.service_pids["enterprise-agent-worker.service"] = "4321"
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"worker ready\n")
+
+    monkeypatch.setattr(policy.subprocess, "run", run)
+    assert boundary.worker_ready() is True
+    args, kwargs = calls[0]
+    assert "_SYSTEMD_UNIT=enterprise-agent-worker.service" in args
+    assert "_PID=4321" in args and "--grep=worker ready" in args
+    assert kwargs["capture_output"] is True and kwargs["timeout"] == 3
+
+
+@pytest.mark.parametrize("status,retryable", [(503, True), (401, False), (404, False)])
+def test_systemd_boundary_health_retries_only_transient_http(monkeypatch, tmp_path, status, retryable):
+    boundary = policy.SystemdBoundary(tmp_path)
+
+    def open_url(*args, **kwargs):
+        raise policy.urllib.error.HTTPError("redacted", status, "redacted", None, None)
+
+    monkeypatch.setattr(policy.urllib.request, "urlopen", open_url)
+    if retryable:
+        assert boundary.local_health() is False
+    else:
+        with pytest.raises(policy.Blocked, match="LOCAL_HEALTH_HTTP_FAILED"):
+            boundary.local_health()
+
+
+def test_systemd_boundary_mcp_permission_error_is_not_retryable(monkeypatch, tmp_path):
+    boundary = policy.SystemdBoundary(tmp_path)
+
+    def connect(*args, **kwargs):
+        raise PermissionError(policy.errno.EACCES, "redacted")
+
+    monkeypatch.setattr(policy.socket, "create_connection", connect)
+    with pytest.raises(policy.Blocked, match="MCP_READINESS_QUERY_FAILED"):
+        boundary.mcp_ready()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("original_failure_stage", "free-form secret text"),
+    ("original_failure_code", CANARY),
+    ("original_failure_at", "not-a-timestamp"),
+])
+def test_v2_journal_failure_fields_remain_strict(fixture, field, value):
+    rollout, _ = fixture
+    apply(rollout)
+    record = journal(rollout)
+    record["original_failure_stage"] = "local_health"
+    record["original_failure_code"] = "LOCAL_HEALTH_NOT_READY"
+    record["original_failure_at"] = policy.utc_now()
+    record[field] = value
+    path = rollout.operations / (record["operation_id"] + ".json")
+    path.write_bytes(json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+    path.chmod(0o600)
+    with pytest.raises(policy.Blocked, match="INVALID_JOURNAL"):
+        rollout._journals()
 
 
 def test_critical_rollback_failure_and_explicit_recovery(fixture):
