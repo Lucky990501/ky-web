@@ -21,6 +21,12 @@ SQL = Path(__file__).resolve().parents[1] / 'migrations/postgres/011_platform_co
 BD_ROOT = Path('/private/tmp/ky-web-stage27.yFFOL6')
 BD_ID = '20260914-bd04dcb'
 BD_COMMIT = 'bd04dcb982bf0efe02a5a1a42dd162d94265da0b'
+B930_ID = '20260914-b930e87'
+B930_COMMIT = 'b930e876aa6919b869af1309d952c3e2e0a8469a'
+B930_ARCHIVE_SHA = '195b3729643974c510fcfabff5e498b4211007cffab0bb968ee2f86cb5556470'
+B930_MANIFEST_SHA = 'e2a3102e6fe5eaab80145f1b05b30b20fb68f267259ed33f7be7ebf70109817b'
+B930_EVIDENCE_VERSION = 'current-b930-original-artifact-pg16-001-011-v1'
+B930_EVIDENCE_SHA = '7d2a12e8a9f30fd3d6a69bf62d0dd2cdab7d67435f175db9eb7a3ed1624a4cfc'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -83,6 +89,135 @@ def approve_active_bd(h):
 def advance(h, **kwargs):
     return epoch.advance(h['base'], h['new'], h['store'].database_url,
                          running_identity_check=lambda source:None, **kwargs)
+
+
+def original_b930_manifest():
+    import hashlib, os
+    root=Path(os.environ.get('CURRENT_APPLICATION_ARTIFACT_ROOT','/private/tmp/ky-web-stage210.G32W91')).resolve()
+    assert root.parent==Path('/private/tmp') and root.stat().st_uid==os.getuid()
+    manifest_path=root/f'{B930_ID}.manifest.json'
+    manifest=json.loads(manifest_path.read_text())
+    assert hashlib.sha256((root/f'{B930_ID}.tar.gz').read_bytes()).hexdigest()==B930_ARCHIVE_SHA
+    assert manifest['release_id']==B930_ID and manifest['source_commit']==B930_COMMIT
+    assert manifest['archive_sha256']==B930_ARCHIVE_SHA
+    assert manifest['selected_file_count']==len(set(manifest['selected_files']))==87
+    assert epoch_gate().digest(manifest)==B930_MANIFEST_SHA
+    return root,manifest
+
+
+def epoch_gate():
+    from scripts import rollback_preflight
+    return rollback_preflight
+
+
+@pytest.fixture
+def pg_current(pg_epoch):
+    h=pg_epoch;origin,manifest=original_b930_manifest()
+    directory=h['base']/'releases'/B930_ID;directory.mkdir()
+    for suffix in ('tar.gz','manifest.json'):
+        shutil.copyfile(origin/f'{B930_ID}.{suffix}',directory/f'{B930_ID}.{suffix}')
+    with tarfile.open(directory/f'{B930_ID}.tar.gz') as archive:
+        archive.extractall(directory,filter='data')
+    h['b930']=directory/'enterprise_agent_poc'
+    gate=h['gate'];d=json.loads((h['new']/'deploy/rollback_compatibility.json').read_text())
+    reference={'release_id':B930_ID,'source_commit':B930_COMMIT}
+    # Test the reviewed repository approval, never inject/relabel an approval
+    # into the current application. Only synthetic tooling carries the record.
+    record=next(t for t in d['approved_targets'] if t['release_id']==B930_ID)
+    assert record['compatibility_evidence']['version']==B930_EVIDENCE_VERSION
+    assert record['compatibility_evidence']['report_sha256']==B930_EVIDENCE_SHA
+    assert record['manifest_sha256']==gate.digest(manifest)
+    assert all(reference in item['allowed_targets'] for item in d['epoch_contract']['epochs'])
+    gate.release_identity(h['base'],B930_ID,B930_COMMIT,record)
+    return h
+
+
+def activate_b930(h):
+    link=h['base']/'release-current';link.unlink();link.symlink_to(h['b930'],target_is_directory=True)
+
+
+def test_current_original_manifest_is_pinned_and_floor_declaration_unchanged():
+    _,manifest=original_b930_manifest()
+    d=json.loads((SQL.parents[2]/'deploy/rollback_compatibility.json').read_text())
+    contract=epoch_gate().epoch_contract(d)
+    assert contract['epochs'][0]['minimum_target']=={'release_id':'20260913-6abccad','source_commit':'6abccad4db3e4802810380fae2082a30473f229c'}
+    assert contract['epochs'][1]['minimum_target']=={'release_id':BD_ID,'source_commit':BD_COMMIT}
+    assert epoch_gate().digest(manifest)==B930_MANIFEST_SHA
+    record=next(t for t in d['approved_targets'] if t['release_id']==B930_ID)
+    assert record['known_migrations']==contract['schema_migrations']
+    assert record['compatibility_evidence']['report_sha256']==B930_EVIDENCE_SHA
+    assert record['compatibility_evidence']['version']==B930_EVIDENCE_VERSION
+    assert record['compatibility_evidence']['postgres_major']==16
+    assert record['compatibility_evidence']['target_identity_fingerprint']==epoch_gate().digest({k:v for k,v in record.items() if k!='compatibility_evidence'})
+    with tarfile.open(original_b930_manifest()[0]/f'{B930_ID}.tar.gz') as archive:
+        old_b930_json=json.loads(archive.extractfile('enterprise_agent_poc/deploy/rollback_compatibility.json').read())
+    assert not any(t['release_id']==B930_ID for t in old_b930_json['approved_targets'])
+
+
+def test_postgres_current_tooling_application_separation_and_permanent_floor(pg_current):
+    h=pg_current;activate_b930(h);before=h['snapshot']()
+    assert pg_gate(h)['compatibility_epoch']=='legacy_v1'
+    result=advance(h);assert result['status']=='advanced'
+    with h['store'].connection() as c:
+        state=epoch.read_state(c)
+        assert state['advanced_by_release_id']=='fixture-new'
+        assert state['advanced_by_source_commit']=='f'*40!=B930_COMMIT
+        assert not epoch.has_productized_data(c)
+    assert (h['base']/'release-current').resolve()==h['b930']
+    assert h['snapshot']()==before
+    for rid,commit in ((BD_ID,BD_COMMIT),(B930_ID,B930_COMMIT)):
+        assert pg_gate(h,target_id=rid,commit=commit)['compatibility_epoch']=='productized_v1'
+    with pytest.raises(h['gate'].RollbackBlocked,match='below_data_compatibility_floor'):pg_gate(h)
+    AgentProductization(h['store']).create_template({'slug':'synthetic-current','name':'Synthetic'},None)
+    with pytest.raises(h['gate'].RollbackBlocked,match='below_data_compatibility_floor'):pg_gate(h)
+    link=h['base']/'release-current';link.unlink();link.symlink_to(h['new'],target_is_directory=True)
+    with pytest.raises(epoch.EpochBlocked,match='current_release_not_approved_productized_identity'):advance(h)
+    with pytest.raises(h['gate'].RollbackBlocked,match='target_not_approved_for_compatibility_epoch'):
+        pg_gate(h,target_id='fixture-new',commit='f'*40)
+
+
+@pytest.mark.parametrize('tamper',['source','archive','archive_sha','manifest','file_bytes','selected_count','selected_set','cwd','inactive'])
+def test_postgres_current_identity_tamper_blocks_before_advance(pg_current,tamper,monkeypatch):
+    h=pg_current;activate_b930(h);before=h['snapshot']();manifest=h['b930'].parent/f'{B930_ID}.manifest.json'
+    if tamper=='archive':
+        p=h['b930'].parent/f'{B930_ID}.tar.gz';p.write_bytes(p.read_bytes()+b'fault')
+    elif tamper=='file_bytes':
+        p=h['b930']/'app/agent_productization.py';p.write_bytes(p.read_bytes()+b'\n# fault\n')
+    elif tamper in ('source','archive_sha','manifest','selected_count','selected_set'):
+        d=json.loads(manifest.read_text())
+        if tamper=='source':d['source_commit']='0'*40
+        elif tamper=='archive_sha':d['archive_sha256']='0'*64
+        elif tamper=='selected_count':d['selected_file_count']=88
+        elif tamper=='selected_set':d['selected_files'][0]=d['selected_files'][1]
+        else:d['build_platform']='unapproved'
+        manifest.write_text(json.dumps(d))
+    elif tamper in ('cwd','inactive'):
+        from types import SimpleNamespace
+        monkeypatch.setattr(subprocess,'run',lambda *a,**k:SimpleNamespace(stdout='MainPID=99\nActiveState=active\n' if tamper=='cwd' else 'MainPID=0\nActiveState=inactive\n'))
+        original=Path.resolve
+        monkeypatch.setattr(Path,'resolve',lambda self,**kwargs:h['bd'] if str(self)=='/proc/99/cwd' else original(self,**kwargs))
+    with pytest.raises((epoch.EpochBlocked,h['gate'].RollbackBlocked)):
+        epoch.advance(h['base'],h['new'],h['store'].database_url,
+            running_identity_check=epoch.require_running_release if tamper in ('cwd','inactive') else lambda source:None)
+    with h['store'].connection() as c:assert epoch.read_state(c)['epoch']=='legacy_v1'
+    assert h['snapshot']()==before and not h['events'].exists()
+
+
+@pytest.mark.parametrize('tamper',['unknown012','checksum011','missing_epoch','corrupt_epoch'])
+def test_postgres_current_approved_identity_still_requires_strict_epoch_history(pg_current,tamper):
+    h=pg_current;activate_b930(h)
+    if tamper in ('unknown012','checksum011'):h['store']=h['fresh_database'](fault=tamper)
+    else:
+        with h['store'].connection() as c:
+            c.execute('ALTER TABLE platform_compatibility_state DISABLE TRIGGER USER')
+            if tamper=='missing_epoch':c.execute('DELETE FROM platform_compatibility_state')
+            else:
+                checks=c.execute("SELECT conname FROM pg_constraint WHERE conrelid='platform_compatibility_state'::regclass AND contype='c'").fetchall()
+                for r in checks:c.execute('ALTER TABLE platform_compatibility_state DROP CONSTRAINT '+r['conname'])
+                c.execute("UPDATE platform_compatibility_state SET epoch='future_v9'")
+    before=h['snapshot']()
+    with pytest.raises((epoch.EpochBlocked,h['gate'].RollbackBlocked)):advance(h)
+    assert h['snapshot']()==before and not h['events'].exists()
 
 
 def test_postgres_001_011_first_apply_rerun_and_legacy_initialization(pg_epoch, capsys):
@@ -331,6 +466,14 @@ def test_historical_sql001010_bytes_unchanged_against_original_bd_artifact():
 
 
 def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, tmp_path):
+    original_artifact_e2e(pg_epoch,tmp_path)
+
+
+def test_original_b930_current_and_productized_artifact_compatibility(pg_current,tmp_path):
+    original_artifact_e2e(pg_current,tmp_path,current_b930=True)
+
+
+def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
     """Real PG/Redis/API/MCP/Worker; model/session I/O is explicitly Fake."""
     import os
     import socket
@@ -338,6 +481,7 @@ def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, t
     from app.auth import hash_password
     from app.task_queue import RedisTaskQueue
     h=pg_epoch; root=h['base']
+    compatible=h['b930'] if current_b930 else h['bd']
     (root/'epoch-isolation.marker').write_text('ky-web-epoch-isolated-v1')
     redis_binary=Path('/private/tmp/ky-web-stage2-readiness.m7EWh0/redis-7.4.2/src/redis-server')
     assert redis_binary.is_file()
@@ -410,8 +554,11 @@ def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, t
         deadline=time.monotonic()+5
         while not (root/'redis.sock').exists() and time.monotonic()<deadline:time.sleep(.05)
         q=RedisTaskQueue(env['REDIS_URL'],'isolated-epoch');assert q.ping()
-        # Independent old target + expanded schema evidence, with zero V2 data.
-        for role in ('api','mcp','worker'):start(role,h['old'],False)
+        # Original candidate itself under legacy_v1 for the b930-specific E2E;
+        # preserve the historical bd/old-floor E2E and its evidence unchanged.
+        with h['store'].connection() as c:
+            assert epoch.read_state(c)['epoch']=='legacy_v1' and not epoch.has_productized_data(c)
+        for role in ('api','mcp','worker'):start(role,compatible if current_b930 else h['old'],False)
         ready()
         with httpx.Client(base_url=f'http://127.0.0.1:{api_port}',timeout=10) as old_api:
             login(old_api)
@@ -421,21 +568,40 @@ def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, t
             legacy_task=old_api.post('/api/v1/agents/copywriting-agent/runs',json={'message':'Synthetic old Legacy on 011'})
             assert legacy_task.status_code==202;poll_task(old_api,legacy_task.json()['id'])
         for role in ('api','mcp','worker'):stop(role)
-        start('api',Path(__file__).resolve().parents[1]);ready()
+        start('api',compatible if current_b930 else Path(__file__).resolve().parents[1]);ready()
         with httpx.Client(base_url=f'http://127.0.0.1:{api_port}',timeout=10) as api:
             login(api)
             blocked=api.post('/api/v1/platform/agents',json={'slug':'social-content-agent','name':'Synthetic social content'})
             assert blocked.status_code==409 and blocked.json()['detail']=='compatibility_epoch_not_advanced'
             stop('api')
-            for role in ('api','mcp','worker'):start(role,h['bd'],False)
-            ready();approve_active_bd(h)
+            for role in ('api','mcp','worker'):start(role,compatible,False)
+            ready()
+            if current_b930:activate_b930(h)
+            else:approve_active_bd(h)
             # Local attestation: all explicit subprocess source/cwd are original
             # bd and alive; production CLI instead enforces actual systemd/procfs.
             assert all(processes[role].poll() is None for role in ('api','mcp','worker'))
-            assert advance(h)['status']=='advanced'
+            if current_b930:
+                def native_running_identity(source):
+                    assert source==compatible
+                    for role in ('api','mcp','worker'):
+                        p=processes[role];assert p.poll() is None
+                        cwd=subprocess.run(['/usr/sbin/lsof','-a','-p',str(p.pid),'-d','cwd','-Fn'],capture_output=True,text=True,check=True)
+                        assert 'n'+str(source) in cwd.stdout.splitlines()
+                with pytest.raises(psycopg.errors.RaiseException,match='compatibility_epoch_not_advanced'),h['store'].connection() as c:
+                    c.execute(INSERT)
+                assert epoch.advance(h['base'],h['new'],h['store'].database_url,running_identity_check=native_running_identity)['status']=='advanced'
+                with h['store'].connection() as c:
+                    provenance=epoch.read_state(c)
+                    assert provenance['advanced_by_release_id']=='fixture-new'!=B930_ID
+                    assert provenance['advanced_by_source_commit']=='f'*40!=B930_COMMIT
+                for rid,commit in ((BD_ID,BD_COMMIT),(B930_ID,B930_COMMIT)):
+                    assert pg_gate(h,target_id=rid,commit=commit)['status']=='rollback_preflight_passed'
+                with pytest.raises(h['gate'].RollbackBlocked,match='below_data_compatibility_floor'):pg_gate(h)
+            else:assert advance(h)['status']=='advanced'
             for role in ('api','mcp','worker'):stop(role)
-            # From here every application process loads original unmodified bd.
-            start('api',h['bd'],True);start('mcp',h['bd'],True);start('worker',h['bd'],True);ready();login(api)
+            # Every application process loads original immutable candidate bytes.
+            start('api',compatible,True);start('mcp',compatible,True);start('worker',compatible,True);ready();login(api)
             r=api.post('/api/v1/platform/agents',json={'slug':'social-content-agent','name':'Synthetic social content'})
             assert r.status_code==201,r.text
             tid=r.json()['id']
@@ -496,7 +662,7 @@ def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, t
             q.acknowledge(first.json()['id'])
             for role in ('api','mcp','worker'):stop(role)
             before=history_snapshot()
-            for role in ('api','mcp','worker'):start(role,h['bd'],False)
+            for role in ('api','mcp','worker'):start(role,compatible,False)
             ready();login(api)
             assert api.get(f'/api/v1/conversations/{conv}').status_code==200
             assert api.get(f'/api/v1/platform/agents/{tid}').json()['versions'][0]['status']=='published'
@@ -511,7 +677,7 @@ def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, t
             legacy_run=api.post('/api/v1/agents/copywriting-agent/runs',json={'message':'Synthetic legacy regression'})
             assert legacy_run.status_code==202;poll_task(api,legacy_run.json()['id'])
             for role in ('api','mcp','worker'):stop(role)
-            for role in ('api','mcp','worker'):start(role,h['bd'],True)
+            for role in ('api','mcp','worker'):start(role,compatible,True)
             ready();login(api)
             assert api.post(f'/api/v1/platform/agents/{tid}/instances/tenant-a/enable').status_code==200
             restored=run(conv);assert restored.status_code==202,restored.text
@@ -532,8 +698,31 @@ def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, t
                 legacy_old_011='PASS',policy_disable_and_reenable='PASS',
                 skill_package_counts={k:len(v) for k,v in h['snapshot']()[0].items() if k!='schema_migrations'},production_touched=False)
             assert h['snapshot']()==registry_before
-            target=Path(os.environ.get('EPOCH_EVIDENCE_DIR',str(tmp_path)))/'epoch-e2e.json'
+            if current_b930:
+                record=next(t for t in d['approved_targets'] if t['release_id']==B930_ID)
+                h['gate'].release_identity(h['base'],B930_ID,B930_COMMIT,record)
+                assert pg_gate(h,target_id=B930_ID,commit=B930_COMMIT)['compatibility_epoch']=='productized_v1'
+                assert pg_gate(h,target_id=BD_ID,commit=BD_COMMIT)['compatibility_epoch']=='productized_v1'
+                with pytest.raises(h['gate'].RollbackBlocked,match='below_data_compatibility_floor'):pg_gate(h)
+                _,manifest=original_b930_manifest()
+                # NEW attestation, not relabeled/reused historical bd evidence.
+                evidence={'version':B930_EVIDENCE_VERSION,'release_id':B930_ID,'source_commit':B930_COMMIT,
+                    'archive_sha256':B930_ARCHIVE_SHA,'canonical_manifest_sha256':h['gate'].digest(manifest),'selected_file_count':87,
+                    'postgres_major':16,'schema_baseline':'001-011','schema_lock_sha256':h['gate'].digest(d['epoch_contract']['schema_migrations']),
+                    'epoch_scenarios':{'legacy_v1_zero_v2':'PASS','productized_v1_zero_v2':'PASS','productized_v1_with_disabled_history':'PASS'},
+                    'checks':dict.fromkeys(('api','mcp','worker','legacy_minimal_run','service_create_block','database_create_block',
+                        'controlled_advance','tooling_application_separation','native_process_cwd','restart','template_revision_create',
+                        'disabled_history_read','runtime_test_persistence','productized_run_resume','credit_idempotency',
+                        'rollback_allowed_target','minimum_bd_floor_unchanged','old_floor_rejected','forward_restore','artifact_bytes_unchanged'),'PASS'),
+                    'legacy_result':'PASS: original three Agents and minimal Legacy execution',
+                    'productized_result':'PASS: isolated control-plane and independent Redis Worker persistence',
+                    'runtime_boundary':'FAKE model/session I/O and Skill discovery; not real Provider certification',
+                    'worker_independent':True,'production_touched':False,'final_status':'PASS'}
+            target=Path(os.environ.get('EPOCH_EVIDENCE_DIR',str(tmp_path)))/('b930-compatibility-e2e.json' if current_b930 else 'epoch-e2e.json')
             target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(evidence,sort_keys=True,indent=2))
+            if current_b930:
+                import hashlib
+                assert hashlib.sha256(target.read_bytes()).hexdigest()==B930_EVIDENCE_SHA
     finally:
         for role in tuple(processes):stop(role)
         for log in logs.values():log.close()
