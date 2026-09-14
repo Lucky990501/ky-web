@@ -144,7 +144,7 @@ def test_current_original_manifest_is_pinned_and_floor_declaration_unchanged():
     assert contract['epochs'][1]['minimum_target']=={'release_id':BD_ID,'source_commit':BD_COMMIT}
     assert epoch_gate().digest(manifest)==B930_MANIFEST_SHA
     record=next(t for t in d['approved_targets'] if t['release_id']==B930_ID)
-    assert record['known_migrations']==contract['schema_migrations']
+    assert record['known_migrations']==contract['schema_migrations'][:11]
     assert record['compatibility_evidence']['report_sha256']==B930_EVIDENCE_SHA
     assert record['compatibility_evidence']['version']==B930_EVIDENCE_VERSION
     assert record['compatibility_evidence']['postgres_major']==16
@@ -174,6 +174,50 @@ def test_postgres_current_tooling_application_separation_and_permanent_floor(pg_
     with pytest.raises(epoch.EpochBlocked,match='current_release_not_approved_productized_identity'):advance(h)
     with pytest.raises(h['gate'].RollbackBlocked,match='target_not_approved_for_compatibility_epoch'):
         pg_gate(h,target_id='fixture-new',commit='f'*40)
+
+
+def _set_productized_epoch(store):
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE platform_compatibility_state SET epoch='productized_v1',epoch_rank=2,"
+            "advanced_at=CURRENT_TIMESTAMP,advance_origin='controlled_advance',"
+            "advanced_by_release_id='isolated-fixture',advanced_by_source_commit=? "
+            "WHERE scope='agent_data_contract'",
+            ('f' * 40,),
+        )
+
+
+def test_member_status_floor_schema011_preserves_approved_productized_targets(pg_current):
+    h = pg_current
+    _set_productized_epoch(h['store'])
+    assert pg_gate(h, target_id=BD_ID, commit=BD_COMMIT)['status'] == 'rollback_preflight_passed'
+    assert pg_gate(h, target_id=B930_ID, commit=B930_COMMIT)['status'] == 'rollback_preflight_passed'
+    with pytest.raises(h['gate'].RollbackBlocked, match='rollback_target_below_data_compatibility_floor'):
+        pg_gate(h)
+
+
+def test_member_status_floor_schema012_blocks_old_artifacts_and_accepts_declared_candidate(pg_current):
+    h = pg_current
+    h['store'] = h['fresh_database'](count=12)
+    _set_productized_epoch(h['store'])
+    # The pre-existing productized epoch floor continues to block 6ab.
+    with pytest.raises(h['gate'].RollbackBlocked, match='rollback_target_below_data_compatibility_floor'):
+        pg_gate(h)
+    for release_id, source_commit in ((BD_ID, BD_COMMIT), (B930_ID, B930_COMMIT)):
+        with pytest.raises(h['gate'].RollbackBlocked, match='rollback_target_below_member_account_status_floor'):
+            pg_gate(h, target_id=release_id, commit=source_commit)
+    candidate = pg_gate(h, target_id='fixture-new', commit='f' * 40)
+    assert candidate['status'] == 'rollback_preflight_passed'
+    assert candidate['active_data_contract_floors'] == ['member_account_status_v1']
+
+
+@pytest.mark.parametrize('fault,check', [('unknown012', 'history_filename'), ('checksum012', 'history_checksum')])
+def test_member_status_floor_keeps_unknown_and_checksum_history_fail_closed(pg_current, fault, check):
+    h = pg_current
+    h['store'] = h['fresh_database'](count=12 if fault == 'checksum012' else 11, fault=fault)
+    _set_productized_epoch(h['store'])
+    with pytest.raises(h['gate'].RollbackBlocked, match=check):
+        pg_gate(h, target_id=B930_ID, commit=B930_COMMIT)
 
 
 @pytest.mark.parametrize('tamper',['source','archive','archive_sha','manifest','file_bytes','selected_count','selected_set','cwd','inactive'])

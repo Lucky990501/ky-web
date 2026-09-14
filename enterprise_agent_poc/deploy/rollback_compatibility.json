@@ -1,5 +1,22 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
+  "supported_data_contracts": [
+    "member_account_status_v1"
+  ],
+  "data_contract_floors": [
+    {
+      "contract_id": "member_account_status_v1",
+      "activation_migration": {
+        "version": "012",
+        "filename": "012_member_account_status.sql",
+        "canonical_sha256": "1bc1ef8d3a7cda4230f1f7924d714667461b5bdce1205c459c6123dbc92078a2"
+      },
+      "required_semantics": [
+        "disabled_login_rejected",
+        "disabled_authenticated_session_rejected"
+      ]
+    }
+  ],
   "baseline": {
     "id": "agent-productization-schema-001-010-v1",
     "source_commit": "f6b0fe074f46cbcc2e693b4aa2fa57297d1ce7ec",
@@ -329,6 +346,11 @@
         "version": "011",
         "filename": "011_platform_compatibility_epoch.sql",
         "canonical_sha256": "e2c433fdde86f4e49b37538c6917c8ea0e7ad6017e8451e7e544583da0014cde"
+      },
+      {
+        "version": "012",
+        "filename": "012_member_account_status.sql",
+        "canonical_sha256": "1bc1ef8d3a7cda4230f1f7924d714667461b5bdce1205c459c6123dbc92078a2"
       }
     ],
     "epochs": [

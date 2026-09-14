@@ -15,7 +15,10 @@ import uuid
 import psycopg
 from psycopg import sql
 import pytest
+from fastapi.testclient import TestClient
 
+from app import main
+from app.auth import hash_password
 from app.agent_productization import AgentCatalogError, AgentProductization
 from app.product_store import ProductStore
 from app.skill_registry import SkillRegistry
@@ -141,6 +144,42 @@ def test_postgres_001_012_preserves_existing_user_and_adds_constrained_default(t
     finally:
         with psycopg.connect(**admin_args, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+def test_postgres_candidate_rejects_disabled_login_and_existing_session(pg_catalog, monkeypatch):
+    """Exercise the candidate's HTTP auth path against the marked private PG16 DB."""
+    class NoopRuntime:
+        async def close(self):
+            return None
+
+    product = ProductStore(pg_catalog.store)
+    product.create_user(
+        "tenant-a", "disabled-member@example.invalid", hash_password("ChangeMe!2026"),
+        "Disabled Member", "member",
+    )
+    user = product.user_by_email("disabled-member@example.invalid")
+    monkeypatch.setattr(main, "product_store", product)
+    # The HTTP assertion only needs auth and ProductStore.  Avoid initializing the
+    # unrelated SQLite-backed skill registry during this PostgreSQL integration test.
+    monkeypatch.setattr(main, "skill_registry", SimpleNamespace(
+        initialize=lambda: None,
+        grant_platform_admin=lambda _user_id: None,
+    ))
+    monkeypatch.setattr(main, "runtime", NoopRuntime())
+    with TestClient(main.app) as client:
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"account": "disabled-member@example.invalid", "password": "ChangeMe!2026"},
+        ).status_code == 200
+        product.update_member_status("tenant-a", user["id"], "disabled")
+        resumed = client.get("/api/v1/me")
+        assert resumed.status_code == 401 and resumed.json()["error_code"] == "ACCOUNT_DISABLED"
+        client.post("/api/v1/auth/logout")
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"account": "disabled-member@example.invalid", "password": "ChangeMe!2026"},
+        )
+        assert login.status_code == 403 and login.json()["error_code"] == "ACCOUNT_DISABLED"
 
 
 def test_postgres_all_new_foreign_keys_enforced(pg_catalog):
