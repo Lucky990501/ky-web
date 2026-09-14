@@ -87,6 +87,22 @@ def test_schema_expand_only_and_idempotent(catalog):
     assert "credits_policy_ref" not in migration
 
 
+def test_concurrent_local_initialization_is_serialized(tmp_path):
+    store = POCStore(tmp_path / "concurrent-catalog.db")
+    store.seed_demo_data()
+    ProductStore(store).initialize()
+    control = AgentProductization(store)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: control.ensure_initialized(), range(8)))
+
+    with store.connection() as conn:
+        tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")}
+    assert "agent_template_versions" in tables
+    assert "current_published_version_id" in columns
+
+
 def test_draft_edit_revision_increment_and_concurrent_create(catalog):
     t, v = new_draft(catalog)
     old = version(catalog, t)["configuration_fingerprint"]
@@ -264,6 +280,10 @@ def test_instance_fixed_revision_allowlist_no_runtime_enable(catalog):
     assert row["status"] == "configured" and row["execution_enabled"] is False
     assert row["agent_template_version_id"] == v
     assert row["instance_id"]
+    current = catalog.control.instance(t, "tenant-a")
+    assert current["status"] == "configured"
+    assert current["revision"] == 1
+    assert current["workspace_visible"] is False
     for key in ["model", "skills", "tools", "credit_cost", "output_policy", "runtime", "required_capabilities"]:
         with pytest.raises(AgentCatalogError, match="Override"):
             catalog.control.configure_instance(t, "tenant-a", v, {key: "changed"})
@@ -274,6 +294,34 @@ def test_instance_fixed_revision_allowlist_no_runtime_enable(catalog):
     with pytest.raises(AgentCatalogError, match="Published"):
         catalog.control.configure_instance(t, "tenant-b", v, {})
     assert legacy_snapshot(catalog) == before
+
+
+def test_enabled_instance_must_be_disabled_before_reconfigure(catalog):
+    t, v = new_draft(catalog)
+    validated_publish(catalog, t, v)
+    catalog.control.configure_instance(t, "tenant-a", v, {})
+    with catalog.store.connection() as conn:
+        conn.execute("UPDATE tenant_agent_instances SET status='enabled' WHERE tenant_id='tenant-a' AND agent_id=?", (t,))
+    assert catalog.control.instance(t, "tenant-a")["workspace_visible"] is True
+    with pytest.raises(AgentCatalogError, match="INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE"):
+        catalog.control.configure_instance(t, "tenant-a", v, {"display_name": "Changed"})
+    assert catalog.control.instance(t, "tenant-a")["status"] == "enabled"
+
+
+def test_saved_revision_exposes_business_configuration_summary(catalog):
+    t, v = new_draft(catalog, credit_cost=3, output_policy="text")
+    catalog.control.bind_skills(t, v, [published_skill(catalog)], catalog.actor)
+    catalog.control.bind_tools(t, v, [{"tool_capability_id": "config_get", "invocation_requirement": "optional"}], catalog.actor)
+    summary = version(catalog, t)["configuration_summary"]
+    assert summary["persona"] == "Synthetic test persona"
+    assert summary["credit_cost"] == 3
+    assert summary["output_policy"] == "text"
+    assert summary["skills"][0]["version"] == "1.0.0"
+    assert summary["tools"] == [{"id": "config_get", "requirement": "optional"}]
+    assert len(summary["configuration_fingerprint"]) == 64
+    assert version(catalog, t)["validation_summary"] == {"status": "pending", "errors": []}
+    catalog.control.validate(t, v, catalog.actor)
+    assert version(catalog, t)["validation_summary"] == {"status": "passed", "errors": []}
 
 
 def test_catalog_seed_does_not_overwrite_productized_and_legacy_unchanged(catalog):
@@ -340,6 +388,7 @@ def test_platform_admin_api_and_ordinary_enterprise_403(catalog, api):
                                ("PUT", "/missing/versions/missing/tools", {"bindings": []}), ("POST", "/missing/versions/missing/validation", None),
                                ("POST", "/missing/versions/missing/test", None), ("POST", "/missing/versions/missing/publish", {"mode": "local_test"}),
                                ("POST", "/missing/versions/missing/deprecate", None),
+                               ("GET", "/missing/instances/tenant-b", None),
                                ("PUT", "/missing/instances/tenant-b", {"agent_template_version_id": "missing"})]:
         assert client.request(method, "/api/v1/platform/agents"+path, json=body).status_code == 403
     client.cookies.set("workbench_session", cookies["platform"])
@@ -358,6 +407,10 @@ def test_platform_admin_api_and_ordinary_enterprise_403(catalog, api):
     assert client.post(path+"/publish", json={"mode": "production"}).status_code == 409
     assert client.post(path+"/publish", json={"mode": "local_test"}).status_code == 200
     assert client.patch(path, json={"name": "Changed"}).status_code == 409
+    instance_path = f"/api/v1/platform/agents/{tid}/instances/tenant-a"
+    assert client.get(instance_path).json()["status"] == "unconfigured"
+    assert client.put(instance_path, json={"agent_template_version_id": vid, "overrides": {}}).status_code == 200
+    assert client.get(instance_path).json()["status"] == "configured"
 
 
 def test_platform_agents_uses_existing_static_entry():

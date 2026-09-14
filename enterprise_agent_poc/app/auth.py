@@ -42,14 +42,21 @@ class UserPrincipal:
     user_id: str
     tenant_id: str
     role: str
+    auth_version: str | None = None
 
 
 class SessionIssuer:
     def __init__(self, secret: str) -> None:
         self._secret = secret.encode("utf-8")
 
+    def credential_version(self, password_hash: str) -> str:
+        return hmac.new(self._secret, f"credential:{password_hash}".encode(), hashlib.sha256).hexdigest()[:24]
+
     def issue(self, principal: UserPrincipal, lifetime_seconds: int = 60 * 60 * 12) -> str:
-        payload = json.dumps({"sub": principal.user_id, "tenant_id": principal.tenant_id, "role": principal.role, "exp": int(time.time()) + lifetime_seconds}, separators=(",", ":"), sort_keys=True).encode()
+        value = {"sub": principal.user_id, "tenant_id": principal.tenant_id, "role": principal.role, "exp": int(time.time()) + lifetime_seconds}
+        if principal.auth_version:
+            value["auth_version"] = principal.auth_version
+        payload = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
         encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
         signature = hmac.new(self._secret, encoded.encode(), hashlib.sha256).digest()
         return f"workbench1.{encoded}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
@@ -66,6 +73,6 @@ class SessionIssuer:
             payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
             if int(payload["exp"]) <= int(time.time()):
                 raise AuthenticationError("登录已过期。")
-            return UserPrincipal(str(payload["sub"]), str(payload["tenant_id"]), str(payload["role"]))
+            return UserPrincipal(str(payload["sub"]), str(payload["tenant_id"]), str(payload["role"]), str(payload["auth_version"]) if payload.get("auth_version") else None)
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             raise AuthenticationError("登录状态无效。") from exc

@@ -220,7 +220,7 @@ def test_postgres_current_approved_identity_still_requires_strict_epoch_history(
     assert h['snapshot']()==before and not h['events'].exists()
 
 
-def test_postgres_001_011_first_apply_rerun_and_legacy_initialization(pg_epoch, capsys):
+def test_postgres_001_012_first_apply_rerun_and_legacy_initialization(pg_epoch, capsys):
     h = pg_epoch
     before = h['snapshot']()
     with h['store'].connection() as conn:
@@ -229,7 +229,7 @@ def test_postgres_001_011_first_apply_rerun_and_legacy_initialization(pg_epoch, 
         conn.execute(SQL.read_text())
     assert migrate.up(h['store']) == 0 and migrate.status(h['store']) == 0
     result = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert len(result['migrations']) == 11 and result['pending'] == result['checksum_mismatch'] == 0
+    assert len(result['migrations']) == 12 and result['pending'] == result['checksum_mismatch'] == 0
     assert result['unknown_history_versions'] == [] and h['snapshot']() == before
     assert pg_gate(h)['compatibility_epoch'] == 'legacy_v1'
 
@@ -572,7 +572,8 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
         with httpx.Client(base_url=f'http://127.0.0.1:{api_port}',timeout=10) as api:
             login(api)
             blocked=api.post('/api/v1/platform/agents',json={'slug':'social-content-agent','name':'Synthetic social content'})
-            assert blocked.status_code==409 and blocked.json()['detail']=='compatibility_epoch_not_advanced'
+            assert blocked.status_code==409 and blocked.json()['error_code']=='INVALID_INPUT'
+            assert blocked.json()['detail']==blocked.json()['user_message'] and blocked.json()['request_id']
             stop('api')
             for role in ('api','mcp','worker'):start(role,compatible,False)
             ready()
@@ -670,7 +671,8 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
             # Policy disabled on a NEW Draft, not inferred from an enabled flag.
             draft=api.post(f'/api/v1/platform/agents/{tid}/versions',json={'from_version_id':v['id']}).json()['versions'][0]
             denied=api.post(f"/api/v1/platform/agents/{tid}/versions/{draft['id']}/test",json={'configuration_fingerprint':draft['configuration_fingerprint']})
-            assert denied.status_code==409 and 'policy denied' in denied.json()['detail']
+            assert denied.status_code==409 and denied.json()['error_code']=='INVALID_INPUT'
+            assert denied.json()['detail']==denied.json()['user_message'] and denied.json()['request_id']
             legacy=api.get('/api/v1/agents').json()
             agents=legacy['agents'] if isinstance(legacy,dict) else legacy
             assert {a['id'] for a in agents}=={'image-agent','copywriting-agent','campaign-agent'}

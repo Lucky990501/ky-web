@@ -85,6 +85,10 @@ def catalog_router(catalog: AgentProductization, require_platform_admin) -> APIR
     def disable(template_id: str, tenant_id: str, principal=Depends(admin)):
         return catalog.set_instance_status(template_id,tenant_id,"disabled")
 
+    @router.get("/{template_id}/instances/{tenant_id}")
+    def instance(template_id: str, tenant_id: str, principal=Depends(admin)):
+        return catalog.instance(template_id, tenant_id)
+
     @router.post("/{template_id}/versions/{version_id}/publish")
     def publish(template_id: str, version_id: str, payload: PublishRequest, principal=Depends(admin)):
         return catalog.publish(template_id, version_id, principal.user_id, payload.mode)

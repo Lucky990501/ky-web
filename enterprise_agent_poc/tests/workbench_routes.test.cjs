@@ -164,12 +164,75 @@ test('existing agent conversation restoration and platform authorization remain 
   assert.equal(h.run('pageFromNavigation()'),'workspace');
 });
 
+test('member, enterprise admin, and platform admin share one filtered navigation source',()=>{
+  const h=harness('/workspace');
+  const ids=user=>JSON.parse(h.run(`JSON.stringify(navigationForUser(${JSON.stringify(user)}).map(item=>item[0]))`));
+  assert.deepEqual(ids({role:'member',is_platform_admin:false}),['workspace','image','history','generations','profile']);
+  assert.deepEqual(ids({role:'enterprise_admin',is_platform_admin:false}),['workspace','image','history','generations','knowledge','assets','members','enterprise','profile']);
+  assert.deepEqual(ids({role:'enterprise_admin',is_platform_admin:true}),['workspace','image','history','generations','knowledge','assets','members','enterprise','platform-skills','platform-agents','profile']);
+  h.run("me={role:'member',is_platform_admin:false}");
+  assert.equal(h.run("allowedPage('members')"),'workspace');
+  assert.equal(h.run("pageRoutes.members"),'/members');
+});
+
+test('saved Agent configuration summary makes empty bindings explicit',()=>{
+  const h=harness('/platform/agents');
+  const html=h.run("configurationSummaryHtml({persona:'Business persona',model:{label:'Approved model'},output_policy:'text',credit_cost:3,skills:[],tools:[],runtime_test_status:'passed',configuration_fingerprint:'f'.repeat(64)},'本次验证配置')");
+  assert.ok(html.includes('本次验证配置'));
+  assert.ok(html.includes('Business persona'));
+  assert.ok(html.includes('3 积分 / 次'));
+  assert.ok(html.includes('未绑定 Skill'));
+  assert.ok(html.includes('未绑定 Tool'));
+  const validation=h.run("validationSummaryHtml({status:'passed',errors:[]})");
+  assert.ok(validation.includes('Validation 摘要'));
+  assert.ok(validation.includes('已通过'));
+});
+
+test('production publish requires an explicit in-page final configuration confirmation',()=>{
+  assert.ok(source.includes('id="production-publish-confirmation"'));
+  assert.ok(source.includes('id="publish-final-confirm"'));
+  assert.ok(source.includes('version.production_ready!==true'));
+  assert.ok(source.includes("configurationSummaryHtml(summary,'Production Publish 配置')"));
+  assert.ok(source.includes('validationSummaryHtml(version.validation_summary)'));
+});
+
+test('Tenant Instance actions enforce disable-before-reconfigure',()=>{
+  const h=harness('/platform/agents');
+  const actions=status=>JSON.parse(h.run(`JSON.stringify(instanceActionsForStatus('${status}'))`));
+  assert.deepEqual(actions('unconfigured'),['configure']);
+  assert.deepEqual(actions('configured'),['configure','enable']);
+  assert.deepEqual(actions('enabled'),['disable']);
+  assert.deepEqual(actions('disabled'),['configure','enable']);
+});
+
+test('customer error fallback never uses a raw backend detail',()=>{
+  const h=harness('/workspace');
+  assert.equal(h.run('fallbackErrorCode(503)'),'SERVICE_TEMPORARILY_UNAVAILABLE');
+  assert.equal(h.run("customerErrorMessages[fallbackErrorCode(503)]"),'服务暂时不可用，请稍后重试。');
+  assert.equal(h.run('customerErrorMessages.ACCOUNT_DISABLED'),'账号已停用，请联系企业管理员。');
+});
+
+test('member status UI exposes enable and disable without deleting identities',()=>{
+  assert.ok(source.includes("item.status==='enabled'?'Enabled':'Disabled'"));
+  assert.ok(source.includes("data-member-status=\"${item.status==='enabled'?'disabled':'enabled'}\""));
+  assert.ok(source.includes('/status`,{method:\'PUT\''));
+  assert.ok(!source.includes('data-delete-member'));
+});
+
+test('mobile Drawer controls exist and sidebar has a responsive replacement',()=>{
+  assert.match(source,/mobile-menu-button/);
+  assert.match(source,/mobile-drawer/);
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(css,/\.mobile-drawer\.open\{transform:translateX\(0\)\}/);
+  assert.match(css,/@media\(max-width:860px\)/);
+});
+
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
   const h=harness('/platform/agents',{page:'profile'});
   assert.equal(h.run('pageFromNavigation()'),'platform-agents');
   await Promise.all([h.run('render(pageFromNavigation())'),h.settle()]);
   h.consistent('platform-agents','Agent 管理');
-  assert.ok(h.document.main.innerHTML.includes('Runtime Test Pending'));
+  assert.ok(h.document.main.innerHTML.includes('服务端保存配置'));
   assert.ok(h.document.main.innerHTML.includes('真实 Runtime Test'));
 });
 test('Agent management profile navigation/back/forward remains route-consistent',async()=>{

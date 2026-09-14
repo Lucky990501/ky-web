@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,65 +59,68 @@ class AgentProductization:
         self.environment = environment
         self.execution_resolver = None
         self.runtime_tester = None
+        self._initialize_lock = threading.RLock()
 
     def ensure_initialized(self):
         # Stage 1 local schema belongs to control-plane use, not legacy API
         # startup. This preserves the existing Registry restart/no-write gate.
         if not self.store.is_postgres:
-            with self.store.connection() as conn:
-                tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")}
-            required = {"agent_template_versions", "agent_template_version_skills", "tool_capabilities", "agent_template_version_tools", "agent_template_tests"}
-            if not required <= tables or "current_published_version_id" not in columns:
-                self.initialize()
-            if self.execution_resolver:
-                self.execution_resolver.initialize_local()
+            with self._initialize_lock:
+                with self.store.connection() as conn:
+                    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")}
+                required = {"agent_template_versions", "agent_template_version_skills", "tool_capabilities", "agent_template_version_tools", "agent_template_tests"}
+                if not required <= tables or "current_published_version_id" not in columns:
+                    self.initialize()
+                if self.execution_resolver:
+                    self.execution_resolver.initialize_local()
 
     def initialize(self) -> None:
         """SQLite local adapter only. PostgreSQL 008 must be applied externally."""
         if self.store.is_postgres:
             return
-        migration = Path(__file__).resolve().parents[1] / "migrations/postgres/008_agent_productization_catalog.sql"
-        sql = migration.read_text(encoding="utf-8").split("-- Match the stable")[0]
-        # Fresh isolated SQLite databases implement the same 010 status domain.
-        # Never rebuild a developer's existing database implicitly.
-        sql = sql.replace("status IN ('passed','failed','invalidated')",
-                          "status IN ('queued','running','passed','failed','invalidated')")
-        with self.store.connection() as conn:
-            for statement in sql.split(";"):
-                statement = re.sub(r"--[^\n]*", "", statement).strip()
-                if not statement:
-                    continue
-                alter = re.match(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+) (.*)", statement, re.S)
-                if alter:
-                    table, column, ddl = alter.groups()
-                    if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
-                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
-                else:
-                    conn.execute(statement)
-            fields = list(DEFAULTS) + ["id", "agent_template_id", "revision", "configuration_fingerprint",
-                                       "publication_scope", "created_at", "updated_at", "published_at", "created_by", "updated_by"]
-            unchanged = " AND ".join(f"NEW.{f} IS OLD.{f}" for f in fields)
-            conn.executescript(f"""
-                CREATE TRIGGER IF NOT EXISTS guard_agent_revision_update BEFORE UPDATE ON agent_template_versions
-                WHEN OLD.status <> 'draft' AND NOT (OLD.status='published' AND NEW.status='deprecated' AND {unchanged})
-                BEGIN SELECT RAISE(ABORT,'Published revision is immutable'); END;
-                CREATE TRIGGER IF NOT EXISTS guard_agent_revision_delete BEFORE DELETE ON agent_template_versions
-                WHEN OLD.status <> 'draft' BEGIN SELECT RAISE(ABORT,'Published revision is immutable'); END;
-            """)
-            for table in ["agent_template_version_skills", "agent_template_version_tools"]:
-                for operation in ["INSERT", "UPDATE", "DELETE"]:
-                    rows = ["NEW"] if operation == "INSERT" else ["OLD"] if operation == "DELETE" else ["OLD", "NEW"]
-                    guard = " OR ".join(f"EXISTS(SELECT 1 FROM agent_template_versions WHERE id={row}.agent_template_version_id AND status <> 'draft')" for row in rows)
-                    conn.execute(f"CREATE TRIGGER IF NOT EXISTS guard_{table}_{operation.lower()} BEFORE {operation} ON {table} WHEN {guard} BEGIN SELECT RAISE(ABORT,'Published revision binding is immutable'); END")
-            for table, identity, column in [("tenant_agent_instances", "agent_id", "agent_template_version_id"),
-                                            ("agent_templates", "id", "current_published_version_id")]:
-                for operation in ["INSERT", "UPDATE"]:
-                    conn.execute(f"CREATE TRIGGER IF NOT EXISTS guard_{table}_revision_{operation.lower()} BEFORE {operation} ON {table} WHEN NEW.{column} IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_template_versions WHERE id=NEW.{column} AND agent_template_id=NEW.{identity}) BEGIN SELECT RAISE(ABORT,'Revision / Template identity mismatch'); END")
-            self._seed_capabilities(conn)
-            # Local adapter only, never a default DB reset or implicit advance.
-            from scripts.compatibility_epoch import initialize_local
-            initialize_local(conn)
+        with self._initialize_lock:
+            migration = Path(__file__).resolve().parents[1] / "migrations/postgres/008_agent_productization_catalog.sql"
+            sql = migration.read_text(encoding="utf-8").split("-- Match the stable")[0]
+            # Fresh isolated SQLite databases implement the same 010 status domain.
+            # Never rebuild a developer's existing database implicitly.
+            sql = sql.replace("status IN ('passed','failed','invalidated')",
+                              "status IN ('queued','running','passed','failed','invalidated')")
+            with self.store.connection() as conn:
+                for statement in sql.split(";"):
+                    statement = re.sub(r"--[^\n]*", "", statement).strip()
+                    if not statement:
+                        continue
+                    alter = re.match(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+) (.*)", statement, re.S)
+                    if alter:
+                        table, column, ddl = alter.groups()
+                        if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                    else:
+                        conn.execute(statement)
+                fields = list(DEFAULTS) + ["id", "agent_template_id", "revision", "configuration_fingerprint",
+                                           "publication_scope", "created_at", "updated_at", "published_at", "created_by", "updated_by"]
+                unchanged = " AND ".join(f"NEW.{f} IS OLD.{f}" for f in fields)
+                conn.executescript(f"""
+                    CREATE TRIGGER IF NOT EXISTS guard_agent_revision_update BEFORE UPDATE ON agent_template_versions
+                    WHEN OLD.status <> 'draft' AND NOT (OLD.status='published' AND NEW.status='deprecated' AND {unchanged})
+                    BEGIN SELECT RAISE(ABORT,'Published revision is immutable'); END;
+                    CREATE TRIGGER IF NOT EXISTS guard_agent_revision_delete BEFORE DELETE ON agent_template_versions
+                    WHEN OLD.status <> 'draft' BEGIN SELECT RAISE(ABORT,'Published revision is immutable'); END;
+                """)
+                for table in ["agent_template_version_skills", "agent_template_version_tools"]:
+                    for operation in ["INSERT", "UPDATE", "DELETE"]:
+                        rows = ["NEW"] if operation == "INSERT" else ["OLD"] if operation == "DELETE" else ["OLD", "NEW"]
+                        guard = " OR ".join(f"EXISTS(SELECT 1 FROM agent_template_versions WHERE id={row}.agent_template_version_id AND status <> 'draft')" for row in rows)
+                        conn.execute(f"CREATE TRIGGER IF NOT EXISTS guard_{table}_{operation.lower()} BEFORE {operation} ON {table} WHEN {guard} BEGIN SELECT RAISE(ABORT,'Published revision binding is immutable'); END")
+                for table, identity, column in [("tenant_agent_instances", "agent_id", "agent_template_version_id"),
+                                                ("agent_templates", "id", "current_published_version_id")]:
+                    for operation in ["INSERT", "UPDATE"]:
+                        conn.execute(f"CREATE TRIGGER IF NOT EXISTS guard_{table}_revision_{operation.lower()} BEFORE {operation} ON {table} WHEN NEW.{column} IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_template_versions WHERE id=NEW.{column} AND agent_template_id=NEW.{identity}) BEGIN SELECT RAISE(ABORT,'Revision / Template identity mismatch'); END")
+                self._seed_capabilities(conn)
+                # Local adapter only, never a default DB reset or implicit advance.
+                from scripts.compatibility_epoch import initialize_local
+                initialize_local(conn)
 
     def _seed_capabilities(self, conn):
         # Never accept capability metadata from an admin request.
@@ -197,6 +201,17 @@ class AgentProductization:
         version["skills"] = [dict(r) for r in conn.execute("SELECT b.skill_id,b.skill_version_id,s.slug,v.version,v.status,v.checksum FROM agent_template_version_skills b JOIN skills s ON s.id=b.skill_id JOIN skill_versions v ON v.id=b.skill_version_id WHERE b.agent_template_version_id=? ORDER BY b.skill_id", (version["id"],))]
         version["tools"] = [dict(r) for r in conn.execute("SELECT tool_capability_id,invocation_requirement FROM agent_template_version_tools WHERE agent_template_version_id=? ORDER BY tool_capability_id", (version["id"],))]
         version["tests"] = [dict(r) for r in conn.execute("SELECT * FROM agent_template_tests WHERE agent_template_version_id=? ORDER BY created_at DESC,id", (version["id"],))]
+        validation_tests = [x for x in version["tests"] if x["test_type"] == "validation" and x["configuration_fingerprint"] == version["configuration_fingerprint"]]
+        version["validation_summary"] = {"status": "pending", "errors": []}
+        if validation_tests:
+            try:
+                validation_result = json.loads(validation_tests[0]["result_json"] or "{}")
+            except (TypeError, ValueError):
+                validation_result = {}
+            version["validation_summary"] = {
+                "status": validation_tests[0]["status"],
+                "errors": validation_result.get("errors", []) if isinstance(validation_result.get("errors", []), list) else [],
+            }
         version["runtime_test_status"] = "Runtime Test Pending"
         runtime_tests=[x for x in version['tests'] if x['test_type']=='runtime' and x['configuration_fingerprint']==version['configuration_fingerprint']]
         if runtime_tests:version['runtime_test_status']=runtime_tests[0]['status']
@@ -204,7 +219,45 @@ class AgentProductization:
         if self.execution_resolver:
             version["production_ready"] = bool(self.execution_resolver._runtime_passed(conn,version))
             if version['production_ready']:version['runtime_test_status']='passed'
+        model = MODEL_CONFIGS[version["model_config_id"]]
+        version["configuration_summary"] = {
+            "persona": version["persona"],
+            "model": {"id": model["id"], "label": model["label"]},
+            "output_policy": version["output_policy"],
+            "credit_cost": version["credit_cost"],
+            "skills": [{"slug": item["slug"], "version": item["version"]} for item in version["skills"]],
+            "tools": [
+                {"id": item["tool_capability_id"], "requirement": item["invocation_requirement"]}
+                for item in version["tools"]
+            ],
+            "runtime_test_status": version["runtime_test_status"],
+            "configuration_fingerprint": version["configuration_fingerprint"],
+        }
         return version
+
+    def instance(self, template_id, tenant_id):
+        with self.store.connection() as conn:
+            self._productized(self._template(conn, template_id))
+            tenant = conn.execute("SELECT id,name FROM tenants WHERE id=?", (tenant_id,)).fetchone()
+            if not tenant:
+                raise AgentCatalogError("Tenant not found", 404)
+            row = conn.execute(
+                "SELECT i.*,v.revision,v.name AS revision_name FROM tenant_agent_instances i "
+                "JOIN agent_template_versions v ON v.id=i.agent_template_version_id "
+                "WHERE i.tenant_id=? AND i.agent_id=?",
+                (tenant_id, template_id),
+            ).fetchone()
+        if not row:
+            return {
+                "tenant_id": tenant_id,
+                "tenant_name": tenant["name"],
+                "agent_id": template_id,
+                "status": "unconfigured",
+                "workspace_visible": False,
+            }
+        value = dict(row)
+        value.update(tenant_name=tenant["name"], workspace_visible=value["status"] == "enabled")
+        return value
 
     def create_template(self, payload, actor):
         allowed = {"name", "slug", "description", "icon", "category"}
@@ -421,16 +474,24 @@ class AgentProductization:
             if not isinstance(value, str) or len(value) > OVERRIDE_SCHEMA[key]["maxLength"]:
                 raise AgentCatalogError("Invalid Tenant Override")
         with self.store.connection() as conn:
+            if not self.store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
             self._productized(self._template(conn, template_id, lock=True))
             version = self._version(conn, template_id, version_id)
             if version["status"] != "published":
                 raise AgentCatalogError("Only Published revisions may configure a new Instance", 409)
             if not conn.execute("SELECT id FROM tenants WHERE id=?", (tenant_id,)).fetchone():
                 raise AgentCatalogError("Tenant not found", 404)
+            existing = conn.execute(
+                "SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?" + (" FOR UPDATE" if self.store.is_postgres else ""),
+                (tenant_id, template_id),
+            ).fetchone()
+            if existing and existing["status"] == "enabled":
+                raise AgentCatalogError("INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE", 409)
             instance_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status,instance_id,agent_template_version_id,overrides_json,created_at,updated_at) VALUES (?,?,'configured',?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(tenant_id,agent_id) DO UPDATE SET status='configured',agent_template_version_id=excluded.agent_template_version_id,overrides_json=excluded.overrides_json,updated_at=CURRENT_TIMESTAMP", (tenant_id, template_id, instance_id, version_id, canonical(overrides)))
             row = dict(conn.execute("SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, template_id)).fetchone())
-        return {**row, "execution_enabled": False, "runtime_test_status": "Runtime Test Pending"}
+        return {**row, "execution_enabled": False, "workspace_visible": False, "runtime_test_status": "Runtime Test Pending"}
 
     def set_instance_status(self, template_id, tenant_id, status):
         if status not in {"enabled", "disabled"} or not self.execution_resolver:

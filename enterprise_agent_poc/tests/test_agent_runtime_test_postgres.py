@@ -1,5 +1,6 @@
 """010 domain-only expansion; all historical row bytes/values preserved."""
 import json
+import os
 import shutil
 from uuid import uuid4
 
@@ -9,6 +10,9 @@ import pytest
 from scripts import migrate
 from test_agent_productization_postgres import pg_catalog
 from test_agent_productization import new_draft
+
+
+pytestmark = pytest.mark.skipif(not os.environ.get("STAGE1_POSTGRES_ROOT"), reason="isolated PostgreSQL cluster not provided")
 
 
 @pytest.fixture
@@ -31,7 +35,7 @@ def test_real_010_preserves_rows_expands_only_status_and_is_idempotent(pg_before
     assert migrate.up(c.store)==0
     assert migrate.status(c.store)==0
     state=json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert len(state['migrations'])==11 and state['pending']==state['checksum_mismatch']==0
+    assert len(state['migrations'])==12 and state['pending']==state['checksum_mismatch']==0
     with c.store.connection() as conn:
         assert before==[dict(r) for r in conn.execute('SELECT * FROM agent_template_tests ORDER BY id')]
         assert keys_before==[dict(r) for r in conn.execute("SELECT conname,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='agent_template_tests'::regclass AND conname<>'agent_template_tests_status_check' ORDER BY conname")]

@@ -117,7 +117,7 @@ class ProductStore:
             return
         with self._store.connection() as conn:
             conn.executescript("""
-                CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('enterprise_admin','member')), avatar_storage_key TEXT, avatar_mime_type TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('enterprise_admin','member')), account_status TEXT NOT NULL DEFAULT 'enabled' CHECK(account_status IN ('enabled','disabled')), avatar_storage_key TEXT, avatar_mime_type TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS credit_accounts (tenant_id TEXT PRIMARY KEY REFERENCES tenants(id), balance INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS credit_transactions (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT REFERENCES users(id), task_id TEXT, amount INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT NOT NULL REFERENCES users(id), agent_id TEXT NOT NULL, conversation_id TEXT, input_text TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')), stage TEXT, error_code TEXT, user_message TEXT, run_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, started_at TEXT, completed_at TEXT);
@@ -143,6 +143,8 @@ class ProductStore:
                 conn.execute("ALTER TABLE users ADD COLUMN avatar_storage_key TEXT")
             if "avatar_mime_type" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN avatar_mime_type TEXT")
+            if "account_status" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'enabled' CHECK(account_status IN ('enabled','disabled'))")
             file_columns = {row["name"] for row in conn.execute("PRAGMA table_info(knowledge_files)").fetchall()}
             for name, ddl in {"filename":"TEXT", "mime_type":"TEXT", "size_bytes":"INTEGER", "uploaded_by":"TEXT", "error_message":"TEXT", "parsed_text":"TEXT", "chunk_count":"INTEGER NOT NULL DEFAULT 0", "embedding_provider":"TEXT", "embedding_model":"TEXT"}.items():
                 if name not in file_columns:
@@ -197,6 +199,71 @@ class ProductStore:
             )
             conn.execute("INSERT OR IGNORE INTO credit_accounts(tenant_id,balance) VALUES (?, 200)", (tenant_id,))
 
+    def members(self, tenant_id: str) -> list[dict]:
+        """Return the tenant's identities without credential material."""
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT id,email,display_name,role,account_status AS status,created_at FROM users WHERE tenant_id=? ORDER BY created_at,id",
+                (tenant_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _lock_member(self, conn, tenant_id: str, user_id: str):
+        suffix = " FOR UPDATE" if self._store.is_postgres else ""
+        return conn.execute(
+            "SELECT id,role,account_status FROM users WHERE id=? AND tenant_id=?" + suffix,
+            (user_id, tenant_id),
+        ).fetchone()
+
+    def _begin_member_change(self, conn, tenant_id: str) -> None:
+        if self._store.is_postgres:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (tenant_id,))
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+
+    def _require_another_enabled_admin(self, conn, tenant_id: str, user_id: str) -> None:
+        suffix = " FOR UPDATE" if self._store.is_postgres else ""
+        rows = conn.execute(
+            "SELECT id FROM users WHERE tenant_id=? AND role='enterprise_admin' AND account_status='enabled' ORDER BY id" + suffix,
+            (tenant_id,),
+        ).fetchall()
+        if not any(row["id"] != user_id for row in rows):
+            raise ValueError("last_enabled_enterprise_admin")
+
+    def update_member_role(self, tenant_id: str, user_id: str, role: str) -> dict | None:
+        if role not in {"member", "enterprise_admin"}:
+            raise ValueError("invalid_role")
+        with self._store.connection() as conn:
+            self._begin_member_change(conn, tenant_id)
+            row = self._lock_member(conn, tenant_id, user_id)
+            if not row:
+                return None
+            if row["role"] == "enterprise_admin" and row["account_status"] == "enabled" and role != "enterprise_admin":
+                self._require_another_enabled_admin(conn, tenant_id, user_id)
+            conn.execute("UPDATE users SET role=? WHERE id=? AND tenant_id=?", (role, user_id, tenant_id))
+        return next((member for member in self.members(tenant_id) if member["id"] == user_id), None)
+
+    def update_member_status(self, tenant_id: str, user_id: str, status: str) -> dict | None:
+        if status not in {"enabled", "disabled"}:
+            raise ValueError("invalid_account_status")
+        with self._store.connection() as conn:
+            self._begin_member_change(conn, tenant_id)
+            row = self._lock_member(conn, tenant_id, user_id)
+            if not row:
+                return None
+            if status == "disabled" and row["account_status"] == "enabled" and row["role"] == "enterprise_admin":
+                self._require_another_enabled_admin(conn, tenant_id, user_id)
+            conn.execute("UPDATE users SET account_status=? WHERE id=? AND tenant_id=?", (status, user_id, tenant_id))
+        return next((member for member in self.members(tenant_id) if member["id"] == user_id), None)
+
+    def update_password_hash(self, tenant_id: str, user_id: str, password_hash: str) -> bool:
+        with self._store.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET password_hash=? WHERE id=? AND tenant_id=?",
+                (password_hash, user_id, tenant_id),
+            )
+        return bool(cursor.rowcount)
+
     def user_by_email(self, email: str) -> dict | None:
         with self._store.connection() as conn:
             row = conn.execute("SELECT * FROM users WHERE email=?", (email.lower(),)).fetchone()
@@ -206,7 +273,7 @@ class ProductStore:
         """Return only the signed-in user's own product profile."""
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT u.id, u.tenant_id, u.email, u.display_name, u.role, u.avatar_storage_key, u.avatar_mime_type, t.name AS tenant_name "
+                "SELECT u.id, u.tenant_id, u.email, u.display_name, u.role, u.account_status, u.avatar_storage_key, u.avatar_mime_type, t.name AS tenant_name "
                 "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=? AND u.tenant_id=?",
                 (user_id, tenant_id),
             ).fetchone()

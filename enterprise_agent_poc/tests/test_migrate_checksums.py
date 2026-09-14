@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import hashlib
 import json
 from pathlib import Path
 
@@ -196,3 +197,24 @@ def test_repository_migrations_match_legacy_production_crlf_checksums():
         migrate.compatibility_status(expected[version], checksums[version])
         for version in expected
     } == {migrate.LEGACY_LINE_ENDING_COMPATIBLE}
+
+
+def test_migrations_001_through_011_bytes_remain_unchanged():
+    expected = {
+        "001": "ab4c74a873073feab7cc9a264a74984be3b135e3d8aef75d343bcd8f2e1c94ce",
+        "002": "afafa855c74ff6f2a1c1e31765ce7396e5b5c35950bbb1b36ec2095c0efdce6c",
+        "003": "62369e85286131cc0884ec0710bc012345051af263313b9cba2c9c35b81a9480",
+        "004": "5b15bf5e86b4508bd03170867fc2dc3027c98004bf3b2252ffba1720b252a802",
+        "005": "31564e792fa4134b7077a777158d13d586a7484933adb42c69cc2f6f9ce3da19",
+        "006": "b33fc2c9bd1140a0efdf2d05fc10cb829e87661f044edf3de54c267dcf8dd0b2",
+        "007": "4ea2b5cc53fb266fb9031741b74e7375c34e118ac13e2c102854fad539cb29e0",
+        "008": "bd0c153e249036f57e62c749f59b04ba21ad43f7db492895b2a0600a0ca68add",
+        "009": "97aafc386db3cdc4c31de149466f55bb508415a3987e6892351802c1fa138884",
+        "010": "2be29da24a3aa20c0e302ce7dc505b28c2d0ffae25d80c4458f7223acaa04b10",
+        "011": "e2c433fdde86f4e49b37538c6917c8ea0e7ad6017e8451e7e544583da0014cde",
+    }
+    actual = {
+        path.name[:3]: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in migrate.migration_files()[:11]
+    }
+    assert actual == expected

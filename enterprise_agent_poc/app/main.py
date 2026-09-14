@@ -5,11 +5,14 @@ import base64
 import hashlib
 import json
 import os
+import re
+import secrets
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -61,6 +64,17 @@ class ProfileUpdateRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     email: str = Field(min_length=3, max_length=254)
     avatar_data_url: str | None = Field(default=None, max_length=3_000_000)
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+class MemberCreateRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+    email: str = Field(min_length=3, max_length=254)
+    role: str = Field(default="member", pattern="^(member|enterprise_admin)$")
+class MemberRoleRequest(BaseModel):
+    role: str = Field(pattern="^(member|enterprise_admin)$")
+class MemberStatusRequest(BaseModel):
+    status: str = Field(pattern="^(enabled|disabled)$")
 
 
 store = POCStore(settings.database_url)
@@ -124,6 +138,116 @@ app = FastAPI(title="Enterprise AI Agent Runtime POC", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+_CUSTOMER_ERROR_MESSAGES = {
+    "AUTH_REQUIRED": "请先登录或重新登录。",
+    "ACCOUNT_DISABLED": "账号已停用，请联系企业管理员。",
+    "FORBIDDEN": "你没有权限访问此功能。",
+    "AGENT_UNAVAILABLE": "当前智能体暂不可用。",
+    "TASK_FAILED": "任务处理失败，请重试。",
+    "TASK_TIMEOUT": "任务处理时间较长，请稍后重试。",
+    "KNOWLEDGE_PROCESSING_FAILED": "资料处理失败，请重新上传。",
+    "INVALID_INPUT": "输入内容不符合要求，请检查后重试。",
+    "INSTANCE_NOT_ENABLED": "当前智能体尚未为该企业启用。",
+    "SERVICE_TEMPORARILY_UNAVAILABLE": "服务暂时不可用，请稍后重试。",
+    "INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE": "请先停用该智能体，再修改配置。",
+}
+_SENSITIVE_ERROR_MARKERS = re.compile(
+    r"traceback|exception|postgres|sqlite|database|\bsql\b|\bmcp\b|runtime|/users/|/app/|\\app\\|\.py[:\s]",
+    re.IGNORECASE,
+)
+
+
+def _request_id(request: Request) -> str:
+    return request.headers.get("x-request-id") or uuid4().hex[:16]
+
+
+def _error_code(status_code: int, detail: object, path: str) -> str:
+    raw = str(detail or "")
+    if raw == "ACCOUNT_DISABLED":
+        return raw
+    if raw == "INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE":
+        return raw
+    if status_code == 401:
+        return "AUTH_REQUIRED"
+    if status_code == 403:
+        return "FORBIDDEN"
+    if status_code in {408, 504}:
+        return "TASK_TIMEOUT"
+    if status_code >= 500:
+        return "SERVICE_TEMPORARILY_UNAVAILABLE"
+    if status_code == 404 and "/agents" in path:
+        return "AGENT_UNAVAILABLE"
+    if "尚未为当前企业启用" in raw:
+        return "INSTANCE_NOT_ENABLED"
+    if "知识" in raw or "资料" in raw:
+        return "KNOWLEDGE_PROCESSING_FAILED" if status_code >= 500 else "INVALID_INPUT"
+    return "INVALID_INPUT"
+
+
+def _public_error_message(code: str, detail: object) -> str:
+    raw = str(detail or "")
+    if raw == code and code in _CUSTOMER_ERROR_MESSAGES:
+        return _CUSTOMER_ERROR_MESSAGES[code]
+    if raw and len(raw) <= 180 and not _SENSITIVE_ERROR_MARKERS.search(raw):
+        return raw
+    return _CUSTOMER_ERROR_MESSAGES.get(code, "请求失败，请稍后重试。")
+
+
+def _error_response(request: Request, status_code: int, code: str, message: str, *, detail: str | None = None) -> JSONResponse:
+    request_id = _request_id(request)
+    content = {"error_code": code, "user_message": message, "request_id": request_id, "detail": detail or message}
+    return JSONResponse(status_code=status_code, content=content, headers={"X-Request-ID": request_id})
+
+
+def _public_task(task: dict, *, include_diagnostic: bool = False) -> dict:
+    value = dict(task)
+    internal_code = str(value.get("error_code") or "")
+    if value.get("status") == "failed":
+        if "timeout" in internal_code:
+            code = "TASK_TIMEOUT"
+        elif internal_code in {"runtime_start_error", "worker_interrupted", "image_provider_error", "mcp_error"}:
+            code = "SERVICE_TEMPORARILY_UNAVAILABLE"
+        elif "instance" in internal_code:
+            code = "INSTANCE_NOT_ENABLED"
+        else:
+            code = "TASK_FAILED"
+        value["error_code"] = code
+        value["user_message"] = _CUSTOMER_ERROR_MESSAGES[code]
+    if include_diagnostic:
+        value["diagnostic_id"] = value.get("run_id") or value.get("id")
+    value.pop("run_id", None)
+    return value
+
+
+def _public_knowledge_file(item: dict) -> dict:
+    value = dict(item)
+    value.pop("error_message", None)
+    if value.get("status") == "failed":
+        value.update(
+            error_code="KNOWLEDGE_PROCESSING_FAILED",
+            user_message=_CUSTOMER_ERROR_MESSAGES["KNOWLEDGE_PROCESSING_FAILED"],
+            diagnostic_id=value.get("id") or value.get("file_id"),
+        )
+    return value
+
+
+@app.exception_handler(HTTPException)
+async def product_http_error(request: Request, exc: HTTPException):
+    code = _error_code(exc.status_code, exc.detail, request.url.path)
+    message = _public_error_message(code, exc.detail)
+    return _error_response(request, exc.status_code, code, message)
+
+
+@app.exception_handler(RequestValidationError)
+async def product_validation_error(request: Request, _exc: RequestValidationError):
+    return _error_response(request, 422, "INVALID_INPUT", _CUSTOMER_ERROR_MESSAGES["INVALID_INPUT"])
+
+
+@app.exception_handler(Exception)
+async def product_unhandled_error(request: Request, _exc: Exception):
+    return _error_response(request, 500, "SERVICE_TEMPORARILY_UNAVAILABLE", _CUSTOMER_ERROR_MESSAGES["SERVICE_TEMPORARILY_UNAVAILABLE"])
+
+
 def current_user(workbench_session: str | None = Cookie(default=None)) -> UserPrincipal:
     if not workbench_session:
         raise HTTPException(401, "请先登录。")
@@ -131,9 +255,15 @@ def current_user(workbench_session: str | None = Cookie(default=None)) -> UserPr
         principal = sessions.verify(workbench_session)
     except AuthenticationError as exc:
         raise HTTPException(401, "登录已失效，请重新登录。") from exc
-    if not product_store.user_by_id(principal.user_id, principal.tenant_id):
+    user = product_store.user_by_id(principal.user_id, principal.tenant_id)
+    if not user:
         raise HTTPException(401, "登录主体已不存在，请重新登录。")
-    return principal
+    if user["account_status"] != "enabled":
+        raise HTTPException(401, "ACCOUNT_DISABLED")
+    full_user = product_store.user_by_email(user["email"])
+    if principal.auth_version and (not full_user or principal.auth_version != sessions.credential_version(full_user["password_hash"])):
+        raise HTTPException(401, "登录凭据已更新，请重新登录。")
+    return UserPrincipal(principal.user_id, principal.tenant_id, user["role"])
 
 def require_admin(workbench_session: str | None) -> UserPrincipal:
     principal=current_user(workbench_session)
@@ -152,8 +282,11 @@ app.include_router(catalog_router(agent_catalog_control, require_platform_admin)
 
 
 @app.exception_handler(AgentCatalogError)
-async def agent_catalog_error(_, exc: AgentCatalogError):
-    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+async def agent_catalog_error(request: Request, exc: AgentCatalogError):
+    raw = str(exc)
+    code = _error_code(exc.status_code, raw, request.url.path)
+    message = _CUSTOMER_ERROR_MESSAGES.get(code) or _public_error_message(code, raw)
+    return _error_response(request, exc.status_code, code, message)
 
 
 def profile_response(user: dict) -> dict:
@@ -225,6 +358,7 @@ async def production_health() -> dict:
 @app.get("/enterprise-config", include_in_schema=False)
 @app.get("/knowledge", include_in_schema=False)
 @app.get("/assets", include_in_schema=False)
+@app.get("/members", include_in_schema=False)
 @app.get("/profile", include_in_schema=False)
 @app.get("/platform/skills", include_in_schema=False)
 @app.get("/platform/agents", include_in_schema=False)
@@ -237,7 +371,9 @@ async def login(payload: LoginRequest, response: Response) -> dict:
     user = product_store.user_by_email(payload.account)
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(401, "账号或密码不正确。")
-    token = sessions.issue(UserPrincipal(user["id"], user["tenant_id"], user["role"]))
+    if user["account_status"] != "enabled":
+        raise HTTPException(403, "ACCOUNT_DISABLED")
+    token = sessions.issue(UserPrincipal(user["id"], user["tenant_id"], user["role"], sessions.credential_version(user["password_hash"])))
     response.set_cookie("workbench_session", token, httponly=True, samesite="lax", secure=settings.secure_cookies, max_age=12 * 60 * 60, path="/")
     return {"user": {"id": user["id"], "display_name": user["display_name"], "tenant_id": user["tenant_id"], "role": user["role"]}}
 
@@ -283,6 +419,90 @@ async def update_me(payload: ProfileUpdateRequest, workbench_session: str | None
         except FileNotFoundError:
             pass
     return profile_response(user)
+
+
+@app.put("/api/v1/me/password")
+async def change_password(payload: PasswordChangeRequest, response: Response, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    user = product_store.user_by_email(product_store.user_by_id(principal.user_id, principal.tenant_id)["email"])
+    if not user or not verify_password(payload.current_password, user["password_hash"]):
+        raise HTTPException(409, "当前密码不正确。")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(422, "新密码不能与当前密码相同。")
+    product_store.update_password_hash(principal.tenant_id, principal.user_id, hash_password(payload.new_password))
+    response.delete_cookie("workbench_session", path="/")
+    return {"status": "updated", "user_message": "密码已修改，请使用新密码重新登录。"}
+
+
+@app.get("/api/v1/members")
+async def list_members(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
+    principal = require_admin(workbench_session)
+    return product_store.members(principal.tenant_id)
+
+
+@app.post("/api/v1/members", status_code=201)
+async def create_member(payload: MemberCreateRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session)
+    display_name, email = payload.display_name.strip(), payload.email.strip().lower()
+    if not display_name or "@" not in email:
+        raise HTTPException(422, "请输入有效的姓名和邮箱。")
+    if product_store.user_by_email(email):
+        raise HTTPException(409, "该邮箱已被使用。")
+    temporary_password = secrets.token_urlsafe(12)
+    product_store.create_user(principal.tenant_id, email, hash_password(temporary_password), display_name, payload.role)
+    member = product_store.user_by_email(email)
+    return {
+        "member": next(item for item in product_store.members(principal.tenant_id) if item["id"] == member["id"]),
+        "temporary_password": temporary_password,
+        "user_message": "成员已创建。临时密码只显示一次，请安全转交给成员。",
+    }
+
+
+@app.put("/api/v1/members/{member_id}/role")
+async def change_member_role(member_id: str, payload: MemberRoleRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session)
+    if member_id == principal.user_id:
+        raise HTTPException(409, "不能在成员管理中修改自己的角色。")
+    try:
+        member = product_store.update_member_role(principal.tenant_id, member_id, payload.role)
+    except ValueError as exc:
+        if str(exc) == "last_enabled_enterprise_admin":
+            raise HTTPException(409, "企业必须至少保留一名已启用的企业管理员。") from exc
+        raise HTTPException(422, "不支持的成员角色。") from exc
+    if not member:
+        raise HTTPException(404, "成员不存在。")
+    return {"member": member, "user_message": "成员角色已更新。"}
+
+
+@app.put("/api/v1/members/{member_id}/status")
+async def change_member_status(member_id: str, payload: MemberStatusRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session)
+    if member_id == principal.user_id:
+        raise HTTPException(409, "不能停用或启用自己的账号。")
+    try:
+        member = product_store.update_member_status(principal.tenant_id, member_id, payload.status)
+    except ValueError as exc:
+        if str(exc) == "last_enabled_enterprise_admin":
+            raise HTTPException(409, "企业必须至少保留一名已启用的企业管理员。") from exc
+        raise HTTPException(422, "不支持的账号状态。") from exc
+    if not member:
+        raise HTTPException(404, "成员不存在。")
+    message = "成员已停用，该成员将无法继续登录或使用平台。" if payload.status == "disabled" else "成员已启用，可以重新登录平台。"
+    return {"member": member, "user_message": message}
+
+
+@app.post("/api/v1/members/{member_id}/reset-password")
+async def reset_member_password(member_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = require_admin(workbench_session)
+    if member_id == principal.user_id:
+        raise HTTPException(409, "请在个人中心修改自己的密码。")
+    temporary_password = secrets.token_urlsafe(12)
+    if not product_store.update_password_hash(principal.tenant_id, member_id, hash_password(temporary_password)):
+        raise HTTPException(404, "成员不存在。")
+    return {
+        "temporary_password": temporary_password,
+        "user_message": "密码已重置。临时密码只显示一次，请安全转交给成员。",
+    }
 
 
 @app.get("/api/v1/me/avatar")
@@ -337,7 +557,7 @@ async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: R
         RedisTaskQueue.from_settings(settings).enqueue(task["id"])
     else:
         asyncio.create_task(task_service.execute(task))
-    return task
+    return _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
 
 
 @app.get("/api/v1/agents/{agent_id}")
@@ -359,7 +579,7 @@ async def get_task(task_id: str, workbench_session: str | None = Cookie(default=
     task = product_store.task(task_id, principal.tenant_id, principal.user_id)
     if not task:
         raise HTTPException(404, "任务不存在。")
-    return task
+    return _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
 
 
 @app.get("/api/v1/tasks/{task_id}/events")
@@ -377,7 +597,8 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
                 yield "event: error\ndata: {\"message\":\"任务不存在。\"}\n\n"
                 return
             if task["status"] in {"completed", "failed", "cancelled"}:
-                terminal = {"status": task["status"], "message": task.get("user_message"), "final_response": task.get("final_response"), "conversation_id": task.get("conversation_id"), "generation": task.get("generation")}
+                public = _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
+                terminal = {"status": public["status"], "error_code": public.get("error_code"), "message": public.get("user_message"), "diagnostic_id": public.get("diagnostic_id"), "final_response": public.get("final_response"), "conversation_id": public.get("conversation_id"), "generation": public.get("generation")}
                 yield f"event: complete\ndata: {json.dumps(jsonable_encoder(terminal), ensure_ascii=False)}\n\n"
                 return
             await asyncio.sleep(0.7)
@@ -439,7 +660,7 @@ async def put_enterprise_config(payload: EnterpriseConfigRequest,workbench_sessi
     principal=require_admin(workbench_session); return product_store.update_enterprise_config(principal.tenant_id,payload.payload)
 @app.get("/api/v1/knowledge/files")
 async def list_knowledge_files(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
-    principal=require_admin(workbench_session); return product_store.knowledge_files(principal.tenant_id)
+    principal=require_admin(workbench_session); return [_public_knowledge_file(item) for item in product_store.knowledge_files(principal.tenant_id)]
 @app.get("/api/v1/knowledge/diagnostics")
 async def knowledge_diagnostics(workbench_session: str | None = Cookie(default=None)) -> dict:
     require_admin(workbench_session)
@@ -476,7 +697,7 @@ async def get_knowledge_file(file_id: str, workbench_session: str | None = Cooki
     principal = require_admin(workbench_session); item = product_store.knowledge_file(principal.tenant_id, file_id)
     if not item: raise HTTPException(404, "知识文件不存在。")
     item["chunks"] = product_store.knowledge_chunks(principal.tenant_id, file_id) if item["status"] == "ready" else []
-    return item
+    return _public_knowledge_file(item)
 @app.post("/api/v1/knowledge/files/{file_id}/retry", status_code=202)
 async def retry_knowledge_file(file_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = require_admin(workbench_session); item = product_store.knowledge_file(principal.tenant_id, file_id)

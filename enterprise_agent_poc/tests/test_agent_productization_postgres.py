@@ -81,7 +81,7 @@ def pg_catalog(tmp_path, approved_bundle, monkeypatch):
 def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
     assert migrate.status(pg_catalog.store) == 0
     status = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 12)]
+    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 13)]
     assert status["pending"] == status["checksum_mismatch"] == 0
     assert all(r["status"] == "applied" for r in status["migrations"])
     with pg_catalog.store.connection() as conn:
@@ -97,7 +97,50 @@ def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
         conn.execute(migrate.migration_files()[-1].read_text())
     assert migrate.up(pg_catalog.store) == 0
     with pg_catalog.store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 11
+        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 12
+
+
+def test_postgres_001_012_preserves_existing_user_and_adds_constrained_default(tmp_path, monkeypatch, capsys):
+    root = Path(os.environ["STAGE1_POSTGRES_ROOT"]).resolve()
+    socket = root / "socket"
+    port = int(os.environ.get("STAGE1_POSTGRES_PORT", "54329"))
+    admin_args = {"dbname": "postgres", "host": str(socket), "port": port, "user": "stage1_fixture"}
+    name = "stage1_member_" + uuid.uuid4().hex
+    with psycopg.connect(**admin_args, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
+    query = urlencode({"host": str(socket), "port": port, "user": "stage1_fixture"})
+    migration_store = POCStore(f"postgresql:///{name}?{query}")
+    try:
+        baseline = tmp_path / "001-011"
+        baseline.mkdir()
+        for path in migrate.migration_files()[:11]:
+            shutil.copy(path, baseline / path.name)
+        with monkeypatch.context() as patch:
+            patch.setattr(migrate, "MIGRATIONS", baseline)
+            assert migrate.up(migration_store) == 0
+        with migration_store.connection() as conn:
+            conn.execute("INSERT INTO tenants(id,name,poc_api_key) VALUES ('migration-tenant','Migration Tenant','local-only')")
+            conn.execute("INSERT INTO users(id,tenant_id,email,password_hash,display_name,role) VALUES ('existing-user','migration-tenant','existing@example.invalid','unchanged-hash','Existing User','enterprise_admin')")
+            before = dict(conn.execute("SELECT id,tenant_id,email,password_hash,display_name,role,created_at FROM users WHERE id='existing-user'").fetchone())
+        assert migrate.up(migration_store) == 0
+        assert migrate.status(migration_store) == 0
+        status = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert len(status["migrations"]) == 12
+        assert status["pending"] == status["checksum_mismatch"] == 0
+        assert status["unknown_history_versions"] == []
+        assert all(item["status"] == "applied" for item in status["migrations"])
+        with migration_store.connection() as conn:
+            after = dict(conn.execute("SELECT id,tenant_id,email,password_hash,display_name,role,created_at FROM users WHERE id='existing-user'").fetchone())
+            assert after == before
+            assert conn.execute("SELECT account_status FROM users WHERE id='existing-user'").fetchone()["account_status"] == "enabled"
+            conn.execute("INSERT INTO users(id,tenant_id,email,password_hash,display_name,role) VALUES ('new-user','migration-tenant','new@example.invalid','new-hash','New User','member')")
+            assert conn.execute("SELECT account_status FROM users WHERE id='new-user'").fetchone()["account_status"] == "enabled"
+        with pytest.raises(psycopg.errors.CheckViolation), migration_store.connection() as conn:
+            conn.execute("UPDATE users SET account_status='paused' WHERE id='new-user'")
+        assert migrate.up(migration_store) == 0
+    finally:
+        with psycopg.connect(**admin_args, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
 
 
 def test_postgres_all_new_foreign_keys_enforced(pg_catalog):
