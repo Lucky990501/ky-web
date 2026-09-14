@@ -72,6 +72,9 @@ if [[ "$mode" == "--preflight-only" ]]; then
   exit 0
 fi
 
+# The trusted gate reads the persistent Compatibility Epoch BEFORE target
+# validation. A productized_v1 floor can never fall back to the old legacy
+# target, even with no current V2 rows. This entry point NEVER advances Epoch.
 # Prove that the previous application is approved for the COMPLETE planned
 # schema before committing migrations or touching any service configuration.
 current_link="$base/release-current"

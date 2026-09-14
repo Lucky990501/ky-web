@@ -254,7 +254,7 @@ def pg_rollback_catalog(request, tmp_path, approved_bundle):
     assert socket.stat().st_mode & 0o077 == 0
     args = dict(dbname='postgres', host=str(socket), port=54329, user='stage1_fixture')
 
-    def fresh_database(count=10, fault=None):
+    def fresh_database(count=11, fault=None):
         name = 'rollback_' + uuid.uuid4().hex
         with psycopg.connect(**args, autocommit=True) as admin:
             assert 160000 <= int(admin.execute('SHOW server_version_num').fetchone()[0]) < 170000
@@ -289,8 +289,8 @@ def pg_rollback_catalog(request, tmp_path, approved_bundle):
                 if fault == 'applied_order' and i == 0:
                     applied += timedelta(days=1)
                 rows.append((version, filename, checksum, applied))
-            if fault == 'unknown011':
-                rows.append(('011', 'unapproved.sql', '0' * 64, start + timedelta(seconds=11)))
+            if fault == 'unknown012':
+                rows.append(('012', 'unapproved.sql', '0' * 64, start + timedelta(seconds=12)))
             if fault == 'duplicate_history':
                 rows.append(rows[8])
             for row in rows:
@@ -333,6 +333,15 @@ def pg_rollback_harness(pg_rollback_catalog, tmp_path):
     # *.md ignore is inappropriate for immutable bundled inputs: copy exact bundle.
     shutil.rmtree(new / 'skill_packages')
     shutil.copytree(project / 'skill_packages', new / 'skill_packages')
+    # Synthetic approval applies ONLY inside this test Artifact. The repository
+    # declaration remains PENDING until independent restart/E2E evidence exists.
+    declaration = new / 'deploy/rollback_compatibility.json'
+    d = json.loads(declaration.read_text())
+    approval = d['epoch_contract']['schema_compatibility_evidence']
+    approval.update(status='PASS', report_sha256='a'*64)
+    approval['checks'] = dict.fromkeys(approval['checks'], 'PASS')
+    d['approved_targets'][1]['compatibility_evidence']['report_sha256'] = 'a'*64
+    declaration.write_text(json.dumps(d))
     helper = new / 'scripts/rollback_preflight.py'
     helper.write_text(helper.read_text().replace("BASE = Path('/opt/enterprise-agent-workbench')", f'BASE = Path({str(base)!r})'))
     systemd = tmp_path / 'systemd'
@@ -407,7 +416,7 @@ p.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(sys.argv[-2],p);p.chm
     pack_trusted_fixture()
     return dict(base=base, new=new, old=old, old_id=old_id, commit=commit, gate=gate, env=env,
                 switch=switch, helper=helper, systemd=systemd, events=events, dropins=dropins,
-                store=pg_catalog.store, snapshot=snapshot, pack=pack_trusted_fixture,
+                store=pg_catalog.store, registry=pg_catalog.registry, snapshot=snapshot, pack=pack_trusted_fixture,
                 fresh_database=pg_catalog.fresh_database)
 
 
@@ -430,7 +439,7 @@ def test_postgres_approved_old_target_complete_schema_and_real_entry_read_only(p
     before = h['snapshot']()
     result = pg_gate(h)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['applied_versions'] == [f'{i:03}' for i in range(1, 11)]
+    assert result['applied_versions'] == [f'{i:03}' for i in range(1, 12)]
     assert result['target_known_versions'] == [f'{i:03}' for i in range(1, 8)]
     assert result['old_runner_invoked'] is False
     assert pg_entry(h).returncode == 0
@@ -438,7 +447,7 @@ def test_postgres_approved_old_target_complete_schema_and_real_entry_read_only(p
     assert (h['base'] / 'release-current').resolve() == h['old']
 
 
-@pytest.mark.parametrize('fault', ['unknown011', 'checksum010', 'name008', 'missing009', 'checksum002',
+@pytest.mark.parametrize('fault', ['unknown012', 'checksum010', 'name008', 'missing009', 'checksum002',
                                   'applied_order', 'duplicate_history', 'commit', 'release_id', 'manifest_missing',
                                   'manifest_abnormal', 'archive', 'source_file', 'target_outside', 'evidence', 'baseline_drift', 'parent_env'])
 def test_postgres_malicious_history_and_identity_block_before_any_host_write(pg_rollback_harness, fault):
@@ -480,9 +489,9 @@ def test_postgres_old_runner_stays_failed_new_normal_runner_strict_and_preflight
     from scripts import migrate
     old = subprocess.run([sys.executable, str(h['old'] / 'scripts/migrate.py'), 'status'], env=h['env'], capture_output=True, text=True)
     assert old.returncode == 2
-    assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010']
+    assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010', '011']
     assert pg_entry(h, '--preflight-only').returncode == 0
-    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('011','unknown.sql',?)", ('0' * 64,))
+    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('012','unknown.sql',?)", ('0' * 64,))
     assert migrate.status(h['store']) == 2
     with pytest.raises(RuntimeError, match='未知'):migrate.up(h['store'])
     assert not h['events'].exists()
@@ -520,7 +529,7 @@ import json,psycopg
 from pathlib import Path
 if Path({str(h['base'] / 'release-current')!r}).resolve()==Path({str(h['new'])!r}):
     with psycopg.connect({h['store'].database_url!r}) as c:
-        c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('011','unapproved.sql',%s) ON CONFLICT DO NOTHING",('0'*64,))
+        c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('012','unapproved.sql',%s) ON CONFLICT DO NOTHING",('0'*64,))
 print(json.dumps({{'status':'error','knowledge':'ok','environment':'production'}}))
 ''')
     r = pg_entry(h, '')
@@ -565,6 +574,7 @@ def test_postgres_legacy_only_evidence_does_not_authorize_productized_pilot_data
     h = pg_rollback_harness
     # Isolated synthetic control-plane row only; no runtime or production Agent.
     with h['store'].connection() as c:
+        c.execute("UPDATE platform_compatibility_state SET epoch='productized_v1',epoch_rank=2,advanced_at=CURRENT_TIMESTAMP,advanced_by_release_id='isolated-fixture',advanced_by_source_commit=?,advance_origin='controlled_advance' WHERE scope='agent_data_contract'", ('f'*40,))
         c.execute("INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('synthetic-pilot','Synthetic','synthetic-pilot','Isolated fixture','test','active','test',1,'[]','productized')")
     r = pg_entry(h)
-    assert r.returncode == 2 and 'evidence_legacy_data_scope' in r.stdout and not h['events'].exists()
+    assert r.returncode == 2 and 'rollback_target_below_data_compatibility_floor' in r.stdout and not h['events'].exists()

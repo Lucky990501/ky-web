@@ -114,6 +114,9 @@ class AgentProductization:
                 for operation in ["INSERT", "UPDATE"]:
                     conn.execute(f"CREATE TRIGGER IF NOT EXISTS guard_{table}_revision_{operation.lower()} BEFORE {operation} ON {table} WHEN NEW.{column} IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_template_versions WHERE id=NEW.{column} AND agent_template_id=NEW.{identity}) BEGIN SELECT RAISE(ABORT,'Revision / Template identity mismatch'); END")
             self._seed_capabilities(conn)
+            # Local adapter only, never a default DB reset or implicit advance.
+            from scripts.compatibility_epoch import initialize_local
+            initialize_local(conn)
 
     def _seed_capabilities(self, conn):
         # Never accept capability metadata from an admin request.
@@ -220,6 +223,13 @@ class AgentProductization:
         template_id = str(uuid.uuid4())
         with self.store.connection() as conn:
             self._ready(conn)
+            if not self.store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
+            from scripts.compatibility_epoch import require_productized_epoch, EpochBlocked
+            try:
+                require_productized_epoch(conn, postgres=self.store.is_postgres)
+            except EpochBlocked:
+                raise AgentCatalogError("compatibility_epoch_not_advanced", 409) from None
             if conn.execute("SELECT id FROM agent_templates WHERE slug=?", (slug,)).fetchone():
                 raise AgentCatalogError("Slug already exists", 409)
             conn.execute("INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,allows_image_generation,category,definition_source,lifecycle_status,created_at,updated_at,created_by,updated_by) VALUES (?,?,?,?,?,'disabled','default',?,'{}',FALSE,?,'productized','draft',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,?,?)", (template_id, fields["name"], slug, fields["description"], fields["icon"], fields["credit_cost"], fields["category"], actor, actor))

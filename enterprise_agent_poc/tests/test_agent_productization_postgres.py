@@ -66,6 +66,12 @@ def pg_catalog(tmp_path, approved_bundle, monkeypatch):
         old_skills = [dict(r) for r in conn.execute("SELECT * FROM skills ORDER BY id").fetchall()]
         old_packages = [dict(r) for r in conn.execute("SELECT * FROM skill_packages ORDER BY id").fetchall()]
     assert migrate.up(store) == 0  # Real runner applies expand-only 008 and 009.
+    with store.connection() as conn:
+        if not conn.execute("SELECT to_regclass('public.platform_compatibility_state') AS name").fetchone()['name']:
+            # Historical 010-domain fixtures need an explicit local Epoch gate
+            # without pretending 011 is already recorded in migration history.
+            conn.execute((Path(__file__).resolve().parents[1] / 'migrations/postgres/011_platform_compatibility_epoch.sql').read_text())
+        conn.execute("UPDATE platform_compatibility_state SET epoch='productized_v1',epoch_rank=2,advanced_at=CURRENT_TIMESTAMP,advanced_by_release_id='isolated-fixture',advanced_by_source_commit=?,advance_origin='controlled_advance' WHERE scope='agent_data_contract'", ('f'*40,))
     control = AgentProductization(store)
     return SimpleNamespace(store=store, product=product, registry=registry, control=control, actor=actor,
                            old_templates=old_templates, old_instances=old_instances, old_bindings=old_bindings,
@@ -75,7 +81,7 @@ def pg_catalog(tmp_path, approved_bundle, monkeypatch):
 def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
     assert migrate.status(pg_catalog.store) == 0
     status = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 11)]
+    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 12)]
     assert status["pending"] == status["checksum_mismatch"] == 0
     assert all(r["status"] == "applied" for r in status["migrations"])
     with pg_catalog.store.connection() as conn:
@@ -91,7 +97,7 @@ def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
         conn.execute(migrate.migration_files()[-1].read_text())
     assert migrate.up(pg_catalog.store) == 0
     with pg_catalog.store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 10
+        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 11
 
 
 def test_postgres_all_new_foreign_keys_enforced(pg_catalog):

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "baseline": {
     "id": "agent-productization-schema-001-010-v1",
     "source_commit": "f6b0fe074f46cbcc2e693b4aa2fa57297d1ce7ec",
@@ -115,6 +115,191 @@
         },
         "scope": "isolated schema compatibility; Fake Runtime; not production Provider/RAG certification"
       }
+    },
+    {
+      "release_id": "20260914-bd04dcb",
+      "source_commit": "bd04dcb982bf0efe02a5a1a42dd162d94265da0b",
+      "archive_sha256": "289cec222e9ee0b9fb8e5a39b3a5157df41ac2743943c3114dd0c14ed8089d14",
+      "manifest_sha256": "515bebcdb183488de0e3d7d72e8fd4c1604c367154465c2e776989b0379eb783",
+      "known_migrations": [
+        {
+          "version": "001",
+          "filename": "001_workbench_v1.sql",
+          "canonical_sha256": "ab4c74a873073feab7cc9a264a74984be3b135e3d8aef75d343bcd8f2e1c94ce"
+        },
+        {
+          "version": "002",
+          "filename": "002_user_profiles.sql",
+          "canonical_sha256": "afafa855c74ff6f2a1c1e31765ce7396e5b5c35950bbb1b36ec2095c0efdce6c"
+        },
+        {
+          "version": "003",
+          "filename": "003_agent_templates.sql",
+          "canonical_sha256": "62369e85286131cc0884ec0710bc012345051af263313b9cba2c9c35b81a9480"
+        },
+        {
+          "version": "004",
+          "filename": "004_knowledge_v1.sql",
+          "canonical_sha256": "5b15bf5e86b4508bd03170867fc2dc3027c98004bf3b2252ffba1720b252a802"
+        },
+        {
+          "version": "005",
+          "filename": "005_skill_registry_v1.sql",
+          "canonical_sha256": "31564e792fa4134b7077a777158d13d586a7484933adb42c69cc2f6f9ce3da19"
+        },
+        {
+          "version": "006",
+          "filename": "006_embedding_profiles.sql",
+          "canonical_sha256": "b33fc2c9bd1140a0efdf2d05fc10cb829e87661f044edf3de54c267dcf8dd0b2"
+        },
+        {
+          "version": "007",
+          "filename": "007_history_storage_indexes.sql",
+          "canonical_sha256": "4ea2b5cc53fb266fb9031741b74e7375c34e118ac13e2c102854fad539cb29e0"
+        },
+        {
+          "version": "008",
+          "filename": "008_agent_productization_catalog.sql",
+          "canonical_sha256": "bd0c153e249036f57e62c749f59b04ba21ad43f7db492895b2a0600a0ca68add"
+        },
+        {
+          "version": "009",
+          "filename": "009_agent_execution_contexts.sql",
+          "canonical_sha256": "97aafc386db3cdc4c31de149466f55bb508415a3987e6892351802c1fa138884"
+        },
+        {
+          "version": "010",
+          "filename": "010_agent_runtime_test_status.sql",
+          "canonical_sha256": "2be29da24a3aa20c0e302ce7dc505b28c2d0ffae25d80c4458f7223acaa04b10"
+        }
+      ],
+      "compatibility_evidence": {
+        "data_scope": "productized_v1",
+        "schema_baseline_fingerprint": "d13ecfd2640032a4f5a2cc48dbe55ad3b05e3489456bd75cd0031d3ff985fe98",
+        "target_identity_fingerprint": "fd84497ec66227107817d99b436d8fae801025a2a301fa55524a876d86986e91",
+        "version": "compatibility-epoch-pg16-productized-original-bd-v1",
+        "baseline_id": "agent-productization-schema-001-010-v1",
+        "report_sha256": "f87c357a48d8e3cfffc335b6ba9b2090ad772500ea2d2dbaaa3a51bec0d0e610",
+        "postgres_major": 16,
+        "checks": {
+          "api": "PASS",
+          "mcp": "PASS",
+          "worker": "PASS",
+          "legacy_minimal_run": "PASS"
+        },
+        "scope": "isolated PostgreSQL 16 Schema 001-011; original bd Artifact API/MCP/independent Redis Worker; Fake model/session I/O; V2 persistence, restart, control-plane rollback and re-enable; not production Provider certification"
+      }
     }
-  ]
+  ],
+  "epoch_contract": {
+    "version": 1,
+    "scope": "agent_data_contract",
+    "contract_id": "agent-productized-v1",
+    "schema_migrations": [
+      {
+        "version": "001",
+        "filename": "001_workbench_v1.sql",
+        "canonical_sha256": "ab4c74a873073feab7cc9a264a74984be3b135e3d8aef75d343bcd8f2e1c94ce"
+      },
+      {
+        "version": "002",
+        "filename": "002_user_profiles.sql",
+        "canonical_sha256": "afafa855c74ff6f2a1c1e31765ce7396e5b5c35950bbb1b36ec2095c0efdce6c"
+      },
+      {
+        "version": "003",
+        "filename": "003_agent_templates.sql",
+        "canonical_sha256": "62369e85286131cc0884ec0710bc012345051af263313b9cba2c9c35b81a9480"
+      },
+      {
+        "version": "004",
+        "filename": "004_knowledge_v1.sql",
+        "canonical_sha256": "5b15bf5e86b4508bd03170867fc2dc3027c98004bf3b2252ffba1720b252a802"
+      },
+      {
+        "version": "005",
+        "filename": "005_skill_registry_v1.sql",
+        "canonical_sha256": "31564e792fa4134b7077a777158d13d586a7484933adb42c69cc2f6f9ce3da19"
+      },
+      {
+        "version": "006",
+        "filename": "006_embedding_profiles.sql",
+        "canonical_sha256": "b33fc2c9bd1140a0efdf2d05fc10cb829e87661f044edf3de54c267dcf8dd0b2"
+      },
+      {
+        "version": "007",
+        "filename": "007_history_storage_indexes.sql",
+        "canonical_sha256": "4ea2b5cc53fb266fb9031741b74e7375c34e118ac13e2c102854fad539cb29e0"
+      },
+      {
+        "version": "008",
+        "filename": "008_agent_productization_catalog.sql",
+        "canonical_sha256": "bd0c153e249036f57e62c749f59b04ba21ad43f7db492895b2a0600a0ca68add"
+      },
+      {
+        "version": "009",
+        "filename": "009_agent_execution_contexts.sql",
+        "canonical_sha256": "97aafc386db3cdc4c31de149466f55bb508415a3987e6892351802c1fa138884"
+      },
+      {
+        "version": "010",
+        "filename": "010_agent_runtime_test_status.sql",
+        "canonical_sha256": "2be29da24a3aa20c0e302ce7dc505b28c2d0ffae25d80c4458f7223acaa04b10"
+      },
+      {
+        "version": "011",
+        "filename": "011_platform_compatibility_epoch.sql",
+        "canonical_sha256": "e2c433fdde86f4e49b37538c6917c8ea0e7ad6017e8451e7e544583da0014cde"
+      }
+    ],
+    "epochs": [
+      {
+        "epoch": "legacy_v1",
+        "epoch_rank": 1,
+        "data_scope": "legacy_only",
+        "minimum_target": {
+          "release_id": "20260913-6abccad",
+          "source_commit": "6abccad4db3e4802810380fae2082a30473f229c"
+        },
+        "allowed_targets": [
+          {
+            "release_id": "20260913-6abccad",
+            "source_commit": "6abccad4db3e4802810380fae2082a30473f229c"
+          },
+          {
+            "release_id": "20260914-bd04dcb",
+            "source_commit": "bd04dcb982bf0efe02a5a1a42dd162d94265da0b"
+          }
+        ]
+      },
+      {
+        "epoch": "productized_v1",
+        "epoch_rank": 2,
+        "data_scope": "productized_v1",
+        "minimum_target": {
+          "release_id": "20260914-bd04dcb",
+          "source_commit": "bd04dcb982bf0efe02a5a1a42dd162d94265da0b"
+        },
+        "allowed_targets": [
+          {
+            "release_id": "20260914-bd04dcb",
+            "source_commit": "bd04dcb982bf0efe02a5a1a42dd162d94265da0b"
+          }
+        ]
+      }
+    ],
+    "schema_compatibility_evidence": {
+      "status": "PASS",
+      "version": "compatibility-epoch-pg16-original-artifacts-v1",
+      "report_sha256": "f87c357a48d8e3cfffc335b6ba9b2090ad772500ea2d2dbaaa3a51bec0d0e610",
+      "postgres_major": 16,
+      "checks": {
+        "legacy_011": "PASS",
+        "productized_011": "PASS",
+        "restart": "PASS",
+        "control_plane_rollback": "PASS",
+        "reenable": "PASS"
+      }
+    }
+  }
 }

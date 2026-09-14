@@ -104,9 +104,63 @@ target requires a reviewed new declaration and isolated compatibility evidence;
 neither a larger version number nor an arbitrary future range grants permission.
 The V1 evidence is PostgreSQL 16 isolated legacy startup/minimal Fake Runtime
 execution, not production Provider/RAG certification.
-Its `legacy_only` data scope blocks old-target rollback if Productized Template
-rows exist; Pilot-data rollback requires a separately approved application-aware
-target/evidence. Do not delete or relabel Pilot records to pass this gate.
+The historical `legacy_only` evidence is retained. Migration 011 adds the
+permanent `agent_data_contract` Compatibility Epoch; current row count is an
+inconsistency check, NOT the rollback floor truth. `productized_v1` permanently
+rejects `20260913-6abccad`, including zero-row, disabled and terminal states.
+The explicitly approved minimum V2 target is original `20260914-bd04dcb`, with
+independent source/archive/Manifest identity and isolated Schema 001–011
+evidence. No release timestamp/commit ordering grants compatibility.
+
+## Explicit pre-Pilot Compatibility Epoch
+
+Migration 011 touches only platform compatibility metadata and V2-write guard
+triggers; it does not convert Agent data or change historical migrations.
+Zero-V2 initialization is `legacy_v1`; existing V2 initializes upward with
+`migration_detection` provenance (no invented Release identity). The database
+forbids rank decrease, changing an advanced record, DELETE and TRUNCATE.
+Productized Template creation has a service transaction check and DB guard.
+New local SQLite control-plane initialization has minimal fail-closed parity,
+never an automatic Pilot advance or default-database reset.
+
+Future production migration and advance EACH require separate human approval.
+After independently verified controlled tooling is installed and configuration
+loaded only inside its process, the interfaces are:
+
+```bash
+python scripts/compatibility_epoch.py status
+python scripts/compatibility_epoch.py advance --to productized_v1
+python scripts/compatibility_epoch.py quiescence
+```
+
+These are interface examples, not authorization to run them on production.
+No DSN, arbitrary identity/path override, reset, downgrade or delete is exposed.
+First advance requires strict complete Schema 001–011, explicit approved current
+Release/floor identity (including all three active systemd MainPID actual CWDs),
+compatible evidence, zero V2 data and disabled Runtime
+Test Policy. It locks the singleton and rechecks history inside the transaction.
+An already-advanced record returns idempotently without updating its provenance.
+Shared configuration must come from the normal controlled process loader; never
+print/copy an environment file or credentials. Normal `release_switch` does NOT
+advance Epoch. New current application identities require independent approval,
+even if their code is newer than bd04dcb.
+
+The only absent-table exception is a PRE-MIGRATION `--check-plan` with 011 not
+applied; it explicitly evaluates the planned 011 initialization scope. Full
+rollback/advance requires the singleton. An applied 011 with missing metadata
+always blocks, including an attempted SQL rerun; no zero-row reset is allowed.
+
+Pilot rollback is control-plane-only on the V2-compatible application: block new
+V2 runs, disable Pilot Instance/Runtime Test Policy, drain workload and preserve
+all V2 history. `quiescence` reads DB and Redis without mutation; active V2
+Task/Test/Run, pending retry/delivery, processing lease or unknown queue entries
+return `ROLLBACK_INCOMPLETE` (exit 2). Invoke only AFTER preventing new producers;
+it is an observation, not an atomic stop command. The current queue's recoverable
+lease/retry state is its pending/processing lists, not a separate TTL scheduler.
+Never delete/relabel V2 history, down schema or switch to 6abccad to stop a Pilot.
+Restart the same compatible Artifact, verify history, then separately approve
+Policy/Instance re-enable. Backups must preserve Epoch, constraints and triggers;
+restoring a newer history as `legacy_v1` is forbidden.
 
 Normal `--preflight-only` remains read-only and may show pending migrations.
 Before a real forward switch, an additional plan gate validates the applied

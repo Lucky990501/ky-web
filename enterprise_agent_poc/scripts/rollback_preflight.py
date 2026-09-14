@@ -119,20 +119,59 @@ def check_sources(directory, lock):
     return result
 
 
-def read_history(database_url, postgres_major):
+def epoch_contract(declaration):
+    contract = declaration['epoch_contract']
+    require(set(contract) == {'version','scope','contract_id','schema_migrations','epochs','schema_compatibility_evidence'}
+            and contract['version'] == 1 and contract['scope'] == 'agent_data_contract'
+            and contract['contract_id'] == 'agent-productized-v1', 'epoch_contract_identity')
+    lock = migration_lock(contract['schema_migrations'])
+    require(lock[:len(declaration['baseline']['migrations'])] == declaration['baseline']['migrations'], 'epoch_schema_baseline')
+    epochs = contract['epochs']
+    require(isinstance(epochs, list) and len(epochs) == 2, 'epoch_declaration')
+    for item, name, rank, scope in zip(epochs, ('legacy_v1','productized_v1'), (1,2), ('legacy_only','productized_v1')):
+        require(set(item) == {'epoch','epoch_rank','data_scope','minimum_target','allowed_targets'}
+                and item['epoch'] == name and type(item['epoch_rank']) is int and item['epoch_rank'] == rank
+                and item['data_scope'] == scope and item['minimum_target'] in item['allowed_targets'], 'epoch_declaration')
+        for reference in item['allowed_targets']:
+            require(set(reference) == {'release_id','source_commit'} and RELEASE.fullmatch(reference['release_id'])
+                    and COMMIT.fullmatch(reference['source_commit']), 'epoch_target_reference')
+            require(sum(t['release_id'] == reference['release_id'] and t['source_commit'] == reference['source_commit']
+                        for t in declaration['approved_targets']) == 1, 'epoch_target_unapproved')
+    return contract
+
+
+def read_history(database_url, postgres_major, *, plan=False, target_id=None, target_commit=None, contract=None):
     from psycopg import connect
     from psycopg.rows import dict_row
     require(database_url.startswith(('postgresql://', 'postgres://')), 'postgresql_required')
     with connect(database_url, row_factory=dict_row, options='-c default_transaction_read_only=on') as conn:
+        conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
         require(conn.execute('SHOW transaction_read_only').fetchone()['transaction_read_only'] == 'on', 'read_only_required')
         require(int(conn.execute('SHOW server_version_num').fetchone()['server_version_num']) // 10000 == postgres_major, 'evidence_postgresql_major')
         rows = conn.execute('SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version').fetchall()
-        # The approved V1 test covered legacy data on expanded schema, NOT old
-        # workers consuming Productized Pilot definitions/jobs. Fail closed
-        # beyond that evidence; an application-aware target needs new approval.
-        if any(r['version'] == '008' for r in rows):
-            require(conn.execute("SELECT COUNT(*) AS n FROM agent_templates WHERE definition_source='productized'").fetchone()['n'] == 0, 'evidence_legacy_data_scope')
-        return rows
+        from scripts.compatibility_epoch import read_state, has_productized_data, EpochBlocked
+        applied = {r['version'] for r in rows}
+        try:
+            # Only the pre-migration PLAN can evaluate an absent 011 table.
+            # Actual rollback / advance ALWAYS requires the persistent singleton.
+            exists = conn.execute("SELECT to_regclass('public.platform_compatibility_state') AS name").fetchone()['name']
+            if not exists and plan and '011' not in applied:
+                has_v2 = has_productized_data(conn, include_execution='009' in applied) if '008' in applied else False
+                state = {'epoch': 'productized_v1' if has_v2 else 'legacy_v1', 'epoch_rank': 2 if has_v2 else 1}
+                source = 'pending_011_initialization_plan'
+            else:
+                state = read_state(conn)
+                if state['epoch'] == 'legacy_v1':
+                    require(not has_productized_data(conn), 'legacy_epoch_productized_data_conflict')
+                source = 'platform_compatibility_state'
+        except EpochBlocked as exc:
+            raise RollbackBlocked(str(exc)) from None
+        epoch = next(e for e in contract['epochs'] if e['epoch'] == state['epoch'])
+        reference = {'release_id': target_id, 'source_commit': target_commit}
+        if reference == contract['epochs'][0]['minimum_target'] and state['epoch_rank'] > 1:
+            raise RollbackBlocked('rollback_target_below_data_compatibility_floor')
+        require(reference in epoch['allowed_targets'], 'target_not_approved_for_compatibility_epoch')
+        return rows, state, source
 
 
 def check_history(rows, items, *, plan=False):
@@ -159,12 +198,20 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     own_source, _ = release_identity(base, trusted_root.parent.name, own_manifest['source_commit'])
     require(own_source == trusted_root, 'trusted_release_identity')
     declaration = read_json(trusted_root / 'deploy' / 'rollback_compatibility.json')
-    require(set(declaration) == {'schema_version', 'baseline', 'approved_targets'}
-            and type(declaration['schema_version']) is int and declaration['schema_version'] == 1, 'declaration_schema')
+    require(set(declaration) == {'schema_version', 'baseline', 'approved_targets','epoch_contract'}
+            and type(declaration['schema_version']) is int and declaration['schema_version'] == 2, 'declaration_schema')
     baseline = declaration['baseline']
     require(set(baseline) == {'id', 'source_commit', 'migrations'} and COMMIT.fullmatch(baseline['source_commit'])
             and isinstance(baseline['id'], str) and bool(baseline['id']), 'baseline_identity')
     lock = migration_lock(baseline['migrations'])
+    contract = epoch_contract(declaration)
+    schema_lock = contract['schema_migrations']
+    # Read epoch before opening or validating the requested target Artifact.
+    if database_url is None:
+        from scripts.migrate import settings
+        database_url = settings.database_url
+    rows, state, epoch_source = read_history(database_url, 16, plan=plan, target_id=target_id,
+                                           target_commit=target_commit, contract=contract)
     targets = declaration['approved_targets']
     require(isinstance(targets, list) and len({t['release_id'] for t in targets}) == len(targets), 'approved_target_set')
     matching = [t for t in targets if t['release_id'] == target_id and t['source_commit'] == target_commit]
@@ -173,23 +220,28 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     require(set(target) == {'release_id', 'source_commit', 'archive_sha256', 'manifest_sha256', 'known_migrations', 'compatibility_evidence'}
             and HASH.fullmatch(target['archive_sha256']) and HASH.fullmatch(target['manifest_sha256']), 'target_declaration')
     target_lock = migration_lock(target['known_migrations'])
-    require(target_lock == lock[:len(target_lock)], 'target_baseline_not_approved_subset')
+    require(target_lock == schema_lock[:len(target_lock)], 'target_baseline_not_approved_subset')
     evidence = target['compatibility_evidence']
     require(set(evidence) == {'version', 'baseline_id', 'report_sha256', 'postgres_major', 'checks', 'scope', 'schema_baseline_fingerprint', 'target_identity_fingerprint', 'data_scope'}
             and isinstance(evidence['version'], str) and evidence['version'] and evidence['baseline_id'] == baseline['id']
             and evidence['schema_baseline_fingerprint'] == digest(lock)
             and evidence['target_identity_fingerprint'] == digest({k: v for k, v in target.items() if k != 'compatibility_evidence'})
             and HASH.fullmatch(evidence['report_sha256']) and type(evidence['postgres_major']) is int and evidence['postgres_major'] >= 11
-            and evidence['data_scope'] == 'legacy_only'
+            and evidence['data_scope'] in {'legacy_only','productized_v1'}
             and evidence['checks'] == dict.fromkeys(('api', 'mcp', 'worker', 'legacy_minimal_run'), 'PASS')
             and isinstance(evidence['scope'], str) and evidence['scope'], 'compatibility_evidence')
     target_root, _ = release_identity(base, target_id, target_commit, target)
-    trusted_items = check_sources(trusted_root, lock)
+    approval = contract['schema_compatibility_evidence']
+    require(set(approval) == {'status','version','report_sha256','postgres_major','checks'}
+            and approval['status'] == 'PASS' and approval['postgres_major'] == 16
+            and isinstance(approval['version'],str) and approval['version']
+            and HASH.fullmatch(approval['report_sha256']) and approval['report_sha256'] != '0'*64
+            and approval['checks'] == dict.fromkeys(('legacy_011','productized_011','restart','control_plane_rollback','reenable'),'PASS'),
+            'epoch_schema_compatibility_evidence')
+    if state['epoch'] == 'productized_v1':
+        require(evidence['data_scope'] == 'productized_v1', 'target_data_scope_evidence')
+    trusted_items = check_sources(trusted_root, schema_lock)
     target_items = check_sources(target_root, target_lock)
-    if database_url is None:
-        from scripts.migrate import settings
-        database_url = settings.database_url
-    rows = read_history(database_url, evidence['postgres_major'])
     check_history(rows, trusted_items, plan=plan)
     require(len(rows) >= len(target_items), 'target_required_migrations_missing')
     check_history(rows[:len(target_items)], target_items)
@@ -198,6 +250,8 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
             'schema_baseline_id': baseline['id'], 'schema_baseline_source_commit': baseline['source_commit'],
             'schema_baseline_fingerprint': digest(lock), 'applied_versions': [r['version'] for r in rows],
             'target_known_versions': [r['version'] for r in target_items], 'evidence_version': evidence['version'],
+            'compatibility_epoch': state['epoch'], 'epoch_rank': state['epoch_rank'], 'epoch_source': epoch_source,
+            'epoch_schema_fingerprint': digest(schema_lock),
             'old_runner_invoked': False}
 
 

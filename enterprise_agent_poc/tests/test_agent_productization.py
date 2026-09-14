@@ -35,6 +35,9 @@ def catalog(tmp_path, approved_bundle):
     registry.grant_platform_admin(actor)
     control = AgentProductization(store)
     control.initialize()
+    # Explicit synthetic pre-Pilot approval; never an application auto-advance.
+    with store.connection() as conn:
+        conn.execute("UPDATE platform_compatibility_state SET epoch='productized_v1',epoch_rank=2,advanced_at=CURRENT_TIMESTAMP,advanced_by_release_id='isolated-fixture',advanced_by_source_commit=?,advance_origin='controlled_advance' WHERE scope='agent_data_contract'", ('f'*40,))
     return SimpleNamespace(store=store, product=product, registry=registry, control=control, actor=actor)
 
 
