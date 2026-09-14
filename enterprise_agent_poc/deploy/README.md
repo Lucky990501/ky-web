@@ -191,3 +191,66 @@ python scripts/verify_runtime_config.py \
 The verifier prints presence flags and fingerprints, never secret values.
 `matches` must be `true`. Production secrets, database credentials, tokens,
 and private keys must never be copied back to a development machine.
+
+## Dedicated Runtime Test Policy rollout (Stage 2.12.1)
+
+`scripts/runtime_policy_rollout.py` is a dedicated four-key transaction tool,
+not an arbitrary env editor. This stage is **local isolated readiness only**;
+production rollout requires separate authorization and trusted tooling delivery.
+It does not advance Epoch, create Pilot data, switch Release, migrate schema or
+alter Agent/Registry business logic.
+
+The root is fixed to `/opt/enterprise-agent-workbench`; its authoritative input
+is `shared/enterprise-agent.env`. There is no CLI env/root override, force or
+ignore. Run as the existing production owner (root). Commands for a separately
+approved future operation are:
+
+```bash
+python scripts/runtime_policy_rollout.py status
+python scripts/runtime_policy_rollout.py plan --tenant TENANT --slug social-content-agent
+python scripts/runtime_policy_rollout.py apply --tenant TENANT --slug social-content-agent \
+  --expected-config-sha256 ORIGINAL_SHA_FROM_PLAN
+python scripts/runtime_policy_rollout.py restore --operation-id OPERATION_ID
+```
+
+Only `ENTERPRISE_POC_AGENT_RUNTIME_TEST_PRODUCTION_ENABLED`,
+`ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TENANT_IDS`,
+`ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TEMPLATE_SLUGS`, and
+`ENTERPRISE_POC_AGENT_RUNTIME_TEST_TENANT_ID` can change. Apply produces a
+singleton Tenant/slug scope and verifies all three actual service environments.
+Tenant syntax validation is **not** Tenant/admin authorization: a separately
+authorized operator must first verify the exact Tenant and its platform_admin.
+
+Status/plan do not create locks, backups, journals or restart services. The
+parser never sources/evaluates env bytes; duplicate keys, invalid policy values,
+multiline, continuation, substitution and unsupported quoting fail closed.
+All non-target bytes remain unchanged. Unsupported existing non-target shell
+syntax also blocks rather than guessing secret values.
+
+Apply stores the complete original file (600) and a secret-free transaction
+journal under the owned `shared/runtime-policy-operations` directory (700).
+Metadata includes original SHA/size/mode/owner, timestamp, operation ID and
+application identity. Writes use same-directory temporary files, fsync,
+inode/bytes/metadata CAS, atomic replace and directory fsync.
+Apply requires the original config SHA emitted by plan, so a changed file between
+commands blocks rather than silently accepting a new baseline. Restore compares
+current bytes with the operation's post SHA and verifies the complete backup.
+Cooperating invocations serialize through flock. CAS cannot make an unrelated
+non-cooperating privileged writer atomic: all shared-env writers must obey the
+exclusive change window; detected concurrent modification is never overwritten.
+
+The tool restarts only the existing API/MCP/Worker units, checks unchanged
+Release/Manifest and actual process CWD, fingerprint/policy agreement, and
+local/public production health. Any restart/fingerprint/health failure restores
+the exact original bytes, restarts all three units and verifies old config and
+health. `CRITICAL_CONFIG_ROLLBACK_FAILED` is never reported as success.
+Prepared/replaced/restarting/rollback_failed journals block another rollout;
+only explicit operation-ID restore/recovery can resolve them. Duplicate apply
+and already-restored operations verify processes/health without extra restart.
+Backups necessarily contain secrets and must remain server-side; neither their
+contents nor raw process environments/logs may be printed or copied.
+
+Tests use an explicitly marked private temporary root and fake service boundary,
+with canary secrets. No default SQLite, PostgreSQL, Redis, production process or
+real model is touched by this tool's tests. The fingerprint helper reads the
+literal Settings contract without importing Settings or loading workspace keys.
