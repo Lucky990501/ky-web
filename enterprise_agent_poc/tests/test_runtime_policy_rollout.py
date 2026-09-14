@@ -1,10 +1,12 @@
 """Private files + fake services only: no DB, Redis, model or production IO."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import stat
 import subprocess
 import sys
+import tarfile
 
 import pytest
 
@@ -56,6 +58,43 @@ class FakeServices:
         return not (self.health_failure and policy.parse(self.env.read_bytes()).get(policy.KEYS[0]) == "true")
 
 
+class NativeLayoutServices:
+    """Real SystemdBoundary path/Artifact checks with isolated process fixtures."""
+
+    def __init__(self, base, proc_root, source, env):
+        self.native = policy.SystemdBoundary(base, proc_root=proc_root)
+        self.source = source
+        self.calls = []
+        self.pids = {service: str(4100 + index) for index, service in enumerate(policy.SERVICES)}
+        self.workdirs = {service: str(source) for service in policy.SERVICES}
+        values = policy.parse(env.read_bytes())
+        raw = b"\0".join((key + "=" + value).encode() for key, value in values.items()) + b"\0"
+        for service, pid in self.pids.items():
+            directory = proc_root / pid
+            directory.mkdir(parents=True)
+            (directory / "cwd").symlink_to(source, target_is_directory=True)
+            (directory / "environ").write_bytes(raw)
+        self.native._show = self._show
+
+    @property
+    def identity_summary(self):
+        return self.native.identity_summary
+
+    def _show(self, service):
+        return {"MainPID": self.pids[service], "ActiveState": "active",
+                "WorkingDirectory": self.workdirs[service]}
+
+    def inspect(self, *, require_active=True):
+        return self.native.inspect(require_active=require_active)
+
+    def restart(self, service):
+        self.calls.append(service)
+        raise AssertionError("read-only native fixture must not restart services")
+
+    def health(self):
+        return True
+
+
 @pytest.fixture
 def fixture(tmp_path):
     base = tmp_path / "workbench"
@@ -68,6 +107,59 @@ def fixture(tmp_path):
     boundary = FakeServices(env)
     rollout = policy.Rollout(base, boundary, isolated=True)
     return rollout, boundary
+
+
+@pytest.fixture
+def native_layout(tmp_path):
+    base = tmp_path / "workbench-native"
+    base.mkdir(mode=0o700)
+    (base / "runtime-policy-isolated.marker").write_bytes(b"runtime-policy-local-only")
+    (base / "shared").mkdir(mode=0o700)
+    env = base / "shared/enterprise-agent.env"
+    env.write_bytes(ORIGINAL)
+    env.chmod(0o600)
+    releases = base / "releases"
+    releases.mkdir(mode=0o700)
+    release_id = "20260914-testrelease"
+    release_dir = releases / release_id
+    source = release_dir / "enterprise_agent_poc"
+    (source / "app").mkdir(parents=True)
+    (source / "scripts").mkdir()
+    files = {
+        "enterprise_agent_poc/app/identity.txt": b"native layout identity\n",
+        "enterprise_agent_poc/scripts/identity.py": b"IDENTITY = 'test-release'\n",
+    }
+    for name, content in files.items():
+        path = release_dir / name
+        path.write_bytes(content)
+        path.chmod(0o644)
+    source_commit = "a" * 40
+    archive = release_dir / f"{release_id}.tar.gz"
+    with tarfile.open(archive, "w:gz", format=tarfile.PAX_FORMAT,
+                      pax_headers={"comment": source_commit}) as output:
+        for name in files:
+            output.add(release_dir / name, arcname=name, recursive=False)
+    archive_sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    manifest = {
+        "release_id": release_id,
+        "source_commit": source_commit,
+        "archive_sha256": archive_sha,
+        "selected_files": list(files),
+        "selected_file_count": len(files),
+        "build_platform": "test-native-layout",
+    }
+    manifest_path = release_dir / f"{release_id}.manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+    (base / "release-current").symlink_to(source, target_is_directory=True)
+    proc_root = base / "proc"
+    services = NativeLayoutServices(base, proc_root, source, env)
+    rollout = policy.Rollout(base, services, isolated=True)
+    return {
+        "base": base, "release_id": release_id, "release_dir": release_dir,
+        "source": source, "archive": archive, "manifest": manifest,
+        "manifest_path": manifest_path, "proc_root": proc_root,
+        "services": services, "rollout": rollout,
+    }
 
 
 def tree(base):
@@ -515,3 +607,189 @@ def test_interrupt_during_manual_restore_is_recoverable(fixture, monkeypatch):
         rollout.status()
     monkeypatch.setattr(rollout, "_restart_verify", real)
     assert rollout.restore(operation)["status"] == "rolled_back"
+
+
+def _repoint(path, target):
+    path.unlink()
+    path.symlink_to(target, target_is_directory=True)
+
+
+def _rewrite_manifest(case, **changes):
+    value = dict(case["manifest"])
+    value.update(changes)
+    case["manifest_path"].write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def test_native_release_layout_status_passes_read_only(native_layout):
+    case = native_layout
+    before = tree(case["base"])
+    result = case["rollout"].status()
+    assert result["status"] == "verified"
+    assert result["application"] == {
+        "release_id": case["release_id"],
+        "source_directory": "enterprise_agent_poc",
+        "source_commit": "a" * 40,
+        "archive_sha256": case["manifest"]["archive_sha256"],
+        "manifest_sha256": policy.digest(case["manifest"]),
+        "selected_file_count": 2,
+        "build_platform": "test-native-layout",
+    }
+    assert result["gates"]["service_states"] == dict.fromkeys(policy.SERVICES, "active")
+    assert result["gates"]["health_verified"] is True
+    assert tree(case["base"]) == before
+    assert not case["services"].calls and not case["rollout"].operations.exists()
+
+
+def test_native_release_layout_status_output_is_secret_free(native_layout, capsys):
+    rollout = native_layout["rollout"]
+    assert policy.main(["status"], factory=lambda: rollout) == 0
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert payload["application"]["release_id"] == native_layout["release_id"]
+    assert payload["application"]["source_commit"] == "a" * 40
+    assert CANARY not in output.out + output.err
+    assert str(rollout.env) not in output.out
+
+
+def test_native_release_layout_plan_reports_exact_safe_diff(native_layout, capsys):
+    case = native_layout
+    before = tree(case["base"])
+    assert policy.main(["plan", "--tenant", TENANT, "--slug", SLUG],
+                       factory=lambda: case["rollout"]) == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert CANARY not in output.out + output.err
+    assert str(case["rollout"].env) not in output.out
+    rendered = policy.replace_policy(ORIGINAL, policy.policy_values(TENANT, SLUG))
+    assert result["status"] == "planned"
+    assert result["original_sha256"] == policy.sha(ORIGINAL) == result["config_sha256"]
+    assert result["predicted_sha256"] == policy.sha(rendered)
+    assert result["current_policy"] == {
+        "enabled": False, "allowed_tenant_count": 0, "allowed_slug_count": 0,
+        "runtime_test_tenant_configured": False,
+    }
+    assert result["planned_policy"] == {
+        "enabled": True, "allowed_tenant_count": 1, "allowed_slug_count": 1,
+        "runtime_test_tenant_configured": True,
+    }
+    assert result["four_field_diff"] == [
+        {"key": key, "changed": True} for key in policy.KEYS
+    ]
+    assert result["non_target_bytes_preserved"] is True
+    assert tree(case["base"]) == before and not case["services"].calls
+
+
+@pytest.mark.parametrize("mutation", [
+    "release_current_to_release_dir",
+    "source_directly_in_releases",
+    "nested_source",
+    "wrong_source_basename",
+    "source_symlink_escape",
+    "wrong_release_parent",
+    "missing_manifest",
+    "manifest_in_source",
+    "manifest_wrong_parent",
+    "manifest_symlink",
+    "release_id_mismatch",
+    "unsafe_build_platform",
+    "source_commit_mismatch",
+    "manifest_archive_identity_mismatch",
+    "archive_checksum_mismatch",
+    "archive_symlink",
+    "source_byte_tamper",
+    "source_mode_tamper",
+    "unmanifested_source_file",
+    "missing_source_file",
+])
+def test_native_release_identity_mutations_block_read_only(native_layout, mutation):
+    case = native_layout
+    base, release_dir, source = case["base"], case["release_dir"], case["source"]
+    if mutation == "release_current_to_release_dir":
+        _repoint(base / "release-current", release_dir)
+    elif mutation == "source_directly_in_releases":
+        flat_source = release_dir.parent / source.name
+        source.rename(flat_source)
+        _repoint(base / "release-current", flat_source)
+    elif mutation == "nested_source":
+        nested = release_dir / "nested"
+        nested.mkdir()
+        nested_source = nested / source.name
+        source.rename(nested_source)
+        _repoint(base / "release-current", nested_source)
+    elif mutation == "wrong_source_basename":
+        wrong_source = release_dir / "workbench_app"
+        source.rename(wrong_source)
+        _repoint(base / "release-current", wrong_source)
+    elif mutation == "source_symlink_escape":
+        outside = base / "outside-source"
+        source.rename(outside)
+        source.symlink_to(outside, target_is_directory=True)
+    elif mutation == "wrong_release_parent":
+        outside = base / "outside-releases"
+        outside.mkdir()
+        moved = outside / case["release_id"]
+        release_dir.rename(moved)
+        _repoint(base / "release-current", moved / source.name)
+    elif mutation == "missing_manifest":
+        case["manifest_path"].unlink()
+    elif mutation == "manifest_in_source":
+        case["manifest_path"].rename(source / case["manifest_path"].name)
+    elif mutation == "manifest_wrong_parent":
+        case["manifest_path"].rename(release_dir.parent / case["manifest_path"].name)
+    elif mutation == "manifest_symlink":
+        outside = base / "outside-manifest.json"
+        case["manifest_path"].rename(outside)
+        case["manifest_path"].symlink_to(outside)
+    elif mutation == "release_id_mismatch":
+        _rewrite_manifest(case, release_id="20260914-other")
+    elif mutation == "unsafe_build_platform":
+        _rewrite_manifest(case, build_platform=CANARY + " secret")
+    elif mutation == "source_commit_mismatch":
+        _rewrite_manifest(case, source_commit="b" * 40)
+    elif mutation == "manifest_archive_identity_mismatch":
+        _rewrite_manifest(case, archive_sha256="0" * 64)
+    elif mutation == "archive_checksum_mismatch":
+        case["archive"].write_bytes(case["archive"].read_bytes() + b"tamper")
+    elif mutation == "archive_symlink":
+        outside = base / "outside-archive.tar.gz"
+        case["archive"].rename(outside)
+        case["archive"].symlink_to(outside)
+    elif mutation == "source_byte_tamper":
+        path = source / "app/identity.txt"
+        path.write_bytes(path.read_bytes() + b"tamper\n")
+    elif mutation == "source_mode_tamper":
+        (source / "scripts/identity.py").chmod(0o755)
+    elif mutation == "unmanifested_source_file":
+        (source / "app/unmanifested.txt").write_text("not approved\n", encoding="utf-8")
+    else:
+        (source / "app/identity.txt").unlink()
+    before = tree(base)
+    with pytest.raises(policy.Blocked, match="APPLICATION_IDENTITY_INVALID"):
+        case["rollout"].status()
+    assert tree(base) == before and not case["services"].calls
+
+
+def test_native_release_process_cwd_mismatch_blocks(native_layout):
+    case = native_layout
+    service = policy.SERVICES[0]
+    cwd = case["proc_root"] / case["services"].pids[service] / "cwd"
+    _repoint(cwd, case["release_dir"])
+    with pytest.raises(policy.Blocked, match="SERVICE_APPLICATION_MISMATCH"):
+        case["rollout"].status()
+    assert not case["services"].calls
+
+
+def test_native_release_systemd_working_directory_mismatch_blocks(native_layout):
+    case = native_layout
+    case["services"].workdirs[policy.SERVICES[1]] = str(case["release_dir"])
+    with pytest.raises(policy.Blocked, match="SERVICE_APPLICATION_MISMATCH"):
+        case["rollout"].status()
+    assert not case["services"].calls
+
+
+def test_native_release_missing_working_directory_blocks(native_layout):
+    case = native_layout
+    case["services"].workdirs[policy.SERVICES[2]] = ""
+    with pytest.raises(policy.Blocked, match="SERVICE_APPLICATION_MISMATCH"):
+        case["rollout"].status()
+    assert not case["services"].calls

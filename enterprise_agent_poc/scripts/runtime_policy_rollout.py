@@ -24,10 +24,10 @@ import uuid
 
 try:
     from scripts.verify_runtime_config import compare, safe_runtime_config_snapshot
-    from scripts.rollback_preflight import BASE
+    from scripts.rollback_preflight import BASE, RollbackBlocked, digest, read_json, release_identity
 except ModuleNotFoundError:
     from verify_runtime_config import compare, safe_runtime_config_snapshot
-    from rollback_preflight import BASE
+    from rollback_preflight import BASE, RollbackBlocked, digest, read_json, release_identity
 
 PREFIX = "ENTERPRISE_POC_AGENT_RUNTIME_TEST_"
 KEYS = tuple(PREFIX + suffix for suffix in (
@@ -103,6 +103,17 @@ def parse(data: bytes) -> dict[str, str]:
     return values
 
 
+def non_policy_bytes(data: bytes) -> bytes:
+    result = []
+    for line in data.splitlines(keepends=True):
+        content = line.removeprefix(b"\xef\xbb\xbf")
+        match = re.match(rb"\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", content)
+        key = match[1].decode() if match else None
+        if key not in KEYS:
+            result.append(line)
+    return b"".join(result)
+
+
 def replace_policy(data: bytes, values: dict[str, str]) -> bytes:
     parse(data)
     lines = data.splitlines(keepends=True)
@@ -130,6 +141,7 @@ def replace_policy(data: bytes, values: dict[str, str]) -> bytes:
     require(all(parsed[k] == values[k] for k in KEYS), "POLICY_RENDER_FAILED")
     require({k: v for k, v in parsed.items() if k not in KEYS} ==
             {k: v for k, v in parse(data).items() if k not in KEYS}, "NON_POLICY_CHANGE")
+    require(non_policy_bytes(output) == non_policy_bytes(data), "NON_POLICY_CHANGE")
     return output
 
 
@@ -150,11 +162,15 @@ class Image:
 
 class SystemdBoundary:
     """Fixed read/restart boundary; command output stays private."""
-    def __init__(self, base: Path):
+    def __init__(self, base: Path, *, proc_root: Path = Path("/proc")):
         self.base = base
+        self.proc_root = proc_root
+        self.identity_summary = {}
+        self.service_states = {}
 
     def _show(self, service: str) -> dict[str, str]:
-        result = subprocess.run(["systemctl", "show", service, "--property=MainPID,ActiveState"],
+        result = subprocess.run(["systemctl", "show", service,
+                                 "--property=MainPID,ActiveState,WorkingDirectory"],
                                 capture_output=True, text=True, timeout=15)
         require(result.returncode == 0, "SERVICE_QUERY_FAILED")
         return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
@@ -162,23 +178,49 @@ class SystemdBoundary:
     def inspect(self, *, require_active: bool = True) -> tuple[str, list[dict[str, str]]]:
         link = self.base / "release-current"
         require(link.is_symlink(), "APPLICATION_IDENTITY_INVALID")
-        target = link.resolve(strict=True)
-        require((self.base / "releases").resolve() == self.base / "releases" and
-                target.parent == self.base / "releases" and
-                bool(re.fullmatch(r"[A-Za-z0-9._-]+", target.name)), "APPLICATION_IDENTITY_INVALID")
-        manifest = target / (target.name + ".manifest.json")
-        require(manifest.is_file() and not manifest.is_symlink(), "APPLICATION_IDENTITY_INVALID")
-        identity = sha(str(target).encode() + manifest.read_bytes())
+        try:
+            source = link.resolve(strict=True)
+            release_dir = source.parent
+            releases = self.base / "releases"
+            require(releases.resolve() == releases and source.name == "enterprise_agent_poc" and
+                    release_dir.parent == releases and
+                    bool(re.fullmatch(r"[A-Za-z0-9._-]+", release_dir.name)),
+                    "APPLICATION_IDENTITY_INVALID")
+            manifest_path = release_dir / (release_dir.name + ".manifest.json")
+            manifest = read_json(manifest_path)
+            source_commit = manifest.get("source_commit")
+            verified_source, verified_manifest = release_identity(
+                self.base, release_dir.name, source_commit)
+            require(verified_source == source and verified_manifest == manifest and
+                    isinstance(manifest.get("build_platform"), str) and
+                    bool(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", manifest["build_platform"])),
+                    "APPLICATION_IDENTITY_INVALID")
+        except (Blocked, RollbackBlocked, OSError, ValueError, TypeError, AttributeError):
+            raise Blocked("APPLICATION_IDENTITY_INVALID") from None
+        self.identity_summary = {
+            "release_id": release_dir.name,
+            "source_directory": source.name,
+            "source_commit": manifest["source_commit"],
+            "archive_sha256": manifest["archive_sha256"],
+            "manifest_sha256": digest(manifest),
+            "selected_file_count": manifest["selected_file_count"],
+            "build_platform": manifest["build_platform"],
+        }
+        identity = sha(json.dumps(self.identity_summary, sort_keys=True,
+                                  separators=(",", ":")).encode())
         environments = []
+        self.service_states = {}
         for service in SERVICES:
             props = self._show(service)
             active = props.get("ActiveState") == "active" and props.get("MainPID", "0").isdigit() and int(props["MainPID"]) > 0
+            self.service_states[service] = props.get("ActiveState", "unknown")
             require(active or not require_active, "SERVICE_INACTIVE")
             if not active:
                 environments.append({})
                 continue
-            proc = Path("/proc") / props["MainPID"]
-            require((proc / "cwd").resolve(strict=True) == target / "enterprise_agent_poc",
+            require(props.get("WorkingDirectory") == str(source), "SERVICE_APPLICATION_MISMATCH")
+            proc = self.proc_root / props["MainPID"]
+            require((proc / "cwd").resolve(strict=True) == source,
                     "SERVICE_APPLICATION_MISMATCH")
             raw = (proc / "environ").read_bytes()
             environments.append(dict(part.decode().split("=", 1) for part in raw.split(b"\0") if b"=" in part))
@@ -346,7 +388,11 @@ class Rollout:
         self.last_gate = {"shared_fingerprint": comparisons[0]["expected_fingerprint"],
                           "process_fingerprints": {service: result["runtime_fingerprint"]
                                                    for service, result in zip(SERVICES, comparisons)},
-                          "config_matches": True, "policy_matches": True, "health_verified": True}
+                          "config_matches": True, "policy_matches": True, "health_verified": True,
+                          "application": getattr(self.boundary, "identity_summary",
+                                                 {"identity_sha256": current_identity}),
+                          "service_states": getattr(self.boundary, "service_states",
+                                                    dict.fromkeys(SERVICES, "active"))}
         return current_identity
 
     def status(self) -> dict:
@@ -356,7 +402,8 @@ class Rollout:
         identity = self._verify(image.data)
         return {"status": "verified", "config_sha256": image.digest,
                 "config_fingerprint": safe_runtime_config_snapshot(values)["fingerprint"],
-                "application_identity": identity, "policy_enabled": values.get(KEYS[0], "false") == "true",
+                "application_identity": identity, "application": self.last_gate["application"],
+                "policy_enabled": values.get(KEYS[0], "false") == "true",
                 "runtime_test_tenant_configured": bool(values.get(KEYS[3], "")), "gates": self.last_gate,
                 "policy_tenant_count": len(values.get(KEYS[1], "").split(",")) if values.get(KEYS[1]) else 0,
                 "policy_slug_count": len(values.get(KEYS[2], "").split(",")) if values.get(KEYS[2]) else 0}
@@ -367,8 +414,22 @@ class Rollout:
         image = self._read(self.env)
         require(image.digest == result["config_sha256"], "CONFIG_CONCURRENT_MODIFICATION")
         output = replace_policy(image.data, proposed)
-        result.update(status="planned", predicted_sha256=sha(output),
+        current = parse(image.data)
+        current_semantics = {
+            "enabled": current.get(KEYS[0], "false") == "true",
+            "allowed_tenant_count": len(current.get(KEYS[1], "").split(",")) if current.get(KEYS[1]) else 0,
+            "allowed_slug_count": len(current.get(KEYS[2], "").split(",")) if current.get(KEYS[2]) else 0,
+            "runtime_test_tenant_configured": bool(current.get(KEYS[3], "")),
+        }
+        planned_semantics = {"enabled": True, "allowed_tenant_count": 1,
+                             "allowed_slug_count": 1, "runtime_test_tenant_configured": True}
+        result.update(status="planned", original_sha256=image.digest,
+                      predicted_sha256=sha(output),
                       predicted_fingerprint=safe_runtime_config_snapshot(parse(output))["fingerprint"],
+                      current_policy=current_semantics, planned_policy=planned_semantics,
+                      four_field_diff=[{"key": key, "changed": current.get(key, "") != proposed[key]}
+                                       for key in KEYS],
+                      non_target_bytes_preserved=True,
                       policy_scope="one_tenant_one_template")
         return result
 
