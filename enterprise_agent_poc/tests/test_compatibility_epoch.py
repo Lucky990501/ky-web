@@ -27,6 +27,11 @@ B930_ARCHIVE_SHA = '195b3729643974c510fcfabff5e498b4211007cffab0bb968ee2f86cb555
 B930_MANIFEST_SHA = 'e2a3102e6fe5eaab80145f1b05b30b20fb68f267259ed33f7be7ebf70109817b'
 B930_EVIDENCE_VERSION = 'current-b930-original-artifact-pg16-001-011-v1'
 B930_EVIDENCE_SHA = '7d2a12e8a9f30fd3d6a69bf62d0dd2cdab7d67435f175db9eb7a3ed1624a4cfc'
+P0_PREDECESSOR_ROOT = Path('/private/tmp/first-customer-p0-909203d')
+P0_PREDECESSOR_ID = '20260915-909203d'
+P0_PREDECESSOR_COMMIT = '909203dfb1d4bf4016b44977ce4a0553a32bf7c8'
+P0_PREDECESSOR_ARCHIVE_SHA = '5a364322350d65e7fb35c6728c32dbb110e646ed88461873a226b970104e1608'
+P0_PREDECESSOR_MANIFEST_SHA = '05b0700698a08adee51390c6c546d3d52a3e77be221a3823eda08672352bd132'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -136,6 +141,22 @@ def activate_b930(h):
     link=h['base']/'release-current';link.unlink();link.symlink_to(h['b930'],target_is_directory=True)
 
 
+def install_exact_p0_predecessor(h):
+    import hashlib
+    assert P0_PREDECESSOR_ROOT.parent == Path('/private/tmp')
+    archive = P0_PREDECESSOR_ROOT / f'{P0_PREDECESSOR_ID}.tar.gz'
+    manifest = P0_PREDECESSOR_ROOT / f'{P0_PREDECESSOR_ID}.manifest.json'
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == P0_PREDECESSOR_ARCHIVE_SHA
+    assert h['gate'].digest(json.loads(manifest.read_text())) == P0_PREDECESSOR_MANIFEST_SHA
+    directory = h['base'] / 'releases' / P0_PREDECESSOR_ID
+    directory.mkdir()
+    shutil.copyfile(archive, directory / archive.name)
+    shutil.copyfile(manifest, directory / manifest.name)
+    with tarfile.open(directory / archive.name) as packed:
+        packed.extractall(directory, filter='data')
+    return directory
+
+
 def test_current_original_manifest_is_pinned_and_floor_declaration_unchanged():
     _,manifest=original_b930_manifest()
     d=json.loads((SQL.parents[2]/'deploy/rollback_compatibility.json').read_text())
@@ -206,6 +227,66 @@ def test_member_status_floor_schema012_blocks_old_artifacts_and_accepts_declared
     candidate = pg_gate(h, target_id='fixture-new', commit='f' * 40)
     assert candidate['status'] == 'rollback_preflight_passed'
     assert candidate['active_data_contract_floors'] == ['member_account_status_v1']
+
+
+def test_member_status_floor_schema012_accepts_only_exact_p0_predecessor(pg_current):
+    h = pg_current
+    directory = install_exact_p0_predecessor(h)
+    h['store'] = h['fresh_database'](count=12)
+    _set_productized_epoch(h['store'])
+    result = pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
+    assert result['status'] == 'rollback_preflight_passed'
+    assert result['evidence_version'] == 'fixed_909203d_member_status_predecessor'
+    with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
+        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit='0' * 40)
+    with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
+        pg_gate(h, target_id='20260915-4057ca6', commit='4057ca619111d15b7ee7209e61f6b1af1cf4dc16')
+    archive = directory / f'{P0_PREDECESSOR_ID}.tar.gz'
+    archive.write_bytes(archive.read_bytes() + b'fault')
+    with pytest.raises(h['gate'].RollbackBlocked, match='archive_checksum'):
+        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
+
+
+@pytest.mark.parametrize(('field', 'check'), [
+    ('release_id', 'forward_predecessor_declaration'),
+    ('source_commit', 'forward_predecessor_declaration'),
+    ('archive_sha256', 'approved_manifest_identity'),
+    ('manifest_sha256', 'approved_manifest_identity'),
+    ('schema_fingerprint', 'forward_predecessor_declaration'),
+    ('data_contract', 'forward_predecessor_declaration'),
+])
+def test_member_status_floor_schema012_p0_predecessor_declaration_tamper_blocks(pg_current, field, check):
+    h = pg_current
+    install_exact_p0_predecessor(h)
+    h['store'] = h['fresh_database'](count=12)
+    _set_productized_epoch(h['store'])
+    declaration = h['new'] / 'deploy' / 'rollback_compatibility.json'
+    payload = json.loads(declaration.read_text())
+    payload['forward_predecessor_approval'][field] = {
+        'release_id': '20260915-other',
+        'source_commit': '0' * 40,
+        'archive_sha256': '0' * 64,
+        'manifest_sha256': '0' * 64,
+        'schema_fingerprint': '0' * 64,
+        'data_contract': 'other_contract',
+    }[field]
+    declaration.write_text(json.dumps(payload))
+    h['pack']()
+    with pytest.raises(h['gate'].RollbackBlocked, match=check):
+        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
+
+
+def test_member_status_floor_schema012_p0_predecessor_manifest_tamper_blocks(pg_current):
+    h = pg_current
+    directory = install_exact_p0_predecessor(h)
+    h['store'] = h['fresh_database'](count=12)
+    _set_productized_epoch(h['store'])
+    manifest = directory / f'{P0_PREDECESSOR_ID}.manifest.json'
+    payload = json.loads(manifest.read_text())
+    payload['build_platform'] = 'tampered'
+    manifest.write_text(json.dumps(payload))
+    with pytest.raises(h['gate'].RollbackBlocked, match='approved_manifest_identity'):
+        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
 
 
 @pytest.mark.parametrize('release_id,source_commit,returncode,check', [
