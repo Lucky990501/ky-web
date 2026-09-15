@@ -48,11 +48,11 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = RELEASE_ARTIFACT_CACHE / '20260915-069f978'
-PRODUCTION_PREDECESSOR_ID = '20260915-069f978'
-PRODUCTION_PREDECESSOR_COMMIT = '069f9787723bb96ef4b27cbc829cabc232c53a73'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '7b56336e543d0c51cb6464806a186f4ad8945660acd0038f91c5ddbb2d8100c4'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'a56a5268f53ecd61ed46b160de7f79189ecaad1b2ae7bf8fb68d5834d1ef1788'
+PRODUCTION_PREDECESSOR_ROOT = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/candidate-artifacts/20260915-b02c8b5')
+PRODUCTION_PREDECESSOR_ID = '20260915-b02c8b5'
+PRODUCTION_PREDECESSOR_COMMIT = 'b02c8b51cbe7e18a2a3f3f90a1f83cb36989c3ba'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'c38fc3d4bfac9851ae2afadda4cb452950bfe6cb0ba33de4a2550fc8997dff80'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = '380df6db9a6c5b88551704b708a9c1db9ebaa83d455bc9b5ae54530cc67e3635'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -243,7 +243,7 @@ def activate_b930(h):
 
 def install_exact_production_predecessor(h):
     import hashlib
-    assert PRODUCTION_PREDECESSOR_ROOT.parent == RELEASE_ARTIFACT_CACHE
+    assert PRODUCTION_PREDECESSOR_ROOT.parent.name == 'candidate-artifacts'
     archive = PRODUCTION_PREDECESSOR_ROOT / f'{PRODUCTION_PREDECESSOR_ID}.tar.gz'
     manifest = PRODUCTION_PREDECESSOR_ROOT / f'{PRODUCTION_PREDECESSOR_ID}.manifest.json'
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == PRODUCTION_PREDECESSOR_ARCHIVE_SHA
@@ -336,7 +336,7 @@ def test_member_status_floor_schema012_accepts_only_exact_production_predecessor
     _set_productized_epoch(h['store'])
     result = pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['evidence_version'] == 'fixed_069f978_member_status_predecessor'
+    assert result['evidence_version'] == 'fixed_b02c8b5_member_status_predecessor'
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
         pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit='0' * 40)
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
