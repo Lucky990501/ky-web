@@ -206,11 +206,9 @@ def read_history(database_url, postgres_major, *, plan=False, target_id=None, ta
         history_prefix = plan or len(rows) < len(trusted_items)
         check_history(rows, trusted_items, plan=history_prefix)
         active_floors = active_contract_floors(rows, floors or [], trusted_items)
-        if active_floors and reference != own_reference:
-            raise RollbackBlocked('rollback_target_below_member_account_status_floor')
-        if reference == contract['epochs'][0]['minimum_target'] and state['epoch_rank'] > 1:
+        if reference == contract['epochs'][0]['minimum_target'] and state['epoch_rank'] > 1 and not active_floors:
             raise RollbackBlocked('rollback_target_below_data_compatibility_floor')
-        require(reference in epoch['allowed_targets'] or (bool(active_floors) and reference == own_reference),
+        require(reference in epoch['allowed_targets'] or bool(active_floors),
                 'target_not_approved_for_compatibility_epoch')
         return rows, state, source, active_floors
 
@@ -240,7 +238,7 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     require(own_source == trusted_root, 'trusted_release_identity')
     declaration = read_json(trusted_root / 'deploy' / 'rollback_compatibility.json')
     require(set(declaration) == {'schema_version', 'supported_data_contracts', 'data_contract_floors',
-                                'baseline', 'approved_targets', 'epoch_contract'}
+                                'forward_predecessor_approval', 'baseline', 'approved_targets', 'epoch_contract'}
             and type(declaration['schema_version']) is int and declaration['schema_version'] == 3, 'declaration_schema')
     baseline = declaration['baseline']
     require(set(baseline) == {'id', 'source_commit', 'migrations'} and COMMIT.fullmatch(baseline['source_commit'])
@@ -249,7 +247,15 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     contract = epoch_contract(declaration)
     schema_lock = contract['schema_migrations']
     floors = data_contract_floors(declaration, schema_lock)
+    predecessor = declaration['forward_predecessor_approval']
+    require(set(predecessor) == {'release_id','source_commit','archive_sha256','manifest_sha256','schema_fingerprint','data_contract'}
+            and predecessor['release_id'] == '20260915-4057ca6'
+            and predecessor['source_commit'] == '4057ca619111d15b7ee7209e61f6b1af1cf4dc16'
+            and HASH.fullmatch(predecessor['archive_sha256']) and HASH.fullmatch(predecessor['manifest_sha256'])
+            and predecessor['schema_fingerprint'] == digest(schema_lock)
+            and predecessor['data_contract'] == 'member_account_status_v1', 'forward_predecessor_declaration')
     own_reference = {'release_id': own_manifest['release_id'], 'source_commit': own_manifest['source_commit']}
+    reference = {'release_id': target_id, 'source_commit': target_commit}
     trusted_items = check_sources(trusted_root, schema_lock)
     # Read epoch before opening or validating the requested target Artifact.
     if database_url is None:
@@ -262,6 +268,7 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     require(isinstance(targets, list) and len({t['release_id'] for t in targets}) == len(targets), 'approved_target_set')
     matching = [t for t in targets if t['release_id'] == target_id and t['source_commit'] == target_commit]
     self_target = {'release_id': target_id, 'source_commit': target_commit} == own_reference
+    predecessor_target = reference == {'release_id': predecessor['release_id'], 'source_commit': predecessor['source_commit']}
     if matching:
         require(len(matching) == 1, 'unapproved_target')
         target = matching[0]
@@ -279,6 +286,10 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
                 and evidence['checks'] == dict.fromkeys(('api', 'mcp', 'worker', 'legacy_minimal_run'), 'PASS')
                 and isinstance(evidence['scope'], str) and evidence['scope'], 'compatibility_evidence')
         target_root, _ = release_identity(base, target_id, target_commit, target)
+    elif predecessor_target:
+        target_root, _ = release_identity(base, target_id, target_commit, predecessor)
+        target_lock = schema_lock
+        evidence = {'version': 'fixed_4057_member_status_predecessor', 'data_scope': 'productized_v1'}
     else:
         require(self_target and bool(active_floors), 'unapproved_target')
         target_root, target_lock = own_source, schema_lock
@@ -290,10 +301,12 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
             and HASH.fullmatch(approval['report_sha256']) and approval['report_sha256'] != '0'*64
             and approval['checks'] == dict.fromkeys(('legacy_011','productized_011','restart','control_plane_rollback','reenable'),'PASS'),
             'epoch_schema_compatibility_evidence')
+    if 'member_account_status_v1' in active_floors and not (self_target or predecessor_target):
+        raise RollbackBlocked('rollback_target_below_member_account_status_floor')
     if state['epoch'] == 'productized_v1':
         require(evidence['data_scope'] == 'productized_v1', 'target_data_scope_evidence')
     if 'member_account_status_v1' in active_floors:
-        require(self_target and 'member_account_status_v1' in declaration['supported_data_contracts'],
+        require((self_target or predecessor_target) and 'member_account_status_v1' in declaration['supported_data_contracts'],
                 'rollback_target_below_member_account_status_floor')
     target_items = check_sources(target_root, target_lock)
     # A pre-012 database remains an exact, trusted prefix.  It has not yet
