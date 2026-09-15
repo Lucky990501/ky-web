@@ -1,5 +1,6 @@
 """Permanent pre-Pilot Epoch; every PostgreSQL test uses a marked private DB."""
 from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -15,7 +16,11 @@ from app.agent_productization import AgentCatalogError, AgentProductization
 from app.product_store import ProductStore
 from app.store import POCStore
 from scripts import compatibility_epoch as epoch, migrate
+from scripts import rollback_preflight as CURRENT_GATE
 from test_release_switch import pg_rollback_catalog, pg_rollback_harness, pg_gate, pg_entry
+
+CURRENT_EPOCH = epoch
+CURRENT_MIGRATE = migrate
 
 SQL = Path(__file__).resolve().parents[1] / 'migrations/postgres/011_platform_compatibility_epoch.sql'
 BD_ROOT = Path('/private/tmp/ky-web-stage27.yFFOL6')
@@ -27,6 +32,19 @@ B930_ARCHIVE_SHA = '195b3729643974c510fcfabff5e498b4211007cffab0bb968ee2f86cb555
 B930_MANIFEST_SHA = 'e2a3102e6fe5eaab80145f1b05b30b20fb68f267259ed33f7be7ebf70109817b'
 B930_EVIDENCE_VERSION = 'current-b930-original-artifact-pg16-001-011-v1'
 B930_EVIDENCE_SHA = '7d2a12e8a9f30fd3d6a69bf62d0dd2cdab7d67435f175db9eb7a3ed1624a4cfc'
+# This is the last immutable 001–011 declaration that approves both
+# productized-v1 historical targets; the later P0 feature commit adds 012.
+HISTORICAL_TOOLING_COMMIT = '21be29942b67445d245889e7099f4b8eee41243a'
+HISTORICAL_RELEASE_PATHS = (
+    'enterprise_agent_poc/app/',
+    'enterprise_agent_poc/migrations/',
+    'enterprise_agent_poc/scripts/',
+    'enterprise_agent_poc/skill_packages/',
+    'enterprise_agent_poc/deploy/',
+    'enterprise_agent_poc/Dockerfile',
+    'enterprise_agent_poc/docker-compose.yml',
+    'enterprise_agent_poc/pyproject.toml',
+)
 P0_PREDECESSOR_ROOT = Path('/private/tmp/first-customer-p0-909203d')
 P0_PREDECESSOR_ID = '20260915-909203d'
 P0_PREDECESSOR_COMMIT = '909203dfb1d4bf4016b44977ce4a0553a32bf7c8'
@@ -65,9 +83,28 @@ def test_sqlite_explicit_advance_is_permanent_even_zero_rows(local_control):
             conn.execute(sql)
 
 
-@pytest.fixture
-def pg_epoch(pg_rollback_harness):
-    h = pg_rollback_harness
+def _use_epoch_modules(epoch_module, gate_module, migrate_module):
+    global epoch, migrate
+    import scripts
+    epoch = epoch_module
+    migrate = migrate_module
+    scripts.compatibility_epoch = epoch_module
+    scripts.rollback_preflight = gate_module
+    scripts.migrate = migrate_module
+    sys.modules['scripts.compatibility_epoch'] = epoch_module
+    sys.modules['scripts.rollback_preflight'] = gate_module
+    sys.modules['scripts.migrate'] = migrate_module
+
+
+def _load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _install_bd(h):
     assert BD_ROOT.is_dir()
     directory = h['base']/'releases'/BD_ID
     directory.mkdir()
@@ -76,12 +113,73 @@ def pg_epoch(pg_rollback_harness):
     with tarfile.open(directory/f'{BD_ID}.tar.gz') as archive:
         archive.extractall(directory, filter='data')
     h['bd'] = directory/'enterprise_agent_poc'
+
+
+def _install_b930(h):
+    origin, manifest = original_b930_manifest()
+    directory = h['base'] / 'releases' / B930_ID
+    directory.mkdir()
+    for suffix in ('tar.gz', 'manifest.json'):
+        shutil.copyfile(origin / f'{B930_ID}.{suffix}', directory / f'{B930_ID}.{suffix}')
+    with tarfile.open(directory / f'{B930_ID}.tar.gz') as archive:
+        archive.extractall(directory, filter='data')
+    h['b930'] = directory / 'enterprise_agent_poc'
+    return manifest
+
+
+def _assert_archive_matches_source(source):
+    with tarfile.open(source.parent / 'fixture-new.tar.gz') as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            archived = archive.extractfile(member)
+            assert archived is not None
+            path = source.parent / member.name
+            assert (path.is_file() and not path.is_symlink() and path.resolve() == path
+                    and path.read_bytes() == archived.read()
+                    and path.stat().st_mode & 0o111 == member.mode & 0o111), member.name
+
+
+@pytest.fixture(autouse=True)
+def current_modules_between_tests():
+    _use_epoch_modules(CURRENT_EPOCH, CURRENT_GATE, CURRENT_MIGRATE)
+    yield
+    _use_epoch_modules(CURRENT_EPOCH, CURRENT_GATE, CURRENT_MIGRATE)
+
+
+@pytest.fixture
+def pg_epoch(pg_rollback_harness):
+    """Historical 001–011 model backed by the immutable b930 artifact."""
+    h = pg_rollback_harness
+    _install_bd(h)
+    _install_b930(h)
+    shutil.rmtree(h['new'].parent)
+    h['new'].parent.mkdir(parents=True)
+    source_archive = h['new'].parent / 'historical-tooling.tar'
+    with source_archive.open('wb') as stream:
+        subprocess.run(['git', '-C', str(Path(__file__).resolve().parents[2]), 'archive', '--format=tar',
+                        HISTORICAL_TOOLING_COMMIT, '--', *HISTORICAL_RELEASE_PATHS], stdout=stream, check=True)
+    with tarfile.open(source_archive) as archive:
+        archive.extractall(h['new'].parent, filter='data')
+    source_archive.unlink()
     # Linux systemd/procfs boundary only. This is an independently packed
-    # synthetic TEST helper, not a change to the original bd Artifact.
+    # synthetic TEST helper, not a change to the immutable b930 Artifact.
     helper=h['new']/'scripts/compatibility_epoch.py'
     helper.write_text(helper.read_text().replace('running_identity_check or require_running_release',
         'running_identity_check or (lambda source: None)'))
+    gate_path = h['new'] / 'scripts' / 'rollback_preflight.py'
+    gate_path.write_text(gate_path.read_text().replace("BASE = Path('/opt/enterprise-agent-workbench')", f"BASE = Path({str(h['base'])!r})"))
+    switch = h['new'] / 'deploy' / 'release_switch.sh'
+    switch.write_text(switch.read_text().replace('base=/opt/enterprise-agent-workbench', f'base="{h["base"]}"').replace('/etc/systemd/system/', str(h['systemd']) + '/'))
     h['pack']()
+    _assert_archive_matches_source(h['new'])
+    historical_migrate = _load_module('historical_migrate', h['new'] / 'scripts' / 'migrate.py')
+    _use_epoch_modules(CURRENT_EPOCH, CURRENT_GATE, historical_migrate)
+    historical_gate = _load_module('historical_rollback_preflight', gate_path)
+    historical_epoch = _load_module('historical_compatibility_epoch', helper)
+    h['gate'] = historical_gate
+    _use_epoch_modules(historical_epoch, historical_gate, historical_migrate)
+    _assert_archive_matches_source(h['new'])
     return h
 
 
@@ -116,14 +214,13 @@ def epoch_gate():
 
 
 @pytest.fixture
-def pg_current(pg_epoch):
-    h=pg_epoch;origin,manifest=original_b930_manifest()
-    directory=h['base']/'releases'/B930_ID;directory.mkdir()
-    for suffix in ('tar.gz','manifest.json'):
-        shutil.copyfile(origin/f'{B930_ID}.{suffix}',directory/f'{B930_ID}.{suffix}')
-    with tarfile.open(directory/f'{B930_ID}.tar.gz') as archive:
-        archive.extractall(directory,filter='data')
-    h['b930']=directory/'enterprise_agent_poc'
+def pg_current(pg_rollback_harness):
+    """Current 001–012 model backed by the current trusted fixture source."""
+    h = pg_rollback_harness
+    _install_bd(h)
+    manifest = _install_b930(h)
+    _use_epoch_modules(CURRENT_EPOCH, CURRENT_GATE, CURRENT_MIGRATE)
+    h['gate'] = CURRENT_GATE
     gate=h['gate'];d=json.loads((h['new']/'deploy/rollback_compatibility.json').read_text())
     reference={'release_id':B930_ID,'source_commit':B930_COMMIT}
     # Test the reviewed repository approval, never inject/relabel an approval
@@ -175,8 +272,8 @@ def test_current_original_manifest_is_pinned_and_floor_declaration_unchanged():
     assert not any(t['release_id']==B930_ID for t in old_b930_json['approved_targets'])
 
 
-def test_postgres_current_tooling_application_separation_and_permanent_floor(pg_current):
-    h=pg_current;activate_b930(h);before=h['snapshot']()
+def test_postgres_current_tooling_application_separation_and_permanent_floor(pg_epoch):
+    h=pg_epoch;activate_b930(h);before=h['snapshot']()
     assert pg_gate(h)['compatibility_epoch']=='legacy_v1'
     result=advance(h);assert result['status']=='advanced'
     with h['store'].connection() as c:
@@ -208,8 +305,8 @@ def _set_productized_epoch(store):
         )
 
 
-def test_member_status_floor_schema011_preserves_approved_productized_targets(pg_current):
-    h = pg_current
+def test_member_status_floor_schema011_preserves_approved_productized_targets(pg_epoch):
+    h = pg_epoch
     _set_productized_epoch(h['store'])
     assert pg_gate(h, target_id=BD_ID, commit=BD_COMMIT)['status'] == 'rollback_preflight_passed'
     assert pg_gate(h, target_id=B930_ID, commit=B930_COMMIT)['status'] == 'rollback_preflight_passed'
@@ -336,8 +433,8 @@ def test_member_status_floor_keeps_unknown_and_checksum_history_fail_closed(pg_c
 
 
 @pytest.mark.parametrize('tamper',['source','archive','archive_sha','manifest','file_bytes','selected_count','selected_set','cwd','inactive'])
-def test_postgres_current_identity_tamper_blocks_before_advance(pg_current,tamper,monkeypatch):
-    h=pg_current;activate_b930(h);before=h['snapshot']();manifest=h['b930'].parent/f'{B930_ID}.manifest.json'
+def test_postgres_current_identity_tamper_blocks_before_advance(pg_epoch,tamper,monkeypatch):
+    h=pg_epoch;activate_b930(h);before=h['snapshot']();manifest=h['b930'].parent/f'{B930_ID}.manifest.json'
     if tamper=='archive':
         p=h['b930'].parent/f'{B930_ID}.tar.gz';p.write_bytes(p.read_bytes()+b'fault')
     elif tamper=='file_bytes':
@@ -363,8 +460,8 @@ def test_postgres_current_identity_tamper_blocks_before_advance(pg_current,tampe
 
 
 @pytest.mark.parametrize('tamper',['unknown012','checksum011','missing_epoch','corrupt_epoch'])
-def test_postgres_current_approved_identity_still_requires_strict_epoch_history(pg_current,tamper):
-    h=pg_current;activate_b930(h)
+def test_postgres_current_approved_identity_still_requires_strict_epoch_history(pg_epoch,tamper):
+    h=pg_epoch;activate_b930(h)
     if tamper in ('unknown012','checksum011'):h['store']=h['fresh_database'](fault=tamper)
     else:
         with h['store'].connection() as c:
@@ -379,7 +476,7 @@ def test_postgres_current_approved_identity_still_requires_strict_epoch_history(
     assert h['snapshot']()==before and not h['events'].exists()
 
 
-def test_postgres_001_012_first_apply_rerun_and_legacy_initialization(pg_epoch, capsys):
+def test_historical_postgres_001_011_first_apply_rerun_and_legacy_initialization(pg_epoch, capsys):
     h = pg_epoch
     before = h['snapshot']()
     with h['store'].connection() as conn:
@@ -388,7 +485,7 @@ def test_postgres_001_012_first_apply_rerun_and_legacy_initialization(pg_epoch, 
         conn.execute(SQL.read_text())
     assert migrate.up(h['store']) == 0 and migrate.status(h['store']) == 0
     result = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert len(result['migrations']) == 12 and result['pending'] == result['checksum_mismatch'] == 0
+    assert len(result['migrations']) == 11 and result['pending'] == result['checksum_mismatch'] == 0
     assert result['unknown_history_versions'] == [] and h['snapshot']() == before
     assert pg_gate(h)['compatibility_epoch'] == 'legacy_v1'
 
@@ -566,13 +663,14 @@ def test_postgres_create_waits_for_advance_commit_or_blocks_after_rollback(pg_ep
 
 
 def test_postgres_backup_restore_preserves_epoch_and_floor(pg_epoch):
+    import os
     import uuid
     from psycopg import sql
     from urllib.parse import urlparse,parse_qs,urlencode
     h=pg_epoch;approve_active_bd(h);advance(h)
     with h['store'].connection() as c:before=epoch.read_state(c)
     parsed=urlparse(h['store'].database_url);args={k:v[0] for k,v in parse_qs(parsed.query).items()}
-    pg=Path('/private/tmp/ky-web-stage1-postgres.bqKYMg')
+    pg=Path(os.environ['STAGE1_POSTGRES_ROOT']).resolve()
     assert args['host']==str(pg/'socket') and (pg/'stage1-isolated.marker').read_text().strip()=='ky-web-stage1-local-only'
     binaries=pg/'pg16/bin'
     command=[str(binaries/'pg_dump'),'--host',args['host'],'--port',args['port'],'--username',args['user'],parsed.path[1:]]
@@ -628,8 +726,8 @@ def test_original_bd_v2_control_rollback_restart_and_forward_restore(pg_epoch, t
     original_artifact_e2e(pg_epoch,tmp_path)
 
 
-def test_original_b930_current_and_productized_artifact_compatibility(pg_current,tmp_path):
-    original_artifact_e2e(pg_current,tmp_path,current_b930=True)
+def test_original_b930_current_and_productized_artifact_compatibility(pg_epoch,tmp_path):
+    original_artifact_e2e(pg_epoch,tmp_path,current_b930=True)
 
 
 def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
@@ -641,6 +739,7 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
     from app.task_queue import RedisTaskQueue
     h=pg_epoch; root=h['base']
     compatible=h['b930'] if current_b930 else h['bd']
+    redis_socket = Path('/private/tmp') / f'epoch-redis-{os.getpid()}-{time.monotonic_ns()}.sock'
     (root/'epoch-isolation.marker').write_text('ky-web-epoch-isolated-v1')
     redis_binary=Path('/private/tmp/ky-web-stage2-readiness.m7EWh0/redis-7.4.2/src/redis-server')
     assert redis_binary.is_file()
@@ -650,7 +749,11 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
     env={**h['env'], 'ENTERPRISE_POC_OBJECT_STORAGE_DIR':str(root/'objects'),
         'ENTERPRISE_POC_OBJECT_STORAGE_PROVIDER':'local','ENTERPRISE_POC_TASK_QUEUE':'redis',
         'ENTERPRISE_POC_TASK_QUEUE_NAMESPACE':'isolated-epoch',
-        'REDIS_URL':f'unix://{root}/redis.sock?db=0',
+        'REDIS_URL':f'unix://{redis_socket}?db=0',
+        'EPOCH_TEST_ROOT':str(root),
+        'EPOCH_TEST_REDIS_SOCKET':str(redis_socket),
+        'EPOCH_TEST_CURRENT_SOURCE':str(Path(__file__).resolve().parents[1]),
+        'STAGE1_POSTGRES_ROOT':os.environ['STAGE1_POSTGRES_ROOT'],
         'ENTERPRISE_POC_MCP_URL':f'http://127.0.0.1:{mcp_port}/mcp',
         'ENTERPRISE_POC_MCP_HOST':'127.0.0.1','ENTERPRISE_POC_MCP_PORT':str(mcp_port),
         'ENTERPRISE_POC_MODEL_BASE_URL':'http://127.0.0.1:1/',
@@ -708,10 +811,10 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
     evidence={}
     try:
         redis_log=(root/'redis.log').open('wb');logs['redis']=redis_log
-        processes['redis']=subprocess.Popen([str(redis_binary),'--port','0','--unixsocket',str(root/'redis.sock'),
+        processes['redis']=subprocess.Popen([str(redis_binary),'--port','0','--unixsocket',str(redis_socket),
             '--unixsocketperm','700','--save','','--appendonly','no'],stdout=redis_log,stderr=redis_log)
         deadline=time.monotonic()+5
-        while not (root/'redis.sock').exists() and time.monotonic()<deadline:time.sleep(.05)
+        while not redis_socket.exists() and time.monotonic()<deadline:time.sleep(.05)
         q=RedisTaskQueue(env['REDIS_URL'],'isolated-epoch');assert q.ping()
         # Original candidate itself under legacy_v1 for the b930-specific E2E;
         # preserve the historical bd/old-floor E2E and its evidence unchanged.
@@ -727,12 +830,11 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
             legacy_task=old_api.post('/api/v1/agents/copywriting-agent/runs',json={'message':'Synthetic old Legacy on 011'})
             assert legacy_task.status_code==202;poll_task(old_api,legacy_task.json()['id'])
         for role in ('api','mcp','worker'):stop(role)
-        start('api',compatible if current_b930 else Path(__file__).resolve().parents[1]);ready()
+        start('api', compatible if current_b930 else h['new']);ready()
         with httpx.Client(base_url=f'http://127.0.0.1:{api_port}',timeout=10) as api:
             login(api)
             blocked=api.post('/api/v1/platform/agents',json={'slug':'social-content-agent','name':'Synthetic social content'})
-            assert blocked.status_code==409 and blocked.json()['error_code']=='INVALID_INPUT'
-            assert blocked.json()['detail']==blocked.json()['user_message'] and blocked.json()['request_id']
+            assert blocked.status_code == 409 and blocked.json() == {'detail': 'compatibility_epoch_not_advanced'}
             stop('api')
             for role in ('api','mcp','worker'):start(role,compatible,False)
             ready()
@@ -830,8 +932,7 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
             # Policy disabled on a NEW Draft, not inferred from an enabled flag.
             draft=api.post(f'/api/v1/platform/agents/{tid}/versions',json={'from_version_id':v['id']}).json()['versions'][0]
             denied=api.post(f"/api/v1/platform/agents/{tid}/versions/{draft['id']}/test",json={'configuration_fingerprint':draft['configuration_fingerprint']})
-            assert denied.status_code==409 and denied.json()['error_code']=='INVALID_INPUT'
-            assert denied.json()['detail']==denied.json()['user_message'] and denied.json()['request_id']
+            assert denied.status_code == 409 and denied.json() == {'detail': 'Server Runtime Test policy denied'}
             legacy=api.get('/api/v1/agents').json()
             agents=legacy['agents'] if isinstance(legacy,dict) else legacy
             assert {a['id'] for a in agents}=={'image-agent','copywriting-agent','campaign-agent'}
@@ -887,3 +988,4 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
     finally:
         for role in tuple(processes):stop(role)
         for log in logs.values():log.close()
+        redis_socket.unlink(missing_ok=True)

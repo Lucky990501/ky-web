@@ -16,21 +16,21 @@ def main():
     parser.add_argument('--port',type=int,required=True)
     args=parser.parse_args()
     root=Path(args.root).resolve()
-    assert root.is_relative_to(Path('/private/tmp')) and root.stat().st_uid==os.getuid()
+    assert root == Path(os.environ['EPOCH_TEST_ROOT']).resolve() and root.stat().st_uid==os.getuid()
     assert (root/'epoch-isolation.marker').read_text()=='ky-web-epoch-isolated-v1'
-    pg=Path('/private/tmp/ky-web-stage1-postgres.bqKYMg')
+    pg=Path(os.environ['STAGE1_POSTGRES_ROOT']).resolve()
     assert (pg/'stage1-isolated.marker').read_text().strip()=='ky-web-stage1-local-only'
     db=urlparse(os.environ['ENTERPRISE_POC_DATABASE_URL']); query=parse_qs(db.query)
     assert not db.hostname and query['host']==[str(pg/'socket')] and db.path.startswith('/rollback_')
     assert os.environ['ENTERPRISE_POC_DATA_DIR']==str(root/'shared/runtime-data')
-    assert os.environ['REDIS_URL']==f'unix://{root}/redis.sock?db=0'
+    assert os.environ['REDIS_URL']==f"unix://{Path(os.environ['EPOCH_TEST_REDIS_SOCKET']).resolve()}?db=0"
     assert os.environ['ENTERPRISE_POC_MODEL_BASE_URL']=='http://127.0.0.1:1/'
     import psycopg
     with psycopg.connect(os.environ['ENTERPRISE_POC_DATABASE_URL'],options='-c default_transaction_read_only=on') as c:
         assert c.execute('SHOW listen_addresses').fetchone()[0]==''
         assert Path(c.execute('SHOW data_directory').fetchone()[0]).resolve()==pg/'cluster'
     source=Path(args.source).resolve()
-    assert source==Path('/Users/lucky/Projects/ky-web/enterprise_agent_poc') or source.is_relative_to(root/'releases')
+    assert source == Path(os.environ['EPOCH_TEST_CURRENT_SOURCE']).resolve() or source.is_relative_to(root/'releases')
     sys.path.insert(0,str(source))
     if args.role=='mcp':
         from app.platform_mcp.server import create_mcp

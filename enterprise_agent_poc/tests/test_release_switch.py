@@ -491,7 +491,7 @@ def test_postgres_old_runner_stays_failed_new_normal_runner_strict_and_preflight
     assert old.returncode == 2
     assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010', '011']
     assert pg_entry(h, '--preflight-only').returncode == 0
-    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('012','unknown.sql',?)", ('0' * 64,))
+    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('013','unknown.sql',?)", ('0' * 64,))
     assert migrate.status(h['store']) == 2
     with pytest.raises(RuntimeError, match='未知'):migrate.up(h['store'])
     assert not h['events'].exists()
@@ -507,17 +507,19 @@ def test_postgres_pre_switch_plan_allows_only_an_applied_prefix_not_full_rollbac
     with pytest.raises(h['gate'].RollbackBlocked):pg_gate(h, plan=True)
 
 
-def test_postgres_switch_health_fail_runs_trusted_gate_restores_old_then_health(pg_rollback_harness):
+def test_postgres_switch_health_fail_current_floor_blocks_unsafe_restore(pg_rollback_harness):
     h = pg_rollback_harness;before = h['snapshot']()
     r = pg_entry(h, '')
-    assert r.returncode == 1 and 'rollback_preflight_passed' in r.stdout and 'rolled_back' in r.stdout
-    assert 'schema_rollback":false' in r.stdout
+    assert r.returncode == 1 and 'rollback_target_below_member_account_status_floor' in r.stdout
+    assert 'rollback_BLOCKED' in r.stderr and 'rolled_back' not in r.stdout
     events = [json.loads(l) for l in h['events'].read_text().splitlines()]
     restarts = [e for e in events if e['args'][0] == 'restart']
-    assert len(restarts) == 2 and restarts[0]['target'] == str(h['new']) and restarts[1]['target'] == str(h['old'])
-    assert (h['base'] / 'release-current').resolve() == h['old']
-    for name, b in h['dropins'].items():assert (h['systemd'] / f'{name}.service.d/release.conf').read_bytes() == b
-    assert h['snapshot']() == before
+    assert len(restarts) == 1 and restarts[0]['target'] == str(h['new'])
+    assert (h['base'] / 'release-current').resolve() == h['new']
+    after = h['snapshot']()
+    assert [row['version'] for row in after[0]['schema_migrations']] == [f'{i:03}' for i in range(1, 13)]
+    assert {k: v for k, v in after[0].items() if k != 'schema_migrations'} == {k: v for k, v in before[0].items() if k != 'schema_migrations'}
+    assert after[1] == before[1]
 
 
 def test_postgres_rollback_failed_gate_after_new_health_failure_does_not_restore_or_restart(pg_rollback_harness):
@@ -541,11 +543,12 @@ print(json.dumps({{'status':'error','knowledge':'ok','environment':'production'}
     assert list(h['base'].glob('.release-switch.*'))  # Snapshot retained for humans.
 
 
-def test_postgres_old_health_failure_cannot_be_reported_as_successful_rollback(pg_rollback_harness):
+def test_postgres_old_health_stage_is_not_reached_below_current_member_floor(pg_rollback_harness):
     h = pg_rollback_harness
     r = pg_entry(h, '', FAIL_OLD_HEALTH='true')
-    assert r.returncode == 1 and 'rollback_health_BLOCKED' in r.stderr and '"status":"rolled_back"' not in r.stdout
-    assert (h['base'] / 'release-current').resolve() == h['old']
+    assert r.returncode == 1 and 'rollback_target_below_member_account_status_floor' in r.stdout
+    assert 'rollback_health_BLOCKED' not in r.stderr and '"status":"rolled_back"' not in r.stdout
+    assert (h['base'] / 'release-current').resolve() == h['new']
     assert list(h['base'].glob('.release-switch.*'))
 
 
