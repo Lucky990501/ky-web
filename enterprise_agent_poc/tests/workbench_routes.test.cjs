@@ -264,12 +264,43 @@ test('Polish batch keeps the customer workspace focused and renders asset tags a
   assert.ok(tags.includes('logo'));
 });
 
+test('Workspace polish aligns agent actions, limits recent lists, and exposes profile navigation',async()=>{
+  const h=harness('/workspace');
+  const pending=h.run("render('workspace')");
+  h.respond('/api/v1/workspace',{brand_name:'测试企业',credit_balance:100,agents:[
+    {id:'image-agent',name:'图片生成智能体',description:'制作企业视觉内容',enabled:true,credit_cost:20,icon:'image'},
+    {id:'copywriting-agent',name:'文案创作智能体',description:'制作企业文案',enabled:true,credit_cost:3,icon:'type'},
+    {id:'campaign-agent',name:'活动策划智能体',description:'制作企业活动',enabled:true,credit_cost:8,icon:'calendar-days'}
+  ],recent_conversations:[
+    {id:'one',agent_id:'image-agent',title:'项目一'},
+    {id:'two',agent_id:'image-agent',title:'项目二'},
+    {id:'three',agent_id:'image-agent',title:'项目三'},
+    {id:'four',agent_id:'image-agent',title:'项目四'}
+  ],recent_generations:[
+    {project:{name:'生成一'}},{project:{name:'生成二'}},{project:{name:'生成三'}},{project:{name:'生成四'}}
+  ]});
+  await pending;
+  const markup=h.document.main.innerHTML;
+  assert.ok(markup.includes('workspace-page-header'));
+  assert.equal((markup.match(/agent-card-footer/g)||[]).length,3);
+  assert.equal((markup.match(/data-agent-conversation=/g)||[]).length,3);
+  assert.ok(markup.includes('生成三'));
+  assert.ok(!markup.includes('生成四'));
+  assert.match(source,/class="side-user" data-go="profile" aria-label="进入个人中心"/);
+});
+
 test('mobile Drawer controls exist and sidebar has a responsive replacement',()=>{
   assert.match(source,/mobile-menu-button/);
   assert.match(source,/mobile-drawer/);
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
   assert.match(css,/\.mobile-drawer\.open\{transform:translateX\(0\)\}/);
   assert.match(css,/@media\(max-width:860px\)/);
+});
+
+test('Workspace polish uses a new static asset version',()=>{
+  const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
+  assert.match(index,/workbench\.css\?v=workspace-polish-v2/);
+  assert.match(index,/workbench\.js\?v=workspace-polish-v2/);
 });
 
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
