@@ -329,7 +329,7 @@ def pg_rollback_harness(pg_rollback_catalog, tmp_path):
         archive.extractall(old_dir, filter='data')
     old = old_dir / 'enterprise_agent_poc'
     new = releases / 'fixture-new' / 'enterprise_agent_poc'
-    shutil.copytree(project, new, ignore=shutil.ignore_patterns('.venv', '.runtime-data', '__pycache__', '.pytest_cache', 'tests', 'skill_sources', '*.md', '.env*'))
+    shutil.copytree(project, new, ignore=shutil.ignore_patterns('.venv', '.runtime-data', '__pycache__', '.pytest_cache', 'tests', 'skill_sources', '*.md', '.env*', '.DS_Store'))
     # *.md ignore is inappropriate for immutable bundled inputs: copy exact bundle.
     shutil.rmtree(new / 'skill_packages')
     shutil.copytree(project / 'skill_packages', new / 'skill_packages')

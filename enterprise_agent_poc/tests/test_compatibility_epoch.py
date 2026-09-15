@@ -23,7 +23,10 @@ CURRENT_EPOCH = epoch
 CURRENT_MIGRATE = migrate
 
 SQL = Path(__file__).resolve().parents[1] / 'migrations/postgres/011_platform_compatibility_epoch.sql'
-BD_ROOT = Path('/private/tmp/ky-web-stage27.yFFOL6')
+RELEASE_ARTIFACT_CACHE = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/release-artifacts')
+POSTGRES_TEST_BIN = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/postgresql-16.6/bin')
+REDIS_TEST_BINARY = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/redis-7.4.2/bin/redis-server')
+BD_ROOT = RELEASE_ARTIFACT_CACHE / '20260914-bd04dcb'
 BD_ID = '20260914-bd04dcb'
 BD_COMMIT = 'bd04dcb982bf0efe02a5a1a42dd162d94265da0b'
 B930_ID = '20260914-b930e87'
@@ -45,11 +48,11 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-P0_PREDECESSOR_ROOT = Path('/private/tmp/first-customer-p0-909203d')
-P0_PREDECESSOR_ID = '20260915-909203d'
-P0_PREDECESSOR_COMMIT = '909203dfb1d4bf4016b44977ce4a0553a32bf7c8'
-P0_PREDECESSOR_ARCHIVE_SHA = '5a364322350d65e7fb35c6728c32dbb110e646ed88461873a226b970104e1608'
-P0_PREDECESSOR_MANIFEST_SHA = '05b0700698a08adee51390c6c546d3d52a3e77be221a3823eda08672352bd132'
+PRODUCTION_PREDECESSOR_ROOT = RELEASE_ARTIFACT_CACHE / '20260915-069f978'
+PRODUCTION_PREDECESSOR_ID = '20260915-069f978'
+PRODUCTION_PREDECESSOR_COMMIT = '069f9787723bb96ef4b27cbc829cabc232c53a73'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '7b56336e543d0c51cb6464806a186f4ad8945660acd0038f91c5ddbb2d8100c4'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'a56a5268f53ecd61ed46b160de7f79189ecaad1b2ae7bf8fb68d5834d1ef1788'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -195,9 +198,9 @@ def advance(h, **kwargs):
 
 
 def original_b930_manifest():
-    import hashlib, os
-    root=Path(os.environ.get('CURRENT_APPLICATION_ARTIFACT_ROOT','/private/tmp/ky-web-stage210.G32W91')).resolve()
-    assert root.parent==Path('/private/tmp') and root.stat().st_uid==os.getuid()
+    import hashlib
+    root = RELEASE_ARTIFACT_CACHE / B930_ID
+    assert root.parent == RELEASE_ARTIFACT_CACHE
     manifest_path=root/f'{B930_ID}.manifest.json'
     manifest=json.loads(manifest_path.read_text())
     assert hashlib.sha256((root/f'{B930_ID}.tar.gz').read_bytes()).hexdigest()==B930_ARCHIVE_SHA
@@ -238,14 +241,14 @@ def activate_b930(h):
     link=h['base']/'release-current';link.unlink();link.symlink_to(h['b930'],target_is_directory=True)
 
 
-def install_exact_p0_predecessor(h):
+def install_exact_production_predecessor(h):
     import hashlib
-    assert P0_PREDECESSOR_ROOT.parent == Path('/private/tmp')
-    archive = P0_PREDECESSOR_ROOT / f'{P0_PREDECESSOR_ID}.tar.gz'
-    manifest = P0_PREDECESSOR_ROOT / f'{P0_PREDECESSOR_ID}.manifest.json'
-    assert hashlib.sha256(archive.read_bytes()).hexdigest() == P0_PREDECESSOR_ARCHIVE_SHA
-    assert h['gate'].digest(json.loads(manifest.read_text())) == P0_PREDECESSOR_MANIFEST_SHA
-    directory = h['base'] / 'releases' / P0_PREDECESSOR_ID
+    assert PRODUCTION_PREDECESSOR_ROOT.parent == RELEASE_ARTIFACT_CACHE
+    archive = PRODUCTION_PREDECESSOR_ROOT / f'{PRODUCTION_PREDECESSOR_ID}.tar.gz'
+    manifest = PRODUCTION_PREDECESSOR_ROOT / f'{PRODUCTION_PREDECESSOR_ID}.manifest.json'
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == PRODUCTION_PREDECESSOR_ARCHIVE_SHA
+    assert h['gate'].digest(json.loads(manifest.read_text())) == PRODUCTION_PREDECESSOR_MANIFEST_SHA
+    directory = h['base'] / 'releases' / PRODUCTION_PREDECESSOR_ID
     directory.mkdir()
     shutil.copyfile(archive, directory / archive.name)
     shutil.copyfile(manifest, directory / manifest.name)
@@ -326,22 +329,22 @@ def test_member_status_floor_schema012_blocks_old_artifacts_and_accepts_declared
     assert candidate['active_data_contract_floors'] == ['member_account_status_v1']
 
 
-def test_member_status_floor_schema012_accepts_only_exact_p0_predecessor(pg_current):
+def test_member_status_floor_schema012_accepts_only_exact_production_predecessor(pg_current):
     h = pg_current
-    directory = install_exact_p0_predecessor(h)
+    directory = install_exact_production_predecessor(h)
     h['store'] = h['fresh_database'](count=12)
     _set_productized_epoch(h['store'])
-    result = pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
+    result = pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['evidence_version'] == 'fixed_909203d_member_status_predecessor'
+    assert result['evidence_version'] == 'fixed_069f978_member_status_predecessor'
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
-        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit='0' * 40)
+        pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit='0' * 40)
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
-        pg_gate(h, target_id='20260915-4057ca6', commit='4057ca619111d15b7ee7209e61f6b1af1cf4dc16')
-    archive = directory / f'{P0_PREDECESSOR_ID}.tar.gz'
+        pg_gate(h, target_id='20260915-909203d', commit='909203dfb1d4bf4016b44977ce4a0553a32bf7c8')
+    archive = directory / f'{PRODUCTION_PREDECESSOR_ID}.tar.gz'
     archive.write_bytes(archive.read_bytes() + b'fault')
     with pytest.raises(h['gate'].RollbackBlocked, match='archive_checksum'):
-        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
+        pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
 
 
 @pytest.mark.parametrize(('field', 'check'), [
@@ -352,9 +355,9 @@ def test_member_status_floor_schema012_accepts_only_exact_p0_predecessor(pg_curr
     ('schema_fingerprint', 'forward_predecessor_declaration'),
     ('data_contract', 'forward_predecessor_declaration'),
 ])
-def test_member_status_floor_schema012_p0_predecessor_declaration_tamper_blocks(pg_current, field, check):
+def test_member_status_floor_schema012_production_predecessor_declaration_tamper_blocks(pg_current, field, check):
     h = pg_current
-    install_exact_p0_predecessor(h)
+    install_exact_production_predecessor(h)
     h['store'] = h['fresh_database'](count=12)
     _set_productized_epoch(h['store'])
     declaration = h['new'] / 'deploy' / 'rollback_compatibility.json'
@@ -370,20 +373,20 @@ def test_member_status_floor_schema012_p0_predecessor_declaration_tamper_blocks(
     declaration.write_text(json.dumps(payload))
     h['pack']()
     with pytest.raises(h['gate'].RollbackBlocked, match=check):
-        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
+        pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
 
 
-def test_member_status_floor_schema012_p0_predecessor_manifest_tamper_blocks(pg_current):
+def test_member_status_floor_schema012_production_predecessor_manifest_tamper_blocks(pg_current):
     h = pg_current
-    directory = install_exact_p0_predecessor(h)
+    directory = install_exact_production_predecessor(h)
     h['store'] = h['fresh_database'](count=12)
     _set_productized_epoch(h['store'])
-    manifest = directory / f'{P0_PREDECESSOR_ID}.manifest.json'
+    manifest = directory / f'{PRODUCTION_PREDECESSOR_ID}.manifest.json'
     payload = json.loads(manifest.read_text())
     payload['build_platform'] = 'tampered'
     manifest.write_text(json.dumps(payload))
     with pytest.raises(h['gate'].RollbackBlocked, match='approved_manifest_identity'):
-        pg_gate(h, target_id=P0_PREDECESSOR_ID, commit=P0_PREDECESSOR_COMMIT)
+        pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
 
 
 @pytest.mark.parametrize('release_id,source_commit,returncode,check', [
@@ -391,10 +394,13 @@ def test_member_status_floor_schema012_p0_predecessor_manifest_tamper_blocks(pg_
      'rollback_target_below_member_account_status_floor'),
     (BD_ID, BD_COMMIT, 2, 'rollback_target_below_member_account_status_floor'),
     (B930_ID, B930_COMMIT, 2, 'rollback_target_below_member_account_status_floor'),
+    (PRODUCTION_PREDECESSOR_ID, PRODUCTION_PREDECESSOR_COMMIT, 0, 'rollback_preflight_passed'),
+    ('20260915-909203d', '909203dfb1d4bf4016b44977ce4a0553a32bf7c8', 2, 'unapproved_target'),
     ('fixture-new', 'f' * 40, 0, 'rollback_preflight_passed'),
 ])
 def test_member_status_floor_schema012_real_cli_path(pg_current, release_id, source_commit, returncode, check):
     h = pg_current
+    install_exact_production_predecessor(h)
     h['store'] = h['fresh_database'](count=12)
     _set_productized_epoch(h['store'])
     result = subprocess.run(
@@ -672,7 +678,8 @@ def test_postgres_backup_restore_preserves_epoch_and_floor(pg_epoch):
     parsed=urlparse(h['store'].database_url);args={k:v[0] for k,v in parse_qs(parsed.query).items()}
     pg=Path(os.environ['STAGE1_POSTGRES_ROOT']).resolve()
     assert args['host']==str(pg/'socket') and (pg/'stage1-isolated.marker').read_text().strip()=='ky-web-stage1-local-only'
-    binaries=pg/'pg16/bin'
+    binaries=POSTGRES_TEST_BIN
+    assert all((binaries / name).is_file() for name in ('pg_dump','pg_restore','psql'))
     command=[str(binaries/'pg_dump'),'--host',args['host'],'--port',args['port'],'--username',args['user'],parsed.path[1:]]
     backup=subprocess.run(command,capture_output=True,check=True).stdout
     # Full synthetic dump is transferred only in memory, never copied to disk.
@@ -741,7 +748,7 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
     compatible=h['b930'] if current_b930 else h['bd']
     redis_socket = Path('/private/tmp') / f'epoch-redis-{os.getpid()}-{time.monotonic_ns()}.sock'
     (root/'epoch-isolation.marker').write_text('ky-web-epoch-isolated-v1')
-    redis_binary=Path('/private/tmp/ky-web-stage2-readiness.m7EWh0/redis-7.4.2/src/redis-server')
+    redis_binary=REDIS_TEST_BINARY
     assert redis_binary.is_file()
     def free_port():
         with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
