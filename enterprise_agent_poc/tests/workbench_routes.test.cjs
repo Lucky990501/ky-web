@@ -168,8 +168,8 @@ test('member, enterprise admin, and platform admin share one filtered navigation
   const h=harness('/workspace');
   const ids=user=>JSON.parse(h.run(`JSON.stringify(navigationForUser(${JSON.stringify(user)}).map(item=>item[0]))`));
   assert.deepEqual(ids({role:'member',is_platform_admin:false}),['workspace','image','history','generations','profile']);
-  assert.deepEqual(ids({role:'enterprise_admin',is_platform_admin:false}),['workspace','image','history','generations','knowledge','assets','members','enterprise','profile']);
-  assert.deepEqual(ids({role:'enterprise_admin',is_platform_admin:true}),['workspace','image','history','generations','knowledge','assets','members','enterprise','platform-skills','platform-agents','profile']);
+  assert.deepEqual(ids({role:'enterprise_admin',is_platform_admin:false}),['workspace','image','history','generations','knowledge','assets','recent-tasks','members','enterprise','profile']);
+  assert.deepEqual(ids({role:'enterprise_admin',is_platform_admin:true}),['workspace','image','history','generations','knowledge','assets','recent-tasks','members','enterprise','platform-skills','platform-agents','profile']);
   h.run("me={role:'member',is_platform_admin:false}");
   assert.equal(h.run("allowedPage('members')"),'workspace');
   assert.equal(h.run("pageRoutes.members"),'/members');
@@ -217,6 +217,31 @@ test('member status UI exposes enable and disable without deleting identities',(
   assert.ok(source.includes("data-member-status=\"${item.status==='enabled'?'disabled':'enabled'}\""));
   assert.ok(source.includes('/status`,{method:\'PUT\''));
   assert.ok(!source.includes('data-delete-member'));
+});
+
+test('P1 customer agent UX keeps examples, copy, regeneration and real reference rendering in the business UI',()=>{
+  const h=harness('/workspace');
+  for(const id of ['image-agent','copywriting-agent','campaign-agent']){
+    const html=h.run(`agentFirstUseHtml({id:'${id}',name:'测试智能体',description:'说明'})`);
+    assert.ok(html.includes('适合做什么'));
+    assert.ok(html.includes('data-example-prompt'));
+  }
+  const message=h.run("messageHtml({role:'assistant',content:'最终回复',created_at:'2026-09-15T00:00:00',references:{knowledge:[{id:'file-1',name:'品牌规范.pdf'}]}},'原始需求')");
+  assert.ok(message.includes('data-copy-response'));
+  assert.ok(message.includes('data-regenerate'));
+  assert.ok(message.includes('参考资料'));
+  assert.ok(message.includes('品牌规范.pdf'));
+  assert.ok(source.includes("input.value=node.dataset.regenerate"));
+  assert.ok(!source.includes('asset_retrievals'));
+});
+
+test('P1 recent task navigation remains enterprise-admin only',()=>{
+  const h=harness('/workspace');
+  const enterprise=JSON.parse(h.run("JSON.stringify(navigationForUser({role:'enterprise_admin',is_platform_admin:false}).map(item=>item[0]))"));
+  assert.ok(enterprise.includes('recent-tasks'));
+  h.run("me={role:'member',is_platform_admin:false}");
+  assert.equal(h.run("allowedPage('recent-tasks')"),'workspace');
+  assert.equal(h.run("pageRoutes['recent-tasks']"),'/recent-tasks');
 });
 
 test('mobile Drawer controls exist and sidebar has a responsive replacement',()=>{

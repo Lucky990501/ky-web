@@ -355,6 +355,7 @@ async def production_health() -> dict:
 @app.get("/agents/{agent_id}", include_in_schema=False)
 @app.get("/conversations", include_in_schema=False)
 @app.get("/generations", include_in_schema=False)
+@app.get("/recent-tasks", include_in_schema=False)
 @app.get("/enterprise-config", include_in_schema=False)
 @app.get("/knowledge", include_in_schema=False)
 @app.get("/assets", include_in_schema=False)
@@ -621,6 +622,21 @@ async def get_conversation(conversation_id: str, workbench_session: str | None =
     if not detail:
         raise HTTPException(404, "会话不存在。")
     return detail
+
+
+@app.get("/api/v1/admin/recent-tasks")
+async def recent_tasks(
+    days: int = Query(default=7, ge=7, le=30),
+    status: str = Query(default="all"),
+    agent_id: str | None = Query(default=None, max_length=120),
+    workbench_session: str | None = Cookie(default=None),
+) -> dict:
+    principal = require_admin(workbench_session)
+    if days not in {7, 30} or status not in {"all", "processing", "completed", "failed"}:
+        raise HTTPException(422, "筛选条件不正确。")
+    result = product_store.recent_tasks(principal.tenant_id, days=days, status=status, agent_id=agent_id)
+    result["tasks"] = [_public_task(item, include_diagnostic=True) for item in result["tasks"]]
+    return result
 
 
 @app.get("/api/v1/generations")

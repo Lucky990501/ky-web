@@ -138,13 +138,13 @@ def login(client, account):
 
 @pytest.mark.parametrize(
     "path",
-    ("/conversations", "/agents/image", "/agents/copywriting", "/agents/campaign"),
+    ("/conversations", "/agents/image", "/agents/copywriting", "/agents/campaign", "/recent-tasks"),
 )
 def test_history_and_agent_deep_links_serve_the_current_shell(history_env, path):
     response = history_env.client.get(path)
 
     assert response.status_code == 200
-    assert "workbench.js?v=first-customer-p0-v1" in response.text
+    assert "workbench.js?v=first-customer-ux-p1-v1" in response.text
 
 
 def test_history_classifies_projects_and_keeps_task_and_image_scope(history_env):

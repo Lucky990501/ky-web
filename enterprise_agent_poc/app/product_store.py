@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from app.agent_catalog import CATALOG, get_agent
@@ -626,6 +626,29 @@ class ProductStore:
         result["generations"] = generations
         result["image_count"] = len(generations)
         generation_by_task = {item["task_id"]: item for item in generations}
+        task_runs = {item["id"]: item.get("run_id") for item in tasks}
+        trace_payloads = {
+            item["run_id"]: json.loads(item["payload"])
+            for item in runs
+            if item["run_id"] and item["payload"]
+        }
+        reference_ids = {
+            str(result.get("file_id"))
+            for payload in trace_payloads.values()
+            for retrieval in payload.get("knowledge_retrievals", [])
+            if isinstance(retrieval, dict)
+            for result in retrieval.get("results", [])
+            if isinstance(result, dict) and result.get("accepted") is True and result.get("file_id")
+        }
+        file_names: dict[str, str] = {}
+        if reference_ids:
+            placeholders = ",".join("?" for _ in reference_ids)
+            with self._store.connection() as reference_conn:
+                rows = reference_conn.execute(
+                    f"SELECT id,name FROM knowledge_files WHERE tenant_id=? AND id IN ({placeholders})",
+                    (tenant_id, *sorted(reference_ids)),
+                ).fetchall()
+            file_names = {str(item["id"]): str(item["name"]) for item in rows}
         message_items = [dict(item) for item in messages]
         for message in message_items:
             message_id = str(message["id"])
@@ -640,9 +663,78 @@ class ProductStore:
                 message["task_id"] = task_id
                 if message["role"] == "assistant" and task_id in generation_by_task:
                     message["generation"] = generation_by_task[task_id]
+                if message["role"] == "assistant":
+                    payload = trace_payloads.get(task_runs.get(task_id), {})
+                    referenced = []
+                    for retrieval in payload.get("knowledge_retrievals", []):
+                        if not isinstance(retrieval, dict):
+                            continue
+                        for observation in retrieval.get("results", []):
+                            file_id = str(observation.get("file_id") or "") if isinstance(observation, dict) else ""
+                            if observation.get("accepted") is True and file_id in file_names:
+                                referenced.append({"id": file_id, "name": file_names[file_id]})
+                    if referenced:
+                        unique = {item["id"]: item for item in referenced}
+                        message["references"] = {"knowledge": list(unique.values())}
         result["messages"] = message_items
         result["runs"] = [{"run_id": item["run_id"], "status": item["status"], "created_at": item["created_at"], "completed_at": item["completed_at"]} for item in runs]
         return result
+
+    @staticmethod
+    def _recent_task_time(value: object) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+    def recent_tasks(self, tenant_id: str, *, days: int, status: str = "all", agent_id: str | None = None) -> dict:
+        """Tenant-scoped operating view for enterprise administrators.
+
+        This is deliberately a compact recent list rather than a reporting or
+        billing surface. Credit usage comes only from committed task charges.
+        """
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT t.id,t.user_id,t.agent_id,t.status,t.stage,t.error_code,t.user_message,t.created_at,t.started_at,t.completed_at,"
+                "u.display_name AS member_name,COALESCE(a.name,t.agent_id) AS agent_name,"
+                "COALESCE(SUM(CASE WHEN c.amount < 0 THEN -c.amount ELSE 0 END),0) AS credit_used "
+                "FROM tasks t JOIN users u ON u.id=t.user_id "
+                "LEFT JOIN agent_templates a ON a.id=t.agent_id "
+                "LEFT JOIN credit_transactions c ON c.task_id=t.id AND c.tenant_id=t.tenant_id "
+                "WHERE t.tenant_id=? GROUP BY t.id,t.user_id,t.agent_id,t.status,t.stage,t.error_code,t.user_message,"
+                "t.created_at,t.started_at,t.completed_at,u.display_name,a.name ORDER BY t.created_at DESC LIMIT 500",
+                (tenant_id,),
+            ).fetchall()
+        status_groups = {"all": {"queued", "running", "completed", "failed"}, "processing": {"queued", "running"}, "completed": {"completed"}, "failed": {"failed"}}
+        allowed = status_groups.get(status, status_groups["all"])
+        summary_items = []
+        tasks = []
+        for row in rows:
+            item = dict(row)
+            created_at = self._recent_task_time(item.get("created_at"))
+            if created_at is None or created_at < since:
+                continue
+            item["credit_used"] = int(item["credit_used"] or 0)
+            summary_items.append(item)
+            if item["status"] not in allowed:
+                continue
+            if agent_id and item["agent_id"] != agent_id:
+                continue
+            tasks.append(item)
+        return {
+            "summary": {
+                "days": days,
+                "task_count": len(summary_items),
+                "completed_count": sum(item["status"] == "completed" for item in summary_items),
+                "failed_count": sum(item["status"] == "failed" for item in summary_items),
+                "credit_used": sum(item["credit_used"] for item in summary_items),
+            },
+            "tasks": tasks[:100],
+        }
 
     def rename_conversation(self, tenant_id: str, user_id: str, conversation_id: str, title: str) -> bool:
         with self._store.connection() as conn:
