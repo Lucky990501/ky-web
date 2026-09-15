@@ -264,7 +264,7 @@ test('Polish batch keeps the customer workspace focused and renders asset tags a
   assert.ok(tags.includes('logo'));
 });
 
-test('Workspace polish aligns agent actions, limits recent lists, and exposes profile navigation',async()=>{
+test('Workspace banner aligns agent cards, limits recent lists, and exposes profile navigation',async()=>{
   const h=harness('/workspace');
   const pending=h.run("render('workspace')");
   h.respond('/api/v1/workspace',{brand_name:'测试企业',credit_balance:100,agents:[
@@ -281,7 +281,10 @@ test('Workspace polish aligns agent actions, limits recent lists, and exposes pr
   ]});
   await pending;
   const markup=h.document.main.innerHTML;
-  assert.ok(markup.includes('workspace-page-header'));
+  assert.ok(markup.includes('workspace-greeting-banner'));
+  assert.ok(markup.includes('workspace-greeting-banner-v1.png'));
+  assert.ok(!markup.includes('agent-card featured'));
+  assert.match(fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8'),/\.topbar\{justify-content:flex-end\}/);
   assert.equal((markup.match(/agent-card-footer/g)||[]).length,3);
   assert.equal((markup.match(/data-agent-conversation=/g)||[]).length,3);
   assert.ok(markup.includes('生成三'));
@@ -297,10 +300,10 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
   assert.match(css,/@media\(max-width:860px\)/);
 });
 
-test('Workspace polish uses a new static asset version',()=>{
+test('Workspace banner uses a new static asset version',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=workspace-polish-v2/);
-  assert.match(index,/workbench\.js\?v=workspace-polish-v2/);
+  assert.match(index,/workbench\.css\?v=workspace-banner-v3/);
+  assert.match(index,/workbench\.js\?v=workspace-banner-v3/);
 });
 
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
