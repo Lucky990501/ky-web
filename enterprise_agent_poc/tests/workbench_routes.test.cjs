@@ -213,7 +213,7 @@ test('customer error fallback never uses a raw backend detail',()=>{
 });
 
 test('member status UI exposes enable and disable without deleting identities',()=>{
-  assert.ok(source.includes("item.status==='enabled'?'Enabled':'Disabled'"));
+  assert.ok(source.includes("item.status==='enabled'?'已启用':'已停用'"));
   assert.ok(source.includes("data-member-status=\"${item.status==='enabled'?'disabled':'enabled'}\""));
   assert.ok(source.includes('/status`,{method:\'PUT\''));
   assert.ok(!source.includes('data-delete-member'));
@@ -242,6 +242,26 @@ test('P1 recent task navigation remains enterprise-admin only',()=>{
   h.run("me={role:'member',is_platform_admin:false}");
   assert.equal(h.run("allowedPage('recent-tasks')"),'workspace');
   assert.equal(h.run("pageRoutes['recent-tasks']"),'/recent-tasks');
+});
+
+test('Polish batch keeps the customer workspace focused and renders asset tags as chips',async()=>{
+  const h=harness('/workspace');
+  const pending=h.run("render('workspace')");
+  h.respond('/api/v1/workspace',{brand_name:'测试企业',credit_balance:100,agents:[
+    {id:'image-agent',name:'图片生成智能体',description:'制作企业视觉内容',enabled:true,credit_cost:20,icon:'image'},
+    {id:'social-content-agent',name:'未开放智能体',description:'不应展示',enabled:false,credit_cost:3,icon:'bot'}
+  ],recent_conversations:[],recent_generations:[]});
+  await pending;
+  assert.ok(h.document.main.innerHTML.includes('适用场景'));
+  assert.ok(h.document.main.innerHTML.includes('开始第一次 AI 对话'));
+  assert.ok(!h.document.main.innerHTML.includes('未开放智能体'));
+  assert.ok(!h.document.main.innerHTML.includes('即将上线'));
+  assert.equal(h.run("taskStatusLabel('running')"),'处理中');
+  assert.equal(h.run("knowledgeStatus('embedding')"),'知识处理中');
+  const tags=h.run("assetTagMarkup('[\\\"brand\\\",\\\"logo\\\"]')");
+  assert.ok(tags.includes('asset-tag'));
+  assert.ok(tags.includes('brand'));
+  assert.ok(tags.includes('logo'));
 });
 
 test('mobile Drawer controls exist and sidebar has a responsive replacement',()=>{
