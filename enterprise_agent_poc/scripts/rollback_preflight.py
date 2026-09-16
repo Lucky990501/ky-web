@@ -249,8 +249,8 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     floors = data_contract_floors(declaration, schema_lock)
     predecessor = declaration['forward_predecessor_approval']
     require(set(predecessor) == {'release_id','source_commit','archive_sha256','manifest_sha256','schema_fingerprint','data_contract'}
-            and predecessor['release_id'] == '20260915-06d12c9'
-            and predecessor['source_commit'] == '06d12c9055f8df0c707d4f2b2596b80f0a72755d'
+            and predecessor['release_id'] == '20260916-113368d'
+            and predecessor['source_commit'] == '113368dc121e73fe390a31fabaa27b6a3213d336'
             and HASH.fullmatch(predecessor['archive_sha256']) and HASH.fullmatch(predecessor['manifest_sha256'])
             and predecessor['schema_fingerprint'] == digest(schema_lock)
             and predecessor['data_contract'] == 'member_account_status_v1', 'forward_predecessor_declaration')
@@ -289,7 +289,7 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     elif predecessor_target:
         target_root, _ = release_identity(base, target_id, target_commit, predecessor)
         target_lock = schema_lock
-        evidence = {'version': 'fixed_06d12c9_member_status_predecessor', 'data_scope': 'productized_v1'}
+        evidence = {'version': 'fixed_113368d_member_status_predecessor', 'data_scope': 'productized_v1'}
     else:
         require(self_target and bool(active_floors), 'unapproved_target')
         target_root, target_lock = own_source, schema_lock

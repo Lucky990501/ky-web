@@ -48,11 +48,11 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/candidate-artifacts/20260915-06d12c9')
-PRODUCTION_PREDECESSOR_ID = '20260915-06d12c9'
-PRODUCTION_PREDECESSOR_COMMIT = '06d12c9055f8df0c707d4f2b2596b80f0a72755d'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'e926def2fca504c54bd03203bedbc82c6cbdcf03bc2a8d02bb139f050275fbc1'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = '3a5b6309bf657565982272b2739f6535cc5434eda9da92ae6fe6e39f56cd9d30'
+PRODUCTION_PREDECESSOR_ROOT = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/candidate-artifacts/20260916-113368d')
+PRODUCTION_PREDECESSOR_ID = '20260916-113368d'
+PRODUCTION_PREDECESSOR_COMMIT = '113368dc121e73fe390a31fabaa27b6a3213d336'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'd88b8dab9c2be6ba662db650275189961638d2e150938cc9a3b75a0691cde3dd'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = '246f4af50f7d741b3ded554cba43b1ec6704ec785be628179aea831f7a8b2cb1'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -336,11 +336,11 @@ def test_member_status_floor_schema012_accepts_only_exact_production_predecessor
     _set_productized_epoch(h['store'])
     result = pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['evidence_version'] == 'fixed_06d12c9_member_status_predecessor'
+    assert result['evidence_version'] == 'fixed_113368d_member_status_predecessor'
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
         pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit='0' * 40)
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
-        pg_gate(h, target_id='20260915-909203d', commit='909203dfb1d4bf4016b44977ce4a0553a32bf7c8')
+        pg_gate(h, target_id='20260915-06d12c9', commit='06d12c9055f8df0c707d4f2b2596b80f0a72755d')
     archive = directory / f'{PRODUCTION_PREDECESSOR_ID}.tar.gz'
     archive.write_bytes(archive.read_bytes() + b'fault')
     with pytest.raises(h['gate'].RollbackBlocked, match='archive_checksum'):
