@@ -231,6 +231,15 @@ test('P1 customer agent UX keeps examples, copy, regeneration and real reference
   assert.ok(message.includes('data-regenerate'));
   assert.ok(message.includes('参考资料'));
   assert.ok(message.includes('品牌规范.pdf'));
+  const userMessage=h.run("messageHtml({role:'user',content:'请调整方案',created_at:'2026-09-15T00:00:00'})");
+  assert.ok(userMessage.includes('chat-message-user'));
+  assert.ok(userMessage.includes('chat-message-content-user'));
+  const markdown=h.run(`markdownHtml(${JSON.stringify('# 标题\n\n**重点**\n- 第一项\n- 第二项\n\n<script>alert(1)</script>')})`);
+  assert.ok(markdown.includes('<h1>标题</h1>'));
+  assert.ok(markdown.includes('<strong>重点</strong>'));
+  assert.ok(markdown.includes('<ul><li>第一项</li><li>第二项</li></ul>'));
+  assert.ok(markdown.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+  assert.match(fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8'),/\.chat-message-assistant \.chat-message-content\{[^}]*max-height:440px[^}]*overflow:auto/);
   assert.ok(source.includes("input.value=node.dataset.regenerate"));
   assert.ok(!source.includes('asset_retrievals'));
 });
@@ -302,8 +311,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace banner uses a new static asset version',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=workspace-banner-v3/);
-  assert.match(index,/workbench\.js\?v=workspace-banner-v3/);
+  assert.match(index,/workbench\.css\?v=agent-response-v4/);
+  assert.match(index,/workbench\.js\?v=agent-response-v4/);
 });
 
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
