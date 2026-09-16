@@ -181,11 +181,61 @@ function bindConversationActions(main){
   main.querySelectorAll('[data-regenerate]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.regenerate;input.focus();});
   main.querySelectorAll('[data-open-message-generation]').forEach(node=>node.onclick=()=>openGenerationViewer(node.dataset.openMessageGeneration,'本次生成图片',node));
 }
-const taskStageLabel = stage => stage==='completed'?'已完成':'正在思考';
+const taskStageLabel = stage => ({generating:'正在生成',persisting_result:'正在整理结果'})[stage]||'正在思考';
+const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',status:'正在思考',completed:false,error:null});
+const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true"><div class="chat-message-content chat-message-content-markdown" data-stream-content><p class="streaming-placeholder">${escapeHtml(status)}</p></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
+const streamingFinalContentHtml = (content,sourcePrompt='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}</div>`;
+const streamingFailureHtml = (partial,message,diagnosticId='') => `<section class="task-failure streaming-failure" role="alert">${partial?`<div class="streaming-partial"><small>部分回复（未保存）</small><div class="chat-message-content chat-message-content-markdown">${markdownHtml(partial)}</div></div>`:''}<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>${partial?'生成已中断。你可以保留这段内容，或重新尝试。':'你可以把原需求放回输入框，检查后再次提交。'}</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button></section>`;
+function acceptStreamingDelta(state,payload){
+  const sequence=Number(payload?.sequence),text=typeof payload?.text==='string'?payload.text:'';
+  if(!Number.isInteger(sequence)||sequence<1||!text||sequence<=state.lastSequence||state.pending.has(sequence))return false;
+  state.pending.set(sequence,text);let changed=false;
+  while(state.pending.has(state.lastSequence+1)){state.text+=state.pending.get(state.lastSequence+1);state.pending.delete(state.lastSequence+1);state.lastSequence+=1;changed=true;}
+  return changed;
+}
+function applyStreamingEvent(state,kind,payload={}){
+  if(state.completed||state.error)return false;
+  if(kind==='progress'){state.status=taskStageLabel(payload.stage);return true;}
+  if(kind==='delta'){const changed=acceptStreamingDelta(state,payload);if(changed)state.status='正在生成';return changed;}
+  if(kind==='complete'){state.completed=true;state.finalResponse=typeof payload.final_response==='string'?payload.final_response:state.text;return true;}
+  if(kind==='error'){state.error=payload.message||customerErrorMessages.TASK_FAILED;state.diagnosticId=payload.diagnostic_id||'';return true;}
+  return false;
+}
+function shouldAutoFollowStream(){
+  const root=document.scrollingElement||document.documentElement||document.body;
+  if(!root)return true;
+  const viewport=root.clientHeight||(typeof window!=='undefined'&&window.innerHeight)||0;
+  return root.scrollHeight-root.scrollTop-viewport<96;
+}
+function scrollStreamToBottom(follow){
+  if(!follow)return;
+  const root=document.scrollingElement||document.documentElement||document.body;
+  if(root)root.scrollTop=root.scrollHeight;
+}
+function renderStreamingMessage(node,state){
+  if(!node||state.completed||state.error)return;
+  const follow=shouldAutoFollowStream(),content=node.querySelector('[data-stream-content]'),status=node.querySelector('[data-stream-status]');
+  if(content)content.innerHTML=state.text?markdownHtml(state.text):`<p class="streaming-placeholder">${escapeHtml(state.status)}</p>`;
+  if(status){status.hidden=false;status.querySelector('span').textContent=state.status;}
+  scrollStreamToBottom(follow);
+}
+function scheduleStreamingRender(node,state){
+  if(state.renderPending)return;
+  state.renderPending=true;
+  const render=()=>{state.renderPending=false;renderStreamingMessage(node,state);};
+  if(typeof requestAnimationFrame==='function')requestAnimationFrame(render);else setTimeout(render,16);
+}
+function completeStreamingMessage(node,state,sourcePrompt,main){
+  if(!node)return;
+  state.completed=true;const follow=shouldAutoFollowStream(),finalResponse=state.finalResponse||state.text;
+  node.removeAttribute('aria-busy');node.classList.remove('streaming-message');node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt);
+  bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow);
+}
 function replaceTaskFailure(node,message,retryText,diagnosticId=''){
   if(!node)return;
-  const card=document.createElement('section');card.className='task-failure';card.setAttribute('role','alert');card.innerHTML=`<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>你可以把原需求放回输入框，检查后再次提交。</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button>`;
-  node.replaceWith(card);card.querySelector('button').onclick=()=>{const input=document.querySelector('#prompt');if(!input)return;input.value=retryText;input.focus();};refreshIcons();
+  const partial=node._streamState?.text||'';
+  const card=document.createElement('section');card.innerHTML=streamingFailureHtml(partial,message,diagnosticId);
+  const failure=card.firstElementChild;node.replaceWith(failure);failure.querySelector('button').onclick=()=>{const input=document.querySelector('#prompt');if(!input)return;input.value=retryText;input.focus();};refreshIcons();
 }
 async function agentWorkspaceV2(main, agentId) {
   activeAgentId=agentId;
@@ -212,9 +262,32 @@ async function agentWorkspaceV2(main, agentId) {
   if(!canRun){main.querySelector('#new-chat').disabled=true;main.querySelector('#composer').innerHTML='<p role="status">智能体已停用，历史项目只读；不能创建任务或继续执行。</p>';main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
   bindNavigation();
 }
-async function submitAgentTaskV2(event,agentId,main){event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim();if(!text)return;input.value='';const body=document.querySelector('#chat-body');body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${escapeHtml(text)}</div></article><section class="task-card task-card-live" id="task-status" role="status"><div class="task-progress"><span class="spin">${icon('loader-circle')}</span><b>正在思考</b></div></section>`);body.scrollTop=body.scrollHeight;refreshIcons();const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});streamTask(task.id,agentId,main,text);}catch(error){replaceTaskFailure(document.querySelector('#task-status'),error.message,text,error.requestId);}}
-function streamTask(taskId,agentId,main,retryText){const card=()=>document.querySelector('#task-status');const source=new EventSource(`/api/v1/tasks/${taskId}/events`);source.addEventListener('progress',event=>{const update=JSON.parse(event.data),node=card();if(!node)return;node.querySelector('b').textContent=taskStageLabel(update.stage);});source.addEventListener('complete',async event=>{source.close();const done=JSON.parse(event.data),node=card();if(done.status==='completed'){activeConversationId=done.conversation_id||activeConversationId;pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');await navigate(agentPage(agentId),{replace:true});}else replaceTaskFailure(node,done.message,retryText,done.diagnostic_id);});source.onerror=()=>{source.close();pollAgentTaskV2(taskId,agentId,main,retryText);};}
-async function pollAgentTaskV2(taskId,agentId,main,retryText){try{const task=await api(`/api/v1/tasks/${taskId}`);if(task.status==='completed'){activeConversationId=task.conversation_id||activeConversationId;pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');return navigate(agentPage(agentId),{replace:true});}if(task.status==='failed'){replaceTaskFailure(document.querySelector('#task-status'),task.user_message,retryText,task.diagnostic_id);return;}setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText),1000);}catch{setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText),2500);}}
+async function submitAgentTaskV2(event,agentId,main){
+  event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim();if(!text||document.querySelector('#task-status'))return;
+  input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
+  body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
+  const node=document.querySelector('#task-status'),state=createStreamingState();node._streamState=state;refreshIcons();scrollStreamToBottom(follow);
+  const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;
+  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId);}
+}
+function streamPayload(event){try{return JSON.parse(event.data||'{}');}catch{return {};}}
+function finishStreamTask(node,state,done,agentId,main,retryText){
+  if(done.status!=='completed'){applyStreamingEvent(state,'error',done);replaceTaskFailure(node,state.error,retryText,state.diagnosticId);return;}
+  applyStreamingEvent(state,'complete',done);activeConversationId=done.conversation_id||activeConversationId;
+  pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');completeStreamingMessage(node,state,retryText,main);
+}
+function streamTask(taskId,agentId,main,retryText,node,state){
+  const source=new EventSource(`/api/v1/tasks/${taskId}/events`);let settled=false;
+  const fallback=()=>{if(settled)return;settled=true;source.close();pollAgentTaskV2(taskId,agentId,main,retryText,node,state);};
+  source.addEventListener('progress',event=>{if(!settled&&applyStreamingEvent(state,'progress',streamPayload(event)))scheduleStreamingRender(node,state);});
+  source.addEventListener('delta',event=>{if(!settled&&applyStreamingEvent(state,'delta',streamPayload(event)))scheduleStreamingRender(node,state);});
+  source.addEventListener('complete',event=>{if(settled)return;settled=true;source.close();finishStreamTask(node,state,streamPayload(event),agentId,main,retryText);});
+  source.addEventListener('error',event=>{const failure=streamPayload(event);if(failure.message){if(settled)return;settled=true;source.close();applyStreamingEvent(state,'error',failure);replaceTaskFailure(node,state.error,retryText,state.diagnosticId);return;}fallback();});
+  source.onerror=fallback;
+}
+async function pollAgentTaskV2(taskId,agentId,main,retryText,node=document.querySelector('#task-status'),state=node?node._streamState:createStreamingState()){
+  try{const task=await api(`/api/v1/tasks/${taskId}`);if(task.status==='completed'){finishStreamTask(node,state,task,agentId,main,retryText);return;}if(task.status==='failed'||task.status==='cancelled'){applyStreamingEvent(state,'error',task);replaceTaskFailure(node,state.error||task.user_message,retryText,state.diagnosticId||task.diagnostic_id);return;}setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),1000);}catch{setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),2500);}
+}
 
 async function agentWorkspace(main, agentId) {
   activeAgentId=agentId; const data=await api('/api/v1/workspace'); const agent=(data.agents||[]).find(x=>x.id===agentId); if(!agent||!agent.enabled){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
