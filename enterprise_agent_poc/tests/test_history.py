@@ -144,7 +144,7 @@ def test_history_and_agent_deep_links_serve_the_current_shell(history_env, path)
     response = history_env.client.get(path)
 
     assert response.status_code == 200
-    assert "workbench.js?v=agent-response-v4" in response.text
+    assert "workbench.js?v=chat-style-v5" in response.text
 
 
 def test_history_classifies_projects_and_keeps_task_and_image_scope(history_env):
