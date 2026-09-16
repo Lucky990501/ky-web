@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 
-from app.domain import RuntimeProfile, RuntimeSession, RuntimeTurn
+from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn
 
 
 class RuntimeStartError(RuntimeError):
@@ -28,6 +29,10 @@ class RuntimeProvider(ABC):
 
     @abstractmethod
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn: ...
+
+    async def stream_turn(self, session: RuntimeSession, message: str) -> AsyncIterator[RuntimeStreamEvent]:
+        """Default compatibility path for providers without native streaming."""
+        yield RuntimeStreamEvent.completed(await self.run_turn(session, message))
 
     @abstractmethod
     async def close(self) -> None: ...

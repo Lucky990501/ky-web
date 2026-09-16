@@ -6,10 +6,12 @@ import json
 import os
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
-from app.domain import RuntimeProfile, RuntimeSession, RuntimeTurn, SandboxPolicy
+from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn, SandboxPolicy
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.skills import SkillDeployment
 from app.settings import Settings
@@ -291,13 +293,20 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn:
         profile = self._profiles[session.profile_id]
+        thread = await self._thread_for_session(session, profile)
+        result = await thread.run(message, sandbox=self._sandbox(profile.sandbox))
+        return self._runtime_turn_from_result(session, profile, result)
+
+    async def _thread_for_session(self, session: RuntimeSession, profile: RuntimeProfile):
         thread = self._threads.get(session.thread_id)
         if thread is None:
             codex = await self._manager.get(profile)
             thread = await codex.thread_resume(session.thread_id, sandbox=self._sandbox(profile.sandbox))
             self._threads[session.thread_id] = thread
+        return thread
+
+    def _runtime_turn_from_result(self, session: RuntimeSession, profile: RuntimeProfile, result: object) -> RuntimeTurn:
         lifecycle_events: list[dict] = [{"event": "turn_started"}]
-        result = await thread.run(message, sandbox=self._sandbox(profile.sandbox))
         usage = result.usage
         mcp_calls: list[dict] = []
         for wrapped_item in result.items:
@@ -367,6 +376,72 @@ class CodexRuntimeProvider(RuntimeProvider):
             error=self._summary(getattr(result, "error", None)),
             lifecycle_events=tuple(lifecycle_events),
         )
+
+    async def stream_turn(self, session: RuntimeSession, message: str) -> AsyncIterator[RuntimeStreamEvent]:
+        """Stream only official agent-message deltas, then one final RuntimeTurn."""
+        from openai_codex.generated.v2_all import (
+            AgentMessageDeltaNotification,
+            ItemCompletedNotification,
+            ThreadTokenUsageUpdatedNotification,
+            TurnCompletedNotification,
+            TurnStatus,
+        )
+
+        profile = self._profiles[session.profile_id]
+        thread = await self._thread_for_session(session, profile)
+        handle = await thread.turn(message, sandbox=self._sandbox(profile.sandbox))
+        items: list[object] = []
+        usage = None
+        completed = None
+        stream = handle.stream()
+        try:
+            async for notification in stream:
+                payload = notification.payload
+                if (
+                    notification.method == "item/agentMessage/delta"
+                    and isinstance(payload, AgentMessageDeltaNotification)
+                    and payload.turn_id == handle.id
+                    and payload.delta
+                ):
+                    yield RuntimeStreamEvent.visible_delta(payload.delta)
+                elif isinstance(payload, ItemCompletedNotification) and payload.turn_id == handle.id:
+                    items.append(payload.item)
+                elif isinstance(payload, ThreadTokenUsageUpdatedNotification) and payload.turn_id == handle.id:
+                    usage = payload.token_usage
+                elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == handle.id:
+                    completed = payload.turn
+        finally:
+            await stream.aclose()
+        if completed is None:
+            raise RuntimeError("turn completed event not received")
+        if completed.status == TurnStatus.failed:
+            message = getattr(getattr(completed, "error", None), "message", None)
+            raise RuntimeError(message or "turn failed")
+        final_response = self._final_assistant_response(items or completed.items)
+        result = SimpleNamespace(
+            usage=usage,
+            items=items or completed.items,
+            final_response=final_response,
+            status=completed.status,
+            error=completed.error,
+            duration_ms=completed.duration_ms,
+        )
+        yield RuntimeStreamEvent.completed(self._runtime_turn_from_result(session, profile, result))
+
+    @staticmethod
+    def _final_assistant_response(items: list[object]) -> str | None:
+        fallback = None
+        for wrapped_item in reversed(items):
+            item = getattr(wrapped_item, "root", wrapped_item)
+            text = getattr(item, "text", None)
+            if not isinstance(text, str):
+                continue
+            phase = str(getattr(getattr(item, "phase", None), "value", getattr(item, "phase", None)) or "")
+            if phase == "final_answer":
+                return text
+            if not phase and fallback is None:
+                fallback = text
+        return fallback
 
     @staticmethod
     def _summary(value: object, limit: int = 600) -> str | None:

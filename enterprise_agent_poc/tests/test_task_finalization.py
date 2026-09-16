@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from app.domain import RuntimeTurn, RuntimeSession
+from app.domain import RuntimeStreamEvent, RuntimeTurn, RuntimeSession
 from app.platform_mcp.service import PlatformMCPService
 from app.product_store import ResultPersistenceError
 from app.runtime.codex_provider import CodexRuntimeProvider
@@ -244,6 +245,142 @@ def test_unrelated_success_cannot_mask_failed_query_with_other_tools_present(tmp
     _,_,saved,trace,_=run_task(tmp_path,monkeypatch,CallsRuntime(calls))
     assert saved["status"] == "failed"
     assert trace["payload"]["required_tool_calls"]["knowledge_search"]["satisfied"] is False
+
+
+class StreamingRuntime(FakeRuntime):
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.turn_count = 0
+
+    async def stream_turn(self, session, message):
+        self.turn_count += 1
+        yield RuntimeStreamEvent.visible_delta("可见")
+        yield RuntimeStreamEvent.visible_delta("正文")
+        if self.fail:
+            raise RuntimeError("provider failed after visible text")
+        yield RuntimeStreamEvent.completed(RuntimeTurn(session.thread_id, "可见正文"))
+
+
+def test_streaming_deltas_are_ordered_and_final_result_stays_atomic(tmp_path, monkeypatch):
+    runtime = StreamingRuntime()
+    store, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", runtime)
+    asyncio.run(service.execute(task))
+
+    deltas = [
+        json.loads(item["message"])
+        for item in product.task_events_since(task["id"], "tenant-a", task["user_id"])
+        if item["stage"] == "delta"
+    ]
+    saved = product.task_for_worker(task["id"])
+    with store.connection() as conn:
+        result = conn.execute("SELECT final_response FROM task_results WHERE task_id=?", (task["id"],)).fetchone()
+        messages = conn.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id", (saved["conversation_id"],)).fetchall()
+    assert deltas == [{"sequence": 1, "text": "可见"}, {"sequence": 2, "text": "正文"}]
+    assert saved["status"] == "completed" and result["final_response"] == "可见正文"
+    assert {(row["role"], row["content"]) for row in messages} == {("user", task["input_text"]), ("assistant", "可见正文")}
+
+
+def test_streaming_failure_never_persists_a_partial_assistant_message(tmp_path, monkeypatch):
+    runtime = StreamingRuntime(fail=True)
+    store, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", runtime)
+    asyncio.run(service.execute(task))
+
+    saved = product.task_for_worker(task["id"])
+    with store.connection() as conn:
+        results = conn.execute("SELECT COUNT(*) AS n FROM task_results WHERE task_id=?", (task["id"],)).fetchone()["n"]
+        assistants = conn.execute("SELECT COUNT(*) AS n FROM messages WHERE id=?", (f"task:{task['id']}:assistant",)).fetchone()["n"]
+    assert saved["status"] == "failed"
+    assert results == 0 and assistants == 0
+
+
+def test_codex_provider_streams_only_agent_message_delta_notifications():
+    from openai_codex.generated.v2_all import AgentMessageDeltaNotification, ItemCompletedNotification, MessagePhase, Turn, TurnCompletedNotification, TurnStatus
+
+    async def notifications():
+        yield SimpleNamespace(method="item/reasoning/textDelta", payload=SimpleNamespace(delta="hidden reasoning"))
+        yield SimpleNamespace(method="item/commandExecution/outputDelta", payload=SimpleNamespace(delta="hidden tool output"))
+        yield SimpleNamespace(method="item/agentMessage/delta", payload=AgentMessageDeltaNotification(delta="可见", itemId="item-1", threadId="thread", turnId="turn"))
+        yield SimpleNamespace(method="item/agentMessage/delta", payload=AgentMessageDeltaNotification(delta="正文", itemId="item-1", threadId="thread", turnId="turn"))
+        item = SimpleNamespace(text="可见正文", phase=MessagePhase.final_answer)
+        yield SimpleNamespace(method="item/completed", payload=ItemCompletedNotification.model_construct(item=item, thread_id="thread", turn_id="turn"))
+        completed = Turn.model_construct(id="turn", status=TurnStatus.completed, items=[item], error=None, duration_ms=9)
+        yield SimpleNamespace(method="turn/completed", payload=TurnCompletedNotification.model_construct(thread_id="thread", turn=completed))
+
+    class Handle:
+        id = "turn"
+
+        def stream(self):
+            return notifications()
+
+    async def turn(*_args, **_kwargs):
+        return Handle()
+
+    provider = CodexRuntimeProvider(None)
+    provider._profiles["profile"] = SimpleNamespace(sandbox="read_only")
+    provider._threads["thread"] = SimpleNamespace(turn=turn)
+
+    async def collect():
+        return [item async for item in provider.stream_turn(RuntimeSession("thread", "profile"), "message")]
+
+    events = asyncio.run(collect())
+    assert [(event.kind, event.text) for event in events[:-1]] == [("delta", "可见"), ("delta", "正文")]
+    assert events[-1].kind == "completed" and events[-1].turn.text == "可见正文"
+
+
+async def _sse_body(response):
+    chunks = [chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator]
+    return "".join(chunks)
+
+
+def test_sse_emits_progress_deltas_then_authoritative_complete(tmp_path, monkeypatch):
+    from app import main
+
+    _, product, task, _, _ = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", FakeRuntime())
+    product.set_task(task["id"], "tenant-a", "running", "starting_runtime", "正在启动")
+    product.add_task_delta(task["id"], "tenant-a", 1, "可见")
+    product.add_task_delta(task["id"], "tenant-a", 2, "正文")
+    product.set_task(task["id"], "tenant-a", "completed", "completed", "完成", response="可见正文")
+    monkeypatch.setattr(main, "product_store", product)
+    monkeypatch.setattr(main, "current_user", lambda _cookie: SimpleNamespace(tenant_id="tenant-a", user_id=task["user_id"], role="member"))
+
+    response = asyncio.run(main.stream_task_events(task["id"], workbench_session="session"))
+    body = asyncio.run(_sse_body(response))
+    assert body.index("event: progress") < body.index('event: delta\ndata: {"sequence": 1') < body.index('event: delta\ndata: {"sequence": 2') < body.index("event: complete")
+    assert '"final_response": "可见正文"' in body
+
+
+def test_sse_failure_after_deltas_emits_error_without_complete(tmp_path, monkeypatch):
+    from app import main
+
+    _, product, task, _, _ = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", FakeRuntime())
+    product.set_task(task["id"], "tenant-a", "running", "starting_runtime", "正在启动")
+    product.add_task_delta(task["id"], "tenant-a", 1, "可见")
+    product.set_task(task["id"], "tenant-a", "failed", "failed", "失败", error_code="runtime_error")
+    monkeypatch.setattr(main, "product_store", product)
+    monkeypatch.setattr(main, "current_user", lambda _cookie: SimpleNamespace(tenant_id="tenant-a", user_id=task["user_id"], role="member"))
+
+    response = asyncio.run(main.stream_task_events(task["id"], workbench_session="session"))
+    body = asyncio.run(_sse_body(response))
+    assert "event: delta" in body and "event: error" in body and "event: complete" not in body
+
+
+def test_closing_sse_generator_does_not_cancel_the_task(tmp_path, monkeypatch):
+    from app import main
+
+    runtime = StreamingRuntime()
+    _, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", runtime)
+    monkeypatch.setattr(main, "product_store", product)
+    monkeypatch.setattr(main, "current_user", lambda _cookie: SimpleNamespace(tenant_id="tenant-a", user_id=task["user_id"], role="member"))
+
+    async def disconnect():
+        response = await main.stream_task_events(task["id"], workbench_session="session")
+        iterator = response.body_iterator
+        await anext(iterator)
+        await iterator.aclose()
+
+    asyncio.run(disconnect())
+    asyncio.run(service.execute(task))
+    assert runtime.turn_count == 1 and product.task_for_worker(task["id"])["status"] == "completed"
 
 
 @pytest.mark.parametrize("status",[401,403,400])
