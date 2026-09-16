@@ -592,6 +592,20 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
         for _ in range(180):
             for item in product_store.task_events_since(task_id, principal.tenant_id, principal.user_id, last_id):
                 last_id = item["id"]
+                if item["stage"] == "delta":
+                    try:
+                        delta = json.loads(item["message"])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if (
+                        isinstance(delta, dict)
+                        and isinstance(delta.get("sequence"), int)
+                        and delta["sequence"] >= 1
+                        and isinstance(delta.get("text"), str)
+                        and delta["text"]
+                    ):
+                        yield f"event: delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+                    continue
                 yield f"event: progress\ndata: {json.dumps(jsonable_encoder(item), ensure_ascii=False)}\n\n"
             task = product_store.task(task_id, principal.tenant_id, principal.user_id)
             if not task:
@@ -600,7 +614,8 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
             if task["status"] in {"completed", "failed", "cancelled"}:
                 public = _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
                 terminal = {"status": public["status"], "error_code": public.get("error_code"), "message": public.get("user_message"), "diagnostic_id": public.get("diagnostic_id"), "final_response": public.get("final_response"), "conversation_id": public.get("conversation_id"), "generation": public.get("generation")}
-                yield f"event: complete\ndata: {json.dumps(jsonable_encoder(terminal), ensure_ascii=False)}\n\n"
+                event = "complete" if task["status"] == "completed" else "error"
+                yield f"event: {event}\ndata: {json.dumps(jsonable_encoder(terminal), ensure_ascii=False)}\n\n"
                 return
             await asyncio.sleep(0.7)
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

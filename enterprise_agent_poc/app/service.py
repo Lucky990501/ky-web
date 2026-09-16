@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from collections.abc import Awaitable
 from typing import Callable
 
 from app.domain import RuntimeProfile, RuntimeSession
@@ -62,6 +63,7 @@ class AgentService:
         *,
         defer_result_persistence: bool = False,
         execution_context: dict | None = None,
+        on_visible_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> RunResult:
         if execution_context is None:
             profile = self.profile_for(tenant_id, agent_id)
@@ -164,7 +166,7 @@ class AgentService:
                     )
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
-            turn = await self._runtime.run_turn(session, message)
+            turn = await self._run_turn(session, message, on_visible_delta)
             trace = self._completed_trace(trace, turn, agent.allows_image_generation)
             if execution_context:
                 for tool in profile.required_tools:
@@ -226,6 +228,26 @@ class AgentService:
                 error_code="runtime_start_error" if isinstance(exc, RuntimeStartError) else "runtime_error",
                 failure_stage=trace["failure_stage"],
             ) from exc
+
+    async def _run_turn(
+        self,
+        session: RuntimeSession,
+        message: str,
+        on_visible_delta: Callable[[str], Awaitable[None]] | None,
+    ):
+        stream_turn = getattr(self._runtime, "stream_turn", None)
+        if not callable(stream_turn):
+            return await self._runtime.run_turn(session, message)
+        completed = None
+        async for event in stream_turn(session, message):
+            if event.kind == "delta":
+                if on_visible_delta and event.text:
+                    await on_visible_delta(event.text)
+            elif event.kind == "completed":
+                completed = event.turn
+        if completed is None:
+            raise RuntimeError("Runtime stream ended without a final turn.")
+        return completed
 
     def _startup_events(self, profile: RuntimeProfile) -> list[dict]:
         getter = getattr(self._runtime, "startup_events", None)

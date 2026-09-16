@@ -72,3 +72,25 @@ class RuntimeTurn:
     status: str = "completed"
     error: str | None = None
     lifecycle_events: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStreamEvent:
+    """One safe, product-facing event from a Runtime turn stream.
+
+    ``delta`` is exclusively assistant-visible text.  ``completed`` carries
+    the authoritative, complete RuntimeTurn after the provider reaches a
+    terminal state.
+    """
+
+    kind: str
+    text: str | None = None
+    turn: RuntimeTurn | None = None
+
+    @classmethod
+    def visible_delta(cls, text: str) -> "RuntimeStreamEvent":
+        return cls(kind="delta", text=text)
+
+    @classmethod
+    def completed(cls, turn: RuntimeTurn) -> "RuntimeStreamEvent":
+        return cls(kind="completed", turn=turn)

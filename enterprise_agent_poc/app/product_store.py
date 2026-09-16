@@ -382,6 +382,21 @@ class ProductStore:
             if response is not None:
                 conn.execute("INSERT INTO task_results(task_id,final_response,result_json) VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET final_response=excluded.final_response,result_json=excluded.result_json", (task_id,response,json.dumps({"run_id":run_id},ensure_ascii=False)))
 
+    def add_task_delta(self, task_id: str, tenant_id: str, sequence: int, text: str) -> None:
+        """Append one already-filtered visible-text delta to the task channel."""
+        if not isinstance(sequence, int) or sequence < 1 or not isinstance(text, str) or not text:
+            raise ValueError("Invalid task text delta")
+        with self._store.connection() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND tenant_id=? AND status NOT IN ('completed','failed','cancelled')",
+                (task_id, tenant_id),
+            ).fetchone()
+            if active:
+                conn.execute(
+                    "INSERT INTO task_events(task_id,stage,message) VALUES (?, 'delta', ?)",
+                    (task_id, json.dumps({"sequence": sequence, "text": text}, ensure_ascii=False)),
+                )
+
     def attach_conversation(self, conversation_id: str, user_id: str, title: str = "新会话") -> None:
         with self._store.connection() as conn:
             conn.execute("INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,?)", (conversation_id,user_id,title))
@@ -749,7 +764,7 @@ class ProductStore:
     def task(self, task_id: str, tenant_id: str, user_id: str) -> dict | None:
         with self._store.connection() as conn:
             row = conn.execute("SELECT t.*, r.final_response FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id WHERE t.id=? AND t.tenant_id=? AND t.user_id=?", (task_id,tenant_id,user_id)).fetchone()
-            events = conn.execute("SELECT stage,message,created_at FROM task_events WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
+            events = conn.execute("SELECT stage,message,created_at FROM task_events WHERE task_id=? AND stage<>'delta' ORDER BY id", (task_id,)).fetchall()
             generation = None
             if row and row["status"] in {"completed", "failed", "cancelled"}:
                 generation = conn.execute(

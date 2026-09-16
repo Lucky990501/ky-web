@@ -63,6 +63,13 @@ class TaskService:
 
         self._store.set_task(task_id, tenant_id, "running", "loading_context", "正在加载企业上下文")
         try:
+            delta_sequence = 0
+
+            async def on_visible_delta(text: str) -> None:
+                nonlocal delta_sequence
+                delta_sequence += 1
+                self._store.add_task_delta(task_id, tenant_id, delta_sequence, text)
+
             agent = self._store.task_definition(task)
             execution_options = {}
             if self._store.execution_resolver and task["agent_id"] not in CATALOG:
@@ -85,6 +92,7 @@ class TaskService:
                 task["conversation_id"],
                 defer_result_persistence=True,
                 **execution_options,
+                on_visible_delta=on_visible_delta,
             )
             trace = self._agents._store.run_trace(result.run_id, tenant_id)
             if not trace:
