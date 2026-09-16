@@ -11,6 +11,10 @@ shared_env="$base/shared/enterprise-agent.env"
 runtime_venv="$base/venv"
 runtime_data_dir="$base/shared/runtime-data"
 services=(enterprise-agent-api enterprise-agent-mcp enterprise-agent-worker)
+# The production API lifespan includes a bounded 45-second embedding probe.
+# Keep a finite allowance above that probe for process startup; never weaken
+# the required healthy-production JSON or the exact-predecessor rollback gate.
+api_readiness_attempts=60
 
 case "$release_id" in
   ""|*[!A-Za-z0-9._-]*) echo "invalid release id" >&2; exit 2 ;;
@@ -121,7 +125,7 @@ rollback() {
   systemctl daemon-reload || return 1
   systemctl restart "${services[@]/%/.service}" || return 1
   for service in "${services[@]}"; do systemctl is-active --quiet "$service.service" || return 1; done
-  for attempt in $(seq 1 30); do
+  for attempt in $(seq 1 "$api_readiness_attempts"); do
     if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
       | "$runtime_venv/bin/python" -c 'import json, sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
       printf '{"status":"rolled_back","application_release":"%s","schema_rollback":false}\n' "$rollback_target_id"
@@ -160,13 +164,13 @@ ln -sfn "$release_root" "$current_link"
 systemctl daemon-reload
 systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
 for service in "${services[@]}"; do systemctl is-active --quiet "$service.service"; done
-for attempt in $(seq 1 30); do
+for attempt in $(seq 1 "$api_readiness_attempts"); do
   if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
     | "$runtime_venv/bin/python" -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
     break
   fi
-  if [[ "$attempt" == 30 ]]; then
-    echo "API health did not become ready within 30 seconds" >&2
+  if [[ "$attempt" == "$api_readiness_attempts" ]]; then
+    echo "API health did not become ready within ${api_readiness_attempts} seconds" >&2
     rollback
     exit 1
   fi

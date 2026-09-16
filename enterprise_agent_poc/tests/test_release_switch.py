@@ -53,7 +53,9 @@ def test_release_switch_health_gate_requires_healthy_production_json():
 def test_release_switch_health_timeout_rolls_back_before_exiting():
     source = SCRIPT.read_text(encoding="utf-8")
 
-    timeout_start = source.index('if [[ "$attempt" == 30 ]]; then')
+    assert 'api_readiness_attempts=60' in source
+    assert source.count('seq 1 "$api_readiness_attempts"') == 2
+    timeout_start = source.index('if [[ "$attempt" == "$api_readiness_attempts" ]]; then')
     timeout_end = source.index("  sleep 1", timeout_start)
     timeout_block = source[timeout_start:timeout_end]
 
@@ -144,7 +146,33 @@ os.execv({sys.executable!r}, [{sys.executable!r}, *args])
     write_executable(base / "venv/bin/uvicorn", "#!/bin/sh\nexit 0\n")
     write_executable(boundary / "stat", f'#!/bin/sh\nexec "{sys.executable}" -c "import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])" "$3"\n')
     write_executable(boundary / "systemctl", '#!/bin/sh\nprintf "systemctl:%s\\n" "$*" >> "$SWITCH_TEST_EVENTS"\ncase "$1" in is-active) echo active;; esac\nexit 0\n')
-    write_executable(boundary / "curl", '#!/bin/sh\nprintf \'{"status":"ok","knowledge":"ok","environment":"production"}\\n\'\n')
+    write_executable(boundary / "curl", '''#!/bin/sh
+count_file="$SWITCH_TEST_HEALTH_ATTEMPTS"
+current="$(readlink "$SWITCH_TEST_CURRENT")"
+if [ "$current" = "$SWITCH_TEST_CANDIDATE" ]; then
+  count=0
+  [ -f "$count_file" ] && count="$(cat "$count_file")"
+  count=$((count + 1))
+  attempt="$count"
+  if [ "${SWITCH_TEST_COMPACT_READINESS:-}" = true ] && [ "$count" -eq 2 ]; then
+    attempt=60
+  fi
+  printf '%s' "$attempt" > "$count_file"
+  ready_at="${SWITCH_TEST_HEALTH_READY_ATTEMPT:-1}"
+  if [ "$attempt" -lt "$ready_at" ]; then
+    printf '{"status":"starting","knowledge":"ok","environment":"production"}\\n'
+    exit 0
+  fi
+fi
+printf '{"status":"ok","knowledge":"ok","environment":"production"}\\n'
+''')
+    write_executable(boundary / "seq", '''#!/bin/sh
+if [ "${SWITCH_TEST_COMPACT_READINESS:-}" = true ] && [ "$1" = 1 ] && [ "$2" = 60 ]; then
+  printf '1\\n60\\n'
+  exit 0
+fi
+exec /usr/bin/seq "$@"
+''')
     wrong = tmp_path / "wrong"
     wrong.mkdir()
     env = os.environ.copy()
@@ -156,7 +184,10 @@ os.execv({sys.executable!r}, [{sys.executable!r}, *args])
     env.pop("ENTERPRISE_POC_DATA_DIR", None)
     env.update(PATH=str(boundary) + os.pathsep + os.environ["PATH"], PYTHONDONTWRITEBYTECODE="1",
                DEEPSEEK_API_KEY="local-test-placeholder", GATEWAY_API_TOKEN="local-test-placeholder",
-               SWITCH_TEST_EVENTS=str(events), SWITCH_TEST_WRONG=str(wrong))
+               SWITCH_TEST_EVENTS=str(events), SWITCH_TEST_WRONG=str(wrong),
+               SWITCH_TEST_HEALTH_ATTEMPTS=str(tmp_path / "health-attempts"),
+               SWITCH_TEST_CURRENT=str(base / "release-current"),
+               SWITCH_TEST_CANDIDATE=str(candidate), SWITCH_TEST_COMPACT_READINESS="true")
     def snapshot():
         files = {p.relative_to(registry.data_root).as_posix(): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
                  for p in registry.data_root.rglob("*") if p.is_file()}
@@ -165,8 +196,12 @@ os.execv({sys.executable!r}, [{sys.executable!r}, *args])
                 old=old, script=executable, events=events, env=env, snapshot=snapshot, systemd=tmp_path / "systemd")
 
 
-def run_switch(harness, *, fault="", preflight=True):
+def run_switch(harness, *, fault="", preflight=True, health_ready_attempt=None):
+    attempts = Path(harness["env"]["SWITCH_TEST_HEALTH_ATTEMPTS"])
+    attempts.unlink(missing_ok=True)
     env = {**harness["env"], "SWITCH_TEST_FAULT": fault}
+    if health_ready_attempt is not None:
+        env["SWITCH_TEST_HEALTH_READY_ATTEMPT"] = str(health_ready_attempt)
     args = ["bash", str(harness["script"]), "candidate"]
     if preflight:
         args.append("--preflight-only")
@@ -219,6 +254,30 @@ def test_real_entry_pass_then_controlled_switch_reuses_same_data_and_skips_no_pe
         dropin = (h["systemd"] / f"{service}.service.d/release.conf").read_text()
         assert f'Environment=ENTERPRISE_POC_DATA_DIR={h["data"]}' in dropin
     assert h["snapshot"]() == before
+
+
+@pytest.mark.parametrize("ready_attempt", [1, 60])
+def test_actual_entry_accepts_api_health_on_or_inside_sixty_check_bound(switch_harness, ready_attempt):
+    h = switch_harness
+    result = run_switch(h, preflight=False, health_ready_attempt=ready_attempt)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1])["status"] == "switched"
+    assert (h["base"] / "release-current").resolve() == h["candidate"]
+    assert Path(h["env"]["SWITCH_TEST_HEALTH_ATTEMPTS"]).read_text() == str(ready_attempt)
+    events = h["events"].read_text()
+    assert events.count("systemctl:restart") == 1
+
+
+def test_actual_entry_over_sixty_check_bound_rolls_back_to_exact_predecessor(switch_harness):
+    h = switch_harness
+    result = run_switch(h, preflight=False, health_ready_attempt=61)
+    assert result.returncode == 1
+    assert "API health did not become ready within 60 seconds" in result.stderr
+    assert '"status":"rolled_back"' in result.stdout
+    assert (h["base"] / "release-current").resolve() == h["old"]
+    assert Path(h["env"]["SWITCH_TEST_HEALTH_ATTEMPTS"]).read_text() == "60"
+    events = h["events"].read_text()
+    assert events.count("systemctl:restart") == 2
 
 
 def test_shared_env_conflicting_data_dir_blocks_without_overriding_configuration(switch_harness):
