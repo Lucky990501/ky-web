@@ -325,8 +325,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=chat-style-v7/);
-  assert.match(index,/workbench\.js\?v=chat-style-v7/);
+  assert.match(index,/workbench\.css\?v=streaming-ux-v1/);
+  assert.match(index,/workbench\.js\?v=streaming-ux-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -334,11 +334,48 @@ test('live task state stays compact and uses customer-facing thinking copy',()=>
   const h=harness('/agents/campaign');
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
   assert.equal(h.run("taskStageLabel('starting_runtime')"),'正在思考');
-  assert.equal(h.run("taskStageLabel('generating')"),'正在思考');
-  assert.ok(source.includes('task-card-live'));
-  assert.ok(!source.includes("node.querySelector('p').textContent=update.message"));
+  assert.equal(h.run("taskStageLabel('generating')"),'正在生成');
+  assert.ok(source.includes('streaming-message'));
+  assert.ok(source.includes("source.addEventListener('delta'"));
   assert.match(css,/max-width:820px/);
-  assert.match(css,/\.task-card-live\{\s*width:fit-content/);
+  assert.match(css,/\.streaming-message/);
+});
+
+test('streaming conversation state orders deltas and accepts the authoritative completion',()=>{
+  const h=harness('/agents/campaign');
+  h.run('streamState=createStreamingState()');
+  assert.equal(h.run("applyStreamingEvent(streamState,'progress',{stage:'loading_context'})"),true);
+  assert.equal(h.run('streamState.status'),'正在思考');
+  assert.equal(h.run("applyStreamingEvent(streamState,'delta',{sequence:2,text:'正文'})"),false);
+  assert.equal(h.run("applyStreamingEvent(streamState,'delta',{sequence:1,text:'# 标题\\n\\n'})"),true);
+  assert.equal(h.run('streamState.text'),'# 标题\n\n正文');
+  assert.equal(h.run("applyStreamingEvent(streamState,'delta',{sequence:2,text:'重复正文'})"),false);
+  assert.equal(h.run('streamState.text'),'# 标题\n\n正文');
+  assert.equal(h.run("applyStreamingEvent(streamState,'complete',{final_response:'## 最终正文'})"),true);
+  assert.equal(h.run('streamState.finalResponse'),'## 最终正文');
+  assert.ok(h.run("streamingFinalContentHtml(streamState.finalResponse,'原始需求')").includes('<h2>最终正文</h2>'));
+  assert.ok(h.run("streamingMessageHtml('正在思考')").includes('data-stream-content'));
+});
+
+test('streaming failure keeps partial text outside persisted history and retains retry UI',()=>{
+  const h=harness('/agents/campaign');
+  h.run("failureState=createStreamingState();applyStreamingEvent(failureState,'delta',{sequence:1,text:'已生成部分正文'});applyStreamingEvent(failureState,'error',{message:'生成中断',diagnostic_id:'diagnostic-1'})");
+  assert.equal(h.run('failureState.text'),'已生成部分正文');
+  assert.equal(h.run('failureState.error'),'生成中断');
+  const failure=h.run("streamingFailureHtml(failureState.text,failureState.error,failureState.diagnosticId)");
+  assert.ok(failure.includes('部分回复（未保存）'));
+  assert.ok(failure.includes('已生成部分正文'));
+  assert.ok(failure.includes('重新尝试'));
+  assert.ok(!failure.includes('conversation_id'));
+  assert.ok(source.includes('pollAgentTaskV2(taskId,agentId,main,retryText,node,state)'));
+  assert.ok(source.includes("source.addEventListener('error'"));
+});
+
+test('streaming complete also supports providers that emit no deltas',()=>{
+  const h=harness('/agents/campaign');
+  h.run("directComplete=createStreamingState();applyStreamingEvent(directComplete,'complete',{final_response:'无需 delta 的最终正文'})");
+  assert.equal(h.run('directComplete.text'),'');
+  assert.equal(h.run('directComplete.finalResponse'),'无需 delta 的最终正文');
 });
 
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
