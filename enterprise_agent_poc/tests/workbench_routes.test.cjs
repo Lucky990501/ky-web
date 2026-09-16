@@ -243,9 +243,19 @@ test('P1 customer agent UX keeps examples, copy, regeneration and real reference
   assert.ok(markdown.includes('<ul><li>第一项</li><li>第二项</li></ul>'));
   assert.ok(markdown.includes('<blockquote>引用内容</blockquote>'));
   assert.ok(markdown.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
-  assert.match(fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8'),/\.chat-message-assistant \.chat-message-content\{[^}]*max-height:440px[^}]*overflow:auto/);
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(css,/\.chat-message-assistant \.chat-message-content\{max-height:none;overflow:visible/);
+  assert.match(css,/\.chatgpt-conversation-layout \.chat-message-assistant>b/);
   assert.ok(source.includes("input.value=node.dataset.regenerate"));
   assert.ok(!source.includes('asset_retrievals'));
+});
+
+test('history rows keep titles and descriptions to ten characters',()=>{
+  const h=harness('/workspace');
+  assert.equal(h.run("compactHistoryText('这是一个超过十个字的项目名称')"),'这是一个超过十个字的');
+  const row=h.run("conversationRowHtml({id:'conversation-1',agent_id:'campaign-agent',project:{name:'这是一个超过十个字的项目名称',type:'活动策划项目'},latest_prompt:'这是一个超过十个字的项目描述',latest_status:'completed'},'data-agent-conversation')");
+  assert.ok(row.includes('这是一个超过十个字的'));
+  assert.ok(!row.includes('这是一个超过十个字的项目名称'));
 });
 
 test('P1 recent task navigation remains enterprise-admin only',()=>{
@@ -295,7 +305,7 @@ test('Workspace banner aligns agent cards, limits recent lists, and exposes prof
   await pending;
   const markup=h.document.main.innerHTML;
   assert.ok(markup.includes('workspace-greeting-banner'));
-  assert.ok(markup.includes('workspace-greeting-banner-v1.png'));
+  assert.ok(!markup.includes('workspace-greeting-banner-v1.png'));
   assert.ok(!markup.includes('agent-card featured'));
   assert.match(fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8'),/\.topbar\{justify-content:flex-end\}/);
   assert.equal((markup.match(/agent-card-footer/g)||[]).length,3);
@@ -313,10 +323,22 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
   assert.match(css,/@media\(max-width:860px\)/);
 });
 
-test('Workspace banner uses a new static asset version',()=>{
+test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=chat-style-v5/);
-  assert.match(index,/workbench\.js\?v=chat-style-v5/);
+  assert.match(index,/workbench\.css\?v=chat-style-v7/);
+  assert.match(index,/workbench\.js\?v=chat-style-v7/);
+  assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
+});
+
+test('live task state stays compact and uses customer-facing thinking copy',()=>{
+  const h=harness('/agents/campaign');
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.equal(h.run("taskStageLabel('starting_runtime')"),'正在思考');
+  assert.equal(h.run("taskStageLabel('generating')"),'正在思考');
+  assert.ok(source.includes('task-card-live'));
+  assert.ok(!source.includes("node.querySelector('p').textContent=update.message"));
+  assert.match(css,/max-width:820px/);
+  assert.match(css,/\.task-card-live\{\s*width:fit-content/);
 });
 
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
