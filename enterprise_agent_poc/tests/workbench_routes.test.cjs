@@ -335,8 +335,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=stop-generation-ux-v1/);
-  assert.match(index,/workbench\.js\?v=stop-generation-ux-v1/);
+  assert.match(index,/workbench\.css\?v=chatgpt-style-conversation-ux-v2/);
+  assert.match(index,/workbench\.js\?v=chatgpt-style-conversation-ux-v2/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -344,11 +344,13 @@ test('live task state stays compact and uses customer-facing thinking copy',()=>
   const h=harness('/agents/campaign');
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
   assert.equal(h.run("taskStageLabel('starting_runtime')"),'正在思考');
-  assert.equal(h.run("taskStageLabel('generating')"),'正在生成');
+  assert.equal(h.run("taskStageLabel('generating')"),'正在生成回答');
   assert.ok(source.includes('streaming-message'));
   assert.ok(source.includes("source.addEventListener('delta'"));
   assert.match(css,/max-width:820px/);
   assert.match(css,/\.streaming-message/);
+  assert.match(css,/\.thinking-summary/);
+  assert.ok(source.includes("source.addEventListener('activity'"));
 });
 
 test('streaming conversation state orders deltas and accepts the authoritative completion',()=>{
@@ -365,6 +367,36 @@ test('streaming conversation state orders deltas and accepts the authoritative c
   assert.equal(h.run('streamState.finalResponse'),'## 最终正文');
   assert.ok(h.run("streamingFinalContentHtml(streamState.finalResponse,'原始需求')").includes('<h2>最终正文</h2>'));
   assert.ok(h.run("streamingMessageHtml('正在思考')").includes('data-stream-content'));
+  assert.ok(h.run("streamingMessageHtml('正在思考')").includes('data-thinking'));
+});
+
+test('safe activity events render only friendly stages and thinking auto-collapses on the first real delta',()=>{
+  const h=harness('/agents/campaign');
+  h.run("activityState=createStreamingState();activityCases=[['queued','正在准备'],['context_loading','正在理解上下文'],['knowledge_retrieving','正在检索企业知识'],['tool_running','正在调用工具'],['generating','正在生成回答']];activityCases.forEach(([stage],index)=>applyStreamingEvent(activityState,'activity',{sequence:index+1,stage,status:'started',created_at:'2026-09-18T00:00:00Z'}));applyStreamingEvent(activityState,'activity',{sequence:6,stage:'context_loading',status:'completed',created_at:'2026-09-18T00:00:01Z'});");
+  assert.equal(h.run('activityState.currentActivity.label'),'正在理解上下文');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(activityState.activities.map(item=>item.label))')),['正在准备','正在理解上下文','正在检索企业知识','正在调用工具','正在生成回答']);
+  assert.equal(h.run('activityState.activities[1].status'),'completed');
+  assert.equal(h.run("applyStreamingEvent(activityState,'activity',{sequence:7,stage:'unsafe_debug',status:'started'})"),false);
+  assert.equal(h.run("applyStreamingEvent(activityState,'delta',{sequence:1,text:'第一段'})"),true);
+  assert.ok(h.run('activityState.thinkingFinishedAt')>0);
+  assert.ok(h.run("streamingThinkingHtml('正在准备')").includes('查看进度'));
+  h.run("thinkingTitle={textContent:''};thinkingList={innerHTML:''};thinkingDetails={open:true,querySelector(selector){return selector==='[data-thinking-title]'?thinkingTitle:selector==='[data-thinking-list]'?thinkingList:null;}};thinkingNode={querySelector(selector){return selector==='[data-thinking]'?thinkingDetails:null;}};activityState.thinkingStartedAt=Date.now()-2100;renderThinkingSummary(thinkingNode,activityState);thinkingDetails.open=true;renderThinkingSummary(thinkingNode,activityState);");
+  assert.match(h.run('thinkingTitle.textContent'),/^思考了 [3-9]\d* 秒$/);
+  assert.equal(h.run('thinkingDetails.open'),true);
+});
+
+test('visual buffer consumes real pending deltas in bounded frames and final markdown remains authoritative',()=>{
+  const h=harness('/agents/campaign');
+  h.run("bufferState=createStreamingState();for(let sequence=1;sequence<=1000;sequence+=1)applyStreamingEvent(bufferState,'delta',{sequence,text:'x'});");
+  assert.equal(h.run('bufferState.text.length'),1000);
+  assert.equal(h.run('bufferState.displayText.length'),0);
+  h.run('consumeStreamingVisualBuffer(bufferState)');
+  assert.ok(h.run('bufferState.displayText.length')>0);
+  assert.ok(h.run('bufferState.displayText.length')<1000);
+  h.run("markdownState=createStreamingState();applyStreamingEvent(markdownState,'delta',{sequence:1,text:'# 标题\\n\\n- 条目\\n\\n正文\\n\\n```js\\nconst answer = 42;\\n```'});markdownState.displayText=markdownState.text;parts=streamingMarkdownParts(markdownState.displayText)");
+  assert.ok(h.run("markdownHtml(parts.stable)").includes('<h1>标题</h1>'));
+  assert.ok(h.run("markdownHtml(parts.stable)").includes('<li>条目</li>'));
+  assert.ok(h.run("markdownHtml(parts.active)").includes('<pre><code>const answer = 42;</code></pre>'));
 });
 
 test('streaming failure keeps partial text outside persisted history and retains retry UI',()=>{
