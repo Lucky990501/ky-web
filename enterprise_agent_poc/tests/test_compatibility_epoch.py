@@ -48,11 +48,11 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/candidate-artifacts/20260916-95c2f59')
-PRODUCTION_PREDECESSOR_ID = '20260916-95c2f59'
-PRODUCTION_PREDECESSOR_COMMIT = '95c2f594358a431ee02719d07be13795bb1a0744'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '3e646cda3bf3734115cf378456ea2d2fbd9f765333b8c98ab69742e8ddbccf86'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'a574320691cfe9f247c6957a87a49d80066e72d1843c348484dce95a5c4df7a9'
+PRODUCTION_PREDECESSOR_ROOT = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/candidate-artifacts/20260917-e43b8e0')
+PRODUCTION_PREDECESSOR_ID = '20260917-e43b8e0'
+PRODUCTION_PREDECESSOR_COMMIT = 'e43b8e00cc6060934a495ad42d6de2bc9148da69'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'd4be1dd32207c3dc36e18c85260b6fdd70f82c185b0da6959e61bee2234afa17'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = '5092bf8bdeb4cde0360933e947e21627be7ac09bc344c92e3899aee4328d678e'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -336,7 +336,7 @@ def test_member_status_floor_schema012_accepts_only_exact_production_predecessor
     _set_productized_epoch(h['store'])
     result = pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['evidence_version'] == 'fixed_95c2f59_member_status_predecessor'
+    assert result['evidence_version'] == 'fixed_e43b8e0_member_status_predecessor'
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
         pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit='0' * 40)
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
