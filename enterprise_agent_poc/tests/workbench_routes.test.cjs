@@ -57,6 +57,7 @@ test('disabled productized conversation remains readable without run controls',a
 });
 function harness(pathname = '/platform/skills', state = null) {
   const pending = [];
+  const eventSources = [];
   const timers = [];let nextTimerId=1;
   const navs = ['workspace', 'image', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
   const document = {
@@ -88,8 +89,9 @@ function harness(pathname = '/platform/skills', state = null) {
     move(delta){index+=delta; location.pathname=stack[index].path; listeners.popstate({state:stack[index].state});},
   };
   const window = {history, addEventListener(name,fn){listeners[name]=fn;}};
-  const context = vm.createContext({document,window,location,console,Map,Set,Date,setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
-    fetch(url){return new Promise((resolve,reject)=>pending.push({url,resolve(body){resolve({ok:true,json:async()=>body});},reject}));},
+  class EventSource {constructor(url){this.url=url;this.listeners={};this.closed=false;eventSources.push(this);}addEventListener(name,listener){this.listeners[name]=listener;}close(){this.closed=true;}}
+  const context = vm.createContext({document,window,location,console,Map,Set,Date,EventSource,setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
+    fetch(url,options){return new Promise((resolve,reject)=>pending.push({url,options,resolve(body){resolve({ok:true,json:async()=>body});},reject}));},
   });
   vm.runInContext(source,context);
   vm.runInContext("me={is_platform_admin:true,display_name:'Test',email:'test@example.invalid',tenant_name:'Test',role:'member'}", context);
@@ -111,7 +113,7 @@ function harness(pathname = '/platform/skills', state = null) {
     assert.deepEqual(navs.filter(x=>x.classList.active).map(x=>x.dataset.page),[page]);
   }
   function runTimers(){for(const timer of timers.splice(0)){if(!timer.cancelled)timer.fn();}}
-  return {run,respond,settle,consistent,pending,timers,runTimers,document,history,location,navs};
+  return {run,respond,settle,consistent,pending,timers,runTimers,eventSources,document,history,location,navs};
 }
 
 test('profile <-> skills uses distinct URLs and matching navigation/view',async()=>{
@@ -333,8 +335,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=streaming-ux-v1/);
-  assert.match(index,/workbench\.js\?v=streaming-ux-v1/);
+  assert.match(index,/workbench\.css\?v=stop-generation-ux-v1/);
+  assert.match(index,/workbench\.js\?v=stop-generation-ux-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -384,6 +386,51 @@ test('streaming complete also supports providers that emit no deltas',()=>{
   h.run("directComplete=createStreamingState();applyStreamingEvent(directComplete,'complete',{final_response:'无需 delta 的最终正文'})");
   assert.equal(h.run('directComplete.text'),'');
   assert.equal(h.run('directComplete.finalResponse'),'无需 delta 的最终正文');
+});
+
+test('conversation run state makes one cancel request and keeps STOPPING until the backend confirms a terminal event',async()=>{
+  const h=harness('/agents/campaign');
+  h.run("stopInput={disabled:false};stopSubmit={classList:{toggle(){}},setAttribute(){},innerHTML:'',onclick:null};stopFeedback={textContent:''};stopMain={querySelector(selector){return selector==='#prompt'?stopInput:selector==='#composer-submit'?stopSubmit:selector==='#composer-run-feedback'?stopFeedback:null;}};stopState=createStreamingState();beginConversationRun(stopState,{taskId:'task-1',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(stopState,{taskId:'task-1',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});");
+  const stop=h.run('requestStopGeneration(stopMain,stopState)');
+  assert.equal(h.run('stopState.run.phase'),'STOPPING');
+  assert.equal(h.pending.length,1);
+  assert.equal(h.pending[0].url,'/api/v1/tasks/task-1/cancel');
+  assert.equal(h.pending[0].options.method,'POST');
+  await h.run('requestStopGeneration(stopMain,stopState)');
+  assert.equal(h.pending.length,1);
+  h.respond('/api/v1/tasks/task-1/cancel',{status:'cancelling'});await stop;
+  assert.equal(h.run('stopState.run.phase'),'STOPPING');
+});
+
+test('cancelled terminal preserves only rendered partial content, clears the task guard, and restores send state',()=>{
+  const h=harness('/agents/campaign');
+  h.run("cancelInput={disabled:true};cancelSubmit={classList:{toggle(){}},setAttribute(){},innerHTML:'',onclick:null};cancelFeedback={textContent:''};cancelMain={querySelector(selector){return selector==='#prompt'?cancelInput:selector==='#composer-submit'?cancelSubmit:selector==='#composer-run-feedback'?cancelFeedback:null;}};cancelCaret={removed:false,remove(){this.removed=true;}};cancelActive={innerHTML:'已有部分回复'};cancelLabel={textContent:''};cancelStatus={hidden:true,classList:{add(){}},querySelector(selector){return selector==='span'?cancelLabel:selector==='svg'||selector==='i'?{remove(){}}:null;}};cancelContent={querySelector(selector){return selector==='[data-stream-active]'?cancelActive:selector==='[data-stream-caret]'?cancelCaret:null;}};cancelNode={id:'task-status',_streamState:createStreamingState(),removeAttribute(name){if(name==='id'){this.id='';document.taskStatus=null;}},classList:{add(){}},querySelector(selector){return selector==='[data-stream-content]'?cancelContent:selector==='[data-stream-status]'?cancelStatus:null;}};cancelNode._streamState.text='已有部分回复';beginConversationRun(cancelNode._streamState,{taskId:'task-2',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(cancelNode._streamState,{taskId:'task-2',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});document.taskStatus=cancelNode;cancelStreamingMessage(cancelNode,cancelNode._streamState,cancelMain);");
+  assert.equal(h.run('cancelCaret.removed'),true);
+  assert.equal(h.run('cancelLabel.textContent'),'已停止生成 · 部分回复未保存');
+  assert.equal(h.run('cancelNode.id'),'');
+  assert.equal(h.run('cancelActive.innerHTML'),'已有部分回复');
+  assert.equal(h.run('cancelNode._streamState.run.phase'),'IDLE');
+  assert.equal(h.run('cancelInput.disabled'),false);
+  assert.match(h.run('cancelSubmit.innerHTML'),/data-lucide="send"/);
+});
+
+test('cancelled SSE event stops the source and leaves a non-persisted partial marker',()=>{
+  const h=harness('/agents/campaign');
+  h.run("sseInput={disabled:true};sseSubmit={classList:{toggle(){}},setAttribute(){},innerHTML:'',onclick:null};sseFeedback={textContent:''};sseMain={querySelector(selector){return selector==='#prompt'?sseInput:selector==='#composer-submit'?sseSubmit:selector==='#composer-run-feedback'?sseFeedback:null;}};sseCaret={remove(){this.removed=true;}};sseLabel={textContent:''};sseStatus={hidden:true,classList:{add(){}},querySelector(selector){return selector==='span'?sseLabel:selector==='svg'||selector==='i'?{remove(){}}:null;}};sseContent={querySelector(selector){return selector==='[data-stream-caret]'?sseCaret:selector==='[data-stream-active]'?{innerHTML:'部分正文'}:null;}};sseNode={id:'task-status',removeAttribute(name){if(name==='id')this.id='';},classList:{add(){}},querySelector(selector){return selector==='[data-stream-content]'?sseContent:selector==='[data-stream-status]'?sseStatus:null;}};sseState=createStreamingState();sseState.text='部分正文';beginConversationRun(sseState,{taskId:'task-sse',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(sseState,{taskId:'task-sse',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});streamTask('task-sse','campaign-agent',sseMain,'需求',sseNode,sseState);");
+  assert.equal(h.eventSources[0].url,'/api/v1/tasks/task-sse/events');
+  h.eventSources[0].listeners.cancelled({data:'{"status":"cancelled"}'});
+  assert.equal(h.eventSources[0].closed,true);
+  assert.equal(h.run('sseState.run.phase'),'IDLE');
+  assert.equal(h.run('sseLabel.textContent'),'已停止生成 · 部分回复未保存');
+});
+
+test('cancelled wins the frontend race over a later complete, and refresh state restores active task controls',()=>{
+  const h=harness('/agents/campaign');
+  h.run("raceState=createStreamingState();beginConversationRun(raceState,{taskId:'task-3',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(raceState,{taskId:'task-3',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});raceState.run.terminal='cancelled';finishStreamTask(null,raceState,{status:'completed',final_response:'不应覆盖'},'campaign-agent',null,'需求');");
+  assert.equal(h.run('raceState.finalResponse'),undefined);
+  assert.equal(h.run("activeConversationTask({tasks:[{id:'done',status:'completed'},{id:'running',status:'running'}]}).id"),'running');
+  h.run("restored=createStreamingState();beginConversationRun(restored,{taskId:'task-4',agentId:'campaign-agent',phase:ConversationRunPhase.STOPPING,restored:true});");
+  assert.equal(h.run('restored.run.phase'),'STOPPING');
 });
 
 test('streaming visual buffer coalesces deltas and keeps completed markdown blocks stable',()=>{
