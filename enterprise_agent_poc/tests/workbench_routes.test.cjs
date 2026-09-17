@@ -57,6 +57,7 @@ test('disabled productized conversation remains readable without run controls',a
 });
 function harness(pathname = '/platform/skills', state = null) {
   const pending = [];
+  const timers = [];let nextTimerId=1;
   const navs = ['workspace', 'image', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
   const document = {
     prompt:{value:'',focused:false,focus(){this.focused=true;}},
@@ -87,7 +88,7 @@ function harness(pathname = '/platform/skills', state = null) {
     move(delta){index+=delta; location.pathname=stack[index].path; listeners.popstate({state:stack[index].state});},
   };
   const window = {history, addEventListener(name,fn){listeners[name]=fn;}};
-  const context = vm.createContext({document,window,location,console,Map,Set,Date,setTimeout,
+  const context = vm.createContext({document,window,location,console,Map,Set,Date,setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
     fetch(url){return new Promise((resolve,reject)=>pending.push({url,resolve(body){resolve({ok:true,json:async()=>body});},reject}));},
   });
   vm.runInContext(source,context);
@@ -109,7 +110,8 @@ function harness(pathname = '/platform/skills', state = null) {
     assert.ok(document.main.innerHTML.includes(`<h1>${heading}</h1>`));
     assert.deepEqual(navs.filter(x=>x.classList.active).map(x=>x.dataset.page),[page]);
   }
-  return {run,respond,settle,consistent,pending,document,history,location,navs};
+  function runTimers(){for(const timer of timers.splice(0)){if(!timer.cancelled)timer.fn();}}
+  return {run,respond,settle,consistent,pending,timers,runTimers,document,history,location,navs};
 }
 
 test('profile <-> skills uses distinct URLs and matching navigation/view',async()=>{
@@ -382,6 +384,44 @@ test('streaming complete also supports providers that emit no deltas',()=>{
   h.run("directComplete=createStreamingState();applyStreamingEvent(directComplete,'complete',{final_response:'无需 delta 的最终正文'})");
   assert.equal(h.run('directComplete.text'),'');
   assert.equal(h.run('directComplete.finalResponse'),'无需 delta 的最终正文');
+});
+
+test('streaming visual buffer coalesces deltas and keeps completed markdown blocks stable',()=>{
+  const h=harness('/agents/campaign');
+  h.run("stableNode={innerHTML:''};activeNode={innerHTML:''};statusNode={hidden:false,querySelector(){return {textContent:''}}};contentNode={querySelector(selector){return selector==='[data-stream-stable]'?stableNode:selector==='[data-stream-active]'?activeNode:null;}};visualNode={querySelector(selector){return selector==='[data-stream-content]'?contentNode:selector==='[data-stream-status]'?statusNode:null;}};visualState=createStreamingState();visualState.lastRenderAt=Date.now();for(let sequence=1;sequence<=1000;sequence+=1){applyStreamingEvent(visualState,'delta',{sequence,text:'x'});scheduleStreamingRender(visualNode,visualState)}");
+  assert.equal(h.timers.length,1);
+  assert.ok(h.timers[0].delay>=0&&h.timers[0].delay<=40);
+  h.runTimers();
+  assert.equal(h.run('visualState.text.length'),1000);
+  assert.ok(h.run('activeNode.innerHTML').includes('streaming-caret'));
+  assert.equal(h.run('statusNode.hidden'),true);
+  h.run("parts=streamingMarkdownParts('# 标题\\n\\n- 第一项\\n- 第二项\\n\\n最后一段')");
+  assert.ok(h.run('parts.stable').includes('# 标题'));
+  assert.ok(h.run('parts.stable').includes('- 第二项'));
+  assert.equal(h.run('parts.active'),'最后一段');
+});
+
+test('streaming follow stops for reading and resumes at the bottom threshold',()=>{
+  const h=harness('/agents/campaign');
+  const root={scrollHeight:1000,scrollTop:500,clientHeight:500,listeners:{},addEventListener(name,listener){this.listeners[name]=listener;},removeEventListener(name){delete this.listeners[name];}};
+  h.document.scrollingElement=root;
+  h.run('followState=createStreamingState();followState.follow=true;watchStreamingFollow(followState)');
+  root.scrollTop=300;root.listeners.scroll();
+  assert.equal(h.run('followState.follow'),false);
+  root.scrollTop=468;root.listeners.scroll();
+  assert.equal(h.run('followState.follow'),true);
+});
+
+test('matching completion removes only the streaming affordances while authoritative completion still wins',()=>{
+  const h=harness('/agents/campaign');
+  h.run("completionStable={innerHTML:''};completionActive={innerHTML:''};caret={removed:false,remove(){this.removed=true;}};completionContent={querySelector(selector){if(selector==='[data-stream-stable]')return completionStable;if(selector==='[data-stream-active]')return completionActive;if(selector==='[data-stream-caret]')return caret;return null;}};completionStatus={hidden:false,querySelector(){return {textContent:''}}};completionActions={hidden:true,innerHTML:''};completionNode={id:'task-status',innerHTML:'',removeAttribute(name){if(name==='id')this.id='';},classList:{remove(){}},querySelector(selector){if(selector==='[data-stream-content]')return completionContent;if(selector==='[data-stream-actions]')return completionActions;if(selector==='[data-stream-status]')return completionStatus;return null;}};completionState=createStreamingState();completionState.text='同一份最终正文';completionState.finalResponse='同一份最终正文';completeStreamingMessage(completionNode,completionState,'原始需求',document.main)");
+  assert.equal(h.run('completionNode.innerHTML'),'');
+  assert.equal(h.run('completionNode.id'),'');
+  assert.equal(h.run('caret.removed'),true);
+  assert.equal(h.run('completionStatus.hidden'),true);
+  assert.ok(h.run('completionActions.innerHTML').includes('复制'));
+  h.run("authoritativeNode={innerHTML:'',removeAttribute(){},classList:{remove(){}}};authoritativeState=createStreamingState();authoritativeState.text='流式草稿';authoritativeState.finalResponse='服务端最终正文';completeStreamingMessage(authoritativeNode,authoritativeState,'原始需求',document.main)");
+  assert.ok(h.run('authoritativeNode.innerHTML').includes('服务端最终正文'));
 });
 
 test('final task lifecycle releases the submit guard after streaming, polling, and failure',()=>{
