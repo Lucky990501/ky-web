@@ -261,6 +261,104 @@ class StreamingRuntime(FakeRuntime):
         yield RuntimeStreamEvent.completed(RuntimeTurn(session.thread_id, "可见正文"))
 
 
+class SummaryStreamingRuntime(FakeRuntime):
+    """A runtime that exposes only already-categorised product activities."""
+
+    async def stream_turn(self, session, message):
+        yield RuntimeStreamEvent.activity("enterprise_config_loading", "started")
+        yield RuntimeStreamEvent.activity("enterprise_config_loading", "completed")
+        yield RuntimeStreamEvent.activity("knowledge_retrieving", "started")
+        yield RuntimeStreamEvent.activity("knowledge_retrieving", "completed")
+        yield RuntimeStreamEvent.activity("asset_retrieving", "started")
+        yield RuntimeStreamEvent.activity("asset_retrieving", "completed")
+        yield RuntimeStreamEvent.activity("tool_running", "started")
+        yield RuntimeStreamEvent.activity("tool_running", "completed")
+        yield RuntimeStreamEvent.visible_delta("可见正文")
+        yield RuntimeStreamEvent.completed(RuntimeTurn(session.thread_id, "可见正文"))
+
+
+def _activity_events(product, task):
+    return [
+        json.loads(item["message"])
+        for item in product.task_events_since(task["id"], "tenant-a", task["user_id"])
+        if item["stage"] == "activity"
+    ]
+
+
+def test_execution_summary_persists_safe_ordered_lifecycle(tmp_path, monkeypatch):
+    _, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", SummaryStreamingRuntime())
+    asyncio.run(service.execute(task))
+
+    activities = _activity_events(product, task)
+    stages = [item["stage"] for item in activities]
+    assert set(stages) == {
+        "queued", "context_loading", "enterprise_config_loading", "knowledge_retrieving",
+        "asset_retrieving", "tool_running", "generating", "persisting", "completed",
+    }
+    assert [item["sequence"] for item in activities] == sorted(item["sequence"] for item in activities)
+    assert all(item["status"] in {"started", "completed"} for item in activities)
+    assert all(set(item) == {"sequence", "stage", "label", "status"} for item in activities)
+    current = product.task(task["id"], "tenant-a", task["user_id"])["current_activity"]
+    assert current and current["stage"] == "completed" and current["created_at"]
+
+
+def test_execution_summary_sse_is_safe_and_does_not_need_legacy_client_changes(tmp_path, monkeypatch):
+    from app import main
+
+    _, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", SummaryStreamingRuntime())
+    asyncio.run(service.execute(task))
+    monkeypatch.setattr(main, "product_store", product)
+    monkeypatch.setattr(main, "current_user", lambda _cookie: SimpleNamespace(tenant_id="tenant-a", user_id=task["user_id"], role="member"))
+
+    response = asyncio.run(main.stream_task_events(task["id"], workbench_session="session"))
+    body = asyncio.run(_sse_body(response))
+    assert "event: activity" in body and "event: complete" in body
+    assert '"stage": "knowledge_retrieving"' in body
+    assert '"label": "正在检索企业知识"' in body
+    assert "reasoning" not in body and "developer prompt" not in body
+    assert "tool raw args" not in body and "mcp_internal" not in body
+
+
+def test_execution_summary_omits_retrievals_that_did_not_run(tmp_path, monkeypatch):
+    _, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", StreamingRuntime())
+    asyncio.run(service.execute(task))
+
+    stages = [item["stage"] for item in _activity_events(product, task)]
+    assert "generating" in stages
+    assert "knowledge_retrieving" not in stages and "asset_retrieving" not in stages
+
+
+def test_execution_summary_marks_failed_task_without_partial_completion(tmp_path, monkeypatch):
+    _, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", StreamingRuntime(fail=True))
+    asyncio.run(service.execute(task))
+
+    activities = _activity_events(product, task)
+    assert activities[-1]["stage"] == "failed"
+    assert "completed" not in [item["stage"] for item in activities]
+
+
+@pytest.mark.parametrize(
+    ("tool", "stage"),
+    [
+        ("enterprise_config_get", "enterprise_config_loading"),
+        ("knowledge_search", "knowledge_retrieving"),
+        ("asset_search", "asset_retrieving"),
+        ("image_generation", "tool_running"),
+    ],
+)
+def test_provider_tool_summary_maps_only_to_safe_categories(tool, stage):
+    event = CodexRuntimeProvider._safe_tool_activity(
+        SimpleNamespace(server="platform", tool=tool, arguments={"query": "secret query"}, output="secret output"),
+        "started",
+    )
+    assert event and event.kind == "activity" and event.text == f"{stage}:started"
+    assert "secret" not in event.text and tool not in event.text
+
+
+def test_provider_tool_summary_ignores_non_tool_items():
+    assert CodexRuntimeProvider._safe_tool_activity(SimpleNamespace(text="hidden reasoning"), "started") is None
+
+
 def test_streaming_deltas_are_ordered_and_final_result_stays_atomic(tmp_path, monkeypatch):
     runtime = StreamingRuntime()
     store, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", runtime)
@@ -325,6 +423,47 @@ def test_codex_provider_streams_only_agent_message_delta_notifications():
     events = asyncio.run(collect())
     assert [(event.kind, event.text) for event in events[:-1]] == [("delta", "可见"), ("delta", "正文")]
     assert events[-1].kind == "completed" and events[-1].turn.text == "可见正文"
+
+
+def test_codex_provider_streams_safe_activity_for_real_tool_notifications():
+    from openai_codex.generated.v2_all import ItemCompletedNotification, ItemStartedNotification, MessagePhase, Turn, TurnCompletedNotification, TurnStatus
+
+    async def notifications():
+        tool_item = SimpleNamespace(
+            server="platform",
+            tool="knowledge_search",
+            arguments={"query": "internal knowledge query"},
+            output="internal tool output",
+        )
+        yield SimpleNamespace(method="item/started", payload=ItemStartedNotification.model_construct(item=tool_item, thread_id="thread", turn_id="turn"))
+        yield SimpleNamespace(method="item/completed", payload=ItemCompletedNotification.model_construct(item=tool_item, thread_id="thread", turn_id="turn"))
+        final_item = SimpleNamespace(text="可见正文", phase=MessagePhase.final_answer)
+        yield SimpleNamespace(method="item/completed", payload=ItemCompletedNotification.model_construct(item=final_item, thread_id="thread", turn_id="turn"))
+        completed = Turn.model_construct(id="turn", status=TurnStatus.completed, items=[tool_item, final_item], error=None, duration_ms=9)
+        yield SimpleNamespace(method="turn/completed", payload=TurnCompletedNotification.model_construct(thread_id="thread", turn=completed))
+
+    class Handle:
+        id = "turn"
+
+        def stream(self):
+            return notifications()
+
+    async def turn(*_args, **_kwargs):
+        return Handle()
+
+    provider = CodexRuntimeProvider(None)
+    provider._profiles["profile"] = SimpleNamespace(sandbox="read_only")
+    provider._threads["thread"] = SimpleNamespace(turn=turn)
+
+    async def collect():
+        return [item async for item in provider.stream_turn(RuntimeSession("thread", "profile"), "message")]
+
+    events = asyncio.run(collect())
+    assert [(event.kind, event.text) for event in events[:-1]] == [
+        ("activity", "knowledge_retrieving:started"),
+        ("activity", "knowledge_retrieving:completed"),
+    ]
+    assert all("internal" not in (event.text or "") for event in events)
 
 
 async def _sse_body(response):

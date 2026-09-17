@@ -92,5 +92,10 @@ class RuntimeStreamEvent:
         return cls(kind="delta", text=text)
 
     @classmethod
+    def activity(cls, stage: str, status: str) -> "RuntimeStreamEvent":
+        """A product-safe execution event; never carries provider payloads."""
+        return cls(kind="activity", text=f"{stage}:{status}")
+
+    @classmethod
     def completed(cls, turn: RuntimeTurn) -> "RuntimeStreamEvent":
         return cls(kind="completed", turn=turn)

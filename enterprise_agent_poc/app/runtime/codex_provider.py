@@ -383,6 +383,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         from openai_codex.generated.v2_all import (
             AgentMessageDeltaNotification,
             ItemCompletedNotification,
+            ItemStartedNotification,
             ThreadTokenUsageUpdatedNotification,
             TurnCompletedNotification,
             TurnStatus,
@@ -406,8 +407,15 @@ class CodexRuntimeProvider(RuntimeProvider):
                     and payload.delta
                 ):
                     yield RuntimeStreamEvent.visible_delta(payload.delta)
+                elif isinstance(payload, ItemStartedNotification) and payload.turn_id == handle.id:
+                    activity = self._safe_tool_activity(getattr(payload, "item", None), "started")
+                    if activity:
+                        yield activity
                 elif isinstance(payload, ItemCompletedNotification) and payload.turn_id == handle.id:
                     items.append(payload.item)
+                    activity = self._safe_tool_activity(payload.item, "completed")
+                    if activity:
+                        yield activity
                 elif isinstance(payload, ThreadTokenUsageUpdatedNotification) and payload.turn_id == handle.id:
                     usage = payload.token_usage
                 elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == handle.id:
@@ -430,6 +438,19 @@ class CodexRuntimeProvider(RuntimeProvider):
             duration_ms=completed.duration_ms,
         )
         yield RuntimeStreamEvent.completed(self._runtime_turn_from_result(session, profile, result))
+
+    @staticmethod
+    def _safe_tool_activity(item: object, status: str) -> RuntimeStreamEvent | None:
+        """Map actual MCP calls to an allowlisted product category only."""
+        if status not in {"started", "completed"} or not getattr(item, "server", None):
+            return None
+        tool = str(getattr(item, "tool", "") or "")
+        stage = {
+            "enterprise_config_get": "enterprise_config_loading",
+            "knowledge_search": "knowledge_retrieving",
+            "asset_search": "asset_retrieving",
+        }.get(tool, "tool_running")
+        return RuntimeStreamEvent.activity(stage, status)
 
     async def cancel_turn(self, session: RuntimeSession) -> bool:
         """Interrupt the SDK turn when it is still active.

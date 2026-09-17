@@ -69,6 +69,7 @@ class AgentService:
         defer_result_persistence: bool = False,
         execution_context: dict | None = None,
         on_visible_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_execution_activity: Callable[[str, str], None] | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
         on_run_started: Callable[[str, str], None] | None = None,
     ) -> RunResult:
@@ -177,7 +178,7 @@ class AgentService:
                     )
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
-            turn = await self._run_turn(session, message, on_visible_delta, cancellation_requested)
+            turn = await self._run_turn(session, message, on_visible_delta, cancellation_requested, on_execution_activity)
             trace = self._completed_trace(trace, turn, agent.allows_image_generation)
             if execution_context:
                 for tool in profile.required_tools:
@@ -260,6 +261,7 @@ class AgentService:
         message: str,
         on_visible_delta: Callable[[str], Awaitable[None]] | None,
         cancellation_requested: Callable[[], bool] | None = None,
+        on_execution_activity: Callable[[str, str], None] | None = None,
     ):
         stream_turn = getattr(self._runtime, "stream_turn", None)
         if not callable(stream_turn):
@@ -267,14 +269,24 @@ class AgentService:
 
         async def consume():
             completed = None
+            generating_started = False
             async for event in stream_turn(session, message):
                 if event.kind == "delta":
+                    if not generating_started and on_execution_activity:
+                        on_execution_activity("generating", "started")
+                        generating_started = True
                     if on_visible_delta and event.text:
                         await on_visible_delta(event.text)
+                elif event.kind == "activity" and on_execution_activity and event.text:
+                    stage, separator, status = event.text.partition(":")
+                    if separator:
+                        on_execution_activity(stage, status)
                 elif event.kind == "completed":
                     completed = event.turn
             if completed is None:
                 raise RuntimeError("Runtime stream ended without a final turn.")
+            if generating_started and on_execution_activity:
+                on_execution_activity("generating", "completed")
             return completed
 
         consumer = asyncio.create_task(consume())

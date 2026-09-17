@@ -617,6 +617,31 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
                     ):
                         yield f"event: delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
                     continue
+                if item["stage"] == "activity":
+                    try:
+                        activity = json.loads(item["message"])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if (
+                        isinstance(activity, dict)
+                        and isinstance(activity.get("sequence"), int)
+                        and activity.get("stage") in {"queued", "context_loading", "enterprise_config_loading", "knowledge_retrieving", "asset_retrieving", "tool_running", "generating", "persisting", "completed", "failed", "cancelled"}
+                        and activity.get("status") in {"started", "completed"}
+                    ):
+                        labels = {
+                            "queued": "任务已进入队列", "context_loading": "正在加载执行上下文",
+                            "enterprise_config_loading": "正在加载企业配置", "knowledge_retrieving": "正在检索企业知识",
+                            "asset_retrieving": "正在查找企业素材", "tool_running": "正在调用工具",
+                            "generating": "正在生成回答", "persisting": "正在保存结果", "completed": "已完成",
+                            "failed": "执行失败", "cancelled": "已停止生成",
+                        }
+                        activity = {
+                            "sequence": activity["sequence"], "stage": activity["stage"],
+                            "label": labels[activity["stage"]], "status": activity["status"],
+                            "created_at": item["created_at"],
+                        }
+                        yield f"event: activity\ndata: {json.dumps(activity, ensure_ascii=False)}\n\n"
+                    continue
                 yield f"event: progress\ndata: {json.dumps(jsonable_encoder(item), ensure_ascii=False)}\n\n"
             task = product_store.task(task_id, principal.tenant_id, principal.user_id)
             if not task:

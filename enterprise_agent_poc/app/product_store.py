@@ -27,6 +27,19 @@ _PROJECT_TYPES = {
     "copywriting-agent": "文案创作项目",
     "campaign-agent": "活动策划项目",
 }
+_SAFE_ACTIVITY_LABELS = {
+    "queued": "任务已进入队列",
+    "context_loading": "正在加载执行上下文",
+    "enterprise_config_loading": "正在加载企业配置",
+    "knowledge_retrieving": "正在检索企业知识",
+    "asset_retrieving": "正在查找企业素材",
+    "tool_running": "正在调用工具",
+    "generating": "正在生成回答",
+    "persisting": "正在保存结果",
+    "completed": "已完成",
+    "failed": "执行失败",
+    "cancelled": "已停止生成",
+}
 
 
 def _project_title(agent_id: str, prompt: str | None) -> str:
@@ -369,6 +382,7 @@ class ProductStore:
             task_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?, 'queued', '任务已进入队列')", (task_id,))
+            self._insert_task_activity(conn, task_id, "queued", "started")
             if context:
                 conn.execute("INSERT INTO task_agent_contexts VALUES (?,?)", (task_id, context["id"]))
             if _test_revision:
@@ -420,6 +434,7 @@ class ProductStore:
             if task["status"] == "queued":
                 conn.execute("UPDATE tasks SET status='cancelled',stage='cancelled',completed_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
                 conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'cancelled','Generation stopped')", (task_id,))
+                self._insert_task_activity(conn, task_id, "cancelled", "completed")
             elif task["stage"] != "cancelling":
                 conn.execute("UPDATE tasks SET stage='cancelling' WHERE id=?", (task_id,))
                 conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'cancelling','正在停止生成')", (task_id,))
@@ -435,6 +450,7 @@ class ProductStore:
             )
             if updated.rowcount:
                 conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'cancelled','Generation stopped')", (task_id,))
+                self._insert_task_activity(conn, task_id, "cancelled", "completed")
 
     def add_task_delta(self, task_id: str, tenant_id: str, sequence: int, text: str) -> None:
         """Append one already-filtered visible-text delta to the task channel."""
@@ -442,7 +458,7 @@ class ProductStore:
             raise ValueError("Invalid task text delta")
         with self._store.connection() as conn:
             active = conn.execute(
-                "SELECT 1 FROM tasks WHERE id=? AND tenant_id=? AND status NOT IN ('completed','failed','cancelled')",
+                "SELECT 1 FROM tasks WHERE id=? AND tenant_id=? AND status NOT IN ('completed','failed','cancelled') AND stage<>'cancelling'",
                 (task_id, tenant_id),
             ).fetchone()
             if active:
@@ -450,6 +466,29 @@ class ProductStore:
                     "INSERT INTO task_events(task_id,stage,message) VALUES (?, 'delta', ?)",
                     (task_id, json.dumps({"sequence": sequence, "text": text}, ensure_ascii=False)),
                 )
+
+    @staticmethod
+    def _insert_task_activity(conn, task_id: str, stage: str, status: str) -> int:
+        cursor = conn.execute(
+            "INSERT INTO task_events(task_id,stage,message) VALUES (?, 'activity', '{}') RETURNING id",
+            (task_id,),
+        )
+        sequence = int(cursor.fetchone()["id"])
+        payload = {"sequence": sequence, "stage": stage, "label": _SAFE_ACTIVITY_LABELS[stage], "status": status}
+        conn.execute("UPDATE task_events SET message=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), sequence))
+        return sequence
+
+    def add_task_activity(self, task_id: str, tenant_id: str, stage: str, status: str) -> int | None:
+        if stage not in _SAFE_ACTIVITY_LABELS or status not in {"started", "completed"}:
+            raise ValueError("Invalid safe task activity")
+        with self._store.connection() as conn:
+            terminal = stage in {"completed", "failed", "cancelled"}
+            active = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND tenant_id=? AND ("
+                "(status NOT IN ('completed','failed','cancelled') AND stage<>'cancelling') OR status=?)",
+                (task_id, tenant_id, stage if terminal else ""),
+            ).fetchone()
+            return self._insert_task_activity(conn, task_id, stage, status) if active else None
 
     def attach_conversation(self, conversation_id: str, user_id: str, title: str = "新会话") -> None:
         with self._store.connection() as conn:
@@ -832,8 +871,37 @@ class ProductStore:
         if not row: return None
         result = dict(row)
         result["events"] = [dict(x) for x in events]
+        result["current_activity"] = next(
+            (
+                {
+                    "sequence": payload["sequence"], "stage": payload["stage"],
+                    "label": _SAFE_ACTIVITY_LABELS[payload["stage"]], "status": payload["status"],
+                    "created_at": event["created_at"],
+                }
+                for event in reversed(result["events"])
+                if event["stage"] == "activity"
+                for payload in [self._safe_activity_payload(event["message"])]
+                if payload is not None
+            ),
+            None,
+        )
         result["generation"] = _generation_view(dict(generation)) if generation else None
         return result
+
+    @staticmethod
+    def _safe_activity_payload(message: object) -> dict | None:
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not (
+            isinstance(payload, dict)
+            and isinstance(payload.get("sequence"), int)
+            and payload.get("stage") in _SAFE_ACTIVITY_LABELS
+            and payload.get("status") in {"started", "completed"}
+        ):
+            return None
+        return payload
 
     def task_events_since(self, task_id: str, tenant_id: str, user_id: str, after_id: int = 0) -> list[dict]:
         with self._store.connection() as conn:

@@ -65,6 +65,7 @@ class TaskService:
             return
 
         self._store.set_task(task_id, tenant_id, "running", "loading_context", "正在加载企业上下文")
+        self._store.add_task_activity(task_id, tenant_id, "context_loading", "started")
         try:
             delta_sequence = 0
 
@@ -72,6 +73,9 @@ class TaskService:
                 nonlocal delta_sequence
                 delta_sequence += 1
                 self._store.add_task_delta(task_id, tenant_id, delta_sequence, text)
+
+            def on_execution_activity(stage: str, status: str) -> None:
+                self._store.add_task_activity(task_id, tenant_id, stage, status)
 
             agent = self._store.task_definition(task)
             execution_options = {}
@@ -87,6 +91,7 @@ class TaskService:
                     task["input_text"],
                     message_id=f"task:{task_id}:user",
                 )
+            self._store.add_task_activity(task_id, tenant_id, "context_loading", "completed")
             self._store.set_task(task_id, tenant_id, "running", "starting_runtime", f"正在启动{agent.name}")
             result = await self._agents.run(
                 tenant_id,
@@ -96,6 +101,7 @@ class TaskService:
                 defer_result_persistence=True,
                 **execution_options,
                 on_visible_delta=on_visible_delta,
+                on_execution_activity=on_execution_activity,
                 cancellation_requested=lambda: self._store.cancellation_requested(task_id, tenant_id),
                 on_run_started=lambda run_id, conversation_id: self._store.attach_task_run(task_id, tenant_id, run_id, conversation_id),
             )
@@ -113,7 +119,10 @@ class TaskService:
                 run_id=result.run_id,
                 conversation_id=result.conversation_id,
             )
+            self._store.add_task_activity(task_id, tenant_id, "persisting", "started")
             self._persist_result({**task, "run_id": result.run_id}, trace)
+            self._store.add_task_activity(task_id, tenant_id, "persisting", "completed")
+            self._store.add_task_activity(task_id, tenant_id, "completed", "completed")
         except (GenerationCancelled, TaskCancellationRequested):
             current = self._store.task_for_worker(task_id) or task
             self._agents.mark_cancelled(current.get("run_id"), tenant_id)
@@ -154,6 +163,7 @@ class TaskService:
                 run_id=getattr(exc, "run_id", None),
                 conversation_id=getattr(exc, "conversation_id", None),
             )
+            self._store.add_task_activity(task_id, tenant_id, "failed", "completed")
 
     @staticmethod
     def _persistence_recoverable(trace: dict | None) -> bool:

@@ -35,6 +35,13 @@ def test_cancel_queued_task_is_terminal_and_idempotent(tmp_path, monkeypatch):
     second = product.cancel_task(task["id"], "tenant-a", task["user_id"])
     assert first["status"] == second["status"] == "cancelled"
     assert product.task_for_worker(task["id"])["stage"] == "cancelled"
+    activities = [
+        item["message"]
+        for item in product.task_events_since(task["id"], "tenant-a", task["user_id"])
+        if item["stage"] == "activity"
+    ]
+    assert any('"stage": "queued"' in item for item in activities)
+    assert activities[-1].find('"stage": "cancelled"') >= 0
 
 
 def test_cancel_respects_tenant_and_user_ownership(tmp_path, monkeypatch):
@@ -66,6 +73,14 @@ def test_running_cancel_interrupts_turn_and_never_persists_partial_result(tmp_pa
         assert conn.execute("SELECT COUNT(*) AS n FROM task_results WHERE task_id=?", (task["id"],)).fetchone()["n"] == 0
         assert conn.execute("SELECT COUNT(*) AS n FROM messages WHERE id=?", (f"task:{task['id']}:assistant",)).fetchone()["n"] == 0
         assert conn.execute("SELECT COUNT(*) AS n FROM credit_transactions WHERE task_id=?", (task["id"],)).fetchone()["n"] == 0
+    activities = [
+        item["message"]
+        for item in product.task_events_since(task["id"], "tenant-a", task["user_id"])
+        if item["stage"] == "activity"
+    ]
+    assert any('"stage": "cancelled"' in item for item in activities)
+    cancelled_at = next(index for index, item in enumerate(activities) if '"stage": "cancelled"' in item)
+    assert all('"stage": "cancelled"' in item for item in activities[cancelled_at:])
 
 
 def test_completed_and_failed_tasks_cannot_be_cancelled(tmp_path, monkeypatch):
