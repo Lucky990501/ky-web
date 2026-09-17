@@ -59,9 +59,15 @@ function harness(pathname = '/platform/skills', state = null) {
   const pending = [];
   const navs = ['workspace', 'image', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
   const document = {
-    querySelector(selector){if(selector === '#main')return this.main; if(selector==='#side-credit')return null; return {};},
+    prompt:{value:'',focused:false,focus(){this.focused=true;}},
+    taskStatus:null,
+    querySelector(selector){if(selector === '#main')return this.main; if(selector==='#side-credit')return null; if(selector==='#prompt')return this.prompt; if(selector==='#task-status')return this.taskStatus; return {};},
     querySelectorAll(selector){return selector === '[data-page]' ? navs : [];},
     addEventListener(){},
+    createElement(){
+      const retryButton={};
+      return {set innerHTML(value){this._html=value;this.firstElementChild={id:'',querySelector(selector){return selector==='button'?retryButton:null;}};}};
+    },
   };
   class View {
     constructor(){this.dataset={}; this.innerHTML=''; this.nodes=new Map();}
@@ -376,6 +382,25 @@ test('streaming complete also supports providers that emit no deltas',()=>{
   h.run("directComplete=createStreamingState();applyStreamingEvent(directComplete,'complete',{final_response:'无需 delta 的最终正文'})");
   assert.equal(h.run('directComplete.text'),'');
   assert.equal(h.run('directComplete.finalResponse'),'无需 delta 的最终正文');
+});
+
+test('final task lifecycle releases the submit guard after streaming, polling, and failure',()=>{
+  const h=harness('/agents/campaign');
+  h.run("streamComplete=createStreamingState();applyStreamingEvent(streamComplete,'complete',{final_response:'流式完成正文'});streamNode={id:'task-status',removeAttribute(name){if(name==='id'){this.id='';document.taskStatus=null;}},classList:{remove(){}},innerHTML:''};document.taskStatus=streamNode;completeStreamingMessage(streamNode,streamComplete,'原始需求',document.main)");
+  assert.equal(h.run("document.querySelector('#task-status')"),null);
+  assert.equal(h.run('streamNode.id'),'');
+  assert.ok(h.run('streamNode.innerHTML').includes('流式完成正文'));
+
+  h.run("pollComplete=createStreamingState();pollNode={id:'task-status',removeAttribute(name){if(name==='id'){this.id='';document.taskStatus=null;}},classList:{remove(){}},innerHTML:''};document.taskStatus=pollNode;finishStreamTask(pollNode,pollComplete,{status:'completed',final_response:'轮询完成正文',conversation_id:'conversation-1'},'campaign-agent',document.main,'轮询需求')");
+  assert.equal(h.run("document.querySelector('#task-status')"),null);
+  assert.equal(h.run('pollNode.id'),'');
+
+  h.run("failedNode={id:'task-status',_streamState:{text:'已生成的部分内容'},replaceWith(failure){this.failure=failure;document.taskStatus=null;}};document.taskStatus=failedNode;replaceTaskFailure(failedNode,'生成中断','重试需求','diagnostic-1');failedNode.failure.querySelector('button').onclick()");
+  assert.equal(h.run("document.querySelector('#task-status')"),null);
+  assert.equal(h.run('failedNode.failure.id'),'');
+  assert.equal(h.document.prompt.value,'重试需求');
+  assert.equal(h.document.prompt.focused,true);
+  assert.ok(source.includes("if(!text||document.querySelector('#task-status'))return;"));
 });
 
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{
