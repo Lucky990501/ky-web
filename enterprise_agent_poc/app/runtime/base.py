@@ -34,5 +34,14 @@ class RuntimeProvider(ABC):
         """Default compatibility path for providers without native streaming."""
         yield RuntimeStreamEvent.completed(await self.run_turn(session, message))
 
+    async def cancel_turn(self, session: RuntimeSession) -> bool:
+        """Best-effort provider cancellation for the active turn in *session*.
+
+        ``False`` means this provider exposes no remote cancellation primitive;
+        callers must still stop consuming the local coroutine and prevent later
+        product-side work from running.
+        """
+        return False
+
     @abstractmethod
     async def close(self) -> None: ...

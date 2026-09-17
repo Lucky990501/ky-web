@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 
 from app.agent_catalog import CATALOG
-from app.product_store import ProductStore, ResultPersistenceError
-from app.service import AgentRunError, AgentService
+from app.product_store import ProductStore, ResultPersistenceError, TaskCancellationRequested
+from app.service import AgentRunError, AgentService, GenerationCancelled
 from app.storage import storage_provider
 
 
@@ -35,6 +35,9 @@ class TaskService:
         task_id, tenant_id = task["id"], task["tenant_id"]
         current = self._store.task_for_worker(task_id) or task
         if current.get("status") in {"completed", "cancelled"}:
+            return
+        if self._store.cancellation_requested(task_id, tenant_id):
+            self._store.finalize_task_cancellation(task_id, tenant_id)
             return
         if current.get("run_id"):
             prior_trace = self._agents._store.run_trace(current["run_id"], tenant_id)
@@ -93,7 +96,11 @@ class TaskService:
                 defer_result_persistence=True,
                 **execution_options,
                 on_visible_delta=on_visible_delta,
+                cancellation_requested=lambda: self._store.cancellation_requested(task_id, tenant_id),
+                on_run_started=lambda run_id, conversation_id: self._store.attach_task_run(task_id, tenant_id, run_id, conversation_id),
             )
+            if self._store.cancellation_requested(task_id, tenant_id):
+                raise TaskCancellationRequested()
             trace = self._agents._store.run_trace(result.run_id, tenant_id)
             if not trace:
                 raise ResultPersistenceError("trace_lookup")
@@ -107,6 +114,12 @@ class TaskService:
                 conversation_id=result.conversation_id,
             )
             self._persist_result({**task, "run_id": result.run_id}, trace)
+        except (GenerationCancelled, TaskCancellationRequested):
+            current = self._store.task_for_worker(task_id) or task
+            self._agents.mark_cancelled(current.get("run_id"), tenant_id)
+            self._store.finalize_task_cancellation(
+                task_id, tenant_id, run_id=current.get("run_id"), conversation_id=current.get("conversation_id")
+            )
         except Exception as exc:
             if isinstance(exc, ResultPersistenceError):
                 code, message = "result_persistence_error", "任务正文已生成，但结果保存失败；可安全重试保存。"

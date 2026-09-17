@@ -209,6 +209,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         self._manager = manager
         self._profiles: dict[str, RuntimeProfile] = {}
         self._threads: dict[str, object] = {}
+        self._active_turns: dict[str, object] = {}
 
     @staticmethod
     def _sandbox(policy: SandboxPolicy):
@@ -390,6 +391,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         profile = self._profiles[session.profile_id]
         thread = await self._thread_for_session(session, profile)
         handle = await thread.turn(message, sandbox=self._sandbox(profile.sandbox))
+        self._active_turns[session.thread_id] = handle
         items: list[object] = []
         usage = None
         completed = None
@@ -412,6 +414,7 @@ class CodexRuntimeProvider(RuntimeProvider):
                     completed = payload.turn
         finally:
             await stream.aclose()
+            self._active_turns.pop(session.thread_id, None)
         if completed is None:
             raise RuntimeError("turn completed event not received")
         if completed.status == TurnStatus.failed:
@@ -427,6 +430,18 @@ class CodexRuntimeProvider(RuntimeProvider):
             duration_ms=completed.duration_ms,
         )
         yield RuntimeStreamEvent.completed(self._runtime_turn_from_result(session, profile, result))
+
+    async def cancel_turn(self, session: RuntimeSession) -> bool:
+        """Interrupt the SDK turn when it is still active.
+
+        AsyncTurnHandle.interrupt is the provider's remote cancellation request;
+        it is deliberately kept distinct from closing this process's stream.
+        """
+        handle = self._active_turns.get(session.thread_id)
+        if handle is None:
+            return False
+        await handle.interrupt()
+        return True
 
     @staticmethod
     def _final_assistant_response(items: list[object]) -> str | None:

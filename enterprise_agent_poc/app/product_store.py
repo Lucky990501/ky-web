@@ -17,6 +17,10 @@ class ResultPersistenceError(RuntimeError):
         self.stage = stage
 
 
+class TaskCancellationRequested(RuntimeError):
+    """The cancellation transition won the task finalization race."""
+
+
 _GENERIC_CONVERSATION_TITLES = {"", "新会话", "新图片会话"}
 _PROJECT_TYPES = {
     "image-agent": "图片生成项目",
@@ -375,12 +379,62 @@ class ProductStore:
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:
         with self._store.connection() as conn:
-            updated = conn.execute("UPDATE tasks SET status=?,stage=?,run_id=COALESCE(?,run_id),error_code=?,conversation_id=COALESCE(?,conversation_id),started_at=CASE WHEN ?='running' THEN CURRENT_TIMESTAMP ELSE started_at END,completed_at=CASE WHEN ? IN ('completed','failed','cancelled') THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=? AND tenant_id=? AND status NOT IN ('completed','cancelled') AND NOT (status='failed' AND ?='completed')", (status,stage,run_id,error_code,conversation_id,status,status,task_id,tenant_id,status))
+            updated = conn.execute("UPDATE tasks SET status=?,stage=?,run_id=COALESCE(?,run_id),error_code=?,conversation_id=COALESCE(?,conversation_id),started_at=CASE WHEN ?='running' THEN CURRENT_TIMESTAMP ELSE started_at END,completed_at=CASE WHEN ? IN ('completed','failed','cancelled') THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=? AND tenant_id=? AND status NOT IN ('completed','cancelled') AND stage<>'cancelling' AND NOT (status='failed' AND ?='completed')", (status,stage,run_id,error_code,conversation_id,status,status,task_id,tenant_id,status))
             if updated.rowcount != 1:
                 return
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,?,?)", (task_id,stage,message))
             if response is not None:
                 conn.execute("INSERT INTO task_results(task_id,final_response,result_json) VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET final_response=excluded.final_response,result_json=excluded.result_json", (task_id,response,json.dumps({"run_id":run_id},ensure_ascii=False)))
+
+    def attach_task_run(self, task_id: str, tenant_id: str, run_id: str, conversation_id: str) -> None:
+        """Expose a started Run to cancellation without advancing task state."""
+        with self._store.connection() as conn:
+            conn.execute(
+                "UPDATE tasks SET run_id=?,conversation_id=COALESCE(conversation_id,?) WHERE id=? AND tenant_id=? AND status NOT IN ('completed','failed','cancelled')",
+                (run_id, conversation_id, task_id, tenant_id),
+            )
+
+    def cancellation_requested(self, task_id: str, tenant_id: str) -> bool:
+        with self._store.connection() as conn:
+            row = conn.execute("SELECT status,stage FROM tasks WHERE id=? AND tenant_id=?", (task_id, tenant_id)).fetchone()
+        return bool(row and (row["status"] == "cancelled" or row["stage"] == "cancelling"))
+
+    def cancel_task(self, task_id: str, tenant_id: str, user_id: str) -> dict | None:
+        """Atomically claim cancellation without changing the database schema.
+
+        Queued work is terminal immediately. A running task stores its requested
+        cancellation in ``stage`` (the durable V1 cancelling representation)
+        until its worker records the cancelled terminal state.
+        """
+        with self._store.connection() as conn:
+            if not self._store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
+            task = conn.execute(
+                "SELECT id,status,stage,run_id FROM tasks WHERE id=? AND tenant_id=? AND user_id=?" + (" FOR UPDATE" if self._store.is_postgres else ""),
+                (task_id, tenant_id, user_id),
+            ).fetchone()
+            if not task:
+                return None
+            if task["status"] in {"completed", "failed", "cancelled"}:
+                return self.task(task_id, tenant_id, user_id)
+            if task["status"] == "queued":
+                conn.execute("UPDATE tasks SET status='cancelled',stage='cancelled',completed_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
+                conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'cancelled','Generation stopped')", (task_id,))
+            elif task["stage"] != "cancelling":
+                conn.execute("UPDATE tasks SET stage='cancelling' WHERE id=?", (task_id,))
+                conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'cancelling','正在停止生成')", (task_id,))
+                if task["run_id"]:
+                    conn.execute("UPDATE run_traces SET status='cancelling' WHERE run_id=? AND tenant_id=? AND status NOT IN ('completed','failed','cancelled')", (task["run_id"], tenant_id))
+        return self.task(task_id, tenant_id, user_id)
+
+    def finalize_task_cancellation(self, task_id: str, tenant_id: str, *, run_id: str | None = None, conversation_id: str | None = None) -> None:
+        with self._store.connection() as conn:
+            updated = conn.execute(
+                "UPDATE tasks SET status='cancelled',stage='cancelled',run_id=COALESCE(?,run_id),conversation_id=COALESCE(?,conversation_id),error_code=NULL,completed_at=CURRENT_TIMESTAMP WHERE id=? AND tenant_id=? AND status NOT IN ('completed','failed','cancelled')",
+                (run_id, conversation_id, task_id, tenant_id),
+            )
+            if updated.rowcount:
+                conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'cancelled','Generation stopped')", (task_id,))
 
     def add_task_delta(self, task_id: str, tenant_id: str, sequence: int, text: str) -> None:
         """Append one already-filtered visible-text delta to the task channel."""
@@ -438,7 +492,7 @@ class ProductStore:
                 if not self._store.is_postgres:
                     conn.execute("BEGIN IMMEDIATE")
                 current = conn.execute(
-                    "SELECT status,agent_id,run_id,conversation_id FROM tasks WHERE id=? AND tenant_id=? AND user_id=?" + (" FOR UPDATE" if self._store.is_postgres else ""),
+                    "SELECT status,stage,agent_id,run_id,conversation_id FROM tasks WHERE id=? AND tenant_id=? AND user_id=?" + (" FOR UPDATE" if self._store.is_postgres else ""),
                     (task_id, tenant_id, user_id),
                 ).fetchone()
                 if not current:
@@ -450,7 +504,9 @@ class ProductStore:
                     if not association or association["context_id"] != context["id"]:
                         raise ValueError("Task / conversation context mismatch")
                 stage = "completion_evidence"
-                if current["status"] == "cancelled" or (current["run_id"] and current["run_id"] != run_id) or (current["conversation_id"] and current["conversation_id"] != conversation_id):
+                if current["status"] == "cancelled" or current["stage"] == "cancelling":
+                    raise TaskCancellationRequested()
+                if (current["run_id"] and current["run_id"] != run_id) or (current["conversation_id"] and current["conversation_id"] != conversation_id):
                     raise ValueError("Task/Run association mismatch.")
                 if current["status"] == "completed":
                     return {
@@ -574,7 +630,7 @@ class ProductStore:
                 )
                 conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,'completed','任务已完成，正文已返回')", (task_id,))
         except Exception as exc:
-            if isinstance(exc, ResultPersistenceError):
+            if isinstance(exc, (ResultPersistenceError, TaskCancellationRequested)):
                 raise
             raise ResultPersistenceError(stage) from exc
         return {

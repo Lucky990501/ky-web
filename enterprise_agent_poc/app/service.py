@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass
 from collections.abc import Awaitable
 from typing import Callable
+import asyncio
 
 from app.domain import RuntimeProfile, RuntimeSession
 from app.runtime.base import RuntimeProvider, RuntimeStartError
@@ -35,6 +36,10 @@ class AgentRunError(RuntimeError):
         self.error_code, self.failure_stage = error_code, failure_stage
 
 
+class GenerationCancelled(RuntimeError):
+    """The product task requested that this locally-running turn stop."""
+
+
 class AgentService:
     def __init__(self, store: POCStore, runtime: RuntimeProvider, settings: Settings, skill_manifest_resolver: Callable[[str], dict[str, str]] | None = None) -> None:
         self._store = store
@@ -64,6 +69,8 @@ class AgentService:
         defer_result_persistence: bool = False,
         execution_context: dict | None = None,
         on_visible_delta: Callable[[str], Awaitable[None]] | None = None,
+        cancellation_requested: Callable[[], bool] | None = None,
+        on_run_started: Callable[[str, str], None] | None = None,
     ) -> RunResult:
         if execution_context is None:
             profile = self.profile_for(tenant_id, agent_id)
@@ -139,8 +146,12 @@ class AgentService:
         # trace first so the task keeps an auditable run_id without inventing a
         # thread id or storing provider exceptions/secrets.
         self._store.create_run_trace(run_id, conversation_id, tenant_id, agent_id, "pending", baseline)
+        if on_run_started:
+            on_run_started(run_id, conversation_id)
         trace = baseline
         try:
+            if cancellation_requested and cancellation_requested():
+                raise GenerationCancelled()
             if is_resume:
                 recovery_context = self._recovery_context(conversation_id, tenant_id, message)
                 session = await self._runtime.resume_session(
@@ -166,7 +177,7 @@ class AgentService:
                     )
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
-            turn = await self._run_turn(session, message, on_visible_delta)
+            turn = await self._run_turn(session, message, on_visible_delta, cancellation_requested)
             trace = self._completed_trace(trace, turn, agent.allows_image_generation)
             if execution_context:
                 for tool in profile.required_tools:
@@ -205,6 +216,20 @@ class AgentService:
             self._store.log_event(conversation_id, "turn.completed", {"run_id": run_id, "token_usage": trace["token_usage"], "latency_ms": turn.latency_ms})
             self._store.finish_run_trace(run_id, status, trace, turn.thread_id)
             return RunResult(run_id=run_id, conversation_id=conversation_id, thread_id=turn.thread_id, text=turn.text)
+        except GenerationCancelled:
+            trace.update(
+                status="cancelled",
+                partial_output=bool(trace.get("final_response_received")),
+                final_response_persisted=False,
+                assistant_message_saved=False,
+                result_persistence_status="not_applicable",
+                failure_stage="cancelled",
+                error=None,
+            )
+            self._store.finish_run_trace(run_id, "cancelled", trace, trace.get("codex_thread_id"))
+            if trace.get("codex_thread_id"):
+                self._store.log_event(conversation_id, "turn.cancelled", {"run_id": run_id})
+            raise
         except Exception as exc:
             trace["status"] = "failed"
             trace["partial_output"] = bool(trace.get("final_response_received"))
@@ -234,20 +259,46 @@ class AgentService:
         session: RuntimeSession,
         message: str,
         on_visible_delta: Callable[[str], Awaitable[None]] | None,
+        cancellation_requested: Callable[[], bool] | None = None,
     ):
         stream_turn = getattr(self._runtime, "stream_turn", None)
         if not callable(stream_turn):
             return await self._runtime.run_turn(session, message)
-        completed = None
-        async for event in stream_turn(session, message):
-            if event.kind == "delta":
-                if on_visible_delta and event.text:
-                    await on_visible_delta(event.text)
-            elif event.kind == "completed":
-                completed = event.turn
-        if completed is None:
-            raise RuntimeError("Runtime stream ended without a final turn.")
-        return completed
+
+        async def consume():
+            completed = None
+            async for event in stream_turn(session, message):
+                if event.kind == "delta":
+                    if on_visible_delta and event.text:
+                        await on_visible_delta(event.text)
+                elif event.kind == "completed":
+                    completed = event.turn
+            if completed is None:
+                raise RuntimeError("Runtime stream ended without a final turn.")
+            return completed
+
+        consumer = asyncio.create_task(consume())
+        try:
+            while not consumer.done():
+                if cancellation_requested and cancellation_requested():
+                    cancel_turn = getattr(self._runtime, "cancel_turn", None)
+                    if callable(cancel_turn):
+                        try:
+                            await cancel_turn(session)
+                        except Exception:
+                            # Local cancellation and the durable task state still
+                            # prevent a false successful result if the provider
+                            # rejects or races the best-effort interrupt request.
+                            pass
+                    consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                    raise GenerationCancelled()
+                await asyncio.wait({consumer}, timeout=0.1)
+            return await consumer
+        finally:
+            if not consumer.done():
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
 
     def _startup_events(self, profile: RuntimeProfile) -> list[dict]:
         getter = getattr(self._runtime, "startup_events", None)
@@ -341,6 +392,27 @@ class AgentService:
         )
         self._store.finish_run_trace(run_id, "failed", payload, trace.get("codex_thread_id"))
         self._store.log_event(trace["conversation_id"], "result.persistence_failed", {"run_id": run_id, "stage": stage})
+
+    def mark_cancelled(self, run_id: str | None, tenant_id: str) -> None:
+        if not run_id:
+            return
+        trace = self._store.run_trace(run_id, tenant_id)
+        if not trace or trace["status"] == "completed":
+            return
+        payload = trace["payload"]
+        payload.update(
+            {
+                "status": "cancelled",
+                "partial_output": bool(payload.get("final_response_received")),
+                "assistant_message_saved": False,
+                "final_response_persisted": False,
+                "result_persistence_status": "not_applicable",
+                "failure_stage": "cancelled",
+                "error": None,
+            }
+        )
+        self._store.finish_run_trace(run_id, "cancelled", payload, trace.get("codex_thread_id"))
+        self._store.log_event(trace["conversation_id"], "turn.cancelled", {"run_id": run_id})
 
     @staticmethod
     def _safe_error(error: str | None) -> str:

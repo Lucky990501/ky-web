@@ -201,6 +201,8 @@ def _error_response(request: Request, status_code: int, code: str, message: str,
 
 def _public_task(task: dict, *, include_diagnostic: bool = False) -> dict:
     value = dict(task)
+    if value.get("status") == "running" and value.get("stage") == "cancelling":
+        value["status"] = "cancelling"
     internal_code = str(value.get("error_code") or "")
     if value.get("status") == "failed":
         if "timeout" in internal_code:
@@ -583,6 +585,15 @@ async def get_task(task_id: str, workbench_session: str | None = Cookie(default=
     return _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
 
 
+@app.post("/api/v1/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    task = product_store.cancel_task(task_id, principal.tenant_id, principal.user_id)
+    if not task:
+        raise HTTPException(404, "任务不存在。")
+    return _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
+
+
 @app.get("/api/v1/tasks/{task_id}/events")
 async def stream_task_events(task_id: str, after: int = 0, workbench_session: str | None = Cookie(default=None)):
     """SSE of persisted, user-visible task phases. No reasoning is streamed."""
@@ -614,6 +625,9 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
             if task["status"] in {"completed", "failed", "cancelled"}:
                 public = _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
                 terminal = {"status": public["status"], "error_code": public.get("error_code"), "message": public.get("user_message"), "diagnostic_id": public.get("diagnostic_id"), "final_response": public.get("final_response"), "conversation_id": public.get("conversation_id"), "generation": public.get("generation")}
+                if task["status"] == "cancelled":
+                    yield f"event: cancelled\ndata: {json.dumps({'status': 'cancelled', 'task_id': task_id, 'message': 'Generation stopped'}, ensure_ascii=False)}\n\n"
+                    return
                 event = "complete" if task["status"] == "completed" else "error"
                 yield f"event: {event}\ndata: {json.dumps(jsonable_encoder(terminal), ensure_ascii=False)}\n\n"
                 return
