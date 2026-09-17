@@ -228,7 +228,7 @@ function scheduleStreamingRender(node,state){
 function completeStreamingMessage(node,state,sourcePrompt,main){
   if(!node)return;
   state.completed=true;const follow=shouldAutoFollowStream(),finalResponse=state.finalResponse||state.text;
-  node.removeAttribute('aria-busy');node.classList.remove('streaming-message');node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt);
+  node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt);
   bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow);
 }
 function replaceTaskFailure(node,message,retryText,diagnosticId=''){
