@@ -182,9 +182,11 @@ function bindConversationActions(main){
   main.querySelectorAll('[data-open-message-generation]').forEach(node=>node.onclick=()=>openGenerationViewer(node.dataset.openMessageGeneration,'本次生成图片',node));
 }
 const taskStageLabel = stage => ({generating:'正在生成',persisting_result:'正在整理结果'})[stage]||'正在思考';
-const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',status:'正在思考',completed:false,error:null});
-const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true"><div class="chat-message-content chat-message-content-markdown" data-stream-content><p class="streaming-placeholder">${escapeHtml(status)}</p></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
-const streamingFinalContentHtml = (content,sourcePrompt='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}</div>`;
+const STREAM_VISUAL_FLUSH_MS=40,STREAM_SCROLL_FLUSH_MS=80,STREAM_FOLLOW_STOP_PX=96,STREAM_FOLLOW_RESUME_PX=32;
+const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',status:'正在思考',completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true});
+const streamingActionsHtml = (content,sourcePrompt='') => `${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}`;
+const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true"><div class="chat-message-content chat-message-content-markdown" data-stream-content><div data-stream-stable></div><div data-stream-active><p class="streaming-placeholder">${escapeHtml(status)}</p></div></div><div class="message-actions" data-stream-actions hidden></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
+const streamingFinalContentHtml = (content,sourcePrompt='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt)}</div>`;
 const streamingFailureHtml = (partial,message,diagnosticId='') => `<section class="task-failure streaming-failure" role="alert">${partial?`<div class="streaming-partial"><small>部分回复（未保存）</small><div class="chat-message-content chat-message-content-markdown">${markdownHtml(partial)}</div></div>`:''}<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>${partial?'生成已中断。你可以保留这段内容，或重新尝试。':'你可以把原需求放回输入框，检查后再次提交。'}</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button></section>`;
 function acceptStreamingDelta(state,payload){
   const sequence=Number(payload?.sequence),text=typeof payload?.text==='string'?payload.text:'';
@@ -201,39 +203,71 @@ function applyStreamingEvent(state,kind,payload={}){
   if(kind==='error'){state.error=payload.message||customerErrorMessages.TASK_FAILED;state.diagnosticId=payload.diagnostic_id||'';return true;}
   return false;
 }
-function shouldAutoFollowStream(){
-  const root=document.scrollingElement||document.documentElement||document.body;
-  if(!root)return true;
+function streamingScrollRoot(){return document.scrollingElement||document.documentElement||document.body;}
+function streamingBottomDistance(root=streamingScrollRoot()){
+  if(!root)return 0;
   const viewport=root.clientHeight||(typeof window!=='undefined'&&window.innerHeight)||0;
-  return root.scrollHeight-root.scrollTop-viewport<96;
+  return Math.max(0,root.scrollHeight-root.scrollTop-viewport);
 }
-function scrollStreamToBottom(follow){
+function shouldAutoFollowStream(){return streamingBottomDistance()<=STREAM_FOLLOW_STOP_PX;}
+function syncStreamingFollow(state){
+  if(!state)return shouldAutoFollowStream();
+  const distance=streamingBottomDistance();
+  if(state.follow&&distance>STREAM_FOLLOW_STOP_PX)state.follow=false;
+  else if(!state.follow&&distance<=STREAM_FOLLOW_RESUME_PX)state.follow=true;
+  return state.follow;
+}
+function watchStreamingFollow(state){
+  const root=streamingScrollRoot();
+  if(!state||!root||state.followRoot===root||typeof root.addEventListener!=='function')return;
+  state.followRoot=root;state.followListener=()=>syncStreamingFollow(state);root.addEventListener('scroll',state.followListener,{passive:true});syncStreamingFollow(state);
+}
+function stopWatchingStreamingFollow(state){
+  if(state?.followRoot&&state.followListener&&typeof state.followRoot.removeEventListener==='function')state.followRoot.removeEventListener('scroll',state.followListener);
+  if(state){state.followRoot=null;state.followListener=null;}
+}
+function scrollStreamToBottom(follow,state=null,force=false){
   if(!follow)return;
-  const root=document.scrollingElement||document.documentElement||document.body;
-  if(root)root.scrollTop=root.scrollHeight;
+  const root=streamingScrollRoot(),now=Date.now();
+  if(!root||state&&!force&&now-state.lastScrollAt<STREAM_SCROLL_FLUSH_MS)return;
+  if(state)state.lastScrollAt=now;root.scrollTop=root.scrollHeight;
+}
+function streamingMarkdownParts(text){
+  const value=String(text||''),boundary=value.lastIndexOf('\n\n');
+  return boundary<0?{stable:'',active:value}:{stable:value.slice(0,boundary+2),active:value.slice(boundary+2)};
+}
+const streamingCaretHtml = () => '<span class="streaming-caret" aria-label="正在生成"></span>';
+function streamingActiveHtml(text,status,hasVisibleText=Boolean(text)){return text?`${markdownHtml(text)}${streamingCaretHtml()}`:hasVisibleText?streamingCaretHtml():`<p class="streaming-placeholder">${escapeHtml(status)}</p>`;}
+function clearStreamingVisualWork(state){
+  if(state?.renderTimer)clearTimeout(state.renderTimer);
+  if(state){state.renderTimer=null;state.renderPending=false;}
+  stopWatchingStreamingFollow(state);
 }
 function renderStreamingMessage(node,state){
-  if(!node||state.completed||state.error)return;
-  const follow=shouldAutoFollowStream(),content=node.querySelector('[data-stream-content]'),status=node.querySelector('[data-stream-status]');
-  if(content)content.innerHTML=state.text?markdownHtml(state.text):`<p class="streaming-placeholder">${escapeHtml(state.status)}</p>`;
-  if(status){status.hidden=false;status.querySelector('span').textContent=state.status;}
-  scrollStreamToBottom(follow);
+  if(!node||state.error)return;
+  watchStreamingFollow(state);const follow=syncStreamingFollow(state),content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null,parts=streamingMarkdownParts(state.text);
+  const stable=content&&typeof content.querySelector==='function'?content.querySelector('[data-stream-stable]'):null,active=content&&typeof content.querySelector==='function'?content.querySelector('[data-stream-active]'):null;
+  const activeKey=parts.active||!state.text?`${parts.active}\u0000${state.status}`:parts.active;
+  if(stable&&active){if(state.renderedStable!==parts.stable){stable.innerHTML=parts.stable?markdownHtml(parts.stable):'';state.renderedStable=parts.stable;}if(state.renderedActive!==activeKey){active.innerHTML=streamingActiveHtml(parts.active,state.status,Boolean(state.text));state.renderedActive=activeKey;}}
+  else if(content)content.innerHTML=streamingActiveHtml(state.text,state.status);
+  if(status){status.hidden=Boolean(state.text);if(!status.hidden){const label=status.querySelector('span');if(label)label.textContent=state.status;}}
+  state.lastRenderAt=Date.now();scrollStreamToBottom(follow,state);
 }
 function scheduleStreamingRender(node,state){
-  if(state.renderPending)return;
-  state.renderPending=true;
-  const render=()=>{state.renderPending=false;renderStreamingMessage(node,state);};
-  if(typeof requestAnimationFrame==='function')requestAnimationFrame(render);else setTimeout(render,16);
+  if(state.renderPending||state.completed||state.error)return;
+  const delay=Math.max(0,STREAM_VISUAL_FLUSH_MS-(Date.now()-state.lastRenderAt));
+  state.renderPending=true;state.renderTimer=setTimeout(()=>{state.renderPending=false;state.renderTimer=null;renderStreamingMessage(node,state);},delay);
 }
 function completeStreamingMessage(node,state,sourcePrompt,main){
   if(!node)return;
-  state.completed=true;const follow=shouldAutoFollowStream(),finalResponse=state.finalResponse||state.text;
-  node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt);
-  bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow);
+  clearStreamingVisualWork(state);state.completed=true;const follow=syncStreamingFollow(state),finalResponse=state.finalResponse||state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
+  if(finalResponse===state.text&&content&&actions){renderStreamingMessage(node,state);const caret=content.querySelector?.('[data-stream-caret]');if(caret?.remove)caret.remove();if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt);}
+  else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt);
+  node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);stopWatchingStreamingFollow(state);
 }
 function replaceTaskFailure(node,message,retryText,diagnosticId=''){
   if(!node)return;
-  const partial=node._streamState?.text||'';
+  const partial=node._streamState?.text||'';clearStreamingVisualWork(node._streamState);
   const card=document.createElement('section');card.innerHTML=streamingFailureHtml(partial,message,diagnosticId);
   const failure=card.firstElementChild;node.replaceWith(failure);failure.querySelector('button').onclick=()=>{const input=document.querySelector('#prompt');if(!input)return;input.value=retryText;input.focus();};refreshIcons();
 }
@@ -266,7 +300,7 @@ async function submitAgentTaskV2(event,agentId,main){
   event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim();if(!text||document.querySelector('#task-status'))return;
   input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
   body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
-  const node=document.querySelector('#task-status'),state=createStreamingState();node._streamState=state;refreshIcons();scrollStreamToBottom(follow);
+  const node=document.querySelector('#task-status'),state=createStreamingState();state.follow=follow;node._streamState=state;watchStreamingFollow(state);refreshIcons();scrollStreamToBottom(follow,state,true);
   const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;
   try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId);}
 }
