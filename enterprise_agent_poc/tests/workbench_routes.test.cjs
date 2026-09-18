@@ -335,8 +335,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=chatgpt-style-conversation-ux-v2/);
-  assert.match(index,/workbench\.js\?v=chatgpt-style-conversation-ux-v2/);
+  assert.match(index,/workbench\.css\?v=chatgpt-style-conversation-ux-v3/);
+  assert.match(index,/workbench\.js\?v=chatgpt-style-conversation-ux-v3/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -344,7 +344,8 @@ test('live task state stays compact and uses customer-facing thinking copy',()=>
   const h=harness('/agents/campaign');
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
   assert.equal(h.run("taskStageLabel('starting_runtime')"),'正在思考');
-  assert.equal(h.run("taskStageLabel('generating')"),'正在生成回答');
+  assert.equal(h.run("taskStageLabel('generating')"),'正在思考');
+  assert.equal(h.run("activityDisplayLabel('generating','started')"),'内容生成中');
   assert.ok(source.includes('streaming-message'));
   assert.ok(source.includes("source.addEventListener('delta'"));
   assert.match(css,/max-width:820px/);
@@ -370,18 +371,19 @@ test('streaming conversation state orders deltas and accepts the authoritative c
   assert.ok(h.run("streamingMessageHtml('正在思考')").includes('data-thinking'));
 });
 
-test('safe activity events render only friendly stages and thinking auto-collapses on the first real delta',()=>{
+test('safe activity events render only real friendly stages and thinking auto-collapses on the first real delta',()=>{
   const h=harness('/agents/campaign');
-  h.run("activityState=createStreamingState();activityCases=[['queued','正在准备'],['context_loading','正在理解上下文'],['knowledge_retrieving','正在检索企业知识'],['tool_running','正在调用工具'],['generating','正在生成回答']];activityCases.forEach(([stage],index)=>applyStreamingEvent(activityState,'activity',{sequence:index+1,stage,status:'started',created_at:'2026-09-18T00:00:00Z'}));applyStreamingEvent(activityState,'activity',{sequence:6,stage:'context_loading',status:'completed',created_at:'2026-09-18T00:00:01Z'});");
-  assert.equal(h.run('activityState.currentActivity.label'),'正在理解上下文');
-  assert.deepEqual(JSON.parse(h.run('JSON.stringify(activityState.activities.map(item=>item.label))')),['正在准备','正在理解上下文','正在检索企业知识','正在调用工具','正在生成回答']);
-  assert.equal(h.run('activityState.activities[1].status'),'completed');
-  assert.equal(h.run("applyStreamingEvent(activityState,'activity',{sequence:7,stage:'unsafe_debug',status:'started'})"),false);
+  h.run("activityState=createStreamingState();applyStreamingEvent(activityState,'activity',{sequence:1,stage:'asset_retrieving',status:'started',created_at:'2026-09-18T00:00:00Z'});applyStreamingEvent(activityState,'activity',{sequence:2,stage:'asset_retrieving',status:'completed',created_at:'2026-09-18T00:00:01Z'});applyStreamingEvent(activityState,'activity',{sequence:3,stage:'generating',status:'started',created_at:'2026-09-18T00:00:02Z'});");
+  assert.equal(h.run('activityState.currentActivity.label'),'内容生成中');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(activityState.activities.map(item=>item.label))')),['查找企业资料','内容生成中']);
+  assert.equal(h.run('activityState.activities[0].status'),'completed');
+  assert.equal(h.run("applyStreamingEvent(activityState,'activity',{sequence:4,stage:'unsafe_debug',status:'started'})"),false);
   assert.equal(h.run("applyStreamingEvent(activityState,'delta',{sequence:1,text:'第一段'})"),true);
   assert.ok(h.run('activityState.thinkingFinishedAt')>0);
-  assert.ok(h.run("streamingThinkingHtml('正在准备')").includes('查看进度'));
+  assert.equal(h.run('activityState.activities.length'),2,'delta must not fabricate a generating activity');
+  assert.ok(!h.run("streamingThinkingHtml('正在准备')").includes('查看进度'));
   h.run("thinkingTitle={textContent:''};thinkingList={innerHTML:''};thinkingDetails={open:true,querySelector(selector){return selector==='[data-thinking-title]'?thinkingTitle:selector==='[data-thinking-list]'?thinkingList:null;}};thinkingNode={querySelector(selector){return selector==='[data-thinking]'?thinkingDetails:null;}};activityState.thinkingStartedAt=Date.now()-2100;renderThinkingSummary(thinkingNode,activityState);thinkingDetails.open=true;renderThinkingSummary(thinkingNode,activityState);");
-  assert.match(h.run('thinkingTitle.textContent'),/^思考了 [3-9]\d* 秒$/);
+  assert.match(h.run('thinkingTitle.textContent'),/^思考了 [1-9]\d* 秒$/);
   assert.equal(h.run('thinkingDetails.open'),true);
 });
 
@@ -396,7 +398,10 @@ test('visual buffer consumes real pending deltas in bounded frames and final mar
   h.run("markdownState=createStreamingState();applyStreamingEvent(markdownState,'delta',{sequence:1,text:'# 标题\\n\\n- 条目\\n\\n正文\\n\\n```js\\nconst answer = 42;\\n```'});markdownState.displayText=markdownState.text;parts=streamingMarkdownParts(markdownState.displayText)");
   assert.ok(h.run("markdownHtml(parts.stable)").includes('<h1>标题</h1>'));
   assert.ok(h.run("markdownHtml(parts.stable)").includes('<li>条目</li>'));
-  assert.ok(h.run("markdownHtml(parts.active)").includes('<pre><code>const answer = 42;</code></pre>'));
+  assert.ok(h.run("markdownHtml(parts.stable)").includes('<pre><code>const answer = 42;</code></pre>'));
+  h.run("openCode=streamingMarkdownParts('```js\\nconst answer = 42;')");
+  assert.equal(h.run('openCode.inCode'),true);
+  assert.ok(h.run("streamingActiveHtml(openCode.active,'正在思考')").includes('<pre'));
 });
 
 test('streaming failure keeps partial text outside persisted history and retains retry UI',()=>{
@@ -436,14 +441,50 @@ test('conversation run state makes one cancel request and keeps STOPPING until t
 
 test('cancelled terminal preserves only rendered partial content, clears the task guard, and restores send state',()=>{
   const h=harness('/agents/campaign');
-  h.run("cancelInput={disabled:true};cancelSubmit={classList:{toggle(){}},setAttribute(){},innerHTML:'',onclick:null};cancelFeedback={textContent:''};cancelMain={querySelector(selector){return selector==='#prompt'?cancelInput:selector==='#composer-submit'?cancelSubmit:selector==='#composer-run-feedback'?cancelFeedback:null;}};cancelCaret={removed:false,remove(){this.removed=true;}};cancelActive={innerHTML:'已有部分回复'};cancelLabel={textContent:''};cancelStatus={hidden:true,classList:{add(){}},querySelector(selector){return selector==='span'?cancelLabel:selector==='svg'||selector==='i'?{remove(){}}:null;}};cancelContent={querySelector(selector){return selector==='[data-stream-active]'?cancelActive:selector==='[data-stream-caret]'?cancelCaret:null;}};cancelNode={id:'task-status',_streamState:createStreamingState(),removeAttribute(name){if(name==='id'){this.id='';document.taskStatus=null;}},classList:{add(){}},querySelector(selector){return selector==='[data-stream-content]'?cancelContent:selector==='[data-stream-status]'?cancelStatus:null;}};cancelNode._streamState.text='已有部分回复';beginConversationRun(cancelNode._streamState,{taskId:'task-2',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(cancelNode._streamState,{taskId:'task-2',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});document.taskStatus=cancelNode;cancelStreamingMessage(cancelNode,cancelNode._streamState,cancelMain);");
+  h.run("cancelInput={disabled:true};cancelSubmit={classList:{toggle(){}},setAttribute(){},innerHTML:'',onclick:null};cancelFeedback={textContent:''};cancelMain={querySelector(selector){return selector==='#prompt'?cancelInput:selector==='#composer-submit'?cancelSubmit:selector==='#composer-run-feedback'?cancelFeedback:null;}};cancelCaret={removed:false,remove(){this.removed=true;}};cancelActive={innerHTML:'已有部分回复'};cancelLabel={textContent:''};cancelStatus={hidden:true,classList:{add(){}},querySelector(selector){return selector==='span'?cancelLabel:selector==='svg'||selector==='i'?{remove(){}}:null;}};cancelContent={querySelector(selector){return selector==='[data-stream-active]'?cancelActive:selector==='[data-stream-caret]'?cancelCaret:null;},querySelectorAll(){return [cancelCaret];}};cancelNode={id:'task-status',_streamState:createStreamingState(),removeAttribute(name){if(name==='id'){this.id='';document.taskStatus=null;}},classList:{add(){}},querySelector(selector){return selector==='[data-stream-content]'?cancelContent:selector==='[data-stream-status]'?cancelStatus:null;}};cancelNode._streamState.text='已有部分回复以及未显示字符';cancelNode._streamState.displayText='已有部分回复';cancelNode._streamState.visualPending='以及未显示字符';beginConversationRun(cancelNode._streamState,{taskId:'task-2',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(cancelNode._streamState,{taskId:'task-2',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});document.taskStatus=cancelNode;cancelStreamingMessage(cancelNode,cancelNode._streamState,cancelMain);");
   assert.equal(h.run('cancelCaret.removed'),true);
   assert.equal(h.run('cancelLabel.textContent'),'已停止生成 · 部分回复未保存');
   assert.equal(h.run('cancelNode.id'),'');
   assert.equal(h.run('cancelActive.innerHTML'),'已有部分回复');
+  assert.equal(h.run('cancelNode._streamState.visualPending'),'');
+  assert.equal(h.run('cancelNode._streamState.text'),'已有部分回复');
   assert.equal(h.run('cancelNode._streamState.run.phase'),'IDLE');
   assert.equal(h.run('cancelInput.disabled'),false);
   assert.match(h.run('cancelSubmit.innerHTML'),/data-lucide="send"/);
+});
+
+test('generating activity always supersedes the last real tool stage, including refresh recovery',()=>{
+  const h=harness('/agents/campaign');
+  h.run("timelineState=createStreamingState();setStreamingTaskStartedAt(timelineState,{started_at:'2026-09-18T01:00:00Z'});applyStreamingEvent(timelineState,'activity',{sequence:1,stage:'knowledge_retrieving',status:'started'});applyStreamingEvent(timelineState,'activity',{sequence:2,stage:'knowledge_retrieving',status:'completed'});applyStreamingEvent(timelineState,'activity',{sequence:3,stage:'asset_retrieving',status:'started'});applyStreamingEvent(timelineState,'activity',{sequence:4,stage:'asset_retrieving',status:'completed'});applyStreamingEvent(timelineState,'activity',{sequence:5,stage:'generating',status:'started'});");
+  assert.equal(h.run('timelineState.currentActivity.stage'),'generating');
+  assert.equal(h.run('timelineState.currentActivity.label'),'内容生成中');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(timelineState.activities.map(item=>[item.label,item.status]))')),[['检索企业知识','completed'],['查找企业资料','completed'],['内容生成中','started']]);
+  h.run("applyStreamingEvent(timelineState,'activity',{sequence:6,stage:'generating',status:'completed'})");
+  assert.equal(h.run('timelineState.currentActivity.label'),'内容生成完成');
+  assert.equal(h.run('timelineState.activities.at(-1).status'),'completed');
+  h.run("recoveredState=createStreamingState();setStreamingTaskStartedAt(recoveredState,{started_at:'2026-09-18T01:00:00Z'});applyStreamingEvent(recoveredState,'activity',{sequence:99,stage:'generating',status:'started'});");
+  assert.equal(h.run('recoveredState.currentActivity.label'),'内容生成中');
+  assert.equal(h.run('recoveredState.taskStartedAt'),Date.parse('2026-09-18T01:00:00Z'));
+  h.run("duplicateState=createStreamingState();applyStreamingEvent(duplicateState,'activity',{sequence:1,stage:'knowledge_retrieving',status:'started'});applyStreamingEvent(duplicateState,'activity',{sequence:2,stage:'knowledge_retrieving',status:'started'});applyStreamingEvent(duplicateState,'activity',{sequence:3,stage:'knowledge_retrieving',status:'completed'});");
+  assert.equal(h.run('duplicateState.activities.length'),1);
+  assert.equal(h.run('duplicateState.activities[0].count'),2);
+  assert.equal(h.run('duplicateState.currentActivity.sequence'),3);
+  assert.equal(h.run('duplicateState.currentActivity.status'),'completed');
+});
+
+test('cancel terminal invalidates queued visual work, removes the caret, and leaves generating unfinished',()=>{
+  const h=harness('/agents/campaign');
+  h.run("frameCallbacks=[];requestAnimationFrame=callback=>{frameCallbacks.push(callback);return frameCallbacks.length};cancelAnimationFrame=()=>{};raceInput={disabled:true};raceSubmit={classList:{toggle(){}},setAttribute(){},innerHTML:'',onclick:null};raceFeedback={textContent:''};raceMain={querySelector(selector){return selector==='#prompt'?raceInput:selector==='#composer-submit'?raceSubmit:selector==='#composer-run-feedback'?raceFeedback:null;}};raceTitle={textContent:''};raceList={innerHTML:'',hidden:false};raceThinkingClass={thinking:true,toggle(name,value){this[name]=value;}};raceThinking={open:true,classList:raceThinkingClass,querySelector(selector){return selector==='[data-thinking-title]'?raceTitle:selector==='[data-thinking-list]'?raceList:null;}};raceCaret={removed:false,remove(){this.removed=true;}};raceActive={innerHTML:'已显示文本'};raceStatusLabel={textContent:''};raceStatus={hidden:true,classList:{add(){}},querySelector(selector){return selector==='span'?raceStatusLabel:selector==='svg'||selector==='i'?{remove(){}}:null;}};raceContent={querySelector(selector){return selector==='[data-stream-stable]'?{innerHTML:''}:selector==='[data-stream-active]'?raceActive:selector==='[data-stream-caret]'?raceCaret:null;},querySelectorAll(){return [raceCaret];}};raceNode={id:'task-status',removeAttribute(name){if(name==='id')this.id='';},classList:{add(){}},querySelector(selector){return selector==='[data-thinking]'?raceThinking:selector==='[data-stream-content]'?raceContent:selector==='[data-stream-status]'?raceStatus:null;}};raceState=createStreamingState();raceState.displayText='已显示文本';raceState.text='已显示文本尚未展示';raceState.visualPending='尚未展示';beginConversationRun(raceState,{taskId:'task-race',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(raceState,{taskId:'task-race',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});applyStreamingEvent(raceState,'activity',{sequence:1,stage:'generating',status:'started'});scheduleStreamingRender(raceNode,raceState);capturedGeneration=raceState.visualGeneration;cancelStreamingMessage(raceNode,raceState,raceMain);frameCallbacks[0]();");
+  assert.equal(h.run('raceState.visualPending'),'');
+  assert.equal(h.run('raceState.text'),'已显示文本');
+  assert.equal(h.run('raceState.currentActivity.label'),'内容生成中');
+  assert.equal(h.run('raceState.activities.at(-1).status'),'started');
+  assert.equal(h.run('canRenderStreamingVisual(raceState,capturedGeneration)'),false);
+  assert.equal(h.run('raceCaret.removed'),true);
+  assert.equal(h.run('raceActive.innerHTML'),'已显示文本');
+  assert.equal(h.run('raceStatusLabel.textContent'),'已停止生成 · 部分回复未保存');
+  assert.equal(h.run('raceThinkingClass["is-thinking"]'),false);
+  assert.equal(h.run('raceState.run.phase'),'IDLE');
 });
 
 test('cancelled SSE event stops the source and leaves a non-persisted partial marker',()=>{

@@ -183,9 +183,15 @@ function bindConversationActions(main){
   main.querySelectorAll('[data-regenerate]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.regenerate;input.focus();});
   main.querySelectorAll('[data-open-message-generation]').forEach(node=>node.onclick=()=>openGenerationViewer(node.dataset.openMessageGeneration,'本次生成图片',node));
 }
-const safeActivityLabels=Object.freeze({queued:'正在准备',context_loading:'正在理解上下文',enterprise_config_loading:'正在加载企业配置',knowledge_retrieving:'正在检索企业知识',asset_retrieving:'正在查找企业素材',tool_running:'正在调用工具',generating:'正在生成回答',persisting:'正在整理结果',completed:'已完成',failed:'执行失败',cancelled:'已停止'});
-const taskStageLabel = stage => safeActivityLabels[stage]||({persisting_result:'正在整理结果',cancelling:'正在停止生成'})[stage]||'正在思考';
-const STREAM_VISUAL_FRAME_MS=16,STREAM_SCROLL_FLUSH_MS=80,STREAM_FOLLOW_STOP_PX=96,STREAM_FOLLOW_RESUME_PX=32;
+const safeActivityLabels=Object.freeze({queued:'准备回复',context_loading:'加载上下文',enterprise_config_loading:'加载企业配置',knowledge_retrieving:'检索企业知识',asset_retrieving:'查找企业资料',tool_running:'调用工具',generating:'内容生成',persisting:'整理结果',completed:'已完成',failed:'执行失败',cancelled:'已停止'});
+const taskStageLabel = stage => stage==='queued'?'正在准备':stage==='cancelling'?'正在停止生成':'正在思考';
+const activityDisplayLabel=(stage,status)=>{
+  const label=safeActivityLabels[stage]||'';
+  if(stage==='generating')return status==='completed'?'内容生成完成':'内容生成中';
+  if(status==='completed')return label;
+  return stage==='queued'?'正在准备':`正在${label}`;
+};
+const STREAM_VISUAL_FRAME_MS=40,STREAM_SCROLL_FLUSH_MS=80,STREAM_FOLLOW_STOP_PX=96,STREAM_FOLLOW_RESUME_PX=32;
 const ConversationRunPhase=Object.freeze({IDLE:'IDLE',SUBMITTING:'SUBMITTING',RUNNING:'RUNNING',STOPPING:'STOPPING',COMPLETED:'COMPLETED',ERROR:'ERROR',CANCELLED:'CANCELLED'});
 const conversationRunTransitions=Object.freeze({IDLE:new Set(['SUBMITTING']),SUBMITTING:new Set(['RUNNING','ERROR']),RUNNING:new Set(['STOPPING','COMPLETED','ERROR','CANCELLED']),STOPPING:new Set(['RUNNING','COMPLETED','ERROR','CANCELLED']),COMPLETED:new Set(['IDLE']),ERROR:new Set(['IDLE']),CANCELLED:new Set(['IDLE'])});
 const createConversationRunState=()=>({phase:ConversationRunPhase.IDLE,taskId:null,agentId:null,terminal:null,stopError:''});
@@ -193,9 +199,9 @@ function transitionConversationRun(run,next){
   if(!run||!conversationRunTransitions[run.phase]?.has(next))return false;
   run.phase=next;return true;
 }
-const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',displayText:'',visualPending:'',status:'正在思考',completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true,activities:[],activitySequence:0,currentActivity:null,thinkingStartedAt:Date.now(),thinkingFinishedAt:null,thinkingAutoCollapsed:false,thinkingTimer:null,run:createConversationRunState()});
+const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',displayText:'',visualPending:'',status:'正在思考',completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true,activities:[],activityEvents:[],activitySequence:0,currentActivity:null,thinkingStartedAt:Date.now(),taskStartedAt:null,firstDeltaAt:null,thinkingFinishedAt:null,thinkingAutoCollapsed:false,thinkingTimer:null,visualGeneration:0,visualStopped:false,run:createConversationRunState()});
 const streamingActionsHtml = (content,sourcePrompt='') => `${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}`;
-const streamingThinkingHtml = status => `<details class="thinking-summary" data-thinking open><summary><span data-thinking-title>思考中 · 0 秒</span><span class="thinking-summary-hint">查看进度</span></summary><ol data-thinking-list><li class="thinking-activity is-active">${escapeHtml(status)}</li></ol></details>`;
+const streamingThinkingHtml = () => `<details class="thinking-summary" data-thinking open><summary><span data-thinking-title>正在思考 · 1 秒</span></summary><ol data-thinking-list hidden></ol></details>`;
 const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true">${streamingThinkingHtml(status)}<div class="chat-message-content chat-message-content-markdown" data-stream-content><div data-stream-stable></div><div data-stream-active><p class="streaming-placeholder">${escapeHtml(status)}</p></div></div><div class="message-actions" data-stream-actions hidden></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
 const streamingFinalContentHtml = (content,sourcePrompt='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt)}</div>`;
 const streamingFailureHtml = (partial,message,diagnosticId='') => `<section class="task-failure streaming-failure" role="alert">${partial?`<div class="streaming-partial"><small>部分回复（未保存）</small><div class="chat-message-content chat-message-content-markdown">${markdownHtml(partial)}</div></div>`:''}<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>${partial?'生成已中断。你可以保留这段内容，或重新尝试。':'你可以把原需求放回输入框，检查后再次提交。'}</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button></section>`;
@@ -209,20 +215,25 @@ function acceptStreamingDelta(state,payload){
 function applyStreamingActivity(state,payload={}){
   const sequence=Number(payload.sequence),stage=String(payload.stage||''),status=String(payload.status||'');
   if(!Number.isInteger(sequence)||sequence<1||sequence<=state.activitySequence||!safeActivityLabels[stage]||!['started','completed'].includes(status))return false;
-  const activity={sequence,stage,status,label:safeActivityLabels[stage],created_at:typeof payload.created_at==='string'?payload.created_at:''};
-  state.activitySequence=sequence;const existing=state.activities.findIndex(item=>item.stage===stage);
-  if(existing>=0)state.activities.splice(existing,1,activity);else state.activities.push(activity);
+  const activity={sequence,stage,status,label:activityDisplayLabel(stage,status),created_at:typeof payload.created_at==='string'?payload.created_at:''};
+  state.activitySequence=sequence;state.activityEvents.push(activity);
+  const currentGroup=state.activities[state.activities.length-1];
+  if(currentGroup?.stage===stage&&status==='completed'&&currentGroup.status==='started'){
+    currentGroup.status='completed';currentGroup.sequence=sequence;currentGroup.label=activity.label;currentGroup.created_at=activity.created_at;
+  }else if(currentGroup?.stage===stage&&status==='started'&&currentGroup.status==='started'){
+    currentGroup.count=(currentGroup.count||1)+1;currentGroup.sequence=sequence;currentGroup.label=activity.label;currentGroup.created_at=activity.created_at;
+  }else state.activities.push({...activity,count:status==='started'?1:0});
   state.currentActivity=activity;state.status=activity.label;return true;
 }
 function finishThinkingOnFirstDelta(state){
   if(state.thinkingFinishedAt)return;
-  state.thinkingFinishedAt=Date.now();
+  state.firstDeltaAt=Date.now();state.thinkingFinishedAt=state.firstDeltaAt;
 }
 function applyStreamingEvent(state,kind,payload={}){
   if(state.completed||state.error||state.run?.terminal==='cancelled')return false;
   if(kind==='activity')return applyStreamingActivity(state,payload);
-  if(kind==='progress'){state.status=taskStageLabel(payload.stage);return true;}
-  if(kind==='delta'){const changed=acceptStreamingDelta(state,payload);if(changed){finishThinkingOnFirstDelta(state);state.status=safeActivityLabels.generating;}return changed;}
+  if(kind==='progress'){if(!state.currentActivity)state.status=taskStageLabel(payload.stage);return true;}
+  if(kind==='delta'){const changed=acceptStreamingDelta(state,payload);if(changed)finishThinkingOnFirstDelta(state);return changed;}
   if(kind==='complete'){state.completed=true;state.finalResponse=typeof payload.final_response==='string'?payload.final_response:state.text;return true;}
   if(kind==='error'){state.error=payload.message||customerErrorMessages.TASK_FAILED;state.diagnosticId=payload.diagnostic_id||'';return true;}
   return false;
@@ -257,21 +268,34 @@ function scrollStreamToBottom(follow,state=null,force=false){
   if(state)state.lastScrollAt=now;root.scrollTop=root.scrollHeight;
 }
 function streamingMarkdownParts(text){
-  const value=String(text||''),boundary=value.lastIndexOf('\n\n');
-  return boundary<0?{stable:'',active:value}:{stable:value.slice(0,boundary+2),active:value.slice(boundary+2)};
+  const value=String(text||'').replace(/\r\n?/g,'\n');let boundary=0,inCode=false,offset=0;
+  for(const line of value.match(/[^\n]*(?:\n|$)/g)||[]){
+    if(!line)continue;
+    const end=offset+line.length,trimmed=line.trim();
+    if(/^```/.test(trimmed)){inCode=!inCode;if(!inCode)boundary=end;}
+    else if(!inCode&&!trimmed)boundary=end;
+    offset=end;
+  }
+  const active=value.slice(boundary);
+  return {stable:value.slice(0,boundary),active,inCode:/^```/.test(active.trimStart())};
 }
-const streamingCaretHtml = () => '<span class="streaming-caret" aria-label="正在生成"></span>';
-function streamingActiveHtml(text,status,hasVisibleText=Boolean(text)){return text?`${markdownHtml(text)}${streamingCaretHtml()}`:hasVisibleText?streamingCaretHtml():`<p class="streaming-placeholder">${escapeHtml(status)}</p>`;}
-function clearStreamingVisualWork(state){
+const streamingCaretHtml = () => '<span class="streaming-caret" data-stream-caret aria-label="正在生成"></span>';
+function streamingActiveHtml(text,status,hasVisibleText=Boolean(text)){
+  const parts=streamingMarkdownParts(text);
+  if(!parts.active)return hasVisibleText?streamingCaretHtml():`<p class="streaming-placeholder">${escapeHtml(status)}</p>`;
+  if(parts.inCode){const newline=parts.active.indexOf('\n'),code=newline<0?'':parts.active.slice(newline+1);return `<pre class="streaming-active-code"><code data-stream-active-text>${escapeHtml(code)}</code></pre>${streamingCaretHtml()}`;}
+  return `<span class="streaming-active-text" data-stream-active-text>${escapeHtml(parts.active)}</span>${streamingCaretHtml()}`;
+}
+function clearStreamingVisualWork(state,{discard=false}={}){
   if(state?.renderTimer)clearTimeout(state.renderTimer);
   if(state?.renderFrame&&typeof cancelAnimationFrame==='function')cancelAnimationFrame(state.renderFrame);
-  if(state?.thinkingTimer)clearInterval(state.thinkingTimer);
-  if(state){state.renderTimer=null;state.renderFrame=null;state.renderPending=false;state.thinkingTimer=null;}
+  if(state){state.visualGeneration=Number(state.visualGeneration||0)+1;state.renderTimer=null;state.renderFrame=null;state.renderPending=false;if(discard){state.visualPending='';state.pending?.clear?.();state.visualStopped=true;}}
   stopWatchingStreamingFollow(state);
 }
+function stopThinkingClock(state){if(state?.thinkingTimer)clearInterval(state.thinkingTimer);if(state)state.thinkingTimer=null;}
 function startThinkingClock(node,state){
   if(!state||state.thinkingTimer||typeof setInterval!=='function')return;
-  state.thinkingTimer=setInterval(()=>{if(state.thinkingFinishedAt||state.completed||state.error||state.run?.terminal){clearStreamingVisualWork(state);return;}renderThinkingSummary(node,state);},1000);
+  state.thinkingTimer=setInterval(()=>{if(state.thinkingFinishedAt||state.completed||state.error||state.run?.terminal){stopThinkingClock(state);return;}renderThinkingSummary(node,state);},1000);
 }
 function composerRunControls(main){
   return {input:main?.querySelector?.('#prompt'),submit:main?.querySelector?.('#composer-submit'),feedback:main?.querySelector?.('#composer-run-feedback')};
@@ -317,19 +341,25 @@ async function requestStopGeneration(main,state){
     const task=await api(`/api/v1/tasks/${encodeURIComponent(run.taskId)}/cancel`,{method:'POST'});
     if(run.terminal)return;
     if(task.status==='completed')return finishStreamTask(document.querySelector('#task-status'),state,task,run.agentId,main,state.sourcePrompt||'');
-    if(task.status==='cancelling'||task.status==='cancelled')return;
+    if(task.status==='cancelled')return cancelStreamingMessage(document.querySelector('#task-status'),state,main);
+    if(task.status==='cancelling')return;
     transitionConversationRun(run,ConversationRunPhase.RUNNING);run.stopError='停止请求未被确认，请重试。';updateComposerRunState(main,state);
   }catch(error){
     if(run.terminal)return;
     transitionConversationRun(run,ConversationRunPhase.RUNNING);run.stopError=error.message||'停止请求失败，请重试。';updateComposerRunState(main,state);
   }
 }
-function thinkingDurationSeconds(state){const end=state.thinkingFinishedAt||Date.now();return Math.max(1,Math.ceil(Math.max(0,end-state.thinkingStartedAt)/1000));}
+function setStreamingTaskStartedAt(state,task={}){
+  const startedAt=Date.parse(task.started_at||'');
+  if(Number.isFinite(startedAt)&&startedAt>0){state.taskStartedAt=startedAt;state.thinkingStartedAt=startedAt;}
+}
+function thinkingDurationSeconds(state){const end=state.thinkingFinishedAt||Date.now(),start=state.taskStartedAt||state.firstDeltaAt||state.thinkingStartedAt;return Math.max(1,Math.ceil(Math.max(0,end-start)/1000));}
 function renderThinkingSummary(node,state){
   const details=node?.querySelector?.('[data-thinking]'),title=details?.querySelector?.('[data-thinking-title]'),list=details?.querySelector?.('[data-thinking-list]');if(!details)return;
   const done=Boolean(state.thinkingFinishedAt||state.completed||state.error||state.run?.terminal==='cancelled');
-  if(title)title.textContent=done?`思考了 ${thinkingDurationSeconds(state)} 秒`:`思考中 · ${thinkingDurationSeconds(state)} 秒`;
-  if(list){const activities=state.activities.length?state.activities:[{label:state.status,status:'started'}];const markup=activities.map(item=>`<li class="thinking-activity ${item.status==='completed'?'is-complete':'is-active'}">${escapeHtml(item.label)}</li>`).join('');if(list.innerHTML!==markup)list.innerHTML=markup;}
+  details.classList?.toggle?.('is-thinking',!done);
+  if(title)title.textContent=done?`思考了 ${thinkingDurationSeconds(state)} 秒`:`正在思考 · ${thinkingDurationSeconds(state)} 秒`;
+  if(list){const cancelled=state.run?.terminal==='cancelled',markup=[...state.activities.map(item=>{const className=item.status==='completed'?'is-complete':cancelled?'is-stopped':done?'is-current':'is-active',count=item.count>1?` · ${item.count} 次`:'';return `<li class="thinking-activity ${className}">${escapeHtml(item.label)}${escapeHtml(count)}</li>`;}),cancelled?'<li class="thinking-terminal">已停止生成</li>':''].join('');list.hidden=!markup;if(list.innerHTML!==markup)list.innerHTML=markup;}
   if(state.thinkingFinishedAt&&!state.thinkingAutoCollapsed){details.open=false;state.thinkingAutoCollapsed=true;}
 }
 function consumeStreamingVisualBuffer(state){
@@ -337,50 +367,50 @@ function consumeStreamingVisualBuffer(state){
   const count=Math.max(24,Math.min(160,Math.ceil(state.visualPending.length/3))),chunk=state.visualPending.slice(0,count);
   state.displayText+=chunk;state.visualPending=state.visualPending.slice(chunk.length);return true;
 }
-function isPlainStreamingText(text){return !/[`#>*_~\n]/.test(text);}
 function renderStreamingActive(active,state,parts,activeKey){
   if(state.renderedActive===activeKey)return;
-  const canPatchText=isPlainStreamingText(parts.active)&&typeof active.querySelector==='function',textNode=canPatchText?active.querySelector('[data-stream-active-text]'):null;
-  if(textNode){textNode.textContent=parts.active;}
-  else if(canPatchText)active.innerHTML=`<span data-stream-active-text>${escapeHtml(parts.active)}</span>${streamingCaretHtml()}`;
-  else active.innerHTML=streamingActiveHtml(parts.active,state.status,Boolean(state.displayText));
+  const kind=parts.inCode?'code':'text',textNode=typeof active.querySelector==='function'?active.querySelector('[data-stream-active-text]'):null;
+  if(textNode&&active.dataset?.streamKind===kind){textNode.textContent=parts.inCode?(parts.active.slice(parts.active.indexOf('\n')+1)||''):parts.active;}
+  else {active.innerHTML=streamingActiveHtml(parts.active,state.status,Boolean(state.displayText));if(active.dataset)active.dataset.streamKind=kind;}
   state.renderedActive=activeKey;
 }
 function renderStreamingMessage(node,state){
   if(!node||state.error)return;
   consumeStreamingVisualBuffer(state);watchStreamingFollow(state);const follow=syncStreamingFollow(state),content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null,parts=streamingMarkdownParts(state.displayText);
   const stable=content&&typeof content.querySelector==='function'?content.querySelector('[data-stream-stable]'):null,active=content&&typeof content.querySelector==='function'?content.querySelector('[data-stream-active]'):null;
-  const activeKey=parts.active||!state.text?`${parts.active}\u0000${state.status}`:parts.active;
+  const activeKey=parts.active||!state.displayText?`${parts.active}\u0000${state.status}`:parts.active;
   if(stable&&active){if(state.renderedStable!==parts.stable){stable.innerHTML=parts.stable?markdownHtml(parts.stable):'';state.renderedStable=parts.stable;}renderStreamingActive(active,state,parts,activeKey);}
-  else if(content)content.innerHTML=streamingActiveHtml(state.text,state.status);
-  if(status){status.hidden=Boolean(state.text);if(!status.hidden){const label=status.querySelector('span');if(label)label.textContent=state.status;}}
+  else if(content)content.innerHTML=streamingActiveHtml(state.displayText,state.status);
+  if(status){status.hidden=Boolean(state.displayText);if(!status.hidden){const label=status.querySelector('span');if(label)label.textContent=state.status;}}
   renderThinkingSummary(node,state);state.lastRenderAt=Date.now();scrollStreamToBottom(follow,state);
 }
+function canRenderStreamingVisual(state,generation){return Boolean(state&&generation===state.visualGeneration&&!state.visualStopped&&!state.completed&&!state.error&&!state.run?.terminal);}
 function scheduleStreamingRender(node,state){
-  if(state.renderPending||state.completed||state.error)return;
-  const flush=()=>{state.renderPending=false;state.renderTimer=null;state.renderFrame=null;renderStreamingMessage(node,state);if(state.visualPending)scheduleStreamingRender(node,state);};
-  state.renderPending=true;if(typeof requestAnimationFrame==='function')state.renderFrame=requestAnimationFrame(flush);else state.renderTimer=setTimeout(flush,STREAM_VISUAL_FRAME_MS);
+  if(state.renderPending||!canRenderStreamingVisual(state,state.visualGeneration))return;
+  const generation=state.visualGeneration,flush=()=>{if(!canRenderStreamingVisual(state,generation))return;state.renderPending=false;state.renderTimer=null;state.renderFrame=null;renderStreamingMessage(node,state);if(state.visualPending)scheduleStreamingRender(node,state);},queueFrame=()=>{if(!canRenderStreamingVisual(state,generation))return;if(typeof requestAnimationFrame==='function')state.renderFrame=requestAnimationFrame(flush);else state.renderTimer=setTimeout(flush,0);},wait=Math.max(0,STREAM_VISUAL_FRAME_MS-(Date.now()-state.lastRenderAt));
+  state.renderPending=true;if(wait)state.renderTimer=setTimeout(typeof requestAnimationFrame==='function'?queueFrame:flush,wait);else queueFrame();
 }
 function completeStreamingMessage(node,state,sourcePrompt,main){
   if(!node)return;
-  clearStreamingVisualWork(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;state.visualPending='';if(!state.thinkingFinishedAt)state.thinkingFinishedAt=Date.now();const follow=syncStreamingFollow(state),finalResponse=state.finalResponse||state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
+  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;if(!state.thinkingFinishedAt)state.thinkingFinishedAt=Date.now();const follow=syncStreamingFollow(state),finalResponse=state.finalResponse||state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
   if(finalResponse===state.text&&content&&actions){renderStreamingMessage(node,state);const caret=content.querySelector?.('[data-stream-caret]');if(caret?.remove)caret.remove();if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt);}
   else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt);
   node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);stopWatchingStreamingFollow(state);
 }
 function cancelStreamingMessage(node,state,main){
   if(!node||state?.run?.terminal==='cancelled')return;
-  clearStreamingVisualWork(state);closeStreamingSource(state);state.run=state.run||createConversationRunState();state.run.terminal='cancelled';if(!state.thinkingFinishedAt)state.thinkingFinishedAt=Date.now();renderThinkingSummary(node,state);
+  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.text=state.displayText;state.run=state.run||createConversationRunState();state.run.terminal='cancelled';if(!state.thinkingFinishedAt)state.thinkingFinishedAt=Date.now();renderThinkingSummary(node,state);
   const content=node.querySelector?.('[data-stream-content]'),active=content?.querySelector?.('[data-stream-active]'),caret=content?.querySelector?.('[data-stream-caret]'),status=node.querySelector?.('[data-stream-status]');
   caret?.remove?.();
-  if(!state.text&&active)active.innerHTML='';
+  content?.querySelectorAll?.('[data-stream-caret],.streaming-caret')?.forEach?.(item=>item.remove?.());
+  if(!state.displayText&&active)active.innerHTML='';
   if(status){status.hidden=false;status.classList?.add?.('stream-cancelled');status.querySelector?.('svg')?.remove?.();status.querySelector?.('i')?.remove?.();const label=status.querySelector?.('span');if(label)label.textContent='已停止生成 · 部分回复未保存';}
   node.removeAttribute?.('aria-busy');node.removeAttribute?.('id');node.classList?.add?.('stream-cancelled');
   settleConversationRun(main,state,'cancelled');
 }
 function replaceTaskFailure(node,message,retryText,diagnosticId='',main=null){
   if(!node)return;
-  const partial=node._streamState?.text||'';clearStreamingVisualWork(node._streamState);
+  const partial=node._streamState?.displayText||node._streamState?.text||'';clearStreamingVisualWork(node._streamState,{discard:true});stopThinkingClock(node._streamState);
   const card=document.createElement('section');card.innerHTML=streamingFailureHtml(partial,message,diagnosticId);
   const failure=card.firstElementChild;node.replaceWith(failure);failure.querySelector('button').onclick=()=>{const input=document.querySelector('#prompt');if(!input)return;input.value=retryText;input.focus();};refreshIcons();
   if(node._streamState)settleConversationRun(main,node._streamState,'error');
@@ -416,7 +446,7 @@ async function submitAgentTaskV2(event,agentId,main){
   body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
   const node=document.querySelector('#task-status'),state=createStreamingState();state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
   const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;
-  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});beginConversationRun(state,{taskId:task.id,agentId,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId,main);}
+  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId,main);}
 }
 function streamPayload(event){try{return JSON.parse(event.data||'{}');}catch{return {};}}
 function finishStreamTask(node,state,done,agentId,main,retryText){
@@ -440,7 +470,7 @@ function streamTask(taskId,agentId,main,retryText,node,state){
   source.onerror=fallback;
 }
 async function pollAgentTaskV2(taskId,agentId,main,retryText,node=document.querySelector('#task-status'),state=node?node._streamState:createStreamingState()){
-  try{const task=await api(`/api/v1/tasks/${taskId}`);if(task.current_activity&&applyStreamingEvent(state,'activity',task.current_activity))scheduleStreamingRender(node,state);if(task.status==='completed'||task.status==='cancelled'){finishStreamTask(node,state,task,agentId,main,retryText);return;}if(task.status==='cancelling'){if(state.run?.phase===ConversationRunPhase.RUNNING)transitionConversationRun(state.run,ConversationRunPhase.STOPPING);updateComposerRunState(main,state);setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),1000);return;}if(task.status==='failed'){applyStreamingEvent(state,'error',task);replaceTaskFailure(node,state.error||task.user_message,retryText,state.diagnosticId||task.diagnostic_id,main);return;}setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),1000);}catch{setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),2500);}
+  try{const task=await api(`/api/v1/tasks/${taskId}`);setStreamingTaskStartedAt(state,task);if(task.current_activity&&applyStreamingEvent(state,'activity',task.current_activity))scheduleStreamingRender(node,state);if(task.status==='completed'||task.status==='cancelled'){finishStreamTask(node,state,task,agentId,main,retryText);return;}if(task.status==='cancelling'){if(state.run?.phase===ConversationRunPhase.RUNNING)transitionConversationRun(state.run,ConversationRunPhase.STOPPING);updateComposerRunState(main,state);setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),1000);return;}if(task.status==='failed'){applyStreamingEvent(state,'error',task);replaceTaskFailure(node,state.error||task.user_message,retryText,state.diagnosticId||task.diagnostic_id,main);return;}setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),1000);}catch{setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),2500);}
 }
 function activeConversationTask(detail){
   return [...(detail?.tasks||[])].reverse().find(task=>['queued','running','cancelling'].includes(task.status))||null;
@@ -450,7 +480,7 @@ function restoreActiveConversationTask(main,agentId,detail){
   const body=main.querySelector?.('#chat-body');if(!body||main.querySelector?.('#task-status'))return;
   body.insertAdjacentHTML?.('beforeend',streamingMessageHtml(task.stage==='cancelling'?'正在停止生成':'正在恢复生成'));
   const node=main.querySelector?.('#task-status')||document.querySelector('#task-status');if(!node)return;
-  const state=createStreamingState();state.sourcePrompt=task.input_text||'';state.status=task.stage==='cancelling'?'正在停止生成':'正在恢复生成';state.follow=shouldAutoFollowStream();state.thinkingStartedAt=Date.parse(task.started_at||task.created_at||'')||Date.now();beginConversationRun(state,{taskId:task.id,agentId,phase:task.status==='cancelling'?ConversationRunPhase.STOPPING:ConversationRunPhase.RUNNING,restored:true});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);api(`/api/v1/tasks/${task.id}`).then(current=>{if(node._streamState!==state||state.run?.terminal)return;if(current.current_activity&&applyStreamingEvent(state,'activity',current.current_activity))scheduleStreamingRender(node,state);if(['completed','cancelled','failed'].includes(current.status))finishStreamTask(node,state,current,agentId,main,state.sourcePrompt);}).catch(()=>{});streamTask(task.id,agentId,main,state.sourcePrompt,node,state);
+  const state=createStreamingState();state.sourcePrompt=task.input_text||'';state.status=task.stage==='cancelling'?'正在停止生成':'正在恢复生成';state.follow=shouldAutoFollowStream();setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,phase:task.status==='cancelling'?ConversationRunPhase.STOPPING:ConversationRunPhase.RUNNING,restored:true});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);api(`/api/v1/tasks/${task.id}`).then(current=>{if(node._streamState!==state||state.run?.terminal)return;setStreamingTaskStartedAt(state,current);if(current.current_activity&&applyStreamingEvent(state,'activity',current.current_activity))scheduleStreamingRender(node,state);if(['completed','cancelled','failed'].includes(current.status))finishStreamTask(node,state,current,agentId,main,state.sourcePrompt);}).catch(()=>{});streamTask(task.id,agentId,main,state.sourcePrompt,node,state);
 }
 
 async function agentWorkspace(main, agentId) {
