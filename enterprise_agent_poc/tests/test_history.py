@@ -1,6 +1,8 @@
 import base64
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
+import re
 from types import SimpleNamespace
 from urllib.parse import quote
 from uuid import uuid4
@@ -16,6 +18,8 @@ from app.store import POCStore
 
 
 PASSWORD = "HistoryTest!2026"
+STATIC_SHELL = (Path(__file__).resolve().parents[1] / "app/static/index.html").read_text(encoding="utf-8")
+WORKBENCH_SCRIPT_URL = re.search(r'<script src="(/static/workbench\.js\?v=[^"]+)" defer></script>', STATIC_SHELL).group(1)
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
@@ -144,7 +148,7 @@ def test_history_and_agent_deep_links_serve_the_current_shell(history_env, path)
     response = history_env.client.get(path)
 
     assert response.status_code == 200
-    assert "workbench.js?v=streaming-ux-v1" in response.text
+    assert WORKBENCH_SCRIPT_URL in response.text
 
 
 def test_history_classifies_projects_and_keeps_task_and_image_scope(history_env):

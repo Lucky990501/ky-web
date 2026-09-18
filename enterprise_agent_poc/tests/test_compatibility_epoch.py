@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,9 +24,10 @@ CURRENT_EPOCH = epoch
 CURRENT_MIGRATE = migrate
 
 SQL = Path(__file__).resolve().parents[1] / 'migrations/postgres/011_platform_compatibility_epoch.sql'
-RELEASE_ARTIFACT_CACHE = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/release-artifacts')
-POSTGRES_TEST_BIN = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/postgresql-16.6/bin')
-REDIS_TEST_BINARY = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/redis-7.4.2/bin/redis-server')
+TEST_RUNTIME_ROOT = Path(os.environ.get('ENTERPRISE_AGENT_TEST_RUNTIME_ROOT') or Path.home() / '.cache/enterprise-agent-test-runtime')
+RELEASE_ARTIFACT_CACHE = TEST_RUNTIME_ROOT / 'release-artifacts'
+POSTGRES_TEST_BIN = TEST_RUNTIME_ROOT / 'postgresql-16.6/bin'
+REDIS_TEST_BINARY = TEST_RUNTIME_ROOT / 'redis-7.4.2/bin/redis-server'
 BD_ROOT = RELEASE_ARTIFACT_CACHE / '20260914-bd04dcb'
 BD_ID = '20260914-bd04dcb'
 BD_COMMIT = 'bd04dcb982bf0efe02a5a1a42dd162d94265da0b'
@@ -48,7 +50,7 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = Path('/Users/lucky/.cache/enterprise-agent-test-runtime/candidate-artifacts/20260917-e43b8e0')
+PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260917-e43b8e0'
 PRODUCTION_PREDECESSOR_ID = '20260917-e43b8e0'
 PRODUCTION_PREDECESSOR_COMMIT = 'e43b8e00cc6060934a495ad42d6de2bc9148da69'
 PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'd4be1dd32207c3dc36e18c85260b6fdd70f82c185b0da6959e61bee2234afa17'
