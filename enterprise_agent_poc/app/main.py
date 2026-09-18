@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+from datetime import datetime, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +35,19 @@ from app.settings import safe_runtime_config_snapshot, settings
 from app.skill_registry import MAX_ARCHIVE_BYTES, SkillRegistry, SkillRegistryError
 from app.skills import SkillDeployment
 from app.store import POCStore
+
+
+def _sse_iso_timestamp(value: object) -> str:
+    """Encode the only timestamp shapes persisted by task event stores."""
+    if isinstance(value, datetime):
+        timestamp = value
+    elif isinstance(value, str):
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise TypeError("Task event created_at must be datetime or ISO timestamp string")
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.isoformat()
 
 
 class RunRequest(BaseModel):
@@ -638,7 +652,7 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
                         activity = {
                             "sequence": activity["sequence"], "stage": activity["stage"],
                             "label": labels[activity["stage"]], "status": activity["status"],
-                            "created_at": item["created_at"],
+                            "created_at": _sse_iso_timestamp(item["created_at"]),
                         }
                         yield f"event: activity\ndata: {json.dumps(activity, ensure_ascii=False)}\n\n"
                     continue

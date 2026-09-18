@@ -441,10 +441,18 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     @staticmethod
     def _safe_tool_activity(item: object, status: str) -> RuntimeStreamEvent | None:
-        """Map actual MCP calls to an allowlisted product category only."""
-        if status not in {"started", "completed"} or not getattr(item, "server", None):
+        """Map actual Codex thread tool items to allowlisted product categories."""
+        from openai_codex.generated.v2_all import DynamicToolCallThreadItem, McpToolCallThreadItem
+
+        if status not in {"started", "completed"}:
             return None
-        tool = str(getattr(item, "tool", "") or "")
+        thread_item = getattr(item, "root", item)
+        if isinstance(thread_item, McpToolCallThreadItem):
+            tool = thread_item.tool
+        elif isinstance(thread_item, DynamicToolCallThreadItem):
+            tool = ""
+        else:
+            return None
         stage = {
             "enterprise_config_get": "enterprise_config_loading",
             "knowledge_search": "knowledge_retrieving",

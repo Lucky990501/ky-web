@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -319,6 +320,48 @@ def test_execution_summary_sse_is_safe_and_does_not_need_legacy_client_changes(t
     assert "tool raw args" not in body and "mcp_internal" not in body
 
 
+def test_sse_serializes_datetime_activities_and_continues_to_delta_and_complete(tmp_path, monkeypatch):
+    from app import main
+
+    _, product, task, _, _ = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", FakeRuntime())
+    product.set_task(task["id"], "tenant-a", "running", "loading_context", "加载上下文")
+    product.add_task_activity(task["id"], "tenant-a", "context_loading", "started")
+    product.add_task_activity(task["id"], "tenant-a", "context_loading", "completed")
+    product.add_task_delta(task["id"], "tenant-a", 1, "可见正文")
+    product.set_task(task["id"], "tenant-a", "completed", "completed", "完成", response="可见正文")
+    original_events = product.task_events_since
+
+    def events_with_postgres_datetimes(*args, **kwargs):
+        events = original_events(*args, **kwargs)
+        for item in events:
+            if item["stage"] == "activity":
+                item["created_at"] = datetime(2026, 9, 18, 14, 38, 45, 380433, tzinfo=timezone(timedelta(hours=8)))
+        return events
+
+    monkeypatch.setattr(product, "task_events_since", events_with_postgres_datetimes)
+    monkeypatch.setattr(main, "product_store", product)
+    monkeypatch.setattr(main, "current_user", lambda _cookie: SimpleNamespace(tenant_id="tenant-a", user_id=task["user_id"], role="member"))
+    response = asyncio.run(main.stream_task_events(task["id"], workbench_session="session"))
+    body = asyncio.run(_sse_body(response))
+
+    assert body.count("event: activity") == 3
+    assert '"created_at": "2026-09-18T14:38:45.380433+08:00"' in body
+    assert body.index("event: progress") < body.index("event: activity") < body.index("event: delta") < body.index("event: complete")
+
+
+@pytest.mark.parametrize("terminal", ["completed", "failed", "cancelled"])
+def test_task_started_at_is_set_once_across_later_lifecycle_updates(tmp_path, monkeypatch, terminal):
+    _, product, task, _, _ = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", FakeRuntime())
+    product.set_task(task["id"], "tenant-a", "running", "loading_context", "加载上下文")
+    first_started_at = product.task_for_worker(task["id"])["started_at"]
+    product.set_task(task["id"], "tenant-a", "running", "persisting_result", "保存结果")
+    product.set_task(task["id"], "tenant-a", terminal, terminal, "终态")
+    saved = product.task_for_worker(task["id"])
+
+    assert first_started_at and saved["started_at"] == first_started_at
+    assert saved["status"] == terminal
+
+
 def test_execution_summary_omits_retrievals_that_did_not_run(tmp_path, monkeypatch):
     _, product, task, _, service = product_task_fixture(tmp_path, monkeypatch, "copywriting-agent", StreamingRuntime())
     asyncio.run(service.execute(task))
@@ -346,17 +389,39 @@ def test_execution_summary_marks_failed_task_without_partial_completion(tmp_path
         ("image_generation", "tool_running"),
     ],
 )
-def test_provider_tool_summary_maps_only_to_safe_categories(tool, stage):
+@pytest.mark.parametrize("status", ["started", "completed"])
+def test_provider_tool_summary_maps_only_to_safe_categories(tool, stage, status):
+    from openai_codex.generated.v2_all import McpToolCallStatus, McpToolCallThreadItem, ThreadItem
+
+    tool_item = ThreadItem.model_construct(root=McpToolCallThreadItem.model_construct(
+        id="tool-1", type="mcpToolCall", server="platform", tool=tool,
+        status=McpToolCallStatus.in_progress, arguments={"query": "secret query"}, result=None,
+    ))
     event = CodexRuntimeProvider._safe_tool_activity(
-        SimpleNamespace(server="platform", tool=tool, arguments={"query": "secret query"}, output="secret output"),
-        "started",
+        tool_item,
+        status,
     )
-    assert event and event.kind == "activity" and event.text == f"{stage}:started"
+    assert event and event.kind == "activity" and event.text == f"{stage}:{status}"
     assert "secret" not in event.text and tool not in event.text
 
 
 def test_provider_tool_summary_ignores_non_tool_items():
-    assert CodexRuntimeProvider._safe_tool_activity(SimpleNamespace(text="hidden reasoning"), "started") is None
+    from openai_codex.generated.v2_all import ReasoningThreadItem, ThreadItem
+
+    reasoning = ThreadItem.model_construct(root=ReasoningThreadItem.model_construct(id="reasoning-1", type="reasoning"))
+    assert CodexRuntimeProvider._safe_tool_activity(reasoning, "started") is None
+
+
+@pytest.mark.parametrize("status", ["started", "completed"])
+def test_provider_dynamic_tool_item_maps_to_generic_safe_activity(status):
+    from openai_codex.generated.v2_all import DynamicToolCallStatus, DynamicToolCallThreadItem, ThreadItem
+
+    tool_item = ThreadItem.model_construct(root=DynamicToolCallThreadItem.model_construct(
+        id="dynamic-1", type="dynamicToolCall", tool="internal tool", status=DynamicToolCallStatus.in_progress,
+        arguments={"secret": "value"},
+    ))
+    event = CodexRuntimeProvider._safe_tool_activity(tool_item, status)
+    assert event and event.text == f"tool_running:{status}"
 
 
 def test_streaming_deltas_are_ordered_and_final_result_stays_atomic(tmp_path, monkeypatch):
@@ -426,20 +491,22 @@ def test_codex_provider_streams_only_agent_message_delta_notifications():
 
 
 def test_codex_provider_streams_safe_activity_for_real_tool_notifications():
-    from openai_codex.generated.v2_all import ItemCompletedNotification, ItemStartedNotification, MessagePhase, Turn, TurnCompletedNotification, TurnStatus
+    from openai_codex.generated.v2_all import ItemCompletedNotification, ItemStartedNotification, McpToolCallStatus, McpToolCallThreadItem, MessagePhase, ThreadItem, Turn, TurnCompletedNotification, TurnStatus
 
     async def notifications():
-        tool_item = SimpleNamespace(
-            server="platform",
-            tool="knowledge_search",
-            arguments={"query": "internal knowledge query"},
-            output="internal tool output",
-        )
-        yield SimpleNamespace(method="item/started", payload=ItemStartedNotification.model_construct(item=tool_item, thread_id="thread", turn_id="turn"))
-        yield SimpleNamespace(method="item/completed", payload=ItemCompletedNotification.model_construct(item=tool_item, thread_id="thread", turn_id="turn"))
+        tool_items = [
+            ThreadItem.model_construct(root=McpToolCallThreadItem.model_construct(
+                id=f"tool-{index}", type="mcpToolCall", server="platform", tool="knowledge_search",
+                status=McpToolCallStatus.in_progress, arguments={"query": "internal knowledge query"}, result=None,
+            ))
+            for index in (1, 2)
+        ]
+        for tool_item in tool_items:
+            yield SimpleNamespace(method="item/started", payload=ItemStartedNotification.model_construct(item=tool_item, thread_id="thread", turn_id="turn"))
+            yield SimpleNamespace(method="item/completed", payload=ItemCompletedNotification.model_construct(item=tool_item, thread_id="thread", turn_id="turn"))
         final_item = SimpleNamespace(text="可见正文", phase=MessagePhase.final_answer)
         yield SimpleNamespace(method="item/completed", payload=ItemCompletedNotification.model_construct(item=final_item, thread_id="thread", turn_id="turn"))
-        completed = Turn.model_construct(id="turn", status=TurnStatus.completed, items=[tool_item, final_item], error=None, duration_ms=9)
+        completed = Turn.model_construct(id="turn", status=TurnStatus.completed, items=[*tool_items, final_item], error=None, duration_ms=9)
         yield SimpleNamespace(method="turn/completed", payload=TurnCompletedNotification.model_construct(thread_id="thread", turn=completed))
 
     class Handle:
@@ -460,6 +527,8 @@ def test_codex_provider_streams_safe_activity_for_real_tool_notifications():
 
     events = asyncio.run(collect())
     assert [(event.kind, event.text) for event in events[:-1]] == [
+        ("activity", "knowledge_retrieving:started"),
+        ("activity", "knowledge_retrieving:completed"),
         ("activity", "knowledge_retrieving:started"),
         ("activity", "knowledge_retrieving:completed"),
     ]

@@ -393,7 +393,7 @@ class ProductStore:
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:
         with self._store.connection() as conn:
-            updated = conn.execute("UPDATE tasks SET status=?,stage=?,run_id=COALESCE(?,run_id),error_code=?,conversation_id=COALESCE(?,conversation_id),started_at=CASE WHEN ?='running' THEN CURRENT_TIMESTAMP ELSE started_at END,completed_at=CASE WHEN ? IN ('completed','failed','cancelled') THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=? AND tenant_id=? AND status NOT IN ('completed','cancelled') AND stage<>'cancelling' AND NOT (status='failed' AND ?='completed')", (status,stage,run_id,error_code,conversation_id,status,status,task_id,tenant_id,status))
+            updated = conn.execute("UPDATE tasks SET status=?,stage=?,run_id=COALESCE(?,run_id),error_code=?,conversation_id=COALESCE(?,conversation_id),started_at=CASE WHEN ?='running' THEN COALESCE(started_at,CURRENT_TIMESTAMP) ELSE started_at END,completed_at=CASE WHEN ? IN ('completed','failed','cancelled') THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=? AND tenant_id=? AND status NOT IN ('completed','cancelled') AND stage<>'cancelling' AND NOT (status='failed' AND ?='completed')", (status,stage,run_id,error_code,conversation_id,status,status,task_id,tenant_id,status))
             if updated.rowcount != 1:
                 return
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?,?,?)", (task_id,stage,message))
