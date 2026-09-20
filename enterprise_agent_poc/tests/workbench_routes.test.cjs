@@ -354,6 +354,17 @@ test('live task state stays compact and uses customer-facing thinking copy',()=>
   assert.ok(source.includes("source.addEventListener('activity'"));
 });
 
+test('desktop conversation layout keeps navigation and long replies inside stable viewport regions',()=>{
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(css,/\.app-shell:has\(\.chatgpt-conversation-layout\)\{height:100dvh;min-height:0;overflow:hidden\}/);
+  assert.match(css,/\.app-shell:has\(\.chatgpt-conversation-layout\) \.sidebar\{min-height:0;overflow:hidden;padding:14px 16px 12px\}/);
+  assert.match(css,/\.app-shell:has\(\.chatgpt-conversation-layout\) \.shell-main\{display:grid;grid-template-rows:70px minmax\(0,1fr\);height:100dvh;min-height:0;overflow:hidden\}/);
+  assert.match(css,/\.chatgpt-conversation-layout\{height:100%;min-height:0;margin:0;overflow:hidden\}/);
+  assert.match(css,/\.chatgpt-conversation-layout \.chat-body\{min-height:0;margin:0 auto;padding:26px 0 32px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable\}/);
+  assert.match(css,/\.chatgpt-conversation-layout \.composer\{position:relative;bottom:auto;flex:0 0 auto;margin:0 auto\}/);
+  assert.match(css,/@media\(min-width:861px\) and \(max-height:760px\)/);
+});
+
 test('streaming conversation state orders deltas and accepts the authoritative completion',()=>{
   const h=harness('/agents/campaign');
   h.run('streamState=createStreamingState()');
