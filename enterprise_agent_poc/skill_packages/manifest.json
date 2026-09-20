@@ -8,7 +8,7 @@
       "source_identity": {"path": "campaign-planning/1.0.0", "files": [{"path": "SKILL.md", "sha256": "426f2ed147c30b83d21b6abd3d4591c0101cd3b98f9b02bc8603118ee52f2ea3", "git_mode": "100644"}]},
       "artifact_sha256": "37794f8842774bf08ee2478b07c6d248f229c96ced26dd75099337015feb91c0",
       "artifact_path": "campaign-planning/1.0.0.zip",
-      "bootstrap_default": ["campaign-agent"],
+      "bootstrap_default": [],
       "builder_policy": "legacy-production-zip-v1",
       "legacy_artifact": true
     },
@@ -21,6 +21,16 @@
       "bootstrap_default": ["campaign-agent"],
       "builder_policy": "legacy-production-zip-v1",
       "legacy_artifact": true
+    },
+    {
+      "skill_slug": "event-campaign-plan",
+      "version": "1.0.0",
+      "source_identity": {"path": "event-campaign-plan/1.0.0", "files": [{"path": "SKILL.md", "sha256": "5b086da9ddb4b13c59f0d5e81444b75dade927a1a9d2a5cc0a47bcdaea419592", "git_mode": "100644"}]},
+      "artifact_sha256": "d3a2f98b699a62d7cebea73695fa2e9d19fca5a7c6e09c6bdf47025e3184d06d",
+      "artifact_path": "event-campaign-plan/1.0.0.zip",
+      "bootstrap_default": ["campaign-agent"],
+      "builder_policy": "native-zip-stored-v1",
+      "legacy_artifact": false
     },
     {
       "skill_slug": "marketing-copywriting",
