@@ -50,11 +50,11 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260918-50f2a1a'
-PRODUCTION_PREDECESSOR_ID = '20260918-50f2a1a'
-PRODUCTION_PREDECESSOR_COMMIT = '50f2a1afdd120d13ee215f1653983bedfd2713d6'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '6f0627c512609ece452476ecd02d8d673a482259d53d41b5c28e4fede9a36470'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = '8ec9e40af92111e20e650138be54debf6ed97b01d49217749742f0ffc29b7701'
+PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260918-5c2205a'
+PRODUCTION_PREDECESSOR_ID = '20260918-5c2205a'
+PRODUCTION_PREDECESSOR_COMMIT = '5c2205ab8eee0ca58a541307ec0122866e7bd638'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '7605b9e4e5820bf7fba10dba3d8b7c973fd5cfc6fc6b47112e5efed95f200e42'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'fb65228922794fa761ce846f5481a29d02d1f5219830fbec7a3c2fc05ace1a88'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
