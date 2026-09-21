@@ -97,7 +97,7 @@ def test_empty_registry_bootstraps_exact_historical_bytes_then_zero_writes(regis
     entries = bundled.validate_bundle(registry.bundled_root)
     for entry in entries:
         with registry._store.connection() as conn:
-            row = conn.execute("SELECT p.storage_path,v.checksum FROM skill_versions v JOIN skills s ON s.id=v.skill_id JOIN skill_packages p ON p.skill_version_id=v.id WHERE s.slug=? AND v.version=?", (entry["skill_slug"], "1.0.0")).fetchone()
+            row = conn.execute("SELECT p.storage_path,v.checksum FROM skill_versions v JOIN skills s ON s.id=v.skill_id JOIN skill_packages p ON p.skill_version_id=v.id WHERE s.slug=? AND v.version=?", (entry["skill_slug"], entry["version"])).fetchone()
         assert Path(row["storage_path"]).read_bytes() == (registry.bundled_root / entry["artifact_path"]).read_bytes()
         assert row["checksum"] == entry["artifact_sha256"]
         assert b"\r\n" in (registry.published_root / entry["skill_slug"] / "1.0.0" / "SKILL.md").read_bytes()
