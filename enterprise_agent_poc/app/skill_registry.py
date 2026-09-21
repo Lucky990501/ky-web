@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from app.agent_catalog import CATALOG
-from app.bundled_skills import BundledSkillError, sha256, validate_bundle
+from app.bundled_skills import BundledSkillError, is_corrected_pre_release_identity, sha256, validate_bundle
 from app.store import POCStore, _PostgresConnection
 
 
@@ -280,6 +280,9 @@ class SkillRegistry:
             row = by_key.get((entry["skill_slug"], entry["version"]))
             if row is None:
                 raise SkillRegistryError("Partial existing Registry; missing bundled version; manual bootstrap required.")
+            if (is_corrected_pre_release_identity(entry) and row["status"] in {"published", "deprecated"}
+                    and row["checksum"] != entry["artifact_sha256"]):
+                raise SkillRegistryError("PUBLISHED_VERSION_IDENTITY_IMMUTABLE")
             if row["status"] == "draft":
                 raise SkillRegistryError("Bundled draft conflict; manual action required.")
             if row["status"] not in {"published", "deprecated"}:

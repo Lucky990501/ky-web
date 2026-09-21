@@ -28,6 +28,27 @@ HISTORICAL_IDENTITIES = {
     "poster-design": ("b70f470cd1b455f8170cf409109ef37f2524db4322518db1df57e05482eac14b", "82689e8361d60ddc1e09e4a16ac35fff5e84825b9bdc1c2a96490cd8c9e7a957"),
     "social-copywriting": ("4e62a73f7cd274c41be57050b09a80dba63f2626f27e085ab1ce8d17b5aa951a", "2fd4024753bd1535c2dd6ec983d1082e2f17a6d61c987cdd25f9b06ec4137f6a"),
 }
+# This is deliberately not a general unpublished-version escape hatch. The
+# only permitted transition was audited before either Registry was published.
+PRE_RELEASE_IDENTITY_CORRECTIONS = {
+    ("event-campaign-plan", "1.0.0"): {
+        "old_identity": {
+            "source_identity": {"path": "event-campaign-plan/1.0.0", "files": [{"path": "SKILL.md", "sha256": "5b086da9ddb4b13c59f0d5e81444b75dade927a1a9d2a5cc0a47bcdaea419592", "git_mode": "100644"}]},
+            "artifact_sha256": "d3a2f98b699a62d7cebea73695fa2e9d19fca5a7c6e09c6bdf47025e3184d06d",
+            "artifact_path": "event-campaign-plan/1.0.0.zip",
+            "builder_policy": "native-zip-stored-v1",
+            "legacy_artifact": False,
+        },
+        "corrected_identity": {
+            "source_identity": {"path": "event-campaign-plan/1.0.0", "files": [{"path": "SKILL.md", "sha256": "5b086da9ddb4b13c59f0d5e81444b75dade927a1a9d2a5cc0a47bcdaea419592", "git_mode": "100644"}]},
+            "artifact_sha256": "19a79e7dab430136cf3ae4513b54b74cab98c8f5b50e766f018a4dd75024ad38",
+            "artifact_path": "event-campaign-plan/1.0.0.zip",
+            "builder_policy": "native-zip-stored-v1",
+            "legacy_artifact": False,
+        },
+        "reason": "Restore the audited historical CRLF ZIP payload before any Production or Shared Registry publication.",
+    },
+}
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 VERSION = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?")
 HASH = re.compile(r"[0-9a-f]{64}")
@@ -42,6 +63,39 @@ class BundledSkillError(ValueError):
 
 def sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _entry_identity(entry: dict) -> dict:
+    """The immutable portion of one manifest entry, excluding bindings."""
+    return {name: entry[name] for name in ("source_identity", "artifact_sha256", "artifact_path",
+                                            "builder_policy", "legacy_artifact")}
+
+
+def pre_release_correction_state(entry: dict) -> str | None:
+    """Return an audited state, never a best-effort identity match."""
+    correction = PRE_RELEASE_IDENTITY_CORRECTIONS.get((entry.get("skill_slug"), entry.get("version")))
+    if correction is None:
+        return None
+    identity = _entry_identity(entry)
+    if identity == correction["old_identity"]:
+        return "old"
+    if identity == correction["corrected_identity"]:
+        return "corrected"
+    raise BundledSkillError("pre-release identity correction mismatch; BLOCK")
+
+
+def is_corrected_pre_release_identity(entry: dict) -> bool:
+    return pre_release_correction_state(entry) == "corrected"
+
+
+def _is_pre_release_correction_transition(old: dict, current: dict) -> bool:
+    """Allow only the one audited old-to-corrected transition in Git ancestry."""
+    if (old["skill_slug"], old["version"]) != (current["skill_slug"], current["version"]):
+        return False
+    try:
+        return pre_release_correction_state(old) == "old" and pre_release_correction_state(current) == "corrected"
+    except BundledSkillError:
+        return False
 
 
 def forbidden_path(name: str) -> bool:
@@ -130,6 +184,9 @@ def parse_manifest(content: bytes) -> list[dict]:
                 defaults.add((agent, slug))
             if type(entry["legacy_artifact"]) is not bool:
                 raise BundledSkillError("invalid legacy marker")
+            # Known correction keys must always be one of the two audited
+            # identities, even before release preflight reaches Git ancestry.
+            pre_release_correction_state(entry)
             if entry["legacy_artifact"]:
                 approved = HISTORICAL_IDENTITIES.get(slug)
                 expected = [{"path": "SKILL.md", "sha256": approved[0], "git_mode": "100644"}] if approved else None
@@ -147,10 +204,17 @@ def parse_manifest(content: bytes) -> list[dict]:
 
 def deterministic_zip(slug: str, version: str, files: dict[str, tuple[bytes, str]]) -> bytes:
     """Offline future-version builder v1: exact Git bytes, ZIP_STORED, no zlib."""
+    return _native_deterministic_zip(slug, version, files)
+
+
+def _native_deterministic_zip(slug: str, version: str, files: dict[str, tuple[bytes, str]], *, crlf_text_payload: bool = False) -> bytes:
+    """Fixed-metadata native ZIP writer; CRLF is internal to the audited contract."""
     if not SLUG.fullmatch(slug) or not VERSION.fullmatch(version):
         raise BundledSkillError("invalid future artifact identity")
     if slug in HISTORICAL_IDENTITIES and version == "1.0.0":
         raise BundledSkillError("historical 1.0.0 must never be rebuilt")
+    if crlf_text_payload and (slug, version) not in PRE_RELEASE_IDENTITY_CORRECTIONS:
+        raise BundledSkillError("unapproved pre-release correction packaging")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as archive:
         for name in sorted(files, key=lambda value: value.encode("utf-8")):
@@ -160,6 +224,8 @@ def deterministic_zip(slug: str, version: str, files: dict[str, tuple[bytes, str
                 raise BundledSkillError("invalid future source")
             if (PurePosixPath(name).suffix.lower() in TEXT_SUFFIXES or PurePosixPath(name).name in {"LICENSE", "Dockerfile"} or name.endswith(".env.example")) and b"\r" in content:
                 raise BundledSkillError("future text source must be committed LF bytes")
+            if crlf_text_payload and PurePosixPath(name).suffix.lower() in TEXT_SUFFIXES:
+                content = content.replace(b"\n", b"\r\n")
             info = zipfile.ZipInfo(f"{slug}/{name}", date_time=(1980, 1, 1, 0, 0, 0))
             info.create_system = 3
             info.create_version = info.extract_version = 20
@@ -174,10 +240,24 @@ def deterministic_zip(slug: str, version: str, files: dict[str, tuple[bytes, str
     return result
 
 
+def canonical_artifact(entry: dict, files: dict[str, tuple[bytes, str]]) -> bytes:
+    """Return the sole approved deterministic artifact for a manifest identity."""
+    if pre_release_correction_state(entry) == "corrected":
+        artifact = _native_deterministic_zip(entry["skill_slug"], entry["version"], files, crlf_text_payload=True)
+        if sha256(artifact) != entry["artifact_sha256"]:
+            raise BundledSkillError("pre-release corrected artifact mismatch; BLOCK")
+        return artifact
+    return deterministic_zip(entry["skill_slug"], entry["version"], files)
+
+
 def future_artifact_from_git(repo: Path, commit: str, slug: str, version: str) -> bytes:
     """Offline API: caller writes/reviews returned bytes; never read checkout."""
     if not SLUG.fullmatch(slug) or not VERSION.fullmatch(version):
         raise BundledSkillError("invalid future artifact identity")
+    entries = parse_manifest(_git(repo, "show", f"{commit}:{MANIFEST_PATH}"))
+    entry = next((item for item in entries if (item["skill_slug"], item["version"]) == (slug, version)), None)
+    if entry is None:
+        raise BundledSkillError("future committed manifest entry missing")
     prefix = f"enterprise_agent_poc/skill_packages/{slug}/{version}/"
     files = {}
     for record in _git(repo, "ls-tree", "-r", "-z", commit, "--", prefix).split(b"\0"):
@@ -190,7 +270,7 @@ def future_artifact_from_git(repo: Path, commit: str, slug: str, version: str) -
         files[name.decode().removeprefix(prefix)] = (_git(repo, "cat-file", "blob", oid), mode)
     if not files:
         raise BundledSkillError("future committed source missing")
-    return deterministic_zip(slug, version, files)
+    return canonical_artifact(entry, files)
 
 
 def _validate_inputs(entries: list[dict], read, names: set[str], modes, *, rebuild_future: bool = False) -> None:
@@ -216,8 +296,15 @@ def _validate_inputs(entries: list[dict], read, names: set[str], modes, *, rebui
                 safe_path(info.filename.rstrip("/"))
                 if not info.is_dir() and secret_content(archive.read(info)):
                     raise BundledSkillError("forbidden content in bundled artifact")
-        # No legacy rebuild, normalization, or runtime reinterpretation.
-        if rebuild_future and not entry["legacy_artifact"] and deterministic_zip(entry["skill_slug"], entry["version"], source) != artifact:
+        if pre_release_correction_state(entry) == "corrected":
+            source_skill = source["SKILL.md"][0]
+            with zipfile.ZipFile(io.BytesIO(artifact)) as archive:
+                payload_skill = archive.read(f"{entry['skill_slug']}/SKILL.md")
+            if b"\r" in source_skill or b"\r\n" not in payload_skill or payload_skill.replace(b"\r\n", b"\n") != source_skill:
+                raise BundledSkillError("pre-release historical newline contract mismatch; BLOCK")
+        # No legacy rebuild, normalization, or runtime reinterpretation. The
+        # exact pre-release contract is the sole audited non-LF payload case.
+        if rebuild_future and not entry["legacy_artifact"] and canonical_artifact(entry, source) != artifact:
             raise BundledSkillError("future deterministic artifact mismatch")
     if names != expected:
         raise BundledSkillError("bundled file set mismatch or unapproved files")
@@ -279,9 +366,11 @@ def validate_git_bundle(repo: Path, commit: str) -> list[dict]:
                 continue
             for old in parse_manifest(previous_content):
                 key = old["skill_slug"], old["version"]
-                if key not in current or {k: v for k, v in old.items() if k != "bootstrap_default"} != {
-                    k: v for k, v in current[key].items() if k != "bootstrap_default"
-                }:
+                if key not in current:
+                    raise BundledSkillError("committed version identity changed; create a new version")
+                old_identity = {k: v for k, v in old.items() if k != "bootstrap_default"}
+                current_identity = {k: v for k, v in current[key].items() if k != "bootstrap_default"}
+                if old_identity != current_identity and not _is_pre_release_correction_transition(old, current[key]):
                     raise BundledSkillError("committed version identity changed; create a new version")
         return entries
     except (subprocess.CalledProcessError, KeyError) as exc:

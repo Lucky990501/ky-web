@@ -40,6 +40,30 @@ def save_manifest(root, value):
     (root / "manifest.json").write_text(json.dumps(value), encoding="utf-8")
 
 
+def entry_for(root, slug="event-campaign-plan", version="1.0.0"):
+    return next(entry for entry in manifest(root)["skills"] if (entry["skill_slug"], entry["version"]) == (slug, version))
+
+
+def apply_audited_pre_release_correction(root):
+    data = manifest(root)
+    entry = next(item for item in data["skills"] if (item["skill_slug"], item["version"]) == ("event-campaign-plan", "1.0.0"))
+    entry.update(json.loads(json.dumps(bundled.PRE_RELEASE_IDENTITY_CORRECTIONS[("event-campaign-plan", "1.0.0")]["corrected_identity"])))
+    source = (root / entry["source_identity"]["path"] / "SKILL.md").read_bytes()
+    artifact = bundled.canonical_artifact(entry, {"SKILL.md": (source, "100644")})
+    (root / entry["artifact_path"]).write_bytes(artifact)
+    save_manifest(root, data)
+    return entry, artifact
+
+
+def fresh_registry(tmp_path, bundle):
+    store = POCStore(tmp_path / "registry.db")
+    store.seed_demo_data()
+    ProductStore(store).initialize()
+    result = SkillRegistry(store, tmp_path / "data", bundle)
+    result.initialize()
+    return result
+
+
 @pytest.fixture
 def registry(tmp_path, approved_bundle):
     store = POCStore(tmp_path / "registry.db")
@@ -93,6 +117,39 @@ def test_empty_registry_bootstraps_exact_historical_bytes_then_zero_writes(regis
     assert registry._store.database_path.read_bytes() == database_before
     for agent in CATALOG.values():
         assert registry.manifest_for_agent(agent.id) == agent.skill_manifest
+
+
+def test_pre_release_correction_has_exact_lf_source_and_crlf_canonical_payload(approved_bundle):
+    old = entry_for(approved_bundle)
+    source = (approved_bundle / old["source_identity"]["path"] / "SKILL.md").read_bytes()
+    assert bundled.pre_release_correction_state(old) == "old"
+    assert b"\r" not in source
+    assert bundled.canonical_artifact(old, {"SKILL.md": (source, "100644")}) == (approved_bundle / old["artifact_path"]).read_bytes()
+    corrected, artifact = apply_audited_pre_release_correction(approved_bundle)
+    assert bundled.pre_release_correction_state(corrected) == "corrected"
+    assert bundled.sha256(artifact) == "19a79e7dab430136cf3ae4513b54b74cab98c8f5b50e766f018a4dd75024ad38"
+    with zipfile.ZipFile(io.BytesIO(artifact)) as archive:
+        payload = archive.read("event-campaign-plan/SKILL.md")
+    assert b"\r\n" in payload and payload.replace(b"\r\n", b"\n") == source
+    assert bundled.validate_bundle(approved_bundle)
+
+
+def test_corrected_pre_release_bootstrap_publishes_crlf_and_restart_writes_nothing(tmp_path, approved_bundle):
+    corrected, _ = apply_audited_pre_release_correction(approved_bundle)
+    registry = fresh_registry(tmp_path, approved_bundle)
+    published = registry.published_root / corrected["skill_slug"] / corrected["version"] / "SKILL.md"
+    assert b"\r\n" in published.read_bytes()
+    before = snapshot(registry)
+    registry.initialize()
+    assert snapshot(registry) == before
+
+
+def test_corrected_identity_blocks_existing_published_registry_without_writes(registry):
+    apply_audited_pre_release_correction(registry.bundled_root)
+    before = snapshot(registry)
+    with pytest.raises(SkillRegistryError, match="PUBLISHED_VERSION_IDENTITY_IMMUTABLE"):
+        registry.verify_bootstrap()
+    assert snapshot(registry) == before
 
 
 def test_api_lifespan_restart_writes_no_registry_sql(registry, monkeypatch):
@@ -336,6 +393,80 @@ def test_future_identity_cannot_change_source_artifact_and_manifest_together(bun
     changed_commit = commit_fixture(bundle_git_repo)
     with pytest.raises(bundled.BundledSkillError, match="committed version identity"):
         bundled.validate_git_bundle(bundle_git_repo, changed_commit)
+
+
+def test_audited_pre_release_transition_passes_git_and_release_preflight(bundle_git_repo, monkeypatch):
+    root = bundle_git_repo / "enterprise_agent_poc" / "skill_packages"
+    corrected, artifact = apply_audited_pre_release_correction(root)
+    commit = commit_fixture(bundle_git_repo)
+    assert bundled.validate_git_bundle(bundle_git_repo, commit)
+    assert bundled.future_artifact_from_git(bundle_git_repo, commit, "event-campaign-plan", "1.0.0") == artifact
+    monkeypatch.setattr(build_release, "REPO", bundle_git_repo)
+    assert build_release.preflight(commit)
+    assert corrected["version"] == "1.0.0"
+
+
+def test_pre_release_transition_rejects_unknown_old_identity(bundle_git_repo):
+    root = bundle_git_repo / "enterprise_agent_poc" / "skill_packages"
+    data = manifest(root)
+    entry = next(item for item in data["skills"] if (item["skill_slug"], item["version"]) == ("event-campaign-plan", "1.0.0"))
+    entry["artifact_sha256"] = "0" * 64
+    save_manifest(root, data)
+    commit_fixture(bundle_git_repo)
+    apply_audited_pre_release_correction(root)
+    corrected = commit_fixture(bundle_git_repo)
+    with pytest.raises(bundled.BundledSkillError, match="pre-release identity correction"):
+        bundled.validate_git_bundle(bundle_git_repo, corrected)
+
+
+def test_pre_release_transition_rejects_change_after_corrected_identity(bundle_git_repo):
+    root = bundle_git_repo / "enterprise_agent_poc" / "skill_packages"
+    corrected, _ = apply_audited_pre_release_correction(root)
+    commit_fixture(bundle_git_repo)
+    data = manifest(root)
+    entry = next(item for item in data["skills"] if (item["skill_slug"], item["version"]) == ("event-campaign-plan", "1.0.0"))
+    entry.update(json.loads(json.dumps(bundled.PRE_RELEASE_IDENTITY_CORRECTIONS[("event-campaign-plan", "1.0.0")]["old_identity"])))
+    source = (root / entry["source_identity"]["path"] / "SKILL.md").read_bytes()
+    (root / entry["artifact_path"]).write_bytes(bundled.deterministic_zip(entry["skill_slug"], entry["version"], {"SKILL.md": (source, "100644")}))
+    save_manifest(root, data)
+    changed = commit_fixture(bundle_git_repo)
+    with pytest.raises(bundled.BundledSkillError, match="committed version identity"):
+        bundled.validate_git_bundle(bundle_git_repo, changed)
+    assert corrected["artifact_sha256"] == "19a79e7dab430136cf3ae4513b54b74cab98c8f5b50e766f018a4dd75024ad38"
+
+
+def test_pre_release_correction_does_not_apply_to_event_campaign_plan_101(approved_bundle):
+    original = entry_for(approved_bundle, version="1.0.1")
+    source = (approved_bundle / original["source_identity"]["path"] / "SKILL.md").read_bytes()
+    assert bundled.pre_release_correction_state(original) is None
+    assert bundled.canonical_artifact(original, {"SKILL.md": (source, "100644")}) == (approved_bundle / original["artifact_path"]).read_bytes()
+    corrected, _ = apply_audited_pre_release_correction(approved_bundle)
+    assert entry_for(approved_bundle, version="1.0.1") == original
+    assert corrected["version"] == "1.0.0"
+
+
+@pytest.mark.parametrize("state,field,value", [
+    ("old", "artifact_sha256", "0" * 64),
+    ("corrected", "builder_policy", "other-builder"),
+])
+def test_pre_release_correction_rejects_wrong_declared_identity(approved_bundle, state, field, value):
+    if state == "corrected":
+        apply_audited_pre_release_correction(approved_bundle)
+    data = manifest(approved_bundle)
+    entry = next(item for item in data["skills"] if (item["skill_slug"], item["version"]) == ("event-campaign-plan", "1.0.0"))
+    entry[field] = value
+    save_manifest(approved_bundle, data)
+    with pytest.raises(bundled.BundledSkillError, match="pre-release identity correction"):
+        bundled.validate_bundle(approved_bundle)
+
+
+def test_pre_release_correction_does_not_allow_other_skill_identity(approved_bundle):
+    data = manifest(approved_bundle)
+    entry = next(item for item in data["skills"] if (item["skill_slug"], item["version"]) == ("poster-design", "1.0.0"))
+    entry["artifact_sha256"] = "0" * 64
+    save_manifest(approved_bundle, data)
+    with pytest.raises(bundled.BundledSkillError, match="approved historical identity"):
+        bundled.validate_bundle(approved_bundle)
 
 
 @pytest.mark.parametrize("autocrlf", ["false", "true", "input"])
