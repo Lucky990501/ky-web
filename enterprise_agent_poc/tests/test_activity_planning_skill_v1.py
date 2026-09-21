@@ -40,8 +40,15 @@ def test_routing_and_optional_tool_policy_cover_fixed_evaluation_cases():
         assert value in instructions
     assert "仅在任务涉及具体企业或品牌约束时调用 enterprise_config_get" in instructions
     assert "仅描述“示意图需求”时不得机械调用 asset_search" in instructions
-    assert "若一次 knowledge_search 已返回充分证据" in instructions
-    assert "不得以等价或近似 Query 重复搜索" in instructions
+    assert "FACT QUERY BUDGET" in instructions
+    assert "resolved_fact_targets" in instructions
+    assert "对同一个 FACT_TARGET 默认最多执行一次" in instructions
+    assert "无论找到支持证据还是未找到支持证据" in instructions
+    assert "不得换同义词、换句式、为了确认或为了提高把握再次搜索" in instructions
+    assert "这不是整轮只能搜索一次的机械上限" in instructions
+    assert "当前企业资料中未找到该权益依据，需进一步确认" in instructions
+    assert "不等于已确认企业绝对不存在" in instructions
+    assert "必须先调用 enterprise_config_get，再调用 knowledge_search 和 asset_search" not in instructions
 
 
 def test_skill_has_minimum_evidence_and_time_grounding_guardrails():
