@@ -114,19 +114,68 @@ def preflight(registry: SkillRegistry, transitions: list[dict], packages: dict[t
     return {"status": "DECLARED_BINDING_TRANSITION_READY", "transitions": [{"agent_id": t["agent_id"], "from_bindings": t["from"], "to_bindings": t["to"]} for t in transitions]}
 
 
+def stage_candidate_packages(
+    registry: SkillRegistry,
+    packages: dict[tuple[str, str], dict],
+    bundle_root: Path,
+) -> dict:
+    """Add missing immutable Candidate packages, then run the startup consumer."""
+    staged, reused = [], []
+    for key, entry in packages.items():
+        slug, version = key
+        with registry._store.connection() as conn:
+            row = conn.execute(
+                "SELECT v.id,v.skill_id,v.version,v.status,v.checksum,s.slug,"
+                "p.storage_path,p.sha256 AS package_sha256,p.size_bytes "
+                "FROM skill_versions v JOIN skills s ON s.id=v.skill_id "
+                "JOIN skill_packages p ON p.skill_version_id=v.id "
+                "WHERE s.slug=? AND v.version=?",
+                (slug, version),
+            ).fetchone()
+        if row is None:
+            content = (bundle_root / entry["artifact_path"]).read_bytes()
+            registry._upsert_import(
+                slug,
+                version,
+                slug,
+                "Release-staged immutable bundled Skill",
+                content,
+                None,
+                published=True,
+            )
+            staged.append({"slug": slug, "version": version})
+        else:
+            require(
+                row["status"] in {"published", "deprecated"}
+                and row["checksum"] == entry["artifact_sha256"],
+                "CANDIDATE_SKILL_PACKAGE_IDENTITY_MISMATCH",
+            )
+            registry._verify_package(row, expected=entry["artifact_sha256"])
+            reused.append({"slug": slug, "version": version})
+
+        with registry._store.connection() as conn:
+            checked = conn.execute(
+                "SELECT v.id,v.skill_id,v.version,v.status,v.checksum,s.slug,"
+                "p.storage_path,p.sha256 AS package_sha256,p.size_bytes "
+                "FROM skill_versions v JOIN skills s ON s.id=v.skill_id "
+                "JOIN skill_packages p ON p.skill_version_id=v.id "
+                "WHERE s.slug=? AND v.version=?",
+                (slug, version),
+            ).fetchone()
+        require(checked is not None, "CANDIDATE_SKILL_PACKAGE_STAGING_FAILED")
+        registry._verify_package(checked, expected=entry["artifact_sha256"])
+
+    # This is the same fail-closed consumer invoked by Candidate API startup.
+    # It must pass while bindings are still FROM and before release-current moves.
+    registry.initialize()
+    return {"status": "candidate_packages_ready", "staged": staged, "reused": reused}
+
+
 def stage_and_apply(registry: SkillRegistry, transitions: list[dict], packages: dict[tuple[str, str], dict], bundle_root: Path, *, rollback: bool) -> dict:
-    # Additive staging is intentionally outside active-binding mutation. It
-    # publishes immutable package bytes only; it never changes an Agent binding.
+    package_staging = None
     if not rollback:
-        for transition in transitions:
-            for slug, version in transition["to"].items():
-                with registry._store.connection() as conn:
-                    row = conn.execute("SELECT v.status,v.checksum FROM skill_versions v JOIN skills s ON s.id=v.skill_id WHERE s.slug=? AND v.version=?", (slug, version)).fetchone()
-                entry = packages[(slug, version)]
-                if row is None:
-                    registry._upsert_import(slug, version, slug, "Release-staged immutable bundled Skill", (bundle_root / entry["artifact_path"]).read_bytes(), None, published=True)
-                elif row["status"] not in {"published", "deprecated"} or row["checksum"] != entry["artifact_sha256"]:
-                    raise TransitionBlocked("TO_SKILL_PACKAGE_IDENTITY_MISMATCH")
+        verify_candidate_packages(transitions, packages)
+        package_staging = stage_candidate_packages(registry, packages, bundle_root)
     with registry._store.connection() as conn:
         result = []
         for transition in transitions:
@@ -148,7 +197,11 @@ def stage_and_apply(registry: SkillRegistry, transitions: list[dict], packages: 
             manifest = dict(sorted(target.items()))
             conn.execute("UPDATE agent_templates SET skill_manifest=? WHERE id=?", (json.dumps(manifest, sort_keys=True), transition["agent_id"]))
             result.append({"agent_id": transition["agent_id"], "result": "rolled_back" if rollback else "applied"})
-    return {"status": "binding_transition_rolled_back" if rollback else "binding_transition_applied", "results": result}
+    return {
+        "status": "binding_transition_rolled_back" if rollback else "binding_transition_applied",
+        "package_staging": package_staging,
+        "results": result,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
