@@ -56,9 +56,16 @@ def validated_publish(catalog, template_id, version_id):
     return catalog.control.publish(template_id, version_id, catalog.actor, "local_test")
 
 
-def published_skill(catalog):
+def published_skill(catalog, *, slug="event-copywriting", version="1.0.0"):
     with catalog.store.connection() as conn:
-        return dict(conn.execute("SELECT skill_id,id AS skill_version_id FROM skill_versions WHERE status='published' ORDER BY id LIMIT 1").fetchone())
+        row = conn.execute(
+            "SELECT v.skill_id,v.id AS skill_version_id FROM skill_versions v "
+            "JOIN skills s ON s.id=v.skill_id "
+            "WHERE v.status='published' AND s.slug=? AND v.version=?",
+            (slug, version),
+        ).fetchone()
+        assert row is not None, f"Published fixture missing: {slug}@{version}"
+        return dict(row)
 
 
 def legacy_snapshot(catalog):
@@ -308,15 +315,21 @@ def test_enabled_instance_must_be_disabled_before_reconfigure(catalog):
     assert catalog.control.instance(t, "tenant-a")["status"] == "enabled"
 
 
-def test_saved_revision_exposes_business_configuration_summary(catalog):
+@pytest.mark.parametrize("skill_version", ["1.0.0", "1.0.1"])
+def test_saved_revision_exposes_business_configuration_summary(catalog, skill_version):
     t, v = new_draft(catalog, credit_cost=3, output_policy="text")
-    catalog.control.bind_skills(t, v, [published_skill(catalog)], catalog.actor)
+    selected = published_skill(catalog, slug="event-campaign-plan", version=skill_version)
+    with catalog.store.connection() as conn:
+        expected_version = conn.execute(
+            "SELECT version FROM skill_versions WHERE id=?", (selected["skill_version_id"],)
+        ).fetchone()["version"]
+    catalog.control.bind_skills(t, v, [selected], catalog.actor)
     catalog.control.bind_tools(t, v, [{"tool_capability_id": "config_get", "invocation_requirement": "optional"}], catalog.actor)
     summary = version(catalog, t)["configuration_summary"]
     assert summary["persona"] == "Synthetic test persona"
     assert summary["credit_cost"] == 3
     assert summary["output_policy"] == "text"
-    assert summary["skills"][0]["version"] == "1.0.0"
+    assert summary["skills"][0]["version"] == expected_version
     assert summary["tools"] == [{"id": "config_get", "requirement": "optional"}]
     assert len(summary["configuration_fingerprint"]) == 64
     assert version(catalog, t)["validation_summary"] == {"status": "pending", "errors": []}
