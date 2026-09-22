@@ -106,6 +106,13 @@ if [[ "$mode" == "--rollback-preflight" ]]; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$3" --target-source-commit "$4"
   exit 0
 fi
+# This application release requires Migration NONE. Never advance schema before
+# snapshot/trap preparation (or silently turn pending DDL into a deployment).
+MIGRATION_RESULT="$migration_result" "$runtime_venv/bin/python" -c 'import json, os; raise SystemExit(0 if json.loads(os.environ["MIGRATION_RESULT"])["pending"] == 0 else 2)'
+# The script owns FD 9 continuously: final preflight, snapshot, first mutation,
+# smoke, final state and commit/recovery. No outer lock or lock handoff exists.
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py preflight \
+  --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest"
 if [[ "$mode" == "--preflight-only" ]]; then
   printf '{"status":"preflight_passed","release_id":"%s","data_dir_resolved":true}\n' "$release_id"
   exit 0
@@ -127,11 +134,6 @@ except Exception:
 ' "$predecessor_manifest")
 [[ "$previous" == "$base/releases/$rollback_target_id/enterprise_agent_poc" ]] || { echo "rollback target outside controlled release path" >&2; exit 2; }
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$rollback_target_id" --target-source-commit "$rollback_target_commit" --check-plan
-PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py credentials
-if MIGRATION_RESULT="$migration_result" "$runtime_venv/bin/python" -c 'import json, os; raise SystemExit(0 if json.loads(os.environ["MIGRATION_RESULT"])["pending"] > 0 else 1)'; then
-  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py up
-fi
-
 backup=$(mktemp -d "$base/.release-switch.XXXXXX")
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"

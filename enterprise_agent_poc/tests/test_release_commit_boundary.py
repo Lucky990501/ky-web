@@ -36,7 +36,7 @@ def declared(switch_harness):
     packages = transition.candidate_packages(h["candidate"] / "skill_packages")
     manifest["binding_transition"] = {
         "schema_version": 1,
-        "exact_predecessor": {**json.loads(predecessor.read_text()), "manifest_sha256": hashlib.sha256(predecessor.read_bytes()).hexdigest()},
+        "exact_predecessor": {**{k: json.loads(predecessor.read_text())[k] for k in ("release_id", "source_commit", "archive_sha256")}, "manifest_sha256": hashlib.sha256(predecessor.read_bytes()).hexdigest()},
         "transitions": [{"agent_id": "campaign-agent", "from_bindings": FROM, "to_bindings": TO,
                          "required_skill_identities": [{"slug": s, "version": v,
                              "artifact_sha256": packages[s, v]["artifact_sha256"],

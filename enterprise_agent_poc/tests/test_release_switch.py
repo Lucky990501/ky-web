@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import zipfile
 
 import pytest
@@ -28,12 +29,13 @@ def test_release_switch_snapshots_dropins_before_enabling_rollback_trap():
     dependency_preflight = source.index('"$runtime_venv/bin/python" -c')
     migration_status = source.index('migration_result=$(')
     skill_preflight = source.index('scripts/verify_bundled_skills.py')
-    migration_preflight = source.index('scripts/migrate.py up')
+    final_preflight = source.index('scripts/release_verify.py preflight')
     config_preflight = source.index('scripts/verify_runtime_config.py')
 
     dry_run_exit = source.index('if [[ "$mode" == "--preflight-only" ]]; then')
-    assert dependency_preflight < skill_preflight < migration_status < config_preflight < dry_run_exit < migration_preflight
-    assert migration_preflight < backup_created < dropin_copied < trap_enabled
+    assert dependency_preflight < skill_preflight < migration_status < config_preflight < final_preflight < dry_run_exit
+    assert final_preflight < backup_created < dropin_copied < trap_enabled
+    assert 'scripts/migrate.py up' not in source
     assert trap_enabled < first_dropin_write
     assert source[trap_enabled:].count('cp "$dropin" "$backup/$service.conf"') == 0
     assert "trap - ERR" in source[source.index("rollback() {"):trap_enabled]
@@ -106,8 +108,28 @@ def switch_harness(tmp_path):
     shared_env.chmod(0o600)
     old = base / "releases/old/enterprise_agent_poc"
     old.mkdir(parents=True)
-    (old.parent / 'old.manifest.json').write_text(json.dumps({'release_id': 'old', 'source_commit': 'a' * 40, 'archive_sha256': 'd' * 64}))
-    (candidate.parent / 'candidate.manifest.json').write_text(json.dumps({'release_id': 'candidate', 'source_commit': 'b' * 40, 'archive_sha256': 'c' * 64}))
+    (old / 'pyproject.toml').write_text('# immutable predecessor fixture\n')
+    def pack(root, commit):
+        archive = root.parent / (root.parent.name + '.tar.gz')
+        files = sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts)
+        with tarfile.open(archive, 'w:gz', pax_headers={'comment': commit}) as tar:
+            for path in files:
+                tar.add(path, arcname=path.relative_to(root.parent).as_posix(), recursive=False)
+        manifest = {'release_id': root.parent.name, 'source_commit': commit,
+                    'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    'selected_files': [p.relative_to(root.parent).as_posix() for p in files],
+                    'selected_file_count': len(files), 'build_platform': 'isolated-fixture'}
+        (root.parent / (root.parent.name + '.manifest.json')).write_text(json.dumps(manifest))
+        return manifest
+    prior = pack(old, 'a' * 40)
+    (candidate / 'deploy').mkdir()
+    (candidate / 'deploy/rollback_compatibility.json').write_text(json.dumps({
+        'forward_predecessor_approval': {'release_id': 'old', 'source_commit': 'a' * 40,
+            'archive_sha256': prior['archive_sha256'],
+            'manifest_sha256': hashlib.sha256(json.dumps(prior, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+            'schema_fingerprint': 'e' * 64, 'data_contract': 'member_account_status_v1'},
+        'supported_data_contracts': ['member_account_status_v1']}))
+    pack(candidate, 'b' * 40)
     (base / "release-current").symlink_to(old, target_is_directory=True)
     executable = tmp_path / "release_switch.sh"
     source = SCRIPT.read_text().replace("base=/opt/enterprise-agent-workbench", f'base="{base}"')
@@ -135,7 +157,11 @@ if args and args[0] == "scripts/release_verify.py":
             raise AssertionError("release lock not held during verification")
     spec = importlib.util.spec_from_file_location("release_verify", Path(args[0]))
     rv = importlib.util.module_from_spec(spec); spec.loader.exec_module(rv)
-    rv.smoke_config = lambda base: {{}}
+    def credentials(base):
+        if os.environ.get("SWITCH_TEST_FAULT") == "credentials":
+            raise rv.GateFailed("smoke_credentials_fields")
+        return {{}}
+    rv.smoke_config = credentials
     def health():
         base = rv.ROOT.parent.parent.parent
         if os.environ.get("SWITCH_TEST_RECOVERY_FAIL") and (base / "release-current").resolve().parent.name == "old":
@@ -143,14 +169,20 @@ if args and args[0] == "scripts/release_verify.py":
         return {{"api": "PASS", "mcp": "PASS", "redis": "PASS"}}
     rv.health = health
     from scripts import rollback_preflight, migrate
-    rollback_preflight.verify = lambda *a: {{"applied_versions": []}}
+    rollback_preflight.verify = lambda *a: {{"applied_versions": [],
+        "epoch_schema_fingerprint": ("0" if os.environ.get("SWITCH_TEST_FAULT") == "schema" else "e") * 64,
+        "active_data_contract_floors": [] if os.environ.get("SWITCH_TEST_FAULT") == "contract" else ["member_account_status_v1"]}}
     migrate.migration_items = lambda: []
     fault = os.environ.get("SWITCH_TEST_FAULT")
+    if fault == "schema_pending":
+        migrate.migration_items = lambda: [{{"version": "001"}}]
     def services(base):
         current = (base / "release-current").resolve()
         result = {{r: {{"active": "active", "pid": 123, "cwd": str(current), "module_ok": True,
                        "exe": str((base / "venv/bin/python").resolve())}} for r in ("api", "mcp", "worker")}}
         if fault == "cwd" and current.name == "enterprise_agent_poc" and current.parent.name == "candidate":
+            result["worker"]["cwd"] = "wrong-release"
+        if fault == "preflight_cwd":
             result["worker"]["cwd"] = "wrong-release"
         return result
     rv.service_state = services
@@ -168,14 +200,18 @@ if args and args[0] == "scripts/release_verify.py":
             raise rv.GateFailed("injected_smoke_failure")
         return {{"status": "technical_smoke_passed"}}
     rv.technical_smoke = smoke
-    sys.exit(rv.main(args[1:]))
+    result = rv.main(args[1:])
+    if args[1] == "preflight" and result == 0:
+        with open(os.environ["SWITCH_TEST_EVENTS"], "a") as f:
+            f.write("FINAL_PREFLIGHT_PASS\\n")
+    sys.exit(result)
 if args and args[0] == "-":
     source = sys.stdin.read()
     assert "default_transaction_read_only=on" in source
     assert "SELECT version,name,checksum,applied_at" in source
     assert "ensure_history" not in source and "CREATE TABLE" not in source
     fault = os.environ.get("SWITCH_TEST_FAULT")
-    print(json.dumps({{"migrations": [], "unknown_history_versions": [], "checksum_mismatch": int(fault == "migration"), "pending": 0}}))
+    print(json.dumps({{"migrations": [], "unknown_history_versions": [], "checksum_mismatch": int(fault == "migration"), "pending": int(fault == "pending")}}))
     sys.exit(2 if fault == "migration" else 0)
 if args and args[0] == "scripts/verify_bundled_skills.py":
     assert args[1] == "--data-dir"
@@ -248,7 +284,14 @@ exec /usr/bin/seq "$@"
 def run_switch(harness, *, fault="", preflight=True, health_ready_attempt=None):
     attempts = Path(harness["env"]["SWITCH_TEST_HEALTH_ATTEMPTS"])
     attempts.unlink(missing_ok=True)
-    env = {**harness["env"], "SWITCH_TEST_FAULT": fault}
+    manifest_path = harness["candidate"].parent / 'candidate.manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    env = {
+        'RELEASE_EXPECTED_SOURCE_COMMIT': manifest['source_commit'],
+        'RELEASE_EXPECTED_ARCHIVE_SHA256': manifest['archive_sha256'],
+        'RELEASE_EXPECTED_RAW_MANIFEST_SHA256': hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        'RELEASE_EXPECTED_CANONICAL_MANIFEST_SHA256': hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+        **harness["env"], "SWITCH_TEST_FAULT": fault}
     if health_ready_attempt is not None:
         env["SWITCH_TEST_HEALTH_READY_ATTEMPT"] = str(health_ready_attempt)
     args = ["bash", "-x", str(harness["script"]), "candidate"]
@@ -656,7 +699,8 @@ def test_postgres_old_runner_stays_failed_new_normal_runner_strict_and_preflight
     old = subprocess.run([sys.executable, str(h['old'] / 'scripts/migrate.py'), 'status'], env=h['env'], capture_output=True, text=True)
     assert old.returncode == 2
     assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010', '011']
-    assert pg_entry(h, '--preflight-only').returncode == 0
+    # Migration-NONE release entry must now reject the pending 012 before writes.
+    assert pg_entry(h, '--preflight-only').returncode == 2
     with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('013','unknown.sql',?)", ('0' * 64,))
     assert migrate.status(h['store']) == 2
     with pytest.raises(RuntimeError, match='未知'):migrate.up(h['store'])
@@ -673,24 +717,19 @@ def test_postgres_pre_switch_plan_allows_only_an_applied_prefix_not_full_rollbac
     with pytest.raises(h['gate'].RollbackBlocked):pg_gate(h, plan=True)
 
 
-def test_postgres_switch_health_fail_current_floor_blocks_unsafe_restore(pg_rollback_harness):
+def test_postgres_pending_migration_blocks_before_switch_or_health(pg_rollback_harness):
     h = pg_rollback_harness;before = h['snapshot']()
     r = pg_entry(h, '')
-    assert r.returncode == 1 and 'rollback_target_below_member_account_status_floor' in r.stdout
-    assert 'rollback_BLOCKED' in r.stderr and 'rolled_back' not in r.stdout
-    events = [json.loads(l) for l in h['events'].read_text().splitlines()]
-    restarts = [e for e in events if e['args'][0] == 'restart']
-    assert len(restarts) == 1 and restarts[0]['target'] == str(h['new'])
-    assert (h['base'] / 'release-current').resolve() == h['new']
-    after = h['snapshot']()
-    assert [row['version'] for row in after[0]['schema_migrations']] == [f'{i:03}' for i in range(1, 13)]
-    assert {k: v for k, v in after[0].items() if k != 'schema_migrations'} == {k: v for k, v in before[0].items() if k != 'schema_migrations'}
-    assert after[1] == before[1]
+    assert r.returncode == 2 and 'PRODUCTION_DEPLOYMENT_PREFLIGHT_BLOCKED' in r.stderr
+    assert not h['events'].exists() and 'rolled_back' not in r.stdout
+    assert (h['base'] / 'release-current').resolve() == h['old']
+    assert h['snapshot']() == before
 
 
-def test_postgres_rollback_failed_gate_after_new_health_failure_does_not_restore_or_restart(pg_rollback_harness):
+def test_postgres_pending_migration_never_reaches_faulting_health_boundary(pg_rollback_harness):
     h = pg_rollback_harness
-    # Trigger corruption at the OS failure boundary AFTER plan & forward switch.
+    before = h['snapshot']()
+    # The formerly reachable post-migration fault boundary must not run at all.
     curl = Path(h['env']['PATH'].split(os.pathsep)[0]) / 'curl'
     write_executable(curl, f'''#!{sys.executable}
 import json,psycopg
@@ -701,30 +740,29 @@ if Path({str(h['base'] / 'release-current')!r}).resolve()==Path({str(h['new'])!r
 print(json.dumps({{'status':'error','knowledge':'ok','environment':'production'}}))
 ''')
     r = pg_entry(h, '')
-    assert r.returncode == 1 and 'rollback_BLOCKED' in r.stderr and 'rolled_back' not in r.stdout
-    events = [json.loads(l) for l in h['events'].read_text().splitlines()]
-    assert len([e for e in events if e['args'][0] == 'restart']) == 1
-    assert all(e['target'] == str(h['new']) for e in events)
-    assert (h['base'] / 'release-current').resolve() == h['new']
-    assert list(h['base'].glob('.release-switch.*'))  # Snapshot retained for humans.
+    assert r.returncode == 2 and 'PRODUCTION_DEPLOYMENT_PREFLIGHT_BLOCKED' in r.stderr
+    assert 'rolled_back' not in r.stdout and not h['events'].exists()
+    assert (h['base'] / 'release-current').resolve() == h['old']
+    assert h['snapshot']() == before and not list(h['base'].glob('.release-switch.*'))
 
 
 def test_postgres_old_health_stage_is_not_reached_below_current_member_floor(pg_rollback_harness):
     h = pg_rollback_harness
     r = pg_entry(h, '', FAIL_OLD_HEALTH='true')
-    assert r.returncode == 1 and 'rollback_target_below_member_account_status_floor' in r.stdout
+    assert r.returncode == 2 and 'PRODUCTION_DEPLOYMENT_PREFLIGHT_BLOCKED' in r.stderr
     assert 'rollback_health_BLOCKED' not in r.stderr and '"status":"rolled_back"' not in r.stdout
-    assert (h['base'] / 'release-current').resolve() == h['new']
-    assert list(h['base'].glob('.release-switch.*'))
+    assert (h['base'] / 'release-current').resolve() == h['old']
+    assert not h['events'].exists() and not list(h['base'].glob('.release-switch.*'))
 
 
 def test_rollback_gate_order_is_fail_closed_and_old_runner_is_not_the_authority():
     source = SCRIPT.read_text()
     plan = source.index('--check-plan')
-    up = source.index('scripts/migrate.py up')
+    preflight = source.index('scripts/release_verify.py preflight')
     backup = source.index('backup=$(mktemp')
     rollback = source[source.index('rollback() {'):source.index("trap 'fail_release' ERR")]
-    assert plan < up < backup
+    assert preflight < plan < backup
+    assert 'scripts/migrate.py up' not in source
     assert rollback.index('scripts/rollback_preflight.py') < rollback.index('ln -sfn') < rollback.index('systemctl restart') < rollback.index('curl --fail')
     assert 'scripts/migrate.py' not in rollback
     assert 'rollback_BLOCKED' in rollback and 'rollback_health_BLOCKED' in rollback

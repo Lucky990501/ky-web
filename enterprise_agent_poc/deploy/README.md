@@ -257,6 +257,41 @@ literal Settings contract without importing Settings or loading workspace keys.
 
 ## Release commit boundary and technical smoke
 
+### In-lock final preflight (Migration NONE)
+
+The formal script alone acquires the non-blocking exclusive global flock. It
+then runs `release_verify.py preflight` before creating the recovery snapshot,
+arming the rollback trap and starting package/binding/service mutations. Both
+normal activation and `--preflight-only` run the same final gate. No lock handoff,
+second lock, inherited-FD interface or lock bypass is supported.
+
+Supply all four non-secret approval pins from the approved release review as
+deployment environment inputs (do not derive them from the files being checked):
+
+```bash
+export RELEASE_EXPECTED_SOURCE_COMMIT='<approved full source SHA>'
+export RELEASE_EXPECTED_ARCHIVE_SHA256='<approved archive SHA-256>'
+export RELEASE_EXPECTED_RAW_MANIFEST_SHA256='<approved raw manifest SHA-256>'
+export RELEASE_EXPECTED_CANONICAL_MANIFEST_SHA256='<approved canonical identity>'
+bash /opt/enterprise-agent-workbench/releases/<release-id>/enterprise_agent_poc/deploy/release_switch.sh <release-id> --preflight-only
+```
+
+Do not remove `--preflight-only` without a separate Deployment Authorization.
+The final gate verifies these pins, archive/installed bytes, the declared exact
+predecessor/current symlink, all service process identities and actual CWDs,
+Registry/binding/manifest consistency, existing exact or stageable packages,
+schema/data-contract gates and the existing private credentials checker. It
+never initializes or stages the Registry, authenticates, runs smoke or repairs
+state. Missing/conflicting approval inputs block. Candidate IDs are not compiled
+into the checker. Legacy candidates without transitions use the same gate and
+their compatibility declaration's exact predecessor; they cannot bypass it.
+
+Pending migrations must be zero. The release switch no longer applies DDL before
+rollback protection; any pending migration returns
+`PRODUCTION_DEPLOYMENT_PREFLIGHT_BLOCKED`, with no snapshot, mutation, rollback
+or smoke. The read-only `--rollback-preflight` diagnostic retains its historical
+target-check semantics and cannot activate a release.
+
 `release_switch.sh` holds the existing global release lock through activation,
 API readiness, actual API/MCP/Worker process identity, Registry/package and exact
 binding/manifest checks, a real authenticated conversation/SSE smoke, and a

@@ -136,6 +136,91 @@ def health():
     return {"api": "PASS", "mcp": "PASS", "redis": "PASS"}
 
 
+def final_preflight(base, candidate, predecessor):
+    """Read-only gate called by release_switch while it owns the global lock.
+
+    Approval pins are deployment inputs, never inferred from the artifact being
+    checked. No Registry initialization, staging, account login or snapshot here.
+    """
+    from scripts import rollback_preflight as gate, migrate
+    from scripts import release_binding_transition as transition
+    root = candidate.parent / "enterprise_agent_poc"
+    require(root == ROOT and root.parent.parent == base / "releases", "candidate_controlled_path")
+    manifest = gate.read_json(candidate)
+    pins = {
+        "source_commit": os.environ.get("RELEASE_EXPECTED_SOURCE_COMMIT", ""),
+        "archive_sha256": os.environ.get("RELEASE_EXPECTED_ARCHIVE_SHA256", ""),
+        "raw_manifest_sha256": os.environ.get("RELEASE_EXPECTED_RAW_MANIFEST_SHA256", ""),
+        "canonical_manifest_sha256": os.environ.get("RELEASE_EXPECTED_CANONICAL_MANIFEST_SHA256", ""),
+    }
+    require(gate.COMMIT.fullmatch(pins["source_commit"])
+            and all(gate.HASH.fullmatch(v) for k, v in pins.items() if k != "source_commit"), "approval_pins_required")
+    require(manifest["source_commit"] == pins["source_commit"]
+            and manifest["archive_sha256"] == pins["archive_sha256"]
+            and hashlib.sha256(candidate.read_bytes()).hexdigest() == pins["raw_manifest_sha256"]
+            and gate.digest(manifest) == pins["canonical_manifest_sha256"], "approved_candidate_identity")
+    require(candidate == root.parent / (manifest["release_id"] + ".manifest.json"), "candidate_manifest_path")
+    gate.release_identity(base, manifest["release_id"], pins["source_commit"])
+
+    compatibility = gate.read_json(root / "deploy/rollback_compatibility.json")
+    exact = compatibility["forward_predecessor_approval"]
+    prior_root, prior = gate.release_identity(base, exact["release_id"], exact["source_commit"], exact)
+    require(predecessor == prior_root.parent / (prior["release_id"] + ".manifest.json")
+            and (base / "release-current").is_symlink()
+            and (base / "release-current").resolve() == prior_root, "EXACT_PREDECESSOR_MISMATCH")
+    services = service_state(base)
+    for role, state in services.items():
+        require(state.get("active") == "active" and state.get("pid", 0) > 0
+                and state.get("cwd") == str(prior_root) and state.get("module_ok")
+                and state.get("exe") == str((base / "venv/bin/python").resolve()), f"preflight_{role}_runtime")
+
+    registry = registry_for(base)
+    active = bindings(registry)  # Includes manifest consistency for every agent.
+    packages = transition.candidate_packages(root / "skill_packages")
+    transitions = []
+    if "binding_transition" in manifest:
+        transitions = transition.declaration(manifest, prior, hashlib.sha256(predecessor.read_bytes()).hexdigest())
+        transition.preflight(registry, transitions, packages)
+    else:
+        registry.verify_bootstrap()
+    required_to = {key for item in transitions for key in item["to"].items()}
+    reusable, stageable = [], []
+    with registry._read_connection() as conn:
+        for (slug, version), entry in packages.items():
+            rows = conn.execute(
+                "SELECT s.slug,v.id,v.skill_id,v.version,v.status,v.checksum,"
+                "p.storage_path,p.sha256 AS package_sha256,p.size_bytes "
+                "FROM skill_versions v JOIN skills s ON s.id=v.skill_id "
+                "LEFT JOIN skill_packages p ON p.skill_version_id=v.id "
+                "WHERE s.slug=? AND v.version=?", (slug, version),
+            ).fetchall()
+            require(len(rows) <= 1, "candidate_package_duplicate")
+            if rows:
+                row = rows[0]
+                require(row["status"] in ({"published"} if (slug, version) in required_to
+                                          else {"published", "deprecated"}), "candidate_package_status")
+                registry._verify_package(row, expected=entry["artifact_sha256"])
+                reusable.append({"slug": slug, "version": version})
+            else:
+                # Only declared transitions use the existing staging consumer.
+                require(bool(transitions), "legacy_package_missing")
+                stageable.append({"slug": slug, "version": version})
+
+    schema = gate.verify(base, root, manifest["release_id"], manifest["source_commit"])
+    gate.verify(base, root, prior["release_id"], prior["source_commit"])
+    require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
+    require(schema["epoch_schema_fingerprint"] == exact["schema_fingerprint"], "preflight_schema_fingerprint")
+    require(exact["data_contract"] in compatibility["supported_data_contracts"]
+            and exact["data_contract"] in schema["active_data_contract_floors"], "preflight_data_contract")
+    smoke_config(base)  # Existing credential checker; never output its values.
+    return {"status": "final_preflight_passed", "read_only": True,
+            "release_id": manifest["release_id"], "source_commit": manifest["source_commit"],
+            **pins, "exact_predecessor": prior["release_id"], "services": services,
+            "bindings": active, "registry_exact_reusable": reusable, "registry_stageable": stageable,
+            "schema": schema, "pending": 0, "migration": "NONE",
+            "data_contract": exact["data_contract"], "credentials": "READY"}
+
+
 def verify_state(base, candidate, predecessor, snapshot, *, rollback=False):
     from scripts.rollback_preflight import verify
     active = binding_gate(base, candidate, predecessor, snapshot, "restored" if rollback else "state")
@@ -278,7 +363,7 @@ def evidence(base, candidate, predecessor, snapshot):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("credentials", "capture", "state", "smoke", "rollback-guard", "evidence"))
+    parser.add_argument("mode", choices=("preflight", "credentials", "capture", "state", "smoke", "rollback-guard", "evidence"))
     parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--predecessor-manifest", type=Path)
     parser.add_argument("--snapshot", type=Path)
@@ -286,7 +371,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     base = ROOT.parent.parent.parent
     try:
-        if args.mode == "credentials":
+        if args.mode == "preflight":
+            result = final_preflight(base, args.candidate_manifest, args.predecessor_manifest)
+        elif args.mode == "credentials":
             smoke_config(base)
             result = {"status": "smoke_credentials_ready"}
         elif args.mode == "capture":
