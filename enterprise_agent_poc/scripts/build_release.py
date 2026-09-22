@@ -87,7 +87,7 @@ def build(commit: str, output: Path) -> dict:
     }
 
 
-def write_manifest(result: dict, release_id: str, output: Path) -> dict:
+def write_manifest(result: dict, release_id: str, output: Path, binding_transition: dict | None = None) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", release_id):
         raise ValueError("Release ID 只能包含字母、数字、点、下划线和连字符。")
     manifest = {
@@ -98,6 +98,10 @@ def write_manifest(result: dict, release_id: str, output: Path) -> dict:
         "selected_file_count": result["files"],
         "build_platform": result["build_platform"],
     }
+    if binding_transition is not None:
+        if not isinstance(binding_transition, dict):
+            raise ValueError("Binding transition declaration must be a JSON object.")
+        manifest["binding_transition"] = binding_transition
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     return manifest
@@ -109,9 +113,10 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--release-id")
     parser.add_argument("--manifest-output", type=Path)
+    parser.add_argument("--binding-transition", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if bool(args.release_id) != bool(args.manifest_output):
+    if bool(args.release_id) != bool(args.manifest_output) or (args.binding_transition and not args.manifest_output):
         parser.error("--release-id 与 --manifest-output 必须同时提供。")
     commit = validate_commit(args.commit)
     if args.dry_run:
@@ -120,7 +125,11 @@ def main() -> int:
         return 0
     result = build(commit, args.output)
     if args.manifest_output:
-        write_manifest(result, args.release_id, args.manifest_output)
+        try:
+            transition = json.loads(args.binding_transition.read_text(encoding="utf-8")) if args.binding_transition else None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Binding transition declaration is unreadable.") from exc
+        write_manifest(result, args.release_id, args.manifest_output, transition)
         result["manifest"] = str(args.manifest_output)
     print(json.dumps({"status": "built", **result}, ensure_ascii=False))
     return 0

@@ -19,6 +19,28 @@ api_readiness_attempts=60
 case "$release_id" in
   ""|*[!A-Za-z0-9._-]*) echo "invalid release id" >&2; exit 2 ;;
 esac
+# Serialize every release decision and side effect, including preflight and
+# rollback.  The descriptor remains open until this shell exits, so the kernel
+# releases it even if the process is interrupted.
+release_lock_file="${RELEASE_LOCK_FILE:-/run/lock/enterprise-agent-workbench-release.lock}"
+if ! command -v flock >/dev/null 2>&1; then
+  printf '{"status":"BLOCKED","check":"RELEASE_SWITCH_LOCK_UNAVAILABLE"}\n' >&2
+  exit 2
+fi
+if ! exec 9>"$release_lock_file"; then
+  printf '{"status":"BLOCKED","check":"RELEASE_SWITCH_LOCK_UNAVAILABLE"}\n' >&2
+  exit 2
+fi
+lock_status=0
+flock -n -E 75 9 || lock_status=$?
+if [[ "$lock_status" -eq 75 ]]; then
+  printf '{"status":"BLOCKED","check":"RELEASE_SWITCH_LOCKED"}\n' >&2
+  exit 75
+fi
+if [[ "$lock_status" -ne 0 ]]; then
+  printf '{"status":"BLOCKED","check":"RELEASE_SWITCH_LOCK_UNAVAILABLE"}\n' >&2
+  exit 2
+fi
 [[ -d "$release_root" && -f "$release_root/pyproject.toml" ]] || { echo "release source missing" >&2; exit 2; }
 [[ -f "$shared_env" ]] || { echo "shared environment file missing" >&2; exit 2; }
 [[ "$(stat -c %a "$shared_env")" =~ ^[0-6]00$ ]] || { echo "shared environment file must not be group/world readable" >&2; exit 2; }
@@ -33,9 +55,16 @@ set -a; . "$shared_env"; set +a
 # drop-in below. Never infer the production Registry root from a Release/cwd.
 export ENTERPRISE_POC_DATA_DIR="$runtime_data_dir"
 export PYTHONDONTWRITEBYTECODE=1
+current_link="$base/release-current"
+previous=$(readlink -f "$current_link" 2>/dev/null || true)
+[[ -n "$previous" && -d "$previous" ]] || { echo "approved rollback target missing" >&2; exit 2; }
+rollback_target_id=$(basename "$(dirname "$previous")")
+candidate_manifest="$base/releases/$release_id/$release_id.manifest.json"
+predecessor_manifest="$base/releases/$rollback_target_id/$rollback_target_id.manifest.json"
+[[ -f "$candidate_manifest" && -f "$predecessor_manifest" ]] || { echo "release manifest missing" >&2; exit 2; }
 printf '{"data_dir_resolved":true}\n'
 cd "$release_root"
-PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_bundled_skills.py --data-dir "$runtime_data_dir"
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_bundled_skills.py --data-dir "$runtime_data_dir" --candidate-release-manifest "$candidate_manifest" --predecessor-release-manifest "$predecessor_manifest"
 # migrate.status() creates history even on an installed database. For BOTH
 # modes use its unchanged checksum/record functions over a read-only SELECT.
 migration_result=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" - <<'PY'
@@ -81,10 +110,6 @@ fi
 # target, even with no current V2 rows. This entry point NEVER advances Epoch.
 # Prove that the previous application is approved for the COMPLETE planned
 # schema before committing migrations or touching any service configuration.
-current_link="$base/release-current"
-previous=$(readlink -f "$current_link" 2>/dev/null || true)
-[[ -n "$previous" && -d "$previous" ]] || { echo "approved rollback target missing" >&2; exit 2; }
-rollback_target_id=$(basename "$(dirname "$previous")")
 rollback_target_commit=$("$runtime_venv/bin/python" -c '
 import json, re, sys
 try:
@@ -93,7 +118,7 @@ try:
     print(value)
 except Exception:
     raise SystemExit(2)
-' "$base/releases/$rollback_target_id/$rollback_target_id.manifest.json")
+' "$predecessor_manifest")
 [[ "$previous" == "$base/releases/$rollback_target_id/enterprise_agent_poc" ]] || { echo "rollback target outside controlled release path" >&2; exit 2; }
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$rollback_target_id" --target-source-commit "$rollback_target_commit" --check-plan
 if MIGRATION_RESULT="$migration_result" "$runtime_venv/bin/python" -c 'import json, os; raise SystemExit(0 if json.loads(os.environ["MIGRATION_RESULT"])["pending"] > 0 else 1)'; then
@@ -117,6 +142,7 @@ rollback() {
     printf '{"status":"rollback_BLOCKED","services_restored":false}\n' >&2
     return 1
   fi
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --rollback || return 1
   ln -sfn "$previous" "$current_link" || return 1
   for service in "${services[@]}"; do
     dropin="/etc/systemd/system/$service.service.d/release.conf"
@@ -139,6 +165,8 @@ rollback() {
   return 1
 }
 trap 'rollback; exit 1' ERR
+
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --apply
 
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"

@@ -82,7 +82,7 @@ def switch_harness(tmp_path):
     shutil.copytree(project / "app", candidate / "app", ignore=shutil.ignore_patterns("__pycache__", "static"))
     shutil.copytree(project / "skill_packages", candidate / "skill_packages")
     (candidate / "scripts").mkdir()
-    for name in ("verify_bundled_skills.py", "verify_runtime_config.py"):
+    for name in ("verify_bundled_skills.py", "verify_runtime_config.py", "release_binding_transition.py"):
         shutil.copyfile(project / "scripts" / name, candidate / "scripts" / name)
     (candidate / "pyproject.toml").write_text("# fixture\n")
     data = base / "shared/runtime-data"
@@ -105,6 +105,7 @@ def switch_harness(tmp_path):
     old = base / "releases/old/enterprise_agent_poc"
     old.mkdir(parents=True)
     (old.parent / 'old.manifest.json').write_text(json.dumps({'source_commit': 'a' * 40}))
+    (candidate.parent / 'candidate.manifest.json').write_text(json.dumps({'release_id': 'candidate', 'source_commit': 'b' * 40, 'archive_sha256': 'c' * 64}))
     (base / "release-current").symlink_to(old, target_is_directory=True)
     executable = tmp_path / "release_switch.sh"
     source = SCRIPT.read_text().replace("base=/opt/enterprise-agent-workbench", f'base="{base}"')
@@ -187,7 +188,8 @@ exec /usr/bin/seq "$@"
                SWITCH_TEST_EVENTS=str(events), SWITCH_TEST_WRONG=str(wrong),
                SWITCH_TEST_HEALTH_ATTEMPTS=str(tmp_path / "health-attempts"),
                SWITCH_TEST_CURRENT=str(base / "release-current"),
-               SWITCH_TEST_CANDIDATE=str(candidate), SWITCH_TEST_COMPACT_READINESS="true")
+               SWITCH_TEST_CANDIDATE=str(candidate), SWITCH_TEST_COMPACT_READINESS="true",
+               RELEASE_LOCK_FILE=str(tmp_path / "release-switch.lock"))
     def snapshot():
         files = {p.relative_to(registry.data_root).as_posix(): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
                  for p in registry.data_root.rglob("*") if p.is_file()}
@@ -206,6 +208,52 @@ def run_switch(harness, *, fault="", preflight=True, health_ready_attempt=None):
     if preflight:
         args.append("--preflight-only")
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=30)
+
+
+def test_global_release_lock_normal_acquisition_allows_legacy_preflight(switch_harness):
+    h = switch_harness
+    # This fixture's manifest intentionally has no transition declaration.
+    result = run_switch(h)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1])["status"] == "preflight_passed"
+
+
+def test_global_release_lock_blocks_before_release_state_access(switch_harness):
+    fcntl = pytest.importorskip("fcntl")
+    h = switch_harness
+    before = h["snapshot"]()
+    lock_path = Path(h["env"]["RELEASE_LOCK_FILE"])
+    with lock_path.open("a+") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = run_switch(h, preflight=False)
+    assert result.returncode == 75
+    assert "RELEASE_SWITCH_LOCKED" in result.stderr
+    assert h["snapshot"]() == before
+    assert (h["base"] / "release-current").resolve() == h["old"]
+    assert not h["systemd"].exists()
+    assert not h["events"].exists()
+
+
+def test_global_release_lock_releases_when_holder_exits(switch_harness):
+    fcntl = pytest.importorskip("fcntl")
+    h = switch_harness
+    lock_path = Path(h["env"]["RELEASE_LOCK_FILE"])
+    with lock_path.open("a+") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        blocked = run_switch(h)
+        assert blocked.returncode == 75
+    result = run_switch(h)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1])["status"] == "preflight_passed"
+
+
+def test_global_release_lock_is_acquired_before_preflight_and_switch():
+    source = SCRIPT.read_text(encoding="utf-8")
+    acquire = source.index('flock -n -E 75 9')
+    predecessor = source.index('previous=$(readlink -f "$current_link"')
+    transition = source.index('scripts/release_binding_transition.py --candidate-manifest')
+    switch = source.index('ln -sfn "$release_root" "$current_link"')
+    assert acquire < predecessor < transition < switch
 
 
 def test_real_entry_preflight_only_uses_shared_data_and_six_gates_without_writes(switch_harness):
