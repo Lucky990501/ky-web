@@ -131,7 +131,7 @@ def test_new_binding_requires_confirmation_and_can_be_unbound(tmp_path):
     unbound = registry.unbind_agent("campaign-agent", "poster-design")
     assert "poster-design" not in unbound["skill_manifest"]
     assert registry.manifest_for_agent("campaign-agent") == {
-        "campaign-planning": "1.0.0",
+        "event-campaign-plan": "1.0.1",
         "event-copywriting": "1.0.0",
     }
 

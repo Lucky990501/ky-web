@@ -92,7 +92,7 @@ def switch_harness(tmp_path):
     ProductStore(store).initialize()
     registry = SkillRegistry(store, data / "skill-registry", candidate / "skill_packages")
     registry.initialize()
-    for slug, agent in [("campaign-planning", "campaign-agent"), ("poster-design", "image-agent")]:
+    for slug, agent in [("event-campaign-plan", "campaign-agent"), ("poster-design", "image-agent")]:
         stream = io.BytesIO()
         with zipfile.ZipFile(stream, "w") as archive:
             archive.writestr(f"{slug}/SKILL.md", f"# {slug} fixture 1.2.0\n")
@@ -216,7 +216,9 @@ def test_real_entry_preflight_only_uses_shared_data_and_six_gates_without_writes
     records = [json.loads(line) for line in result.stdout.splitlines()]
     skill = next(item for item in records if item.get("mode") == "reuse")
     assert len(skill["checks"]) == 6 and skill["data_dir_resolved"] is True
-    assert any(b["skill_slug"] == "campaign-planning" and b["version"] == "1.2.0" for b in skill["bindings"])
+    assert any(b["skill_slug"] == "event-campaign-plan" and b["version"] == "1.2.0" for b in skill["bindings"])
+    assert not any(b["skill_slug"] == "campaign-planning" for b in skill["bindings"])
+    assert not any(b["skill_slug"] == "event-campaign-plan" and b["version"] == "1.0.0" for b in skill["bindings"])
     assert any(b["skill_slug"] == "poster-design" and b["version"] == "1.2.0" for b in skill["bindings"])
     assert records[-1]["status"] == "preflight_passed"
     assert h["snapshot"]() == before

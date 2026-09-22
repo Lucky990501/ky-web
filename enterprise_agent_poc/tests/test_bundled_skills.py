@@ -5,6 +5,7 @@ from dataclasses import replace
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -20,6 +21,25 @@ from app.skill_registry import NativeSkillArchive, SkillRegistry, SkillRegistryE
 from app.skills import SkillDeployment
 from app.store import POCStore
 from scripts import build_release, verify_bundled_skills
+
+
+EXPECTED_BUNDLED_SKILL_VERSIONS = {
+    ("campaign-planning", "1.0.0"),
+    ("event-campaign-plan", "1.0.0"),
+    ("event-campaign-plan", "1.0.1"),
+    ("event-copywriting", "1.0.0"),
+    ("marketing-copywriting", "1.0.0"),
+    ("poster-design", "1.0.0"),
+    ("social-copywriting", "1.0.0"),
+}
+EXPECTED_DEFAULT_BINDINGS = {
+    ("campaign-agent", "event-campaign-plan", "1.0.1"),
+    ("campaign-agent", "event-copywriting", "1.0.0"),
+    ("copywriting-agent", "marketing-copywriting", "1.0.0"),
+    ("copywriting-agent", "social-copywriting", "1.0.0"),
+    ("image-agent", "poster-design", "1.0.0"),
+}
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="requires POSIX mode or symlink semantics")
 
 
 def git(repo, *args):
@@ -44,15 +64,24 @@ def entry_for(root, slug="event-campaign-plan", version="1.0.0"):
     return next(entry for entry in manifest(root)["skills"] if (entry["skill_slug"], entry["version"]) == (slug, version))
 
 
-def apply_audited_pre_release_correction(root):
+def apply_audited_pre_release_identity(root, state):
     data = manifest(root)
     entry = next(item for item in data["skills"] if (item["skill_slug"], item["version"]) == ("event-campaign-plan", "1.0.0"))
-    entry.update(json.loads(json.dumps(bundled.PRE_RELEASE_IDENTITY_CORRECTIONS[("event-campaign-plan", "1.0.0")]["corrected_identity"])))
+    identity = bundled.PRE_RELEASE_IDENTITY_CORRECTIONS[("event-campaign-plan", "1.0.0")][f"{state}_identity"]
+    entry.update(json.loads(json.dumps(identity)))
     source = (root / entry["source_identity"]["path"] / "SKILL.md").read_bytes()
     artifact = bundled.canonical_artifact(entry, {"SKILL.md": (source, "100644")})
     (root / entry["artifact_path"]).write_bytes(artifact)
     save_manifest(root, data)
     return entry, artifact
+
+
+def apply_audited_pre_release_correction(root):
+    return apply_audited_pre_release_identity(root, "corrected")
+
+
+def apply_audited_pre_release_old_identity(root):
+    return apply_audited_pre_release_identity(root, "old")
 
 
 def fresh_registry(tmp_path, bundle):
@@ -120,11 +149,14 @@ def test_empty_registry_bootstraps_exact_historical_bytes_then_zero_writes(regis
 
 
 def test_pre_release_correction_has_exact_lf_source_and_crlf_canonical_payload(approved_bundle):
-    old = entry_for(approved_bundle)
-    source = (approved_bundle / old["source_identity"]["path"] / "SKILL.md").read_bytes()
-    assert bundled.pre_release_correction_state(old) == "old"
+    current = entry_for(approved_bundle)
+    source = (approved_bundle / current["source_identity"]["path"] / "SKILL.md").read_bytes()
+    assert bundled.pre_release_correction_state(current) == "corrected"
     assert b"\r" not in source
-    assert bundled.canonical_artifact(old, {"SKILL.md": (source, "100644")}) == (approved_bundle / old["artifact_path"]).read_bytes()
+    assert bundled.canonical_artifact(current, {"SKILL.md": (source, "100644")}) == (approved_bundle / current["artifact_path"]).read_bytes()
+    old, old_artifact = apply_audited_pre_release_old_identity(approved_bundle)
+    assert bundled.pre_release_correction_state(old) == "old"
+    assert bundled.sha256(old_artifact) == "d3a2f98b699a62d7cebea73695fa2e9d19fca5a7c6e09c6bdf47025e3184d06d"
     corrected, artifact = apply_audited_pre_release_correction(approved_bundle)
     assert bundled.pre_release_correction_state(corrected) == "corrected"
     assert bundled.sha256(artifact) == "19a79e7dab430136cf3ae4513b54b74cab98c8f5b50e766f018a4dd75024ad38"
@@ -144,7 +176,9 @@ def test_corrected_pre_release_bootstrap_publishes_crlf_and_restart_writes_nothi
     assert snapshot(registry) == before
 
 
-def test_corrected_identity_blocks_existing_published_registry_without_writes(registry):
+def test_corrected_identity_blocks_existing_published_registry_without_writes(tmp_path, approved_bundle):
+    apply_audited_pre_release_old_identity(approved_bundle)
+    registry = fresh_registry(tmp_path, approved_bundle)
     apply_audited_pre_release_correction(registry.bundled_root)
     before = snapshot(registry)
     with pytest.raises(SkillRegistryError, match="PUBLISHED_VERSION_IDENTITY_IMMUTABLE"):
@@ -187,12 +221,15 @@ def test_source_byte_changes_block(approved_bundle, mutation):
         bundled.validate_bundle(approved_bundle)
 
 
-def test_source_file_set_and_executable_bit_block(approved_bundle):
+def test_source_file_set_block(approved_bundle):
     path = approved_bundle / "poster-design" / "1.0.0" / "extra.md"
     path.write_bytes(b"extra")
     with pytest.raises(bundled.BundledSkillError, match="file set"):
         bundled.validate_bundle(approved_bundle)
-    path.unlink()
+
+
+@POSIX_ONLY
+def test_source_executable_bit_block(approved_bundle):
     source = approved_bundle / "poster-design" / "1.0.0" / "SKILL.md"
     source.chmod(0o755)
     with pytest.raises(bundled.BundledSkillError, match="source lock"):
@@ -262,14 +299,23 @@ def test_deprecated_and_explicit_unbind_survive_restart(registry):
 def test_current_12_bindings_profile_sync_and_rollback(registry, tmp_path):
     from app.domain import RuntimeProfile
     upgrade(registry, "poster-design", "image-agent")
-    upgrade(registry, "campaign-planning", "campaign-agent")
+    upgrade(registry, "event-campaign-plan", "campaign-agent")
     def profiles():
         return {agent: RuntimeProfile.build(tenant_id="fixture", agent_id=agent, model_provider_id="fixture", model_id="fixture", reasoning_effort="high", skill_manifest=registry.manifest_for_agent(agent)) for agent in CATALOG}
     before = profiles()
     registry.initialize()
     assert profiles() == before
     assert registry.manifest_for_agent("image-agent") == {"poster-design": "1.2.0"}
-    assert registry.manifest_for_agent("campaign-agent") == {"campaign-planning": "1.2.0", "event-copywriting": "1.0.0"}
+    assert registry.manifest_for_agent("campaign-agent") == {"event-campaign-plan": "1.2.0", "event-copywriting": "1.0.0"}
+    with registry._store.connection() as conn:
+        package_versions = {
+            (row["slug"], row["version"])
+            for row in conn.execute("SELECT s.slug,v.version FROM skills s JOIN skill_versions v ON v.skill_id=s.id")
+        }
+    assert ("campaign-planning", "1.0.0") in package_versions
+    assert ("event-campaign-plan", "1.0.0") in package_versions
+    assert "campaign-planning" not in registry.manifest_for_agent("campaign-agent")
+    assert registry.manifest_for_agent("campaign-agent").get("event-campaign-plan") != "1.0.0"
     target = tmp_path / "skills"
     deployment = SkillDeployment(registry.published_root)
     deployment.deploy(registry.manifest_for_agent("image-agent"), target)
@@ -482,6 +528,7 @@ def test_git_preflight_artifact_bytes_ignore_checkout_policy(bundle_git_repo, au
     assert bundled.validate_git_bundle(bundle_git_repo, "HEAD")
 
 
+@POSIX_ONLY
 def test_release_build_blocks_committed_executable_bit_change(bundle_git_repo, tmp_path, monkeypatch):
     root = bundle_git_repo / "enterprise_agent_poc" / "skill_packages"
     (root / "poster-design" / "1.0.0" / "SKILL.md").chmod(0o755)
@@ -554,8 +601,19 @@ def test_concurrent_first_install_seeds_once(tmp_path, approved_bundle):
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert list(pool.map(lambda _: initialize(), range(2))) == ["ok", "ok"]
     with store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM skill_versions").fetchone()["n"] == 5
-        assert conn.execute("SELECT COUNT(*) AS n FROM agent_skill_bindings").fetchone()["n"] == 5
+        versions = {
+            (row["slug"], row["version"])
+            for row in conn.execute("SELECT s.slug,v.version FROM skills s JOIN skill_versions v ON v.skill_id=s.id")
+        }
+        bindings = {
+            (row["agent_id"], row["slug"], row["version"])
+            for row in conn.execute(
+                "SELECT b.agent_id,s.slug,v.version FROM agent_skill_bindings b "
+                "JOIN skills s ON s.id=b.skill_id JOIN skill_versions v ON v.id=b.skill_version_id"
+            )
+        }
+    assert versions == EXPECTED_BUNDLED_SKILL_VERSIONS
+    assert bindings == EXPECTED_DEFAULT_BINDINGS
 
 
 def test_partial_schema_blocks_without_repair(tmp_path, approved_bundle):
@@ -598,20 +656,26 @@ def test_unsafe_future_paths_block(path):
         bundled.deterministic_zip("poster-design", "1.3.0", {"SKILL.md": (b"# Future\n", "100644"), path: (b"bad", "100644")})
 
 
-def test_release_preflight_blocks_secret_material_and_symlinks(bundle_git_repo, tmp_path, monkeypatch):
+def test_release_preflight_blocks_secret_material(bundle_git_repo, tmp_path, monkeypatch):
     path = bundle_git_repo / "enterprise_agent_poc" / "app" / "private.txt"
     path.write_bytes(b"-----BEGIN PRIVATE KEY-----\nfixture, not a real key\n")
     commit = commit_fixture(bundle_git_repo)
     monkeypatch.setattr(build_release, "REPO", bundle_git_repo)
     with pytest.raises(RuntimeError, match="秘密材料"):
         build_release.preflight(commit)
-    path.unlink()
+
+
+@POSIX_ONLY
+def test_release_preflight_blocks_symlinks(bundle_git_repo, monkeypatch):
+    path = bundle_git_repo / "enterprise_agent_poc" / "app" / "private.txt"
     path.symlink_to("main.py")
     commit = commit_fixture(bundle_git_repo)
+    monkeypatch.setattr(build_release, "REPO", bundle_git_repo)
     with pytest.raises(RuntimeError, match="禁止文件"):
         build_release.preflight(commit)
 
 
+@POSIX_ONLY
 def test_published_cache_executable_drift_blocks(registry):
     path = registry.published_root / "poster-design" / "1.0.0" / "SKILL.md"
     path.chmod(0o700)
@@ -682,7 +746,7 @@ def test_explicit_production_data_dir_wins_over_environment_and_preserves_upgrad
     data = tmp_path / "shared"
     registry = SkillRegistry(store, data / "skill-registry", Path(__file__).resolve().parents[1] / "skill_packages")
     registry.initialize()
-    upgrade(registry, "campaign-planning", "campaign-agent")
+    upgrade(registry, "event-campaign-plan", "campaign-agent")
     upgrade(registry, "poster-design", "image-agent")
     before = snapshot(registry)
     monkeypatch.setenv("APP_ENV", "production")
@@ -691,7 +755,9 @@ def test_explicit_production_data_dir_wins_over_environment_and_preserves_upgrad
     assert verify_bundled_skills.main(["--data-dir", str(data)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["data_dir_resolved"] is True and len(result["checks"]) == 6
-    assert any(b["skill_slug"] == "campaign-planning" and b["version"] == "1.2.0" for b in result["bindings"])
+    assert any(b["skill_slug"] == "event-campaign-plan" and b["version"] == "1.2.0" for b in result["bindings"])
+    assert not any(b["skill_slug"] == "campaign-planning" for b in result["bindings"])
+    assert not any(b["skill_slug"] == "event-campaign-plan" and b["version"] == "1.0.0" for b in result["bindings"])
     assert any(b["skill_slug"] == "poster-design" and b["version"] == "1.2.0" for b in result["bindings"])
     assert snapshot(registry) == before
 
