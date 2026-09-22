@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.bundled_skills import forbidden_path, secret_content, validate_git_bundle
+from scripts.release_manifest import validate_manifest_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
@@ -99,9 +100,8 @@ def write_manifest(result: dict, release_id: str, output: Path, binding_transiti
         "build_platform": result["build_platform"],
     }
     if binding_transition is not None:
-        if not isinstance(binding_transition, dict):
-            raise ValueError("Binding transition declaration must be a JSON object.")
         manifest["binding_transition"] = binding_transition
+    validate_manifest_contract(manifest)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     return manifest

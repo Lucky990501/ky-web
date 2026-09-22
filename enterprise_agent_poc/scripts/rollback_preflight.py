@@ -16,6 +16,7 @@ import tarfile
 ROOT = Path(__file__).absolute().parents[1]
 BASE = Path('/opt/enterprise-agent-workbench')
 sys.path.insert(0, str(ROOT))
+from scripts.release_manifest import ManifestContractError, validate_manifest_contract
 HASH = re.compile(r'[0-9a-f]{64}')
 COMMIT = re.compile(r'[0-9a-f]{40}')
 RELEASE = re.compile(r'[A-Za-z0-9._-]+')
@@ -67,7 +68,10 @@ def release_identity(base, rid, expected_commit, expected=None):
     # Reject that unmanifested input without opening it before any app import.
     require(not (directory / '.env').exists() and not (directory / '.env').is_symlink(), 'unapproved_environment_file')
     manifest = read_json(directory / f'{rid}.manifest.json')
-    require(set(manifest) == {'release_id', 'source_commit', 'archive_sha256', 'selected_files', 'selected_file_count', 'build_platform'}, 'manifest_fields')
+    try:
+        validate_manifest_contract(manifest)
+    except ManifestContractError as exc:
+        raise RollbackBlocked(str(exc)) from None
     require(manifest['release_id'] == rid and manifest['source_commit'] == expected_commit
             and HASH.fullmatch(manifest['archive_sha256']), 'manifest_identity')
     if expected is not None:
