@@ -254,3 +254,39 @@ Tests use an explicitly marked private temporary root and fake service boundary,
 with canary secrets. No default SQLite, PostgreSQL, Redis, production process or
 real model is touched by this tool's tests. The fingerprint helper reads the
 literal Settings contract without importing Settings or loading workspace keys.
+
+## Release commit boundary and technical smoke
+
+`release_switch.sh` holds the existing global release lock through activation,
+API readiness, actual API/MCP/Worker process identity, Registry/package and exact
+binding/manifest checks, a real authenticated conversation/SSE smoke, and a
+second final-state check. Only then does the RELEASE COMMIT POINT disarm rollback,
+delete the snapshot and emit `PRODUCTION_DEPLOYMENT_PASS` (`status: switched`).
+The existing 60-attempt API readiness allowance is unchanged.
+
+Before normal activation, supply `/opt/enterprise-agent-workbench/shared/release-smoke.json`:
+a regular non-symlink file owned by the deploy user with mode `0600`, containing
+only string keys `account`, `password`, `tenant_id`, `user_id`. Use an explicitly
+approved smoke account with campaign-agent access, credits and a usable provider.
+Never place this file in Git or an artifact. Missing input blocks before mutation;
+`--preflight-only` remains read-only and does not execute/provision the smoke.
+
+Smoke creates one real conversation/task (normal persistence and billing apply),
+requires progress/activity/delta/complete, reads the completed task/conversation,
+and checks authenticated terminal Cancel idempotency. It does not claim an active
+Stop or visual UX test. It has a 180-second total bound plus at most 10 seconds
+to request cancellation of its own unfinished task; it never cancels other work.
+No generated answer, login response, cookie or password is logged. MCP health
+uses initialize/ping/list_tools; completed Redis-backed work proves the worker path.
+
+Exact TO plus a runtime/health/smoke failure follows the unchanged TO-to-FROM
+transition and predecessor restoration, with final state/health verification
+before `PRODUCTION_DEPLOYMENT_ROLLED_BACK`. A pre-activation staging failure may
+also safely retain the proven FROM state, as in the existing transition consumer.
+Unknown/mixed binding or manifest state never permits code-only rollback or a
+second transition attempt: it emits `PRODUCTION_DEPLOYMENT_MANUAL_RECOVERY_REQUIRED`.
+The private `.release-switch.*` snapshot and `recovery-evidence.json` retain
+release/process identity, binding rows/manifests/package identities, health and
+sanitized gate errors. Capture occurs under the same lock; the process then exits
+nonzero and releases the lock. Evidence capture errors retain the snapshot and
+are explicitly reported. No long-lived lock or automatic mixed-state repair exists.

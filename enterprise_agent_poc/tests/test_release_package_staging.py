@@ -277,7 +277,7 @@ def test_r6_staging_failure_precedes_code_switch_and_leaves_from_active(tmp_path
     assert registry_manifest(registry) == FROM
 
     switch = (ROOT / "deploy" / "release_switch.sh").read_text(encoding="utf-8")
-    apply = switch.index("scripts/release_binding_transition.py --candidate-manifest", switch.index("trap 'rollback; exit 1' ERR"))
+    apply = switch.index("scripts/release_binding_transition.py --candidate-manifest", switch.index("trap 'fail_release' ERR"))
     code_switch = switch.index('ln -sfn "$release_root" "$current_link"')
     service_start = switch.index("systemctl restart enterprise-agent-mcp.service")
     assert apply < code_switch < service_start

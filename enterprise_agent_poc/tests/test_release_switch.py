@@ -23,7 +23,7 @@ def test_release_switch_snapshots_dropins_before_enabling_rollback_trap():
 
     backup_created = source.index('backup=$(mktemp -d "$base/.release-switch.XXXXXX")')
     dropin_copied = source.index('cp "$dropin" "$backup/$service.conf"')
-    trap_enabled = source.index("trap 'rollback; exit 1' ERR")
+    trap_enabled = source.index("trap 'fail_release' ERR")
     first_dropin_write = source.index('cat > "$dropin"')
     dependency_preflight = source.index('"$runtime_venv/bin/python" -c')
     migration_status = source.index('migration_result=$(')
@@ -59,7 +59,9 @@ def test_release_switch_health_timeout_rolls_back_before_exiting():
     timeout_end = source.index("  sleep 1", timeout_start)
     timeout_block = source[timeout_start:timeout_end]
 
-    assert timeout_block.index("rollback") < timeout_block.index("exit 1")
+    assert "fail_release" in timeout_block
+    failure = source[source.index("fail_release() {"):source.index("trap 'fail_release' ERR")]
+    assert failure.index("rollback") < failure.index("exit 1")
 
 
 def write_executable(path, content):
@@ -82,7 +84,7 @@ def switch_harness(tmp_path):
     shutil.copytree(project / "app", candidate / "app", ignore=shutil.ignore_patterns("__pycache__", "static"))
     shutil.copytree(project / "skill_packages", candidate / "skill_packages")
     (candidate / "scripts").mkdir()
-    for name in ("verify_bundled_skills.py", "verify_runtime_config.py", "release_binding_transition.py"):
+    for name in ("verify_bundled_skills.py", "verify_runtime_config.py", "release_binding_transition.py", "release_verify.py", "rollback_preflight.py", "release_manifest.py", "migrate.py"):
         shutil.copyfile(project / "scripts" / name, candidate / "scripts" / name)
     (candidate / "pyproject.toml").write_text("# fixture\n")
     data = base / "shared/runtime-data"
@@ -104,7 +106,7 @@ def switch_harness(tmp_path):
     shared_env.chmod(0o600)
     old = base / "releases/old/enterprise_agent_poc"
     old.mkdir(parents=True)
-    (old.parent / 'old.manifest.json').write_text(json.dumps({'source_commit': 'a' * 40}))
+    (old.parent / 'old.manifest.json').write_text(json.dumps({'release_id': 'old', 'source_commit': 'a' * 40, 'archive_sha256': 'd' * 64}))
     (candidate.parent / 'candidate.manifest.json').write_text(json.dumps({'release_id': 'candidate', 'source_commit': 'b' * 40, 'archive_sha256': 'c' * 64}))
     (base / "release-current").symlink_to(old, target_is_directory=True)
     executable = tmp_path / "release_switch.sh"
@@ -122,6 +124,51 @@ with open(os.environ["SWITCH_TEST_EVENTS"], "a") as f:
 if args and args[0] == "scripts/rollback_preflight.py":
     print(json.dumps({{"status": "rollback_plan_passed" if "--check-plan" in args else "rollback_preflight_passed", "read_only": True}}))
     sys.exit(0)
+if args and args[0] == "scripts/release_verify.py":
+    import fcntl, importlib.util
+    with open(os.environ["RELEASE_LOCK_FILE"], "a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise AssertionError("release lock not held during verification")
+    spec = importlib.util.spec_from_file_location("release_verify", Path(args[0]))
+    rv = importlib.util.module_from_spec(spec); spec.loader.exec_module(rv)
+    rv.smoke_config = lambda base: {{}}
+    def health():
+        base = rv.ROOT.parent.parent.parent
+        if os.environ.get("SWITCH_TEST_RECOVERY_FAIL") and (base / "release-current").resolve().parent.name == "old":
+            raise rv.GateFailed("recovery_health_failed")
+        return {{"api": "PASS", "mcp": "PASS", "redis": "PASS"}}
+    rv.health = health
+    from scripts import rollback_preflight, migrate
+    rollback_preflight.verify = lambda *a: {{"applied_versions": []}}
+    migrate.migration_items = lambda: []
+    fault = os.environ.get("SWITCH_TEST_FAULT")
+    def services(base):
+        current = (base / "release-current").resolve()
+        result = {{r: {{"active": "active", "pid": 123, "cwd": str(current), "module_ok": True,
+                       "exe": str((base / "venv/bin/python").resolve())}} for r in ("api", "mcp", "worker")}}
+        if fault == "cwd" and current.name == "enterprise_agent_poc" and current.parent.name == "candidate":
+            result["worker"]["cwd"] = "wrong-release"
+        return result
+    rv.service_state = services
+    async def smoke(config):
+        base = rv.ROOT.parent.parent.parent
+        assert (base / "release-current").resolve() == rv.ROOT
+        assert list(base.glob(".release-switch.*/state.json"))
+        if fault in ("binding", "manifest"):
+            with rv.registry_for(base)._store.connection() as conn:
+                if fault == "binding":
+                    conn.execute("DELETE FROM agent_skill_bindings WHERE agent_id=?", ("campaign-agent",))
+                else:
+                    conn.execute("UPDATE agent_templates SET skill_manifest=? WHERE id=?", ("{{}}", "campaign-agent"))
+        if fault == "smoke":
+            raise rv.GateFailed("injected_smoke_failure")
+        return {{"status": "technical_smoke_passed"}}
+    rv.technical_smoke = smoke
+    sys.exit(rv.main(args[1:]))
 if args and args[0] == "-":
     source = sys.stdin.read()
     assert "default_transaction_read_only=on" in source
@@ -204,7 +251,7 @@ def run_switch(harness, *, fault="", preflight=True, health_ready_attempt=None):
     env = {**harness["env"], "SWITCH_TEST_FAULT": fault}
     if health_ready_attempt is not None:
         env["SWITCH_TEST_HEALTH_READY_ATTEMPT"] = str(health_ready_attempt)
-    args = ["bash", str(harness["script"]), "candidate"]
+    args = ["bash", "-x", str(harness["script"]), "candidate"]
     if preflight:
         args.append("--preflight-only")
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=30)
@@ -467,7 +514,17 @@ def pg_rollback_harness(pg_rollback_catalog, tmp_path):
     shared.write_text('\n'.join(k + '=' + shlex.quote(v) for k, v in env.items() if k not in ('PATH', 'LANG', 'TMPDIR')) + '\n')
     shared.chmod(0o600)
     venv = base / 'venv/bin'
-    write_executable(venv / 'python', f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    # This harness tests the real historical PostgreSQL gate, not live host
+    # runtime/auth. CB tests separately exercise the new verifier on SQLite.
+    write_executable(venv / 'python', f'''#!/bin/sh
+if [ "$1" = scripts/release_verify.py ]; then
+  if [ "$2" = capture ]; then
+    exec "{sys.executable}" -c 'import sys;from pathlib import Path;Path(sys.argv[sys.argv.index("--snapshot")+1]).write_text("{{}}")' "$@"
+  fi
+  exit 0
+fi
+exec "{sys.executable}" "$@"
+''')
     for name in ('pip', 'uvicorn'):
         write_executable(venv / name, f'#!/bin/sh\nexec "{Path(sys.executable).with_name(name)}" "$@"\n')
     (base / 'release-current').symlink_to(old, target_is_directory=True)
@@ -666,7 +723,7 @@ def test_rollback_gate_order_is_fail_closed_and_old_runner_is_not_the_authority(
     plan = source.index('--check-plan')
     up = source.index('scripts/migrate.py up')
     backup = source.index('backup=$(mktemp')
-    rollback = source[source.index('rollback() {'):source.index("trap 'rollback; exit 1' ERR")]
+    rollback = source[source.index('rollback() {'):source.index("trap 'fail_release' ERR")]
     assert plan < up < backup
     assert rollback.index('scripts/rollback_preflight.py') < rollback.index('ln -sfn') < rollback.index('systemctl restart') < rollback.index('curl --fail')
     assert 'scripts/migrate.py' not in rollback

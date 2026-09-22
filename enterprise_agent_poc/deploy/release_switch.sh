@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Controlled systemd release switch. Run only as root on the production host.
 set -euo pipefail
+final_status=PRODUCTION_DEPLOYMENT_PREFLIGHT_BLOCKED
+report_exit() {
+  result=$?
+  if [[ "$result" -ne 0 ]]; then printf '{"deployment_status":"%s"}\n' "$final_status" >&2; fi
+}
+trap report_exit EXIT
 
 release_id="${1:?usage: release_switch.sh <trusted-release-id> [--preflight-only | --rollback-preflight <target-release-id> <target-source-commit>]}"
 mode="${2:-}"
@@ -121,6 +127,7 @@ except Exception:
 ' "$predecessor_manifest")
 [[ "$previous" == "$base/releases/$rollback_target_id/enterprise_agent_poc" ]] || { echo "rollback target outside controlled release path" >&2; exit 2; }
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$rollback_target_id" --target-source-commit "$rollback_target_commit" --check-plan
+PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py credentials
 if MIGRATION_RESULT="$migration_result" "$runtime_venv/bin/python" -c 'import json, os; raise SystemExit(0 if json.loads(os.environ["MIGRATION_RESULT"])["pending"] > 0 else 1)'; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/migrate.py up
 fi
@@ -132,17 +139,36 @@ for service in "${services[@]}"; do
     cp "$dropin" "$backup/$service.conf"
   fi
 done
+verify_release() {
+  local step="$1"; shift
+  printf '%s\n' "$step" > "$backup/last-step.log"
+  local result=0
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py "$@" \
+    --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" \
+    --snapshot "$backup/state.json" > "$backup/$step.log" 2>&1 || result=$?
+  cat "$backup/$step.log"
+  return "$result"
+}
+verify_release capture capture
 rollback() {
   trap - ERR
   set +e
+  # No code-only restore or unknown-state overwrite. This read-only guard also
+  # protects unrelated agents and legacy releases. Keep the snapshot on failure.
+  verify_release rollback-guard rollback-guard || return 1
   # Never invoke the old runner: its future-history rejection is intentional.
   # Failure preserves backup/new state for manual intervention; no restore,
   # drop-in mutation, or restart is allowed until this trusted gate passes.
-  if ! PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$rollback_target_id" --target-source-commit "$rollback_target_commit"; then
+  if ! PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$rollback_target_id" --target-source-commit "$rollback_target_commit" > "$backup/rollback-identity.log" 2>&1; then
+    cat "$backup/rollback-identity.log"
     printf '{"status":"rollback_BLOCKED","services_restored":false}\n' >&2
     return 1
   fi
-  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --rollback || return 1
+  cat "$backup/rollback-identity.log"
+  local transition_status=0
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --rollback > "$backup/rollback-helper.log" 2>&1 || transition_status=$?
+  cat "$backup/rollback-helper.log"
+  [[ "$transition_status" -eq 0 ]] || return 1
   ln -sfn "$previous" "$current_link" || return 1
   for service in "${services[@]}"; do
     dropin="/etc/systemd/system/$service.service.d/release.conf"
@@ -153,7 +179,10 @@ rollback() {
   for service in "${services[@]}"; do systemctl is-active --quiet "$service.service" || return 1; done
   for attempt in $(seq 1 "$api_readiness_attempts"); do
     if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
+      | tee "$backup/rollback-health.log" \
       | "$runtime_venv/bin/python" -c 'import json, sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
+      verify_release restored state --rollback || return 1
+      final_status=PRODUCTION_DEPLOYMENT_ROLLED_BACK
       printf '{"status":"rolled_back","application_release":"%s","schema_rollback":false}\n' "$rollback_target_id"
       rm -rf "$backup"
       return 0
@@ -164,10 +193,23 @@ rollback() {
   # Keep backup on failed rollback health too; never claim recovery succeeded.
   return 1
 }
-trap 'rollback; exit 1' ERR
+fail_release() {
+  # Suppress recursion, not recovery evidence. FD 9 and snapshot stay alive.
+  trap - ERR
+  final_status=PRODUCTION_DEPLOYMENT_MANUAL_RECOVERY_REQUIRED
+  cp "$backup/last-step.log" "$backup/failure-step.log" || true
+  if ! rollback; then
+    verify_release evidence evidence || printf '{"status":"recovery_evidence_incomplete","snapshot_retained":true}\n' >&2
+  fi
+  exit 1
+}
+trap 'fail_release' ERR
+final_status=PRODUCTION_DEPLOYMENT_MANUAL_RECOVERY_REQUIRED
 
+printf 'binding-apply\n' > "$backup/last-step.log"
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --apply
 
+printf 'service-activation\n' > "$backup/last-step.log"
 for service in "${services[@]}"; do
   dropin="/etc/systemd/system/$service.service.d/release.conf"
   mkdir -p "$(dirname "$dropin")"
@@ -192,18 +234,24 @@ ln -sfn "$release_root" "$current_link"
 systemctl daemon-reload
 systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
 for service in "${services[@]}"; do systemctl is-active --quiet "$service.service"; done
+printf 'candidate-health\n' > "$backup/last-step.log"
 for attempt in $(seq 1 "$api_readiness_attempts"); do
   if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
+    | tee "$backup/candidate-health.log" \
     | "$runtime_venv/bin/python" -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
     break
   fi
   if [[ "$attempt" == "$api_readiness_attempts" ]]; then
     echo "API health did not become ready within ${api_readiness_attempts} seconds" >&2
-    rollback
-    exit 1
+    fail_release # same rollback path, with evidence on failed recovery
   fi
   sleep 1
 done
+verify_release before-smoke state
+verify_release technical-smoke smoke
+verify_release final-state state
+# RELEASE COMMIT POINT: same global lock + rollback snapshot through all gates.
 trap - ERR
 rm -rf "$backup"
-printf '{"status":"switched","release_id":"%s","previous_release":"%s"}\n' "$release_id" "${previous:-none}"
+final_status=PRODUCTION_DEPLOYMENT_PASS
+printf '{"status":"switched","deployment_status":"%s","release_id":"%s","previous_release":"%s"}\n' "$final_status" "$release_id" "${previous:-none}"
