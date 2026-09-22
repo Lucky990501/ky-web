@@ -249,8 +249,8 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     floors = data_contract_floors(declaration, schema_lock)
     predecessor = declaration['forward_predecessor_approval']
     require(set(predecessor) == {'release_id','source_commit','archive_sha256','manifest_sha256','schema_fingerprint','data_contract'}
-            and predecessor['release_id'] == '20260918-5c2205a'
-            and predecessor['source_commit'] == '5c2205ab8eee0ca58a541307ec0122866e7bd638'
+            and predecessor['release_id'] == '20260920-63112f8'
+            and predecessor['source_commit'] == '63112f87d957f57f0c7c9f447b31ad79e9a133a1'
             and HASH.fullmatch(predecessor['archive_sha256']) and HASH.fullmatch(predecessor['manifest_sha256'])
             and predecessor['schema_fingerprint'] == digest(schema_lock)
             and predecessor['data_contract'] == 'member_account_status_v1', 'forward_predecessor_declaration')
