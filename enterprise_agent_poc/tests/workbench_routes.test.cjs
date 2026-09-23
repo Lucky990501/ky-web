@@ -58,6 +58,9 @@ test('disabled productized conversation remains readable without run controls',a
 function harness(pathname = '/platform/skills', state = null) {
   const pending = [];
   const eventSources = [];
+  const downloads = [];
+  const sessionValues = new Map();
+  const sessionStorage={get length(){return sessionValues.size;},key(index){return [...sessionValues.keys()][index]||null;},getItem(key){return sessionValues.get(key)||null;},setItem(key,value){sessionValues.set(key,String(value));},removeItem(key){sessionValues.delete(key);}};
   const timers = [];let nextTimerId=1;
   const navs = ['workspace', 'image', 'profile', 'platform-skills', 'platform-agents'].map(page => ({dataset:{page}, classList:{active:false, toggle(name,value){this.active=value;}}}));
   const document = {
@@ -66,7 +69,9 @@ function harness(pathname = '/platform/skills', state = null) {
     querySelector(selector){if(selector === '#main')return this.main; if(selector==='#side-credit')return null; if(selector==='#prompt')return this.prompt; if(selector==='#task-status')return this.taskStatus; return {};},
     querySelectorAll(selector){return selector === '[data-page]' ? navs : [];},
     addEventListener(){},
-    createElement(){
+    body:{appendChild(){}},
+    createElement(tag){
+      if(tag==='a')return {href:'',download:'',hidden:false,click(){downloads.push({href:this.href,filename:this.download});},remove(){}};
       const retryButton={};
       return {set innerHTML(value){this._html=value;this.firstElementChild={id:'',querySelector(selector){return selector==='button'?retryButton:null;}};}};
     },
@@ -79,7 +84,7 @@ function harness(pathname = '/platform/skills', state = null) {
     querySelectorAll(){return [];}
   }
   document.main = new View();
-  const location = {pathname};
+  const location = {pathname,origin:'http://localhost'};
   const stack = [{path:pathname,state}], listeners = {};
   let index = 0;
   const history = {
@@ -90,13 +95,18 @@ function harness(pathname = '/platform/skills', state = null) {
   };
   const window = {history, addEventListener(name,fn){listeners[name]=fn;}};
   class EventSource {constructor(url){this.url=url;this.listeners={};this.closed=false;eventSources.push(this);}addEventListener(name,listener){this.listeners[name]=listener;}close(){this.closed=true;}}
-  const context = vm.createContext({document,window,location,console,Map,Set,Date,EventSource,setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
-    fetch(url,options){return new Promise((resolve,reject)=>pending.push({url,options,resolve(body){resolve({ok:true,json:async()=>body});},reject}));},
+  class BrowserURL extends URL {}
+  BrowserURL.createObjectURL=()=>`blob:http://localhost/document-${downloads.length+1}`;
+  BrowserURL.revokeObjectURL=()=>{};
+  const context = vm.createContext({document,window,location,sessionStorage,console,Map,Set,Date,URL:BrowserURL,EventSource,setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
+    fetch(url,options){return new Promise((resolve,reject)=>pending.push({url,options,resolve(body){resolve({ok:true,json:async()=>body});},resolveResponse:resolve,reject}));},
   });
   vm.runInContext(source,context);
-  vm.runInContext("me={is_platform_admin:true,display_name:'Test',email:'test@example.invalid',tenant_name:'Test',role:'member'}", context);
+  vm.runInContext("me={user_id:'user-test',tenant_id:'tenant-test',is_platform_admin:true,display_name:'Test',email:'test@example.invalid',tenant_name:'Test',role:'member'}", context);
   const run = code => vm.runInContext(code,context);
   function respond(url, body){const request=pending.find(x=>x.url===url&&!x.done); assert.ok(request,`expected request ${url}`); request.done=true; request.resolve(body);}
+  function respondError(url,status){const request=pending.find(x=>x.url===url&&!x.done);assert.ok(request,`expected request ${url}`);request.done=true;request.resolveResponse({ok:false,status,headers:{get(){return '';}},json:async()=>({})});}
+  function respondDownload(url){const request=pending.find(x=>x.url===url&&!x.done);assert.ok(request,`expected request ${url}`);request.done=true;request.resolveResponse({ok:true,headers:{get:()=> 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'},blob:async()=>new Blob(['docx bytes'],{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'})});}
   async function settle(){
     for(let i=0;i<5;i++){
       for(const request of pending.filter(x=>!x.done)){
@@ -113,7 +123,7 @@ function harness(pathname = '/platform/skills', state = null) {
     assert.deepEqual(navs.filter(x=>x.classList.active).map(x=>x.dataset.page),[page]);
   }
   function runTimers(){for(const timer of timers.splice(0)){if(!timer.cancelled)timer.fn();}}
-  return {run,respond,settle,consistent,pending,timers,runTimers,eventSources,document,history,location,navs};
+  return {run,respond,respondError,respondDownload,settle,consistent,pending,timers,runTimers,eventSources,downloads,sessionStorage,document,history,location,navs};
 }
 
 test('profile <-> skills uses distinct URLs and matching navigation/view',async()=>{
@@ -335,8 +345,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=chatgpt-style-conversation-layout-v1/);
-  assert.match(index,/workbench\.js\?v=chatgpt-style-conversation-layout-v1/);
+  assert.match(index,/workbench\.css\?v=activity-plan-document-export-ux-v1/);
+  assert.match(index,/workbench\.js\?v=activity-plan-document-export-ux-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -597,4 +607,115 @@ test('late Agent control-plane fetch cannot overwrite newer profile view',async(
 test('Stage 1 management navigation remains platform-admin only',()=>{
   const h=harness('/platform/agents');h.run('me.is_platform_admin=false');
   assert.equal(h.run('pageFromNavigation()'),'workspace');
+});
+
+const activityPlanResult={type:'activity_plan',version:'1',data:{
+  document_title:'秋季社区活动方案',activity_theme:'秋季社区活动',activity_time:'2026-10-10',activity_location:'社区中心',
+  target_audience:'社区居民',promotion_channels:['社区公告'],activity_items:[{phase:'准备',name:'签到',description:'签到接待',image_requirement:'无需'}],
+  invitation_copy:'欢迎参加秋季社区活动',pending_items:['场地待确认'],
+}};
+const documentResponse=(id,filename='秋季社区活动方案.docx')=>({document_id:id,filename,content_type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',download_url:`/api/v1/documents/activity-plan/${id}`});
+
+test('activity plan export is hidden for Markdown-only or malformed results and appears only for a completed validated message',()=>{
+  const h=harness('/agents/campaign');
+  assert.ok(!h.run("messageHtml({id:'simple',role:'assistant',content:'五个活动标题'},'给我想5个活动标题','campaign-agent')").includes('导出 Word'));
+  assert.ok(!h.run("streamingMessageHtml('正在思考')").includes('导出 Word'));
+  h.run(`rememberActivityPlanResult('plan-1',${JSON.stringify(activityPlanResult)})`);
+  assert.ok(h.run("messageHtml({id:'plan-1',role:'assistant',content:'方案正文'},'完整活动方案','campaign-agent')").includes('导出 Word'));
+  assert.ok(!h.run("messageHtml({id:'plan-1',role:'assistant',content:'方案正文'},'完整活动方案','copywriting-agent')").includes('导出 Word'));
+  assert.equal(h.run("rememberActivityPlanResult('bad',{type:'activity_plan',version:'1',data:{document_title:'标题'}})"),null);
+  assert.equal(h.run("documentActionHtml('bad')"),'');
+});
+
+test('activity plan export posts the exact structured data, downloads the returned Chinese filename, and never re-posts a ready message',async()=>{
+  const h=harness('/agents/campaign');h.run(`rememberActivityPlanResult('plan-1',${JSON.stringify(activityPlanResult)})`);
+  const generating=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'generating');
+  assert.ok(h.run("documentActionHtml('plan-1')").includes('正在生成...'));
+  assert.ok(h.run("documentActionHtml('plan-1')").includes('disabled'));
+  assert.equal(h.pending.length,1);assert.equal(h.pending[0].options.method,'POST');
+  assert.deepEqual(JSON.parse(h.pending[0].options.body).content,activityPlanResult.data);
+  h.respond('/api/v1/documents/activity-plan',documentResponse('doc-1'));await generating;
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'ready');
+  assert.ok(h.run("documentActionHtml('plan-1')").includes('下载 Word'));
+  const download=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");
+  assert.equal(h.pending.at(-1).url,'/api/v1/documents/activity-plan/doc-1');
+  assert.equal(h.pending.at(-1).options.credentials,'same-origin');
+  h.respondDownload('/api/v1/documents/activity-plan/doc-1');await download;
+  assert.deepEqual(h.downloads,[{href:'blob:http://localhost/document-1',filename:'秋季社区活动方案.docx'}]);
+  assert.equal(h.pending.filter(request=>request.options.method==='POST').length,1);
+});
+
+test('ready document survives same-tab history reload without crossing user identity',async()=>{
+  const h=harness('/agents/campaign');h.run(`rememberActivityPlanResult('plan-1',${JSON.stringify(activityPlanResult)})`);
+  const generated=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");h.respond('/api/v1/documents/activity-plan',documentResponse('doc-saved'));await generated;
+  assert.equal(h.sessionStorage.length,1);
+  h.run(`activityPlanDocuments.clear();rememberActivityPlanResult('plan-1',${JSON.stringify(activityPlanResult)})`);
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'ready');
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').document.document_id"),'doc-saved');
+  h.run(`me.user_id='other-user';activityPlanDocuments.clear();rememberActivityPlanResult('plan-1',${JSON.stringify(activityPlanResult)})`);
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'idle');
+  h.run('clearActivityPlanSessionDocuments()');assert.equal(h.sessionStorage.length,0);
+});
+
+test('activity plan export errors stay local to a message and can be retried',async()=>{
+  const h=harness('/agents/campaign');h.run(`rememberActivityPlanResult('plan-1',${JSON.stringify(activityPlanResult)})`);
+  const failed=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");h.respondError('/api/v1/documents/activity-plan',500);await failed;
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'error');
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').error"),'Word 生成失败，请重试');
+  assert.ok(h.run("documentActionHtml('plan-1')").includes('重新生成 Word'));
+  const retried=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");h.respond('/api/v1/documents/activity-plan',documentResponse('doc-retry'));await retried;
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'ready');
+  assert.equal(h.run("activityPlanDocuments.get('plan-1').error"),'');
+  for(const [status,message] of [[400,'方案数据无效'],[401,'请先登录'],[403,'没有权限'],[404,'文档不存在'],[413,'方案内容过大']]){
+    assert.ok(h.run(`documentExportError({status:${status}})`).includes(message));
+  }
+  assert.equal(h.run('documentExportError(new TypeError())'),'网络异常，请稍后重试');
+  const network=harness('/agents/campaign');network.run(`rememberActivityPlanResult('plan-network',${JSON.stringify(activityPlanResult)})`);
+  const failedNetwork=network.run("handleActivityPlanDocumentAction(document.main,'plan-network')");network.pending[0].done=true;network.pending[0].reject(new TypeError('offline'));await failedNetwork;
+  assert.equal(network.run("activityPlanDocuments.get('plan-network').state"),'error');
+  assert.equal(network.run("activityPlanDocuments.get('plan-network').error"),'网络异常，请稍后重试');
+  const retriedNetwork=network.run("handleActivityPlanDocumentAction(document.main,'plan-network')");network.respond('/api/v1/documents/activity-plan',documentResponse('doc-network'));await retriedNetwork;
+  assert.equal(network.run("activityPlanDocuments.get('plan-network').state"),'ready');
+  const stale=network.run("handleActivityPlanDocumentAction(document.main,'plan-network')");network.respondError('/api/v1/documents/activity-plan/doc-network',404);await stale;
+  assert.equal(network.run("activityPlanDocuments.get('plan-network').state"),'error');
+  assert.equal(network.sessionStorage.length,0);
+});
+
+test('two activity-plan assistant messages own independent document state and payloads',async()=>{
+  const h=harness('/agents/campaign'),second=structuredClone(activityPlanResult);second.data.activity_theme='冬季客户答谢';
+  h.run(`rememberActivityPlanResult('plan-a',${JSON.stringify(activityPlanResult)})`);
+  h.run(`rememberActivityPlanResult('plan-b',${JSON.stringify(second)})`);
+  const first=h.run("handleActivityPlanDocumentAction(document.main,'plan-a')");
+  const other=h.run("handleActivityPlanDocumentAction(document.main,'plan-b')");
+  assert.equal(h.pending.length,2);
+  assert.equal(JSON.parse(h.pending[0].options.body).content.activity_theme,'秋季社区活动');
+  assert.equal(JSON.parse(h.pending[1].options.body).content.activity_theme,'冬季客户答谢');
+  h.pending[1].done=true;h.pending[1].resolve(documentResponse('doc-b','冬季客户答谢.docx'));await other;
+  assert.equal(h.run("activityPlanDocuments.get('plan-a').state"),'generating');
+  assert.equal(h.run("activityPlanDocuments.get('plan-b').document.document_id"),'doc-b');
+  h.pending[0].done=true;h.pending[0].resolve(documentResponse('doc-a'));await first;
+  assert.equal(h.run("activityPlanDocuments.get('plan-a').document.document_id"),'doc-a');
+});
+
+test('SSE completion binds export to the matching assistant message; history restoration verifies task association',async()=>{
+  const h=harness('/agents/campaign');
+  h.run('completionNode={innerHTML:"",dataset:{},removeAttribute(){},classList:{remove(){}},querySelector(){return null}};completionState=createStreamingState()');
+  h.run(`finishStreamTask(completionNode,completionState,{status:'completed',assistant_message_id:'task:t1:assistant',structured_result:${JSON.stringify(activityPlanResult)},final_response:'完整活动方案'},'campaign-agent',document.main,'完整活动方案')`);
+  assert.ok(h.run('completionNode.innerHTML').includes('导出 Word'));
+  assert.equal(h.run('completionNode.dataset.assistantMessageId'),'task:t1:assistant');
+  assert.equal(h.run("activityPlanDocuments.get('task:t1:assistant').state"),'idle');
+  h.run("hydrateHistoryActivityPlans(document.main,[{id:'task:t2:assistant',task_id:'t2',role:'assistant'}],'campaign-agent')");
+  assert.equal(h.pending.at(-1).url,'/api/v1/tasks/t2');
+  h.respond('/api/v1/tasks/t2',{status:'completed',assistant_message_id:'task:t2:assistant',structured_result:activityPlanResult});await flush();
+  assert.ok(h.run("documentActionHtml('task:t2:assistant')").includes('导出 Word'));
+  h.run("hydrateHistoryActivityPlans(document.main,[{id:'task:t3:assistant',task_id:'t3',role:'assistant'}],'campaign-agent')");
+  h.respond('/api/v1/tasks/t3',{status:'completed',assistant_message_id:'other-message',structured_result:activityPlanResult});await flush();
+  assert.equal(h.run("documentActionHtml('task:t3:assistant')"),'');
+});
+
+test('activity plan export actions remain wrapping and touch-sized on mobile',()=>{
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(css,/\.chat-message \.message-actions\{flex-wrap:wrap;min-width:0\}/);
+  assert.match(css,/@media\(max-width:860px\)\{\.chat-message \.message-actions \.button\{min-height:44px\}/);
 });

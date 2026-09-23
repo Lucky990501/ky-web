@@ -95,3 +95,10 @@ body.dialog-open{overflow:hidden}.global-search-disabled{opacity:.72;cursor:not-
   .app-shell:has(.chatgpt-conversation-layout) .side-credit{padding-top:8px}
   .app-shell:has(.chatgpt-conversation-layout) .side-user{padding-top:7px}
 }
+.chat-message .message-actions{flex-wrap:wrap;min-width:0}
+.document-action-slot{display:inline-flex;align-items:center;flex-wrap:wrap;gap:7px;min-width:0;max-width:100%}
+.chat-message .message-actions .document-export-button{border-color:#c9d8f2;color:#294174}
+.document-export-button[aria-busy="true"] svg{animation:rotate 1s linear infinite}
+.document-action-error{color:var(--bad);font-size:12px;line-height:1.45}
+@media(max-width:860px){.chat-message .message-actions .button{min-height:44px}.document-action-error{flex-basis:100%}}
+@media(prefers-reduced-motion:reduce){.document-export-button[aria-busy="true"] svg{animation:none}}

@@ -1,6 +1,9 @@
 const app = document.querySelector('#app');
 let me, activeConversationId = null, activeAgentId = 'image-agent', mobileDrawerController = () => {};
 const pageCache = new Map();
+const activityPlanDocuments = new Map();
+const activityPlanDocumentStoragePrefix = 'activity-plan-document-v1:';
+let activityPlanBrandName = '';
 const cacheablePaths = new Set(['/api/v1/me','/api/v1/workspace','/api/v1/conversations','/api/v1/generations','/api/v1/knowledge/files','/api/v1/assets','/api/v1/enterprise-config','/api/v1/platform/skills']);
 const customerErrorMessages = {AUTH_REQUIRED:'请先登录或重新登录。',ACCOUNT_DISABLED:'账号已停用，请联系企业管理员。',FORBIDDEN:'你没有权限访问此功能。',AGENT_UNAVAILABLE:'当前智能体暂不可用。',TASK_FAILED:'任务处理失败，请重试。',TASK_TIMEOUT:'任务处理时间较长，请稍后重试。',KNOWLEDGE_PROCESSING_FAILED:'资料处理失败，请重新上传。',INVALID_INPUT:'输入内容不符合要求，请检查后重试。',INSTANCE_NOT_ENABLED:'当前智能体尚未为该企业启用。',SERVICE_TEMPORARILY_UNAVAILABLE:'服务暂时不可用，请稍后重试。',INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE:'请先停用该智能体，再修改配置。'};
 const fallbackErrorCode = status => status===401?'AUTH_REQUIRED':status===403?'FORBIDDEN':status===408||status===504?'TASK_TIMEOUT':status>=500?'SERVICE_TEMPORARILY_UNAVAILABLE':'INVALID_INPUT';
@@ -9,7 +12,7 @@ const api = (path, options = {}) => {
   if(canCache&&cached&&Date.now()-cached.at<15000)return Promise.resolve(cached.value);
   return fetch(path,{credentials:'same-origin',headers:{'content-type':'application/json',...(options.headers||{})},...options}).then(async response=>{
     let body={};try{body=await response.json();}catch{}
-    if(!response.ok){const code=body.error_code||fallbackErrorCode(response.status),error=Error(body.user_message||customerErrorMessages[code]||'请求失败，请稍后重试。');error.code=code;error.requestId=body.request_id||response.headers?.get?.('x-request-id')||'';throw error;}
+    if(!response.ok){const code=body.error_code||fallbackErrorCode(response.status),error=Error(body.user_message||customerErrorMessages[code]||'请求失败，请稍后重试。');error.code=code;error.status=response.status;error.requestId=body.request_id||response.headers?.get?.('x-request-id')||'';throw error;}
     if(canCache)pageCache.set(path,{at:Date.now(),value:body});if(method!=='GET')pageCache.clear();return body;
   });
 };
@@ -24,6 +27,7 @@ const bindImageFallbacks = () => document.querySelectorAll('img[data-generation-
 const refreshIcons = () => { window.lucide?.createIcons({ attrs: { 'stroke-width': 1.9 } }); bindGenerationViewers(); bindImageFallbacks(); };
 
 function login() {
+  activityPlanDocuments.clear();activityPlanBrandName='';clearActivityPlanSessionDocuments();
   app.innerHTML = `<div class="login-layout"><section class="login-hero"><div class="brand-lockup">${icon('bot',35)}<div><b>AI Workbench</b><span>企业 AI 智能体工作台</span></div></div><div class="hero-copy"><h1>让 AI 成为<br>每一位团队成员的<span>创造力引擎</span></h1><p>在 AI 的陪伴下，激发灵感，高效创作，共同成长</p><div class="hero-values"><span>${icon('zap')} 高效创作</span><span>${icon('users')} 协同共建</span><span>${icon('book-open')} 专业可信</span></div></div></section><section class="login-side"><nav class="login-links">产品官网　 |　 帮助中心　 |　 下载客户端</nav><form class="login-card" id="login"><div class="brand-lockup small">${icon('bot',28)}<div><b>AI Workbench</b><span>企业 AI 智能体工作台</span></div></div><h2>欢迎登录 AI Workbench</h2><p>开启高效、智能、协同的创作新体验</p><label><span>账号</span><input name="account" type="email" required autocomplete="username" placeholder="请输入账号 / 邮箱"></label><label><span>密码</span><input name="password" type="password" required autocomplete="current-password" placeholder="请输入密码"></label><label class="checkbox"><input type="checkbox" checked> 记住我</label><button class="button primary full" type="submit">登 录</button><p class="form-error" role="alert"></p></form></section></div>`;
   document.querySelector('.login-links').innerHTML = '<button type="button" class="login-help" id="login-help">帮助中心</button>';
   document.querySelector('#login-help').onclick = showHelpDialog;
@@ -173,14 +177,108 @@ const markdownHtml = content => {
   }
   flushParagraph();closeList();if(codeLines)blocks.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);return blocks.join('')||'<p>暂无内容。</p>';
 };
-const messageHtml = (item, sourcePrompt='') => {
-  const isUser=item.role==='user';
-  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}"><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?escapeHtml(item.content).replace(/\n/g,'<br>'):markdownHtml(item.content)}</div>${!isUser?`<div class="message-actions"><button type="button" class="button secondary" data-copy-response="${escapeHtml(item.content)}">${icon('copy',15)}复制</button>${sourcePrompt?`<button type="button" class="button secondary" data-regenerate="${escapeHtml(sourcePrompt)}">${icon('refresh-cw',15)}重新生成</button>`:''}</div>${taskReferencesHtml(item.references)}`:''}${messageGenerationHtml(item.generation)}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
+const activityPlanResultIsValid = result => {
+  if(!result||result.type!=='activity_plan'||result.version!=='1'||!result.data||typeof result.data!=='object'||Array.isArray(result.data))return false;
+  const data=result.data,strings=['document_title','activity_theme','activity_time','activity_location','target_audience','invitation_copy'];
+  return strings.every(key=>typeof data[key]==='string'&&data[key].trim())
+    &&['promotion_channels','pending_items'].every(key=>Array.isArray(data[key])&&data[key].every(value=>typeof value==='string'))
+    &&Array.isArray(data.activity_items)&&data.activity_items.every(item=>item&&['phase','name','description','image_requirement'].every(key=>typeof item[key]==='string'));
 };
+const activityPlanDocumentStorageKey=messageId=>me?.tenant_id&&me?.user_id?`${activityPlanDocumentStoragePrefix}${me.tenant_id}:${me.user_id}:${messageId}`:'';
+function clearActivityPlanSessionDocuments(){
+  try{for(let index=sessionStorage.length-1;index>=0;index--){const key=sessionStorage.key(index);if(key?.startsWith(activityPlanDocumentStoragePrefix))sessionStorage.removeItem(key);}}catch{}
+}
+function storedActivityPlanDocument(messageId){
+  const key=activityPlanDocumentStorageKey(messageId);if(!key)return null;
+  try{const value=JSON.parse(sessionStorage.getItem(key)||'null');return validDocumentResponse(value)?value:null;}catch{return null;}
+}
+function saveActivityPlanDocument(messageId,document){
+  const key=activityPlanDocumentStorageKey(messageId);if(!key)return;
+  try{if(document)sessionStorage.setItem(key,JSON.stringify(document));else sessionStorage.removeItem(key);}catch{}
+}
+function rememberActivityPlanResult(messageId,result){
+  if(typeof messageId!=='string'||!messageId||!activityPlanResultIsValid(result))return null;
+  const previous=activityPlanDocuments.get(messageId);
+  if(previous&&JSON.stringify(previous.structuredResult.data)===JSON.stringify(result.data))return previous;
+  const document=storedActivityPlanDocument(messageId),entry={structuredResult:result,state:document?'ready':'idle',document,error:''};activityPlanDocuments.set(messageId,entry);return entry;
+}
+const documentActionDetails=entry=>{const generating=entry.state==='generating',ready=entry.state==='ready';return {generating,label:generating?'正在生成...':ready?'下载 Word':entry.state==='error'?'重新生成 Word':'导出 Word',iconName:generating?'loader-circle':ready?'download':'file-text'};};
+function documentActionHtml(messageId){
+  const entry=activityPlanDocuments.get(messageId);if(!entry)return '';
+  const {generating,label,iconName}=documentActionDetails(entry);
+  return `<span class="document-action-slot" data-document-action="${escapeHtml(messageId)}"><button type="button" class="button secondary document-export-button" data-document-export="${escapeHtml(messageId)}" ${generating?'disabled aria-busy="true"':''}><i data-lucide="${iconName}" width="15" height="15" aria-hidden="true"></i>${label}</button>${entry.error?`<span class="document-action-error" role="alert">${escapeHtml(entry.error)}</span>`:''}</span>`;
+}
+const messageActionsHtml=(content,sourcePrompt='',messageId='')=>`${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}${documentActionHtml(messageId)}`;
+const messageHtml = (item, sourcePrompt='',agentId='') => {
+  const isUser=item.role==='user';
+  if(!isUser&&agentId==='campaign-agent')rememberActivityPlanResult(item.id,item.structured_result);
+  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}" ${!isUser&&item.id?`data-assistant-message-id="${escapeHtml(item.id)}"`:''}><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?escapeHtml(item.content).replace(/\n/g,'<br>'):markdownHtml(item.content)}</div>${!isUser?`<div class="message-actions">${messageActionsHtml(item.content,sourcePrompt,agentId==='campaign-agent'?item.id:'')}</div>${taskReferencesHtml(item.references)}`:''}${messageGenerationHtml(item.generation)}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
+};
+function syncActivityPlanAction(main,messageId){
+  const article=[...(main?.querySelectorAll?.('[data-assistant-message-id]')||[])].find(node=>node.dataset.assistantMessageId===messageId);
+  const actions=article?.querySelector?.('.message-actions');if(!actions)return;
+  const slot=[...(actions.querySelectorAll?.('[data-document-action]')||[])].find(node=>node.dataset.documentAction===messageId);
+  const entry=activityPlanDocuments.get(messageId);
+  if(slot&&entry){
+    const button=slot.querySelector('[data-document-export]'),{generating,label,iconName}=documentActionDetails(entry);
+    if(button){button.innerHTML=`<i data-lucide="${iconName}" width="15" height="15" aria-hidden="true"></i>${label}`;button.disabled=generating;button.toggleAttribute('aria-busy',generating);}
+    const error=slot.querySelector('.document-action-error');
+    if(entry.error){if(error)error.textContent=entry.error;else slot.insertAdjacentHTML('beforeend',`<span class="document-action-error" role="alert">${escapeHtml(entry.error)}</span>`);}
+    else error?.remove();
+  }else if(entry)actions.insertAdjacentHTML('beforeend',documentActionHtml(messageId));
+  bindConversationActions(main);refreshIcons();
+}
+function documentExportError(error){
+  if(error?.status===400)return '方案数据无效，无法生成 Word';
+  if(error?.status===401)return customerErrorMessages.AUTH_REQUIRED;
+  if(error?.status===403)return customerErrorMessages.FORBIDDEN;
+  if(error?.status===404)return '文档不存在或已失效';
+  if(error?.status===413)return '方案内容过大，暂无法生成';
+  if(error?.status)return 'Word 生成失败，请重试';
+  return '网络异常，请稍后重试';
+}
+function validDocumentResponse(document){
+  if(!document||typeof document.document_id!=='string'||!document.document_id||typeof document.filename!=='string'||!document.filename.endsWith('.docx')||document.content_type!=='application/vnd.openxmlformats-officedocument.wordprocessingml.document'||typeof document.download_url!=='string')return false;
+  try{const url=new URL(document.download_url,location.origin);return url.origin===location.origin&&url.pathname===`/api/v1/documents/activity-plan/${encodeURIComponent(document.document_id)}`;}catch{return false;}
+}
+async function downloadActivityPlanDocument(entry){
+  const response=await fetch(entry.document.download_url,{credentials:'same-origin'});
+  if(!response.ok){const error=Error('download failed');error.status=response.status;throw error;}
+  if(response.headers?.get?.('content-type')?.split(';')[0]!==entry.document.content_type){const error=Error('invalid document content');error.status=500;throw error;}
+  const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');
+  try{link.href=url;link.download=entry.document.filename;link.hidden=true;document.body.appendChild(link);link.click();}finally{link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
+}
+async function handleActivityPlanDocumentAction(main,messageId){
+  const entry=activityPlanDocuments.get(messageId);if(!entry||entry.state==='generating')return;
+  if(entry.state==='ready'&&entry.document){
+    try{await downloadActivityPlanDocument(entry);entry.error='';}
+    catch(error){entry.error=documentExportError(error);if(error?.status===404){entry.state='error';entry.document=null;saveActivityPlanDocument(messageId,null);}}
+    syncActivityPlanAction(main,messageId);return;
+  }
+  entry.state='generating';entry.error='';syncActivityPlanAction(main,messageId);
+  try{
+    const presentation=activityPlanBrandName&&activityPlanBrandName.length<=120?{brand_name:activityPlanBrandName}:{};
+    const document=await api('/api/v1/documents/activity-plan',{method:'POST',body:JSON.stringify({content:entry.structuredResult.data,presentation})});
+    if(!validDocumentResponse(document)){const error=Error('invalid document response');error.status=500;throw error;}
+    entry.document={document_id:document.document_id,filename:document.filename,content_type:document.content_type,download_url:document.download_url};entry.state='ready';saveActivityPlanDocument(messageId,entry.document);
+  }catch(error){entry.state='error';entry.error=documentExportError(error);}
+  syncActivityPlanAction(main,messageId);
+}
+function hydrateHistoryActivityPlans(main,history,agentId){
+  if(agentId!=='campaign-agent')return;
+  for(const item of history){
+    if(item.role!=='assistant'||!item.id||!item.task_id||activityPlanDocuments.has(item.id))continue;
+    api(`/api/v1/tasks/${encodeURIComponent(item.task_id)}`).then(task=>{
+      if(task.status!=='completed'||task.assistant_message_id!==item.id||!rememberActivityPlanResult(item.id,task.structured_result))return;
+      syncActivityPlanAction(main,item.id);
+    }).catch(()=>{});
+  }
+}
 function bindConversationActions(main){
   main.querySelectorAll('[data-example-prompt]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.examplePrompt;input.focus();});
   main.querySelectorAll('[data-copy-response]').forEach(node=>node.onclick=async()=>{const original=node.innerHTML;try{await navigator.clipboard.writeText(node.dataset.copyResponse);node.textContent='已复制';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}catch{node.textContent='复制失败';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}});
   main.querySelectorAll('[data-regenerate]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.regenerate;input.focus();});
+  main.querySelectorAll('[data-document-export]').forEach(node=>node.onclick=()=>handleActivityPlanDocumentAction(main,node.dataset.documentExport));
   main.querySelectorAll('[data-open-message-generation]').forEach(node=>node.onclick=()=>openGenerationViewer(node.dataset.openMessageGeneration,'本次生成图片',node));
 }
 const safeActivityLabels=Object.freeze({queued:'准备回复',context_loading:'加载上下文',enterprise_config_loading:'加载企业配置',knowledge_retrieving:'检索企业知识',asset_retrieving:'查找企业资料',tool_running:'调用工具',generating:'内容生成',persisting:'整理结果',completed:'已完成',failed:'执行失败',cancelled:'已停止'});
@@ -200,10 +298,10 @@ function transitionConversationRun(run,next){
   run.phase=next;return true;
 }
 const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',displayText:'',visualPending:'',status:'正在思考',completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true,activities:[],activityEvents:[],activitySequence:0,currentActivity:null,thinkingStartedAt:Date.now(),taskStartedAt:null,firstDeltaAt:null,thinkingFinishedAt:null,thinkingAutoCollapsed:false,thinkingTimer:null,visualGeneration:0,visualStopped:false,run:createConversationRunState()});
-const streamingActionsHtml = (content,sourcePrompt='') => `${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}`;
+const streamingActionsHtml = (content,sourcePrompt='',messageId='') => messageActionsHtml(content,sourcePrompt,messageId);
 const streamingThinkingHtml = () => `<details class="thinking-summary" data-thinking open><summary><span data-thinking-title>正在思考 · 1 秒</span></summary><ol data-thinking-list hidden></ol></details>`;
 const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true">${streamingThinkingHtml(status)}<div class="chat-message-content chat-message-content-markdown" data-stream-content><div data-stream-stable></div><div data-stream-active><p class="streaming-placeholder">${escapeHtml(status)}</p></div></div><div class="message-actions" data-stream-actions hidden></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
-const streamingFinalContentHtml = (content,sourcePrompt='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt)}</div>`;
+const streamingFinalContentHtml = (content,sourcePrompt='',messageId='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt,messageId)}</div>`;
 const streamingFailureHtml = (partial,message,diagnosticId='') => `<section class="task-failure streaming-failure" role="alert">${partial?`<div class="streaming-partial"><small>部分回复（未保存）</small><div class="chat-message-content chat-message-content-markdown">${markdownHtml(partial)}</div></div>`:''}<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>${partial?'生成已中断。你可以保留这段内容，或重新尝试。':'你可以把原需求放回输入框，检查后再次提交。'}</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button></section>`;
 function acceptStreamingDelta(state,payload){
   const sequence=Number(payload?.sequence),text=typeof payload?.text==='string'?payload.text:'';
@@ -393,8 +491,9 @@ function scheduleStreamingRender(node,state){
 function completeStreamingMessage(node,state,sourcePrompt,main){
   if(!node)return;
   clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;if(!state.thinkingFinishedAt)state.thinkingFinishedAt=Date.now();const follow=syncStreamingFollow(state),finalResponse=state.finalResponse||state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
-  if(finalResponse===state.text&&content&&actions){renderStreamingMessage(node,state);const caret=content.querySelector?.('[data-stream-caret]');if(caret?.remove)caret.remove();if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt);}
-  else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt);
+  if(finalResponse===state.text&&content&&actions){renderStreamingMessage(node,state);const caret=content.querySelector?.('[data-stream-caret]');if(caret?.remove)caret.remove();if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt,state.assistantMessageId);}
+  else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
+  if(state.assistantMessageId&&node.dataset)node.dataset.assistantMessageId=state.assistantMessageId;
   node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);stopWatchingStreamingFollow(state);
 }
 function cancelStreamingMessage(node,state,main){
@@ -417,7 +516,7 @@ function replaceTaskFailure(node,message,retryText,diagnosticId='',main=null){
 }
 async function agentWorkspaceV2(main, agentId) {
   activeAgentId=agentId;
-  const data=await api('/api/v1/workspace');
+  const data=await api('/api/v1/workspace');activityPlanBrandName=typeof data.brand_name==='string'?data.brand_name:'';
   let agent=agentPage(agentId).startsWith('agent:')?await api(`/api/v1/agents/${encodeURIComponent(agentId)}`).catch(()=>null):(data.agents||[]).find(x=>x.id===agentId);
   if(main.dataset.page!==agentPage(agentId))return;
   if((!agent||!agent.enabled)&&!activeConversationId){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
@@ -433,9 +532,9 @@ async function agentWorkspaceV2(main, agentId) {
   const history=detail?.messages||[],attachedIds=new Set(history.map(item=>item.generation?.id).filter(Boolean));
   const remainingImages=(detail?.generations||[]).filter(item=>!attachedIds.has(item.id));
   const historicalImages=remainingImages.length?`<section class="conversation-artifacts"><h3>${icon('images',18)}本项目生成图片 <span>${remainingImages.length}</span></h3><div>${remainingImages.map(item=>image(item,detail?.project?.name||'历史生成图片')).join('')}</div></section>`:'';
-  const historyMarkup=history.length?`${history.map((item,index)=>messageHtml(item,item.role==='assistant'?[...history.slice(0,index)].reverse().find(previous=>previous.role==='user')?.content||'':'')).join('')}${historicalImages}`:agentFirstUseHtml(agent);
+  const historyMarkup=history.length?`${history.map((item,index)=>messageHtml(item,item.role==='assistant'?[...history.slice(0,index)].reverse().find(previous=>previous.role==='user')?.content||'':'',agentId)).join('')}${historicalImages}`:agentFirstUseHtml(agent);
   main.innerHTML=`<div class="creation-layout chatgpt-conversation-layout"><aside class="conversation-rail"><button class="button primary full" id="new-chat">${icon('plus')}新建项目</button><div class="conversation-rail-heading"><h3>${escapeHtml((conversations[0]?.project?.type)||'创作项目')}</h3><button class="link-button" data-go="history">全部历史</button></div>${conversations.map(x=>conversationRowHtml(x,'data-select-agent-conversation',activeConversationId===x.id)).join('')||'<div class="empty-state">暂无历史项目</div>'}</aside><section class="creation-main"><div class="agent-heading"><div>${icon(agent.icon||'bot',28)}<div><h1>${detail?escapeHtml(detail.project?.name||detail.title):escapeHtml(agent.name)}</h1><p>${detail?`${escapeHtml(detail.project?.type||'创作项目')} · ${detail.task_count||0} 次执行${detail.image_count?` · ${detail.image_count} 张图片`:''}`:`${escapeHtml(agent.description)} · ${agent.credit_cost} 积分 / 次`}</p></div></div><button class="button secondary history-shortcut" data-go="history">${icon('history')}历史项目</button></div><div id="chat-body" class="chat-body" aria-live="polite">${historyMarkup}</div><form class="composer" id="composer"><textarea id="prompt" required placeholder="${escapeHtml(agentPlaceholder(agentId))}"></textarea><div><span>${detail?'继续在当前项目里提出修改，系统会保留上文。':'可按需使用企业资料与品牌素材。'}</span><p class="composer-run-feedback" id="composer-run-feedback" role="status"></p><button class="button primary" id="composer-submit" type="submit" aria-label="发送消息" title="发送">${icon('send')}</button></div></form></section><aside class="creation-right"><section class="panel"><h3>当前智能体</h3><p><b>${escapeHtml(agent.name)}</b></p><p class="muted">${escapeHtml(agentFirstUse[agent.id]?.purpose||agent.description||'协助完成业务创作。')}</p></section><section class="panel"><h3>${detail?'当前项目':'本次执行'}</h3><p><b>${escapeHtml(detail?.project?.name||'新建项目')}</b></p><p class="muted">${detail?`最近保存：${escapeHtml(formatHistoryTime(detail.tasks?.at(-1)?.completed_at||detail.created_at))}`:'发送前可先选择示例，或直接描述你的业务需求。'}</p></section></aside></div>`;
-  main.querySelector('#new-chat').onclick=()=>{activeConversationId=null;navigate(agentPage(agentId));}; main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.selectAgentConversation;navigate(agentPage(agentId));}); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
+  main.querySelector('#new-chat').onclick=()=>{activeConversationId=null;navigate(agentPage(agentId));}; main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.selectAgentConversation;navigate(agentPage(agentId));}); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
   if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
   if(!canRun){main.querySelector('#new-chat').disabled=true;main.querySelector('#composer').innerHTML='<p role="status">智能体已停用，历史项目只读；不能创建任务或继续执行。</p>';main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
   bindNavigation();
@@ -453,6 +552,8 @@ function finishStreamTask(node,state,done,agentId,main,retryText){
   if(state?.run?.terminal==='cancelled')return;
   if(done.status==='cancelled'){cancelStreamingMessage(node,state,main);return;}
   if(done.status!=='completed'){applyStreamingEvent(state,'error',done);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);return;}
+  state.assistantMessageId=typeof done.assistant_message_id==='string'?done.assistant_message_id:'';
+  if(agentId==='campaign-agent')rememberActivityPlanResult(state.assistantMessageId,done.structured_result);
   state.run=state.run||createConversationRunState();state.run.terminal='completed';transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);
   applyStreamingEvent(state,'complete',done);activeConversationId=done.conversation_id||activeConversationId;
   pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');completeStreamingMessage(node,state,retryText,main);settleConversationRun(main,state,'completed');
@@ -558,7 +659,7 @@ function bindModalDialog(container,trigger=document.activeElement){const request
 function showHelpDialog(){const current=document.querySelector('#help-dialog');if(current){current.querySelector('.dialog-close')?.focus();return;}app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="help-dialog" role="presentation"><section class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title"><button type="button" class="dialog-close" aria-label="关闭帮助弹窗">${icon('x')}</button>${icon('circle-help',30)}<h2 id="help-title">帮助与反馈</h2><p>如在使用过程中遇到问题，请联系企业管理员或平台服务人员。</p></section></div>`);const dialog=document.querySelector('#help-dialog');bindModalDialog(dialog);refreshIcons();}
 function bindGenerationViewers(){document.querySelectorAll('[data-generation-link]:not([data-viewer-bound])').forEach(link=>{link.dataset.viewerBound='true';link.addEventListener('click',event=>{event.preventDefault();if(link.classList.contains('media-failed'))return;openGenerationViewer(link.href,link.querySelector('img')?.alt||'生成图片',link);});});document.querySelectorAll('.generation-result [onclick]:not([data-viewer-bound])').forEach(button=>{button.dataset.viewerBound='true';button.addEventListener('click',event=>{event.preventDefault();event.stopImmediatePropagation();const result=button.closest('.generation-result'),link=result?.querySelector('.media-thumb');if(link&&!link.classList.contains('media-failed'))openGenerationViewer(link.href,link.querySelector('img')?.alt||'生成图片',button);},{capture:true});});}
 function openGenerationViewer(source,alt,trigger=null){if(document.querySelector('#generation-viewer'))return;const origin=trigger||document.activeElement;app.insertAdjacentHTML('beforeend',`<div class="generation-viewer" id="generation-viewer" role="presentation"><section class="generation-viewer-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(alt)}大图预览"><header><b>${icon('image',18)}生成图片</b><div><a href="${escapeHtml(source)}" download class="viewer-download">${icon('download',18)}下载</a><button type="button" class="dialog-close" aria-label="关闭大图预览">${icon('x')}</button></div></header><div class="viewer-canvas"><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}"></div></section></div>`);const viewer=document.querySelector('#generation-viewer');bindModalDialog(viewer,origin);refreshIcons();}
-async function logout(){await api('/api/v1/auth/logout',{method:'POST'});me=null;activeConversationId=null;login();}
+async function logout(){await api('/api/v1/auth/logout',{method:'POST'});me=null;activeConversationId=null;activityPlanDocuments.clear();activityPlanBrandName='';clearActivityPlanSessionDocuments();login();}
 function bindNavigation(){document.querySelectorAll('[data-go]').forEach(x=>x.onclick=event=>{const modified=event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey;if(x.matches('a[href]')&&modified)return;event.preventDefault();navigate(x.dataset.go);});document.querySelectorAll('[data-conversation]').forEach(x=>x.onclick=()=>{activeAgentId='image-agent';activeConversationId=x.dataset.conversation;navigate('image');});}
 async function boot(){try{me=await api('/api/v1/me');const requested=pageFromNavigation(),path=pageRoutes[requested]||location.pathname;window.history.replaceState(navigationState(requested),'',path);shell(requested);}catch{login();}}
 const knowledgeStatus = value => ({uploaded:'已上传',queued:'排队中',parsing:'知识处理中',chunking:'知识处理中',embedding:'知识处理中',indexing:'知识处理中',ready:'已完成',failed:'失败'})[value]||value;
