@@ -161,14 +161,30 @@ const markdownInlineHtml = value => {
   html=html.replace(/\*([^*]+)\*/g,'<em>$1</em>').replace(/_([^_]+)_/g,'<em>$1</em>');
   return html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 };
+function markdownTableCells(line){
+  const value=String(line||'').trim().replace(/^\|/,'').replace(/\|$/,'');let cell='',cells=[];
+  for(let index=0;index<value.length;index++){
+    if(value[index]==='\\'&&value[index+1]==='|'){cell+='|';index++;}
+    else if(value[index]==='|'){cells.push(cell.trim());cell='';}
+    else cell+=value[index];
+  }
+  cells.push(cell.trim());return cells;
+}
+const markdownTableSeparator=line=>{const cells=markdownTableCells(line);return cells.length>1&&cells.every(cell=>/^:?-{3,}:?$/.test(cell));};
+const markdownTableCellHtml=value=>markdownInlineHtml(value).replace(/&lt;br\s*\/?&gt;/gi,'<br>');
 const markdownHtml = content => {
   const blocks=[],paragraph=[],lines=String(content||'').replace(/\r\n?/g,'\n').split('\n');let listType='',codeLines=null;
   const closeList=()=>{if(listType){blocks.push(`</${listType}>`);listType='';}};
   const flushParagraph=()=>{if(paragraph.length){blocks.push(`<p>${paragraph.splice(0).map(markdownInlineHtml).join('<br>')}</p>`);}};
-  for(const raw of lines){const line=raw.trim(),heading=line.match(/^(#{1,3})\s+(.+)$/),ordered=line.match(/^\d+[.)]\s+(.+)$/),bullet=line.match(/^[-*+]\s+(.+)$/),quote=line.match(/^>\s?(.+)$/);
+  for(let index=0;index<lines.length;index++){const raw=lines[index],line=raw.trim(),heading=line.match(/^(#{1,3})\s+(.+)$/),ordered=line.match(/^\d+[.)]\s+(.+)$/),bullet=line.match(/^[-*+]\s+(.+)$/),quote=line.match(/^>\s?(.+)$/);
     if(codeLines){if(/^```/.test(line)){blocks.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);codeLines=null;}else codeLines.push(raw);continue;}
     if(/^```/.test(line)){flushParagraph();closeList();codeLines=[];continue;}
     if(!line){flushParagraph();closeList();continue;}
+    if(line.includes('|')&&index+1<lines.length&&markdownTableSeparator(lines[index+1])){
+      flushParagraph();closeList();const headers=markdownTableCells(line);index++;
+      const rows=[];while(index+1<lines.length&&lines[index+1].trim().includes('|'))rows.push(markdownTableCells(lines[++index]));
+      blocks.push(`<div class="markdown-table-scroll"><table><thead><tr>${headers.map(value=>`<th>${markdownTableCellHtml(value)}</th>`).join('')}</tr></thead><tbody>${rows.map(cells=>`<tr>${headers.map((_,cellIndex)=>`<td>${markdownTableCellHtml(cells[cellIndex]||'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);continue;
+    }
     if(heading){flushParagraph();closeList();blocks.push(`<h${heading[1].length}>${markdownInlineHtml(heading[2])}</h${heading[1].length}>`);continue;}
     if(quote){flushParagraph();closeList();blocks.push(`<blockquote>${markdownInlineHtml(quote[1])}</blockquote>`);continue;}
     if(/^(---+|\*\*\*+|___+)$/.test(line)){flushParagraph();closeList();blocks.push('<hr>');continue;}
@@ -202,30 +218,37 @@ function rememberActivityPlanResult(messageId,result){
   if(previous&&JSON.stringify(previous.structuredResult.data)===JSON.stringify(result.data))return previous;
   const document=storedActivityPlanDocument(messageId),entry={structuredResult:result,state:document?'ready':'idle',document,error:''};activityPlanDocuments.set(messageId,entry);return entry;
 }
-const documentActionDetails=entry=>{const generating=entry.state==='generating',ready=entry.state==='ready';return {generating,label:generating?'正在生成...':ready?'下载 Word':entry.state==='error'?'重新生成 Word':'导出 Word',iconName:generating?'loader-circle':ready?'download':'file-text'};};
+const documentActionDetails=entry=>{const generating=entry.state==='generating';return {generating,label:generating?'正在生成 Word...':entry.state==='error'?'重试导出 Word':'导出 Word',iconName:generating?'loader-circle':'file-text'};};
 function documentActionHtml(messageId){
-  const entry=activityPlanDocuments.get(messageId);if(!entry)return '';
+  const entry=activityPlanDocuments.get(messageId);if(!entry||entry.state==='ready')return '';
   const {generating,label,iconName}=documentActionDetails(entry);
-  return `<span class="document-action-slot" data-document-action="${escapeHtml(messageId)}"><button type="button" class="button secondary document-export-button" data-document-export="${escapeHtml(messageId)}" ${generating?'disabled aria-busy="true"':''}><i data-lucide="${iconName}" width="15" height="15" aria-hidden="true"></i>${label}</button>${entry.error?`<span class="document-action-error" role="alert">${escapeHtml(entry.error)}</span>`:''}</span>`;
+  return `<span class="document-action-slot" data-document-action="${escapeHtml(messageId)}"><button type="button" class="button secondary document-export-button" data-document-export="${escapeHtml(messageId)}" ${generating?'disabled aria-busy="true"':''}><i data-lucide="${iconName}" width="15" height="15" aria-hidden="true"></i>${label}</button></span>`;
 }
+function documentResultHtml(messageId){
+  const entry=activityPlanDocuments.get(messageId);if(!entry)return '';
+  if(entry.state==='generating')return '<div class="document-result document-result-generating" role="status" aria-live="polite"><i data-lucide="loader-circle" width="18" height="18" aria-hidden="true"></i>正在生成 Word 文档...</div>';
+  if(entry.state==='error')return `<div class="document-result document-result-error" role="alert">${escapeHtml(entry.error||'Word 生成失败，请重试')}</div>`;
+  if(entry.state!=='ready'||!entry.document)return '';
+  const filename=escapeHtml(entry.document.filename),url=escapeHtml(entry.document.download_url),id=escapeHtml(messageId);
+  return `<section class="document-result document-result-ready" aria-label="Word 文档已生成"><p class="document-result-success"><i data-lucide="circle-check" width="18" height="18" aria-hidden="true"></i>已整理成正式 Word 活动方案。</p><a class="document-download-link" href="${url}" download="${filename}" data-document-download="${id}">下载《${filename.replace(/\.docx$/i,'')}》</a><a class="document-file-card" href="${url}" download="${filename}" data-document-download="${id}" aria-label="下载 Word 文档 ${filename}"><span class="document-file-icon" aria-hidden="true"><i data-lucide="file-text" width="22" height="22"></i></span><span class="document-file-details"><strong>${filename}</strong><small>Word 文档 · DOCX</small></span><i data-lucide="download" width="18" height="18" aria-hidden="true"></i></a>${entry.error?`<p class="document-action-error" role="alert">${escapeHtml(entry.error)}</p>`:''}</section>`;
+}
+const documentResultSlotHtml=messageId=>activityPlanDocuments.has(messageId)?`<div class="document-result-slot" data-document-result-slot="${escapeHtml(messageId)}">${documentResultHtml(messageId)}</div>`:'';
 const messageActionsHtml=(content,sourcePrompt='',messageId='')=>`${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}${documentActionHtml(messageId)}`;
 const messageHtml = (item, sourcePrompt='',agentId='') => {
   const isUser=item.role==='user';
   if(!isUser&&agentId==='campaign-agent')rememberActivityPlanResult(item.id,item.structured_result);
-  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}" ${!isUser&&item.id?`data-assistant-message-id="${escapeHtml(item.id)}"`:''}><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?escapeHtml(item.content).replace(/\n/g,'<br>'):markdownHtml(item.content)}</div>${!isUser?`<div class="message-actions">${messageActionsHtml(item.content,sourcePrompt,agentId==='campaign-agent'?item.id:'')}</div>${taskReferencesHtml(item.references)}`:''}${messageGenerationHtml(item.generation)}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
+  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}" ${!isUser&&item.id?`data-assistant-message-id="${escapeHtml(item.id)}"`:''}><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?escapeHtml(item.content).replace(/\n/g,'<br>'):markdownHtml(item.content)}</div>${!isUser?`<div class="message-actions">${messageActionsHtml(item.content,sourcePrompt,agentId==='campaign-agent'?item.id:'')}</div>${agentId==='campaign-agent'?documentResultSlotHtml(item.id):''}${taskReferencesHtml(item.references)}`:''}${messageGenerationHtml(item.generation)}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
 };
 function syncActivityPlanAction(main,messageId){
   const article=[...(main?.querySelectorAll?.('[data-assistant-message-id]')||[])].find(node=>node.dataset.assistantMessageId===messageId);
   const actions=article?.querySelector?.('.message-actions');if(!actions)return;
   const slot=[...(actions.querySelectorAll?.('[data-document-action]')||[])].find(node=>node.dataset.documentAction===messageId);
   const entry=activityPlanDocuments.get(messageId);
-  if(slot&&entry){
-    const button=slot.querySelector('[data-document-export]'),{generating,label,iconName}=documentActionDetails(entry);
-    if(button){button.innerHTML=`<i data-lucide="${iconName}" width="15" height="15" aria-hidden="true"></i>${label}`;button.disabled=generating;button.toggleAttribute('aria-busy',generating);}
-    const error=slot.querySelector('.document-action-error');
-    if(entry.error){if(error)error.textContent=entry.error;else slot.insertAdjacentHTML('beforeend',`<span class="document-action-error" role="alert">${escapeHtml(entry.error)}</span>`);}
-    else error?.remove();
-  }else if(entry)actions.insertAdjacentHTML('beforeend',documentActionHtml(messageId));
+  if(slot)slot.remove();
+  if(entry&&entry.state!=='ready')actions.insertAdjacentHTML('beforeend',documentActionHtml(messageId));
+  const resultSlot=article.querySelector?.('[data-document-result-slot]')||article.querySelector?.('[data-stream-document-result]');
+  if(resultSlot)resultSlot.innerHTML=documentResultHtml(messageId);
+  else if(entry)actions.insertAdjacentHTML('afterend',documentResultSlotHtml(messageId));
   bindConversationActions(main);refreshIcons();
 }
 function documentExportError(error){
@@ -279,16 +302,26 @@ function bindConversationActions(main){
   main.querySelectorAll('[data-copy-response]').forEach(node=>node.onclick=async()=>{const original=node.innerHTML;try{await navigator.clipboard.writeText(node.dataset.copyResponse);node.textContent='已复制';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}catch{node.textContent='复制失败';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}});
   main.querySelectorAll('[data-regenerate]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.regenerate;input.focus();});
   main.querySelectorAll('[data-document-export]').forEach(node=>node.onclick=()=>handleActivityPlanDocumentAction(main,node.dataset.documentExport));
+  main.querySelectorAll('[data-document-download]').forEach(node=>node.onclick=event=>{event.preventDefault();handleActivityPlanDocumentAction(main,node.dataset.documentDownload);});
   main.querySelectorAll('[data-open-message-generation]').forEach(node=>node.onclick=()=>openGenerationViewer(node.dataset.openMessageGeneration,'本次生成图片',node));
 }
-const safeActivityLabels=Object.freeze({queued:'准备回复',context_loading:'加载上下文',enterprise_config_loading:'加载企业配置',knowledge_retrieving:'检索企业知识',asset_retrieving:'查找企业资料',tool_running:'调用工具',generating:'内容生成',persisting:'整理结果',completed:'已完成',failed:'执行失败',cancelled:'已停止'});
-const taskStageLabel = stage => stage==='queued'?'正在准备':stage==='cancelling'?'正在停止生成':'正在思考';
-const activityDisplayLabel=(stage,status)=>{
-  const label=safeActivityLabels[stage]||'';
-  if(stage==='generating')return status==='completed'?'内容生成完成':'内容生成中';
-  if(status==='completed')return label;
-  return stage==='queued'?'正在准备':`正在${label}`;
+const safeActivityLabels=Object.freeze({queued:true,context_loading:true,enterprise_config_loading:true,knowledge_retrieving:true,asset_retrieving:true,tool_running:true,generating:true,persisting:true,completed:true,failed:true,cancelled:true});
+const activityDisplayLabel=(stage,status,planMode='generic')=>{
+  const done=status==='completed';
+  const labels={
+    queued:['正在理解你的需求','需求已接收'],
+    context_loading:['正在整理相关信息','相关信息已准备'],
+    enterprise_config_loading:['正在读取品牌信息','品牌信息已读取'],
+    knowledge_retrieving:['正在查找相关知识','相关知识已查找'],
+    asset_retrieving:['正在查找可用素材','可用素材已查找'],
+    tool_running:['正在处理所需资料','所需资料已处理'],
+    generating:planMode==='full'?['正在生成活动方案','活动方案已生成']:['正在生成内容','内容已生成'],
+    persisting:['正在整理最终结果','最终结果已整理'],
+    completed:['已完成','已完成'],failed:['执行失败','执行失败'],cancelled:['已停止','已停止'],
+  };
+  return labels[stage]?.[done?1:0]||'';
 };
+const taskStageLabel=stage=>({queued:'正在理解你的需求',loading_context:'正在整理相关信息',starting_runtime:'正在处理你的请求',persisting_result:'正在整理最终结果',completed:'已完成',cancelling:'正在停止生成'})[stage]||'正在处理你的请求';
 const STREAM_VISUAL_FRAME_MS=40,STREAM_SCROLL_FLUSH_MS=80,STREAM_FOLLOW_STOP_PX=96,STREAM_FOLLOW_RESUME_PX=32;
 const ConversationRunPhase=Object.freeze({IDLE:'IDLE',SUBMITTING:'SUBMITTING',RUNNING:'RUNNING',STOPPING:'STOPPING',COMPLETED:'COMPLETED',ERROR:'ERROR',CANCELLED:'CANCELLED'});
 const conversationRunTransitions=Object.freeze({IDLE:new Set(['SUBMITTING']),SUBMITTING:new Set(['RUNNING','ERROR']),RUNNING:new Set(['STOPPING','COMPLETED','ERROR','CANCELLED']),STOPPING:new Set(['RUNNING','COMPLETED','ERROR','CANCELLED']),COMPLETED:new Set(['IDLE']),ERROR:new Set(['IDLE']),CANCELLED:new Set(['IDLE'])});
@@ -297,11 +330,11 @@ function transitionConversationRun(run,next){
   if(!run||!conversationRunTransitions[run.phase]?.has(next))return false;
   run.phase=next;return true;
 }
-const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',displayText:'',visualPending:'',status:'正在思考',completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true,activities:[],activityEvents:[],activitySequence:0,currentActivity:null,thinkingStartedAt:Date.now(),taskStartedAt:null,firstDeltaAt:null,thinkingFinishedAt:null,thinkingAutoCollapsed:false,thinkingTimer:null,visualGeneration:0,visualStopped:false,run:createConversationRunState()});
+const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',displayText:'',visualPending:'',status:'正在思考',completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true,activities:[],activityEvents:[],activitySequence:0,currentActivity:null,conversationStartedAt:Date.now(),taskStartedAt:null,firstDeltaAt:null,completedAt:null,thinkingAutoCollapsed:false,thinkingTimer:null,planMode:'generic',visualGeneration:0,visualStopped:false,run:createConversationRunState()});
 const streamingActionsHtml = (content,sourcePrompt='',messageId='') => messageActionsHtml(content,sourcePrompt,messageId);
-const streamingThinkingHtml = () => `<details class="thinking-summary" data-thinking open><summary><span data-thinking-title>正在思考 · 1 秒</span></summary><ol data-thinking-list hidden></ol></details>`;
-const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true">${streamingThinkingHtml(status)}<div class="chat-message-content chat-message-content-markdown" data-stream-content><div data-stream-stable></div><div data-stream-active><p class="streaming-placeholder">${escapeHtml(status)}</p></div></div><div class="message-actions" data-stream-actions hidden></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
-const streamingFinalContentHtml = (content,sourcePrompt='',messageId='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt,messageId)}</div>`;
+const streamingThinkingHtml = () => `<details class="thinking-summary" data-thinking open><summary><span data-thinking-title>正在思考 · 不足 1 秒</span></summary><ol data-thinking-list hidden></ol></details>`;
+const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true">${streamingThinkingHtml(status)}<div class="chat-message-content chat-message-content-markdown" data-stream-content><div data-stream-stable></div><div data-stream-active><p class="streaming-placeholder">${escapeHtml(status)}</p></div></div><div class="message-actions" data-stream-actions hidden></div><div data-stream-document-result></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
+const streamingFinalContentHtml = (content,sourcePrompt='',messageId='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt,messageId)}</div>${documentResultSlotHtml(messageId)}`;
 const streamingFailureHtml = (partial,message,diagnosticId='') => `<section class="task-failure streaming-failure" role="alert">${partial?`<div class="streaming-partial"><small>部分回复（未保存）</small><div class="chat-message-content chat-message-content-markdown">${markdownHtml(partial)}</div></div>`:''}<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>${partial?'生成已中断。你可以保留这段内容，或重新尝试。':'你可以把原需求放回输入框，检查后再次提交。'}</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button></section>`;
 function acceptStreamingDelta(state,payload){
   const sequence=Number(payload?.sequence),text=typeof payload?.text==='string'?payload.text:'';
@@ -313,7 +346,7 @@ function acceptStreamingDelta(state,payload){
 function applyStreamingActivity(state,payload={}){
   const sequence=Number(payload.sequence),stage=String(payload.stage||''),status=String(payload.status||'');
   if(!Number.isInteger(sequence)||sequence<1||sequence<=state.activitySequence||!safeActivityLabels[stage]||!['started','completed'].includes(status))return false;
-  const activity={sequence,stage,status,label:activityDisplayLabel(stage,status),created_at:typeof payload.created_at==='string'?payload.created_at:''};
+  const activity={sequence,stage,status,label:activityDisplayLabel(stage,status,state.planMode),created_at:typeof payload.created_at==='string'?payload.created_at:''};
   state.activitySequence=sequence;state.activityEvents.push(activity);
   const currentGroup=state.activities[state.activities.length-1];
   if(currentGroup?.stage===stage&&status==='completed'&&currentGroup.status==='started'){
@@ -323,20 +356,20 @@ function applyStreamingActivity(state,payload={}){
   }else state.activities.push({...activity,count:status==='started'?1:0});
   state.currentActivity=activity;state.status=activity.label;return true;
 }
-function finishThinkingOnFirstDelta(state){
-  if(state.thinkingFinishedAt)return;
-  state.firstDeltaAt=Date.now();state.thinkingFinishedAt=state.firstDeltaAt;
-}
+function markFirstVisibleDelta(state){if(state.firstDeltaAt===null)state.firstDeltaAt=Date.now();}
 function applyStreamingEvent(state,kind,payload={}){
   if(state.completed||state.error||state.run?.terminal==='cancelled')return false;
   if(kind==='activity')return applyStreamingActivity(state,payload);
-  if(kind==='progress'){if(!state.currentActivity)state.status=taskStageLabel(payload.stage);return true;}
-  if(kind==='delta'){const changed=acceptStreamingDelta(state,payload);if(changed)finishThinkingOnFirstDelta(state);return changed;}
+  if(kind==='progress'){state.status=taskStageLabel(payload.stage);return true;}
+  if(kind==='delta'){const changed=acceptStreamingDelta(state,payload);if(changed)markFirstVisibleDelta(state);return changed;}
   if(kind==='complete'){state.completed=true;state.finalResponse=typeof payload.final_response==='string'?payload.final_response:state.text;return true;}
   if(kind==='error'){state.error=payload.message||customerErrorMessages.TASK_FAILED;state.diagnosticId=payload.diagnostic_id||'';return true;}
   return false;
 }
-function streamingScrollRoot(){return document.scrollingElement||document.documentElement||document.body;}
+function streamingScrollRoot(){
+  const conversation=document.querySelector?.('#chat-body');
+  return conversation&&typeof conversation.scrollTop==='number'&&typeof conversation.scrollHeight==='number'?conversation:document.scrollingElement||document.documentElement||document.body;
+}
 function streamingBottomDistance(root=streamingScrollRoot()){
   if(!root)return 0;
   const viewport=root.clientHeight||(typeof window!=='undefined'&&window.innerHeight)||0;
@@ -393,7 +426,7 @@ function clearStreamingVisualWork(state,{discard=false}={}){
 function stopThinkingClock(state){if(state?.thinkingTimer)clearInterval(state.thinkingTimer);if(state)state.thinkingTimer=null;}
 function startThinkingClock(node,state){
   if(!state||state.thinkingTimer||typeof setInterval!=='function')return;
-  state.thinkingTimer=setInterval(()=>{if(state.thinkingFinishedAt||state.completed||state.error||state.run?.terminal){stopThinkingClock(state);return;}renderThinkingSummary(node,state);},1000);
+  state.thinkingTimer=setInterval(()=>{if(state.completed||state.error||state.run?.terminal){stopThinkingClock(state);return;}renderThinkingSummary(node,state);},1000);
 }
 function composerRunControls(main){
   return {input:main?.querySelector?.('#prompt'),submit:main?.querySelector?.('#composer-submit'),feedback:main?.querySelector?.('#composer-run-feedback')};
@@ -449,16 +482,26 @@ async function requestStopGeneration(main,state){
 }
 function setStreamingTaskStartedAt(state,task={}){
   const startedAt=Date.parse(task.started_at||'');
-  if(Number.isFinite(startedAt)&&startedAt>0){state.taskStartedAt=startedAt;state.thinkingStartedAt=startedAt;}
+  if(Number.isFinite(startedAt)&&startedAt>0)state.taskStartedAt=startedAt;
+  if(state.restored&&task.created_at){
+    const value=String(task.created_at).replace(' ','T'),createdAt=Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value)?value:`${value}Z`);
+    if(Number.isFinite(createdAt)&&createdAt>0)state.conversationStartedAt=createdAt;
+  }
 }
-function thinkingDurationSeconds(state){const end=state.thinkingFinishedAt||Date.now(),start=state.taskStartedAt||state.firstDeltaAt||state.thinkingStartedAt;return Math.max(1,Math.ceil(Math.max(0,end-start)/1000));}
+function formatThinkingDuration(milliseconds){
+  const seconds=Math.floor(Math.max(0,milliseconds)/1000);
+  if(seconds<1)return '不足 1 秒';
+  if(seconds<60)return `${seconds} 秒`;
+  return `${Math.floor(seconds/60)} 分 ${seconds%60} 秒`;
+}
+function thinkingDuration(state){return formatThinkingDuration((state.completedAt??Date.now())-(state.conversationStartedAt??Date.now()));}
 function renderThinkingSummary(node,state){
   const details=node?.querySelector?.('[data-thinking]'),title=details?.querySelector?.('[data-thinking-title]'),list=details?.querySelector?.('[data-thinking-list]');if(!details)return;
-  const done=Boolean(state.thinkingFinishedAt||state.completed||state.error||state.run?.terminal==='cancelled');
+  const done=Boolean(state.completed||state.error||state.run?.terminal==='cancelled');
   details.classList?.toggle?.('is-thinking',!done);
-  if(title)title.textContent=done?`思考了 ${thinkingDurationSeconds(state)} 秒`:`正在思考 · ${thinkingDurationSeconds(state)} 秒`;
-  if(list){const cancelled=state.run?.terminal==='cancelled',markup=[...state.activities.map(item=>{const className=item.status==='completed'?'is-complete':cancelled?'is-stopped':done?'is-current':'is-active',count=item.count>1?` · ${item.count} 次`:'';return `<li class="thinking-activity ${className}">${escapeHtml(item.label)}${escapeHtml(count)}</li>`;}),cancelled?'<li class="thinking-terminal">已停止生成</li>':''].join('');list.hidden=!markup;if(list.innerHTML!==markup)list.innerHTML=markup;}
-  if(state.thinkingFinishedAt&&!state.thinkingAutoCollapsed){details.open=false;state.thinkingAutoCollapsed=true;}
+  if(title)title.textContent=state.completed?`思考了 ${thinkingDuration(state)}`:state.run?.terminal==='cancelled'?'已停止生成':state.error?'生成中断':`正在思考 · ${thinkingDuration(state)}`;
+  if(list){const cancelled=state.run?.terminal==='cancelled',markup=[...state.activities.map(item=>{const latest=item.sequence===state.currentActivity?.sequence,className=item.status==='completed'?'is-complete':cancelled?'is-stopped':!latest?'is-previous':done?'is-current':'is-active',label=!latest&&item.status==='started'?item.label.replace(/^正在/,''):item.label,count=item.count>1?` · ${item.count} 次`:'';return `<li class="thinking-activity ${className}">${escapeHtml(label)}${escapeHtml(count)}</li>`;}),cancelled?'<li class="thinking-terminal">已停止生成</li>':''].join('');list.hidden=!markup;if(list.innerHTML!==markup)list.innerHTML=markup;}
+  if((state.firstDeltaAt!==null||done)&&!state.thinkingAutoCollapsed){details.open=false;state.thinkingAutoCollapsed=true;}
 }
 function consumeStreamingVisualBuffer(state){
   if(!state.visualPending)return false;
@@ -490,15 +533,18 @@ function scheduleStreamingRender(node,state){
 }
 function completeStreamingMessage(node,state,sourcePrompt,main){
   if(!node)return;
-  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;if(!state.thinkingFinishedAt)state.thinkingFinishedAt=Date.now();const follow=syncStreamingFollow(state),finalResponse=state.finalResponse||state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
-  if(finalResponse===state.text&&content&&actions){renderStreamingMessage(node,state);const caret=content.querySelector?.('[data-stream-caret]');if(caret?.remove)caret.remove();if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt,state.assistantMessageId);}
-  else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
+  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;const follow=syncStreamingFollow(state),finalResponse=state.finalResponse||state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
+  if(content&&actions){
+    content.querySelector?.('[data-stream-caret]')?.remove?.();content.innerHTML=markdownHtml(finalResponse);
+    if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt,state.assistantMessageId);
+    const result=node.querySelector?.('[data-stream-document-result]');if(result)result.innerHTML=documentResultSlotHtml(state.assistantMessageId);
+  }else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
   if(state.assistantMessageId&&node.dataset)node.dataset.assistantMessageId=state.assistantMessageId;
-  node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);stopWatchingStreamingFollow(state);
+  node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);state.completedAt??=Date.now();renderThinkingSummary(node,state);stopWatchingStreamingFollow(state);
 }
 function cancelStreamingMessage(node,state,main){
   if(!node||state?.run?.terminal==='cancelled')return;
-  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.text=state.displayText;state.run=state.run||createConversationRunState();state.run.terminal='cancelled';if(!state.thinkingFinishedAt)state.thinkingFinishedAt=Date.now();renderThinkingSummary(node,state);
+  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.text=state.displayText;state.run=state.run||createConversationRunState();state.run.terminal='cancelled';renderThinkingSummary(node,state);
   const content=node.querySelector?.('[data-stream-content]'),active=content?.querySelector?.('[data-stream-active]'),caret=content?.querySelector?.('[data-stream-caret]'),status=node.querySelector?.('[data-stream-status]');
   caret?.remove?.();
   content?.querySelectorAll?.('[data-stream-caret],.streaming-caret')?.forEach?.(item=>item.remove?.());
@@ -541,9 +587,10 @@ async function agentWorkspaceV2(main, agentId) {
 }
 async function submitAgentTaskV2(event,agentId,main){
   event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim();if(!text||document.querySelector('#task-status'))return;
+  const submittedAt=Date.now();
   input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
   body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
-  const node=document.querySelector('#task-status'),state=createStreamingState();state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
+  const node=document.querySelector('#task-status'),state=createStreamingState();state.conversationStartedAt=submittedAt;state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
   const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;
   try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId,main);}
 }
@@ -553,7 +600,10 @@ function finishStreamTask(node,state,done,agentId,main,retryText){
   if(done.status==='cancelled'){cancelStreamingMessage(node,state,main);return;}
   if(done.status!=='completed'){applyStreamingEvent(state,'error',done);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);return;}
   state.assistantMessageId=typeof done.assistant_message_id==='string'?done.assistant_message_id:'';
-  if(agentId==='campaign-agent')rememberActivityPlanResult(state.assistantMessageId,done.structured_result);
+  if(agentId==='campaign-agent'&&rememberActivityPlanResult(state.assistantMessageId,done.structured_result)){
+    state.planMode='full';
+    for(const activity of state.activities)activity.label=activityDisplayLabel(activity.stage,activity.status,state.planMode);
+  }
   state.run=state.run||createConversationRunState();state.run.terminal='completed';transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);
   applyStreamingEvent(state,'complete',done);activeConversationId=done.conversation_id||activeConversationId;
   pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');completeStreamingMessage(node,state,retryText,main);settleConversationRun(main,state,'completed');
@@ -581,7 +631,7 @@ function restoreActiveConversationTask(main,agentId,detail){
   const body=main.querySelector?.('#chat-body');if(!body||main.querySelector?.('#task-status'))return;
   body.insertAdjacentHTML?.('beforeend',streamingMessageHtml(task.stage==='cancelling'?'正在停止生成':'正在恢复生成'));
   const node=main.querySelector?.('#task-status')||document.querySelector('#task-status');if(!node)return;
-  const state=createStreamingState();state.sourcePrompt=task.input_text||'';state.status=task.stage==='cancelling'?'正在停止生成':'正在恢复生成';state.follow=shouldAutoFollowStream();setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,phase:task.status==='cancelling'?ConversationRunPhase.STOPPING:ConversationRunPhase.RUNNING,restored:true});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);api(`/api/v1/tasks/${task.id}`).then(current=>{if(node._streamState!==state||state.run?.terminal)return;setStreamingTaskStartedAt(state,current);if(current.current_activity&&applyStreamingEvent(state,'activity',current.current_activity))scheduleStreamingRender(node,state);if(['completed','cancelled','failed'].includes(current.status))finishStreamTask(node,state,current,agentId,main,state.sourcePrompt);}).catch(()=>{});streamTask(task.id,agentId,main,state.sourcePrompt,node,state);
+  const state=createStreamingState();state.restored=true;state.sourcePrompt=task.input_text||'';state.status=task.stage==='cancelling'?'正在停止生成':'正在恢复生成';state.follow=shouldAutoFollowStream();setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,phase:task.status==='cancelling'?ConversationRunPhase.STOPPING:ConversationRunPhase.RUNNING,restored:true});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);api(`/api/v1/tasks/${task.id}`).then(current=>{if(node._streamState!==state||state.run?.terminal)return;setStreamingTaskStartedAt(state,current);if(current.current_activity&&applyStreamingEvent(state,'activity',current.current_activity))scheduleStreamingRender(node,state);if(['completed','cancelled','failed'].includes(current.status))finishStreamTask(node,state,current,agentId,main,state.sourcePrompt);}).catch(()=>{});streamTask(task.id,agentId,main,state.sourcePrompt,node,state);
 }
 
 async function agentWorkspace(main, agentId) {

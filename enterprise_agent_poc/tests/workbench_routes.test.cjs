@@ -345,17 +345,17 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=activity-plan-document-export-ux-v1/);
-  assert.match(index,/workbench\.js\?v=activity-plan-document-export-ux-v1/);
+  assert.match(index,/workbench\.css\?v=activity-plan-export-ux-polish-v1/);
+  assert.match(index,/workbench\.js\?v=activity-plan-export-ux-polish-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
 test('live task state stays compact and uses customer-facing thinking copy',()=>{
   const h=harness('/agents/campaign');
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
-  assert.equal(h.run("taskStageLabel('starting_runtime')"),'正在思考');
-  assert.equal(h.run("taskStageLabel('generating')"),'正在思考');
-  assert.equal(h.run("activityDisplayLabel('generating','started')"),'内容生成中');
+  assert.equal(h.run("taskStageLabel('starting_runtime')"),'正在处理你的请求');
+  assert.equal(h.run("taskStageLabel('generating')"),'正在处理你的请求');
+  assert.equal(h.run("activityDisplayLabel('generating','started')"),'正在生成内容');
   assert.ok(source.includes('streaming-message'));
   assert.ok(source.includes("source.addEventListener('delta'"));
   assert.match(css,/max-width:820px/);
@@ -379,7 +379,7 @@ test('streaming conversation state orders deltas and accepts the authoritative c
   const h=harness('/agents/campaign');
   h.run('streamState=createStreamingState()');
   assert.equal(h.run("applyStreamingEvent(streamState,'progress',{stage:'loading_context'})"),true);
-  assert.equal(h.run('streamState.status'),'正在思考');
+  assert.equal(h.run('streamState.status'),'正在整理相关信息');
   assert.equal(h.run("applyStreamingEvent(streamState,'delta',{sequence:2,text:'正文'})"),false);
   assert.equal(h.run("applyStreamingEvent(streamState,'delta',{sequence:1,text:'# 标题\\n\\n'})"),true);
   assert.equal(h.run('streamState.text'),'# 标题\n\n正文');
@@ -387,6 +387,7 @@ test('streaming conversation state orders deltas and accepts the authoritative c
   assert.equal(h.run('streamState.text'),'# 标题\n\n正文');
   assert.equal(h.run("applyStreamingEvent(streamState,'complete',{final_response:'## 最终正文'})"),true);
   assert.equal(h.run('streamState.finalResponse'),'## 最终正文');
+  assert.equal(h.run('streamState.completedAt'),null,'duration ends after the final DOM render');
   assert.ok(h.run("streamingFinalContentHtml(streamState.finalResponse,'原始需求')").includes('<h2>最终正文</h2>'));
   assert.ok(h.run("streamingMessageHtml('正在思考')").includes('data-stream-content'));
   assert.ok(h.run("streamingMessageHtml('正在思考')").includes('data-thinking'));
@@ -395,16 +396,17 @@ test('streaming conversation state orders deltas and accepts the authoritative c
 test('safe activity events render only real friendly stages and thinking auto-collapses on the first real delta',()=>{
   const h=harness('/agents/campaign');
   h.run("activityState=createStreamingState();applyStreamingEvent(activityState,'activity',{sequence:1,stage:'asset_retrieving',status:'started',created_at:'2026-09-18T00:00:00Z'});applyStreamingEvent(activityState,'activity',{sequence:2,stage:'asset_retrieving',status:'completed',created_at:'2026-09-18T00:00:01Z'});applyStreamingEvent(activityState,'activity',{sequence:3,stage:'generating',status:'started',created_at:'2026-09-18T00:00:02Z'});");
-  assert.equal(h.run('activityState.currentActivity.label'),'内容生成中');
-  assert.deepEqual(JSON.parse(h.run('JSON.stringify(activityState.activities.map(item=>item.label))')),['查找企业资料','内容生成中']);
+  assert.equal(h.run('activityState.currentActivity.label'),'正在生成内容');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(activityState.activities.map(item=>item.label))')),['可用素材已查找','正在生成内容']);
   assert.equal(h.run('activityState.activities[0].status'),'completed');
   assert.equal(h.run("applyStreamingEvent(activityState,'activity',{sequence:4,stage:'unsafe_debug',status:'started'})"),false);
   assert.equal(h.run("applyStreamingEvent(activityState,'delta',{sequence:1,text:'第一段'})"),true);
-  assert.ok(h.run('activityState.thinkingFinishedAt')>0);
+  assert.ok(h.run('activityState.firstDeltaAt')>0);
+  assert.equal(h.run('activityState.completedAt'),null);
   assert.equal(h.run('activityState.activities.length'),2,'delta must not fabricate a generating activity');
   assert.ok(!h.run("streamingThinkingHtml('正在准备')").includes('查看进度'));
-  h.run("thinkingTitle={textContent:''};thinkingList={innerHTML:''};thinkingDetails={open:true,querySelector(selector){return selector==='[data-thinking-title]'?thinkingTitle:selector==='[data-thinking-list]'?thinkingList:null;}};thinkingNode={querySelector(selector){return selector==='[data-thinking]'?thinkingDetails:null;}};activityState.thinkingStartedAt=Date.now()-2100;renderThinkingSummary(thinkingNode,activityState);thinkingDetails.open=true;renderThinkingSummary(thinkingNode,activityState);");
-  assert.match(h.run('thinkingTitle.textContent'),/^思考了 [1-9]\d* 秒$/);
+  h.run("thinkingTitle={textContent:''};thinkingList={innerHTML:''};thinkingDetails={open:true,querySelector(selector){return selector==='[data-thinking-title]'?thinkingTitle:selector==='[data-thinking-list]'?thinkingList:null;}};thinkingNode={querySelector(selector){return selector==='[data-thinking]'?thinkingDetails:null;}};activityState.conversationStartedAt=Date.now()-2100;renderThinkingSummary(thinkingNode,activityState);thinkingDetails.open=true;renderThinkingSummary(thinkingNode,activityState);");
+  assert.match(h.run('thinkingTitle.textContent'),/^正在思考 · [1-9]\d* 秒$/);
   assert.equal(h.run('thinkingDetails.open'),true);
 });
 
@@ -478,13 +480,13 @@ test('generating activity always supersedes the last real tool stage, including 
   const h=harness('/agents/campaign');
   h.run("timelineState=createStreamingState();setStreamingTaskStartedAt(timelineState,{started_at:'2026-09-18T01:00:00Z'});applyStreamingEvent(timelineState,'activity',{sequence:1,stage:'knowledge_retrieving',status:'started'});applyStreamingEvent(timelineState,'activity',{sequence:2,stage:'knowledge_retrieving',status:'completed'});applyStreamingEvent(timelineState,'activity',{sequence:3,stage:'asset_retrieving',status:'started'});applyStreamingEvent(timelineState,'activity',{sequence:4,stage:'asset_retrieving',status:'completed'});applyStreamingEvent(timelineState,'activity',{sequence:5,stage:'generating',status:'started'});");
   assert.equal(h.run('timelineState.currentActivity.stage'),'generating');
-  assert.equal(h.run('timelineState.currentActivity.label'),'内容生成中');
-  assert.deepEqual(JSON.parse(h.run('JSON.stringify(timelineState.activities.map(item=>[item.label,item.status]))')),[['检索企业知识','completed'],['查找企业资料','completed'],['内容生成中','started']]);
+  assert.equal(h.run('timelineState.currentActivity.label'),'正在生成内容');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(timelineState.activities.map(item=>[item.label,item.status]))')),[['相关知识已查找','completed'],['可用素材已查找','completed'],['正在生成内容','started']]);
   h.run("applyStreamingEvent(timelineState,'activity',{sequence:6,stage:'generating',status:'completed'})");
-  assert.equal(h.run('timelineState.currentActivity.label'),'内容生成完成');
+  assert.equal(h.run('timelineState.currentActivity.label'),'内容已生成');
   assert.equal(h.run('timelineState.activities.at(-1).status'),'completed');
   h.run("recoveredState=createStreamingState();setStreamingTaskStartedAt(recoveredState,{started_at:'2026-09-18T01:00:00Z'});applyStreamingEvent(recoveredState,'activity',{sequence:99,stage:'generating',status:'started'});");
-  assert.equal(h.run('recoveredState.currentActivity.label'),'内容生成中');
+  assert.equal(h.run('recoveredState.currentActivity.label'),'正在生成内容');
   assert.equal(h.run('recoveredState.taskStartedAt'),Date.parse('2026-09-18T01:00:00Z'));
   h.run("duplicateState=createStreamingState();applyStreamingEvent(duplicateState,'activity',{sequence:1,stage:'knowledge_retrieving',status:'started'});applyStreamingEvent(duplicateState,'activity',{sequence:2,stage:'knowledge_retrieving',status:'started'});applyStreamingEvent(duplicateState,'activity',{sequence:3,stage:'knowledge_retrieving',status:'completed'});");
   assert.equal(h.run('duplicateState.activities.length'),1);
@@ -498,7 +500,7 @@ test('cancel terminal invalidates queued visual work, removes the caret, and lea
   h.run("frameCallbacks=[];requestAnimationFrame=callback=>{frameCallbacks.push(callback);return frameCallbacks.length};cancelAnimationFrame=()=>{};raceInput={disabled:true};raceSubmit={classList:{toggle(){}},setAttribute(){},innerHTML:'',onclick:null};raceFeedback={textContent:''};raceMain={querySelector(selector){return selector==='#prompt'?raceInput:selector==='#composer-submit'?raceSubmit:selector==='#composer-run-feedback'?raceFeedback:null;}};raceTitle={textContent:''};raceList={innerHTML:'',hidden:false};raceThinkingClass={thinking:true,toggle(name,value){this[name]=value;}};raceThinking={open:true,classList:raceThinkingClass,querySelector(selector){return selector==='[data-thinking-title]'?raceTitle:selector==='[data-thinking-list]'?raceList:null;}};raceCaret={removed:false,remove(){this.removed=true;}};raceActive={innerHTML:'已显示文本'};raceStatusLabel={textContent:''};raceStatus={hidden:true,classList:{add(){}},querySelector(selector){return selector==='span'?raceStatusLabel:selector==='svg'||selector==='i'?{remove(){}}:null;}};raceContent={querySelector(selector){return selector==='[data-stream-stable]'?{innerHTML:''}:selector==='[data-stream-active]'?raceActive:selector==='[data-stream-caret]'?raceCaret:null;},querySelectorAll(){return [raceCaret];}};raceNode={id:'task-status',removeAttribute(name){if(name==='id')this.id='';},classList:{add(){}},querySelector(selector){return selector==='[data-thinking]'?raceThinking:selector==='[data-stream-content]'?raceContent:selector==='[data-stream-status]'?raceStatus:null;}};raceState=createStreamingState();raceState.displayText='已显示文本';raceState.text='已显示文本尚未展示';raceState.visualPending='尚未展示';beginConversationRun(raceState,{taskId:'task-race',agentId:'campaign-agent',phase:ConversationRunPhase.SUBMITTING});beginConversationRun(raceState,{taskId:'task-race',agentId:'campaign-agent',phase:ConversationRunPhase.RUNNING});applyStreamingEvent(raceState,'activity',{sequence:1,stage:'generating',status:'started'});scheduleStreamingRender(raceNode,raceState);capturedGeneration=raceState.visualGeneration;cancelStreamingMessage(raceNode,raceState,raceMain);frameCallbacks[0]();");
   assert.equal(h.run('raceState.visualPending'),'');
   assert.equal(h.run('raceState.text'),'已显示文本');
-  assert.equal(h.run('raceState.currentActivity.label'),'内容生成中');
+  assert.equal(h.run('raceState.currentActivity.label'),'正在生成内容');
   assert.equal(h.run('raceState.activities.at(-1).status'),'started');
   assert.equal(h.run('canRenderStreamingVisual(raceState,capturedGeneration)'),false);
   assert.equal(h.run('raceCaret.removed'),true);
@@ -553,12 +555,28 @@ test('streaming follow stops for reading and resumes at the bottom threshold',()
   assert.equal(h.run('followState.follow'),true);
 });
 
+test('streaming follow targets the fixed conversation pane instead of the page root',()=>{
+  const h=harness('/agents/campaign');
+  const pane={scrollHeight:1400,scrollTop:900,clientHeight:500,listeners:{},addEventListener(name,listener){this.listeners[name]=listener;},removeEventListener(name){delete this.listeners[name];}};
+  h.document.scrollingElement={scrollHeight:800,scrollTop:0,clientHeight:800};
+  h.document.querySelector=((original)=>selector=>selector==='#chat-body'?pane:original(selector))(h.document.querySelector.bind(h.document));
+  h.run('paneState=createStreamingState();watchStreamingFollow(paneState)');
+  assert.equal(h.run('paneState.followRoot'),pane);
+  pane.scrollHeight=1500;h.run('scrollStreamToBottom(true,paneState,true)');
+  assert.equal(pane.scrollTop,1500);
+  pane.scrollTop=300;pane.listeners.scroll();
+  assert.equal(h.run('paneState.follow'),false);
+  h.run('scrollStreamToBottom(paneState.follow,paneState,true)');
+  assert.equal(pane.scrollTop,300);
+});
+
 test('matching completion removes only the streaming affordances while authoritative completion still wins',()=>{
   const h=harness('/agents/campaign');
   h.run("completionStable={innerHTML:''};completionActive={innerHTML:''};caret={removed:false,remove(){this.removed=true;}};completionContent={querySelector(selector){if(selector==='[data-stream-stable]')return completionStable;if(selector==='[data-stream-active]')return completionActive;if(selector==='[data-stream-caret]')return caret;return null;}};completionStatus={hidden:false,querySelector(){return {textContent:''}}};completionActions={hidden:true,innerHTML:''};completionNode={id:'task-status',innerHTML:'',removeAttribute(name){if(name==='id')this.id='';},classList:{remove(){}},querySelector(selector){if(selector==='[data-stream-content]')return completionContent;if(selector==='[data-stream-actions]')return completionActions;if(selector==='[data-stream-status]')return completionStatus;return null;}};completionState=createStreamingState();completionState.text='同一份最终正文';completionState.finalResponse='同一份最终正文';completeStreamingMessage(completionNode,completionState,'原始需求',document.main)");
   assert.equal(h.run('completionNode.innerHTML'),'');
   assert.equal(h.run('completionNode.id'),'');
   assert.equal(h.run('caret.removed'),true);
+  assert.ok(h.run('completionContent.innerHTML').includes('同一份最终正文'));
   assert.equal(h.run('completionStatus.hidden'),true);
   assert.ok(h.run('completionActions.innerHTML').includes('复制'));
   h.run("authoritativeNode={innerHTML:'',removeAttribute(){},classList:{remove(){}}};authoritativeState=createStreamingState();authoritativeState.text='流式草稿';authoritativeState.finalResponse='服务端最终正文';completeStreamingMessage(authoritativeNode,authoritativeState,'原始需求',document.main)");
@@ -631,13 +649,18 @@ test('activity plan export posts the exact structured data, downloads the return
   const h=harness('/agents/campaign');h.run(`rememberActivityPlanResult('plan-1',${JSON.stringify(activityPlanResult)})`);
   const generating=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");
   assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'generating');
-  assert.ok(h.run("documentActionHtml('plan-1')").includes('正在生成...'));
+  assert.ok(h.run("documentActionHtml('plan-1')").includes('正在生成 Word...'));
+  assert.ok(h.run("documentResultHtml('plan-1')").includes('正在生成 Word 文档...'));
   assert.ok(h.run("documentActionHtml('plan-1')").includes('disabled'));
   assert.equal(h.pending.length,1);assert.equal(h.pending[0].options.method,'POST');
   assert.deepEqual(JSON.parse(h.pending[0].options.body).content,activityPlanResult.data);
   h.respond('/api/v1/documents/activity-plan',documentResponse('doc-1'));await generating;
   assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'ready');
-  assert.ok(h.run("documentActionHtml('plan-1')").includes('下载 Word'));
+  assert.equal(h.run("documentActionHtml('plan-1')"),'');
+  assert.ok(h.run("documentResultHtml('plan-1')").includes('已整理成正式 Word 活动方案'));
+  assert.ok(h.run("documentResultHtml('plan-1')").includes('document-download-link'));
+  assert.ok(h.run("documentResultHtml('plan-1')").includes('document-file-card'));
+  assert.ok(h.run("documentResultHtml('plan-1')").includes('秋季社区活动方案.docx'));
   const download=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");
   assert.equal(h.pending.at(-1).url,'/api/v1/documents/activity-plan/doc-1');
   assert.equal(h.pending.at(-1).options.credentials,'same-origin');
@@ -663,7 +686,8 @@ test('activity plan export errors stay local to a message and can be retried',as
   const failed=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");h.respondError('/api/v1/documents/activity-plan',500);await failed;
   assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'error');
   assert.equal(h.run("activityPlanDocuments.get('plan-1').error"),'Word 生成失败，请重试');
-  assert.ok(h.run("documentActionHtml('plan-1')").includes('重新生成 Word'));
+  assert.ok(h.run("documentActionHtml('plan-1')").includes('重试导出 Word'));
+  assert.ok(h.run("documentResultHtml('plan-1')").includes('Word 生成失败，请重试'));
   const retried=h.run("handleActivityPlanDocumentAction(document.main,'plan-1')");h.respond('/api/v1/documents/activity-plan',documentResponse('doc-retry'));await retried;
   assert.equal(h.run("activityPlanDocuments.get('plan-1').state"),'ready');
   assert.equal(h.run("activityPlanDocuments.get('plan-1').error"),'');
@@ -718,4 +742,76 @@ test('activity plan export actions remain wrapping and touch-sized on mobile',()
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
   assert.match(css,/\.chat-message \.message-actions\{flex-wrap:wrap;min-width:0\}/);
   assert.match(css,/@media\(max-width:860px\)\{\.chat-message \.message-actions \.button\{min-height:44px\}/);
+  assert.match(css,/\.document-file-details\{[^}]*min-width:0/);
+  assert.match(css,/\.document-file-details strong\{[^}]*overflow-wrap:anywhere/);
+  assert.match(css,/\.document-download-link\{[^}]*min-height:44px/);
+  assert.match(css,/\.chatgpt-conversation-layout \.chat-message,\.chatgpt-conversation-layout \.chat-message-content-markdown\{min-width:0\}/);
+});
+
+test('business progress labels follow real stages without inventing semantic validation',()=>{
+  const h=harness('/agents/campaign');
+  h.run("simpleProgress=createStreamingState();applyStreamingEvent(simpleProgress,'progress',{stage:'starting_runtime'});applyStreamingEvent(simpleProgress,'activity',{sequence:1,stage:'generating',status:'started'});applyStreamingEvent(simpleProgress,'activity',{sequence:2,stage:'generating',status:'completed'});");
+  assert.equal(h.run('simpleProgress.status'),'内容已生成');
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(simpleProgress.activities.map(x=>x.label))')),['内容已生成']);
+  assert.ok(!h.run('JSON.stringify(simpleProgress.activities)').includes('活动方案'));
+  assert.ok(!h.run('JSON.stringify(simpleProgress.activities)').includes('校验'));
+  assert.equal(h.run("activityDisplayLabel('generating','started','full')"),'正在生成活动方案');
+  assert.equal(h.run("activityDisplayLabel('generating','completed','full')"),'活动方案已生成');
+  assert.equal(h.run("taskStageLabel('persisting_result')"),'正在整理最终结果');
+});
+
+test('activity-plan Markdown keeps headings, lists, and escaped-pipe tables readable',()=>{
+  const h=harness('/agents/campaign');
+  const markdown='# 活动方案\n\n- 宣发渠道\n\n| 环节 | 说明 |\n| --- | --- |\n| 签到 | 执行\\|接待<br>待确认 |\n\n结束';
+  const html=h.run(`markdownHtml(${JSON.stringify(markdown)})`);
+  assert.match(html,/<h1>活动方案<\/h1>/);
+  assert.match(html,/<li>宣发渠道<\/li>/);
+  assert.match(html,/<table>/);
+  assert.match(html,/<td>执行\|接待<br>待确认<\/td>/);
+  assert.ok(!html.includes('&lt;br&gt;'));
+  assert.ok(h.run(`markdownHtml(${JSON.stringify('| a | b |\n| --- | --- |\n| <script> | safe |')})`).includes('&lt;script&gt;'));
+  h.run(`finalTableState=createStreamingState();finalTableState.text=${JSON.stringify(markdown)};finalTableState.finalResponse=finalTableState.text;finalTableContent={innerHTML:'',querySelector(){return null}};finalTableActions={hidden:true,innerHTML:''};finalTableNode={removeAttribute(){},classList:{remove(){}},querySelector(selector){return selector==='[data-stream-content]'?finalTableContent:selector==='[data-stream-actions]'?finalTableActions:null}};completeStreamingMessage(finalTableNode,finalTableState,'需求',document.main)`);
+  assert.match(h.run('finalTableContent.innerHTML'),/<table>/);
+  assert.match(h.run('finalTableContent.innerHTML'),/<li>宣发渠道<\/li>/);
+});
+
+test('thinking duration measures send to complete, not first delta, with minute formatting',()=>{
+  const h=harness('/agents/campaign');
+  assert.equal(h.run('formatThinkingDuration(42300)'),'42 秒');
+  assert.equal(h.run('formatThinkingDuration(88400)'),'1 分 28 秒');
+  assert.equal(h.run('formatThinkingDuration(700)'),'不足 1 秒');
+  h.run("durationState=createStreamingState();durationState.conversationStartedAt=0;applyStreamingEvent(durationState,'delta',{sequence:1,text:'第一段'});durationState.completedAt=42300;");
+  assert.equal(h.run('durationState.completed'),false);
+  assert.equal(h.run('thinkingDuration(durationState)'),'42 秒');
+  h.run("durationState.completedAt=88400;durationState.completed=true");
+  assert.equal(h.run('thinkingDuration(durationState)'),'1 分 28 秒');
+  h.run("durationTitle={textContent:''};durationList={innerHTML:'',hidden:false};durationDetails={open:true,classList:{toggle(){}},querySelector(selector){return selector==='[data-thinking-title]'?durationTitle:selector==='[data-thinking-list]'?durationList:null;}};durationNode={querySelector(selector){return selector==='[data-thinking]'?durationDetails:null;}};renderThinkingSummary(durationNode,durationState)");
+  assert.equal(h.run('durationTitle.textContent'),'思考了 1 分 28 秒');
+  assert.equal(h.run('durationDetails.open'),false);
+  h.run('durationDetails.open=true;renderThinkingSummary(durationNode,durationState)');
+  assert.equal(h.run('durationDetails.open'),true);
+});
+
+test('ready document result is message-scoped, hides internal IDs, and exposes two GET-only entry points',()=>{
+  const h=harness('/agents/campaign');
+  h.run(`rememberActivityPlanResult('message-one',${JSON.stringify(activityPlanResult)});activityPlanDocuments.get('message-one').state='ready';activityPlanDocuments.get('message-one').document=${JSON.stringify(documentResponse('private-doc-1'))}`);
+  const block=h.run("documentResultHtml('message-one')");
+  assert.match(block,/Word 文档 · DOCX/);
+  assert.match(block,/下载《秋季社区活动方案》/);
+  assert.equal((block.match(/data-document-download=/g)||[]).length,2);
+  assert.ok(!block.includes('document_id'));
+  assert.ok(!block.includes('storage_key'));
+  assert.ok(h.run("messageHtml({id:'message-one',role:'assistant',content:'正文'},'方案','campaign-agent')").includes('document-file-card'));
+});
+
+test('validated full-plan completion relabels only its real generating activity',()=>{
+  const h=harness('/agents/campaign');
+  h.run("fullState=createStreamingState();applyStreamingEvent(fullState,'activity',{sequence:1,stage:'generating',status:'started'});applyStreamingEvent(fullState,'activity',{sequence:2,stage:'generating',status:'completed'});fullNode={innerHTML:'',dataset:{},removeAttribute(){},classList:{remove(){}},querySelector(){return null}};");
+  h.run(`finishStreamTask(fullNode,fullState,{status:'completed',assistant_message_id:'full-message',structured_result:${JSON.stringify(activityPlanResult)},final_response:'活动方案'},'campaign-agent',document.main,'完整活动方案')`);
+  assert.equal(h.run('fullState.planMode'),'full');
+  assert.equal(h.run('fullState.activities[0].label'),'活动方案已生成');
+  assert.ok(h.run('fullState.completedAt')>0);
+  assert.equal(h.run('fullState.activities.length'),1);
+  assert.ok(h.run('fullNode.innerHTML').includes('导出 Word'));
+  assert.ok(!h.run('fullNode.innerHTML').includes('正在校验方案内容'));
 });
