@@ -72,6 +72,8 @@ class RuntimeTurn:
     status: str = "completed"
     error: str | None = None
     lifecycle_events: tuple[dict, ...] = ()
+    structured_result: dict | None = None
+    structured_diagnostic: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)

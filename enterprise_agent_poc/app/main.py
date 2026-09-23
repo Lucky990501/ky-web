@@ -671,7 +671,7 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
                 return
             if task["status"] in {"completed", "failed", "cancelled"}:
                 public = _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
-                terminal = {"status": public["status"], "error_code": public.get("error_code"), "message": public.get("user_message"), "diagnostic_id": public.get("diagnostic_id"), "final_response": public.get("final_response"), "conversation_id": public.get("conversation_id"), "generation": public.get("generation")}
+                terminal = {"status": public["status"], "error_code": public.get("error_code"), "message": public.get("user_message"), "diagnostic_id": public.get("diagnostic_id"), "final_response": public.get("final_response"), "conversation_id": public.get("conversation_id"), "generation": public.get("generation"), "assistant_message_id": public.get("assistant_message_id"), "structured_result": public.get("structured_result")}
                 if task["status"] == "cancelled":
                     yield f"event: cancelled\ndata: {json.dumps({'status': 'cancelled', 'task_id': task_id, 'message': 'Generation stopped'}, ensure_ascii=False)}\n\n"
                     return

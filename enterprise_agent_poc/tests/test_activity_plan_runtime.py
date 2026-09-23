@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from app import main
+from app.activity_plan_runtime import (
+    is_full_activity_plan, parse_plan, render_markdown, semantic_guard,
+)
+from app.document_generator import ActivityPlanContent, ActivityPlanDocumentService
+from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn
+from app.product_service import TaskService
+from app.product_store import ProductStore
+from app.runtime.codex_provider import CodexRuntimeProvider
+from app.service import AgentService
+from app.settings import Settings
+from app.storage import LocalStorage
+from app.store import POCStore
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def plan() -> dict:
+    result = json.loads((FIXTURES / "activity_plan_d2.json").read_text(encoding="utf-8"))
+    result["document_title"] = "社区教师节完整活动方案"
+    result["activity_theme"] = "社区教师节共读活动"
+    return result
+
+
+class ScriptedProvider(CodexRuntimeProvider):
+    def __init__(self, responses: list[str], grounding: tuple[str, ...] = ()) -> None:
+        super().__init__(None)
+        self.responses = list(responses)
+        self.options = []
+        self.grounding = grounding
+
+    async def create_session(self, profile, developer_instructions):
+        self._profiles[profile.id] = profile
+        return RuntimeSession("scripted-thread", profile.id)
+
+    async def resume_session(self, profile, thread_id, **kwargs):
+        self._profiles[profile.id] = profile
+        return RuntimeSession(thread_id, profile.id)
+
+    def startup_events(self, profile):
+        return ()
+
+    async def _stream_provider_turn(self, session, profile, message, *, output_schema=None, visible_deltas=True):
+        self.options.append((message, output_schema is not None, visible_deltas))
+        raw = self.responses.pop(0)
+        yield RuntimeStreamEvent.activity("tool_running", "completed")
+        if visible_deltas:
+            yield RuntimeStreamEvent.visible_delta(raw)
+        calls = tuple({"tool": "knowledge_search", "server": "platform", "status": "completed",
+                       "output_summary": value, "input_summary": None, "error": None} for value in self.grounding)
+        yield RuntimeStreamEvent.completed(RuntimeTurn(session.thread_id, raw, mcp_calls=calls))
+
+
+def collect(provider: ScriptedProvider, message: str, agent_id: str = "campaign-agent"):
+    profile = RuntimeProfile.build(
+        tenant_id="tenant-a", agent_id=agent_id, model_provider_id="deepseek",
+        model_id="deepseek-v4-pro", reasoning_effort="high", skill_manifest={},
+    )
+
+    async def run():
+        session = await provider.create_session(profile, "")
+        return [event async for event in provider.stream_turn(session, message)]
+
+    return asyncio.run(run())
+
+
+def full_request() -> str:
+    return "请给社区教师节设计完整活动方案，包含主题、时间、地点、宣发、执行和邀约"
+
+
+def test_rg1_simple_request_and_other_agents_keep_text_path():
+    simple = "给我想5个社区教师节活动标题"
+    assert not is_full_activity_plan("campaign-agent", simple)
+    events = collect(ScriptedProvider(["五个活动标题"]), simple)
+    assert events[-1].turn.text == "五个活动标题"
+    assert events[-1].turn.structured_result is None
+    assert not is_full_activity_plan("copywriting-agent", full_request())
+
+
+def test_rg2_rg3_full_plan_contract_and_deterministic_markdown():
+    source = plan()
+    provider = ScriptedProvider([json.dumps(source, ensure_ascii=False)])
+    events = collect(provider, full_request())
+    final = events[-1].turn
+    assert final.structured_result == {"type": "activity_plan", "version": "1", "data": source}
+    assert final.text == render_markdown(ActivityPlanContent.model_validate(source))
+    assert "社区教师节" in final.text
+    assert provider.options == [(provider.options[0][0], True, False)]
+    assert [event.kind for event in events] == ["activity", "delta", "completed"]
+
+
+def test_rg4_fenced_or_explained_json_needs_one_correction_or_fails_safe():
+    source = json.dumps(plan(), ensure_ascii=False)
+    assert parse_plan(f"```json\n{source}\n```") is None
+    assert parse_plan("解释：" + source) is None
+    corrected = collect(ScriptedProvider([f"```json\n{source}\n```", source]), full_request())[-1].turn
+    assert corrected.structured_result is not None
+    failed = collect(ScriptedProvider(["说明：" + source, "仍非 JSON"]), full_request())[-1].turn
+    assert failed.structured_result is None
+    assert "暂无法生成" in failed.text
+    assert failed.structured_diagnostic["code"] == "invalid_structured_output"
+
+
+def test_rg5_pending_staff_dependency_is_corrected_only_in_conflict_field():
+    source = plan()
+    source["pending_items"] = ["工作人员未确认"]
+    source["invitation_copy"] = "工作人员将进行一对一跟进。"
+    issues = semantic_guard(ActivityPlanContent.model_validate(source))
+    assert any(item.field == "invitation_copy" for item in issues)
+    fixed = {**source, "invitation_copy": "如工作人员确认到位，可安排一对一跟进，具体以确认结果为准。"}
+    result = collect(ScriptedProvider([json.dumps(source, ensure_ascii=False), json.dumps(fixed, ensure_ascii=False)]), full_request())[-1].turn
+    assert result.structured_result["data"] == fixed
+
+
+def test_rg6_pending_material_dependency_requires_conditional_language():
+    source = plan()
+    source["pending_items"] = ["手作物料尚未采购"]
+    source["invitation_copy"] = "现场设有手作区。"
+    assert any(item.type == "pending_dependency_committed" for item in semantic_guard(ActivityPlanContent.model_validate(source)))
+    fixed = {**source, "invitation_copy": "拟设置手作区，具体以物料确认后为准。"}
+    result = collect(ScriptedProvider([json.dumps(source, ensure_ascii=False), json.dumps(fixed, ensure_ascii=False)]), full_request())[-1].turn
+    assert result.structured_result["data"] == fixed
+
+
+def test_rg7_proposed_activity_does_not_require_enterprise_grounding():
+    source = plan()
+    source["activity_items"][0]["description"] = "建议设置教师心愿卡互动。"
+    assert semantic_guard(ActivityPlanContent.model_validate(source)) == []
+
+
+def test_rg8_rg9_enterprise_benefit_requires_matching_tool_evidence():
+    source = plan()
+    source["invitation_copy"] = "现场将提供价值1999元课程。"
+    parsed = ActivityPlanContent.model_validate(source)
+    assert any(item.type == "unverified_enterprise_benefit" for item in semantic_guard(parsed))
+    assert semantic_guard(parsed, ("企业资料：价值1999元课程，已确认可用于活动。",)) == []
+    failed = collect(ScriptedProvider([json.dumps(source, ensure_ascii=False)] * 2), full_request())[-1].turn
+    assert failed.structured_result is None
+    verified = collect(ScriptedProvider([json.dumps(source, ensure_ascii=False)], ("价值1999元课程",)), full_request())[-1].turn
+    assert verified.structured_result["data"] == source
+
+
+def test_rg10_rg11_message_association_and_sse_compatibility(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{tmp_path / 'product.db'}")
+    monkeypatch.setenv("ENTERPRISE_POC_OBJECT_STORAGE_DIR", str(tmp_path / "objects"))
+    store = POCStore(tmp_path / "product.db")
+    store.seed_demo_data()
+    product = ProductStore(store)
+    product.initialize()
+    product.create_user("tenant-a", "bridge-member@tenant-a.test", main.hash_password("ChangeMe!2026"), "成员", "member")
+    member = product.user_by_email("bridge-member@tenant-a.test")
+    runtime = ScriptedProvider(["五个标题", json.dumps(plan(), ensure_ascii=False)])
+    service = TaskService(product, AgentService(store, runtime, Settings.from_env()))
+    first = product.create_task("tenant-a", member["id"], "campaign-agent", "给我想5个社区教师节活动标题", None)
+    asyncio.run(service.execute(first))
+    first_saved = product.task(first["id"], "tenant-a", member["id"])
+    second = product.create_task("tenant-a", member["id"], "campaign-agent", full_request(), first_saved["conversation_id"])
+    asyncio.run(service.execute(second))
+    second_saved = product.task(second["id"], "tenant-a", member["id"])
+    assert first_saved["structured_result"] is None
+    assert second_saved["structured_result"]["type"] == "activity_plan"
+    assert second_saved["assistant_message_id"] == f"task:{second['id']}:assistant"
+    assert first_saved["assistant_message_id"] != second_saved["assistant_message_id"]
+    assert product.conversation_detail("tenant-a", member["id"], second_saved["conversation_id"])["messages"][-1]["id"] == second_saved["assistant_message_id"]
+
+    monkeypatch.setattr(main, "product_store", product)
+    token = main.sessions.issue(main.UserPrincipal(member["id"], "tenant-a", "member", main.sessions.credential_version(member["password_hash"])))
+    client = TestClient(main.app)
+    try:
+        client.cookies.set("workbench_session", token)
+        with client.stream("GET", f"/api/v1/tasks/{second['id']}/events") as response:
+            body = "".join(response.iter_text())
+        assert response.status_code == 200
+        assert all(f"event: {event}" in body for event in ("progress", "activity", "delta", "complete"))
+        complete = json.loads(body.split("event: complete\ndata: ", 1)[1].split("\n\n", 1)[0])
+        assert complete["assistant_message_id"] == second_saved["assistant_message_id"]
+        assert complete["structured_result"] == second_saved["structured_result"]
+    finally:
+        client.close()
+
+
+def test_rg12_validated_result_posts_to_document_generator(tmp_path, monkeypatch):
+    source = plan()
+    result = collect(ScriptedProvider([json.dumps(source, ensure_ascii=False)]), full_request())[-1].turn
+    assert result.structured_result is not None
+    monkeypatch.setattr(main, "document_service", ActivityPlanDocumentService(LocalStorage(tmp_path / "objects")))
+    store = POCStore(tmp_path / "auth.db")
+    store.seed_demo_data()
+    product = ProductStore(store)
+    product.initialize()
+    product.create_user("tenant-a", "doc-member@tenant-a.test", main.hash_password("ChangeMe!2026"), "成员", "member")
+    member = product.user_by_email("doc-member@tenant-a.test")
+    monkeypatch.setattr(main, "product_store", product)
+    token = main.sessions.issue(main.UserPrincipal(member["id"], "tenant-a", "member", main.sessions.credential_version(member["password_hash"])))
+    client = TestClient(main.app)
+    try:
+        client.cookies.set("workbench_session", token)
+        created = client.post("/api/v1/documents/activity-plan", json={"content": result.structured_result["data"]})
+        assert created.status_code == 201
+        downloaded = client.get(created.json()["download_url"])
+        assert downloaded.status_code == 200
+        assert downloaded.content.startswith(b"PK")
+    finally:
+        client.close()

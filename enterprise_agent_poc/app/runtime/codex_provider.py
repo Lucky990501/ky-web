@@ -7,11 +7,15 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn, SandboxPolicy
+from app.activity_plan_runtime import (
+    PLAN_SCHEMA, SAFE_FALLBACK, STRUCTURED_INSTRUCTION, correction_is_bounded,
+    correction_prompt, is_full_activity_plan, parse_plan, render_markdown, result_envelope, semantic_guard,
+)
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.skills import SkillDeployment
 from app.settings import Settings
@@ -294,6 +298,11 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn:
         profile = self._profiles[session.profile_id]
+        if is_full_activity_plan(getattr(profile, "agent_id", ""), message):
+            async for event in self.stream_turn(session, message):
+                if event.kind == "completed" and event.turn is not None:
+                    return event.turn
+            raise RuntimeError("structured turn completed event not received")
         thread = await self._thread_for_session(session, profile)
         result = await thread.run(message, sandbox=self._sandbox(profile.sandbox))
         return self._runtime_turn_from_result(session, profile, result)
@@ -379,7 +388,75 @@ class CodexRuntimeProvider(RuntimeProvider):
         )
 
     async def stream_turn(self, session: RuntimeSession, message: str) -> AsyncIterator[RuntimeStreamEvent]:
-        """Stream only official agent-message deltas, then one final RuntimeTurn."""
+        """Stream public text for simple turns, validated Markdown for full plans."""
+        profile = self._profiles[session.profile_id]
+        if not is_full_activity_plan(getattr(profile, "agent_id", ""), message):
+            async for event in self._stream_provider_turn(session, profile, message):
+                yield event
+            return
+
+        first_prompt = message + "\n\n" + STRUCTURED_INSTRUCTION
+        prompt = first_prompt
+        original = None
+        violations = []
+        diagnostic = "invalid_structured_output"
+        last_turn = None
+        use_schema = True
+        grounding: tuple[str, ...] = ()
+        for attempt in range(2):
+            try:
+                async for event in self._stream_provider_turn(
+                    session, profile, prompt, output_schema=PLAN_SCHEMA if use_schema else None,
+                    visible_deltas=False,
+                ):
+                    if event.kind == "completed":
+                        last_turn = event.turn
+                    else:
+                        yield event
+            except Exception as exc:
+                # A provider/adapter that rejects the schema can use one raw
+                # JSON attempt. Operational failures still follow normal error handling.
+                wording = str(exc).lower()
+                if attempt == 0 and any(part in wording for part in ("output_schema", "output schema", "json_schema", "json schema", "response_format")):
+                    use_schema = False
+                    prompt = first_prompt
+                    diagnostic = "native_schema_unavailable"
+                    continue
+                raise
+            if last_turn is None:
+                raise RuntimeError("structured turn completed event not received")
+            grounding += tuple(str(call.get("output_summary") or "") for call in last_turn.mcp_calls
+                               if call.get("tool") in {"knowledge_search", "enterprise_config_get"}
+                               and call.get("status") == "completed")
+            candidate = parse_plan(last_turn.text)
+            violations = semantic_guard(candidate, grounding) if candidate else []
+            if candidate and not violations and (original is None or correction_is_bounded(original, candidate, original_violations)):
+                markdown = render_markdown(candidate)
+                yield RuntimeStreamEvent.visible_delta(markdown)
+                yield RuntimeStreamEvent.completed(replace(
+                    last_turn, text=markdown, structured_result=result_envelope(candidate), structured_diagnostic=None,
+                ))
+                return
+            diagnostic = "semantic_guard_failed" if violations else "invalid_structured_output"
+            if attempt == 0:
+                original = candidate
+                original_violations = violations
+                prompt = correction_prompt(candidate, violations)
+
+        fallback = SAFE_FALLBACK
+        yield RuntimeStreamEvent.visible_delta(fallback)
+        yield RuntimeStreamEvent.completed(replace(
+            last_turn, text=fallback, structured_result=None,
+            structured_diagnostic={"code": diagnostic, "violations": [
+                {"type": item.type, "field": item.field} for item in violations
+            ]},
+        ))
+
+    async def _stream_provider_turn(
+        self, session: RuntimeSession, profile: RuntimeProfile, message: str,
+        *, output_schema: dict | None = None, visible_deltas: bool = True,
+    ) -> AsyncIterator[RuntimeStreamEvent]:
+        """Collect one SDK turn, preserving public activity and tool evidence."""
         from openai_codex.generated.v2_all import (
             AgentMessageDeltaNotification,
             ItemCompletedNotification,
@@ -389,9 +466,11 @@ class CodexRuntimeProvider(RuntimeProvider):
             TurnStatus,
         )
 
-        profile = self._profiles[session.profile_id]
         thread = await self._thread_for_session(session, profile)
-        handle = await thread.turn(message, sandbox=self._sandbox(profile.sandbox))
+        options = {"sandbox": self._sandbox(profile.sandbox)}
+        if output_schema is not None:
+            options["output_schema"] = output_schema
+        handle = await thread.turn(message, **options)
         self._active_turns[session.thread_id] = handle
         items: list[object] = []
         usage = None
@@ -406,7 +485,8 @@ class CodexRuntimeProvider(RuntimeProvider):
                     and payload.turn_id == handle.id
                     and payload.delta
                 ):
-                    yield RuntimeStreamEvent.visible_delta(payload.delta)
+                    if visible_deltas:
+                        yield RuntimeStreamEvent.visible_delta(payload.delta)
                 elif isinstance(payload, ItemStartedNotification) and payload.turn_id == handle.id:
                     activity = self._safe_tool_activity(getattr(payload, "item", None), "started")
                     if activity:

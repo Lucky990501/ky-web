@@ -367,6 +367,8 @@ class AgentService:
         trace["latency_ms"] = turn.latency_ms
         trace["error"] = AgentService._safe_error(turn.error) if turn.error else None
         trace["final_result"] = turn.text
+        trace["structured_result"] = turn.structured_result
+        trace["structured_result_diagnostic"] = turn.structured_diagnostic
         artifacts = dict(trace["artifacts"])
         for call in calls:
             if call["tool"] == "enterprise_config_get":

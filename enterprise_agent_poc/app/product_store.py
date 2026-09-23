@@ -567,6 +567,12 @@ class ProductStore:
                 if agent.allows_image_generation and trace_payload.get("artifact_available") is not True:
                     raise ValueError("Missing verified image artifact.")
 
+                from app.activity_plan_runtime import validated_envelope
+                grounding = tuple(str(call.get("output_summary") or "") for call in evidence.get("mcp_calls", [])
+                                  if call.get("tool") in {"knowledge_search", "enterprise_config_get"}
+                                  and call.get("status") == "completed")
+                structured_result = validated_envelope(evidence.get("structured_result"), response, grounding)
+
                 stage = "conversation_owner"
                 conn.execute(
                     "INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,?)",
@@ -612,7 +618,8 @@ class ProductStore:
 
                 stage = "task_result"
                 result_json = json.dumps(
-                    {"run_id": run_id, "assistant_message_id": assistant_message_id, "generation_id": generation_id},
+                    {"run_id": run_id, "assistant_message_id": assistant_message_id, "generation_id": generation_id,
+                     "structured_result": structured_result},
                     ensure_ascii=False,
                 )
                 conn.execute(
@@ -652,6 +659,10 @@ class ProductStore:
                         "artifact_available": True if generation_id else None,
                         "artifact_completed": True if agent.allows_image_generation else None,
                         "generation_id": generation_id,
+                        "structured_result": structured_result,
+                        "structured_result_diagnostic": evidence.get("structured_result_diagnostic") or (
+                            {"code": "persistence_validation_failed"} if evidence.get("structured_result") and not structured_result else None
+                        ),
                         "error": None,
                     }
                 )
@@ -858,7 +869,7 @@ class ProductStore:
 
     def task(self, task_id: str, tenant_id: str, user_id: str) -> dict | None:
         with self._store.connection() as conn:
-            row = conn.execute("SELECT t.*, r.final_response FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id WHERE t.id=? AND t.tenant_id=? AND t.user_id=?", (task_id,tenant_id,user_id)).fetchone()
+            row = conn.execute("SELECT t.*, r.final_response,r.result_json FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id WHERE t.id=? AND t.tenant_id=? AND t.user_id=?", (task_id,tenant_id,user_id)).fetchone()
             events = conn.execute("SELECT stage,message,created_at FROM task_events WHERE task_id=? AND stage<>'delta' ORDER BY id", (task_id,)).fetchall()
             generation = None
             if row and row["status"] in {"completed", "failed", "cancelled"}:
@@ -870,6 +881,9 @@ class ProductStore:
                 ).fetchone()
         if not row: return None
         result = dict(row)
+        result_metadata = json.loads(result.pop("result_json") or "{}")
+        result["assistant_message_id"] = result_metadata.get("assistant_message_id") if result["status"] == "completed" else None
+        result["structured_result"] = result_metadata.get("structured_result") if result["status"] == "completed" else None
         result["events"] = [dict(x) for x in events]
         result["current_activity"] = next(
             (
