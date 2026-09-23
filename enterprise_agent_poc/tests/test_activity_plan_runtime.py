@@ -52,6 +52,8 @@ class ScriptedProvider(CodexRuntimeProvider):
     async def _stream_provider_turn(self, session, profile, message, *, output_schema=None, visible_deltas=True):
         self.options.append((message, output_schema is not None, visible_deltas))
         raw = self.responses.pop(0)
+        if isinstance(raw, Exception):
+            raise raw
         yield RuntimeStreamEvent.activity("tool_running", "completed")
         if visible_deltas:
             yield RuntimeStreamEvent.visible_delta(raw)
@@ -107,7 +109,54 @@ def test_rg4_fenced_or_explained_json_needs_one_correction_or_fails_safe():
     failed = collect(ScriptedProvider(["说明：" + source, "仍非 JSON"]), full_request())[-1].turn
     assert failed.structured_result is None
     assert "暂无法生成" in failed.text
-    assert failed.structured_diagnostic["code"] == "invalid_structured_output"
+    assert failed.structured_diagnostic["code"] == "format_validation_failed_after_retry"
+    assert failed.structured_model_calls == 2
+    assert [step["stage"] for step in failed.structured_attempt_trace] == [
+        "INITIAL", "FORMAT_VALIDATION", "SEMANTIC_VALIDATION", "CORRECTION",
+        "FORMAT_VALIDATION", "REVALIDATION", "FINAL",
+    ]
+
+
+def test_schema_rejection_uses_only_one_raw_json_retry():
+    source = json.dumps(plan(), ensure_ascii=False)
+    provider = ScriptedProvider([RuntimeError("output_schema unsupported"), source])
+    turn = collect(provider, full_request())[-1].turn
+    assert turn.structured_result is not None
+    assert turn.structured_model_calls == 2
+    assert [option[1] for option in provider.options] == [True, False]
+
+
+def test_targeted_correction_preserves_non_conflict_fields_and_revalidates():
+    source = plan()
+    source["pending_items"] = ["工作人员未确认"]
+    source["invitation_copy"] = "工作人员将进行一对一跟进。"
+    corrected = {**source, "document_title": "模型擅自改写的标题",
+                 "invitation_copy": "如工作人员确认到位，可安排一对一跟进。"}
+    turn = collect(ScriptedProvider([
+        json.dumps(source, ensure_ascii=False), json.dumps(corrected, ensure_ascii=False)
+    ]), full_request())[-1].turn
+    assert turn.structured_result["data"]["document_title"] == source["document_title"]
+    assert turn.structured_result["data"]["invitation_copy"] == corrected["invitation_copy"]
+    assert turn.structured_result_status == "validated_after_retry"
+    assert turn.structured_attempt_trace[-1]["correction_result"] == "PASS"
+
+
+def test_new_semantic_violation_after_retry_fails_safe_without_content_trace():
+    source = plan()
+    source["pending_items"] = ["工作人员未确认"]
+    source["invitation_copy"] = "工作人员将进行一对一跟进。"
+    corrected = {**source, "invitation_copy": "如工作人员确认到位，可安排一对一跟进。现场将赠送价值1999元课程。"}
+    turn = collect(ScriptedProvider([
+        json.dumps(source, ensure_ascii=False), json.dumps(corrected, ensure_ascii=False)
+    ]), full_request())[-1].turn
+    assert turn.structured_result is None
+    assert turn.structured_result_status == "semantic_guard_failed_after_retry"
+    assert turn.structured_model_calls == 2
+    assert turn.structured_attempt_trace[-1]["correction_result"] == "FAIL"
+    assert {item["type"] for item in turn.structured_attempt_trace[-2]["violations"]} == {
+        "unverified_enterprise_benefit"
+    }
+    assert "1999" not in json.dumps(turn.structured_attempt_trace, ensure_ascii=False)
 
 
 def test_rg5_pending_staff_dependency_is_corrected_only_in_conflict_field():
@@ -129,6 +178,48 @@ def test_rg6_pending_material_dependency_requires_conditional_language():
     fixed = {**source, "invitation_copy": "拟设置手作区，具体以物料确认后为准。"}
     result = collect(ScriptedProvider([json.dumps(source, ensure_ascii=False), json.dumps(fixed, ensure_ascii=False)]), full_request())[-1].turn
     assert result.structured_result["data"] == fixed
+
+
+def test_conditional_material_readiness_and_safe_fallback_are_not_false_positives():
+    source = plan()
+    source["pending_items"] = ["心愿卡物料采购与数量【待确认】"]
+    source["invitation_copy"] = (
+        "若心愿卡与手作材料已备齐，还可参与寄语墙与感恩手作工坊。"
+        "若材料未到位，相关环节将调整为口头寄语或绘画致谢。"
+    )
+    source["activity_items"][0]["description"] = (
+        "若心愿卡物料已采购到位，参与者现场领取心愿卡并写下感谢。"
+    )
+    assert semantic_guard(ActivityPlanContent.model_validate(source)) == []
+
+
+def test_negative_condition_cannot_hide_continued_material_commitment():
+    source = plan()
+    source["pending_items"] = ["手作物料尚未采购"]
+    source["invitation_copy"] = "若手作物料未到位，现场仍将提供手作材料。"
+    assert any(item.type == "pending_dependency_committed" for item in
+               semantic_guard(ActivityPlanContent.model_validate(source)))
+
+
+def test_pending_date_disclosure_and_verified_course_description_do_not_cross_trigger():
+    source = plan()
+    source["pending_items"] = [
+        "活动具体日期、时段与场地地址", "教师专属礼遇具体内容待确认",
+        "实际参与讲师及课程演示的具体安排",
+    ]
+    source["invitation_copy"] = "活动具体日期、地点与礼遇内容将另行通知，敬请关注官方通知。"
+    source["activity_items"][0]["description"] = "参与者获得活动参与感，下一步进入主会场环节。"
+    source["activity_items"].append({**source["activity_items"][0],
+        "description": "介绍已核实的秋季课程分层教学方式，提供轻量学习体验，不承诺提分。"})
+    assert semantic_guard(ActivityPlanContent.model_validate(source)) == []
+
+
+def test_disclosure_does_not_mask_a_separate_benefit_promise():
+    source = plan()
+    source["pending_items"] = ["教师专属礼遇内容待确认"]
+    source["invitation_copy"] = "礼遇详情将另行通知，但现场仍将赠送课程礼品。"
+    assert any(item.dependency_kind == "benefit" for item in
+               semantic_guard(ActivityPlanContent.model_validate(source)))
 
 
 def test_rg7_proposed_activity_does_not_require_enterprise_grounding():
@@ -172,6 +263,12 @@ def test_rg10_rg11_message_association_and_sse_compatibility(tmp_path, monkeypat
     assert second_saved["assistant_message_id"] == f"task:{second['id']}:assistant"
     assert first_saved["assistant_message_id"] != second_saved["assistant_message_id"]
     assert product.conversation_detail("tenant-a", member["id"], second_saved["conversation_id"])["messages"][-1]["id"] == second_saved["assistant_message_id"]
+    trace = store.run_trace(second_saved["run_id"], "tenant-a")["payload"]
+    assert trace["structured_result_status"] == "validated_initial"
+    assert trace["total_model_calls_for_structured_result"] == 1
+    assert [step["stage"] for step in trace["structured_attempt_trace"]] == [
+        "INITIAL", "FORMAT_VALIDATION", "SEMANTIC_VALIDATION", "FINAL",
+    ]
 
     monkeypatch.setattr(main, "product_store", product)
     token = main.sessions.issue(main.UserPrincipal(member["id"], "tenant-a", "member", main.sessions.credential_version(member["password_hash"])))
@@ -187,6 +284,32 @@ def test_rg10_rg11_message_association_and_sse_compatibility(tmp_path, monkeypat
         assert complete["structured_result"] == second_saved["structured_result"]
     finally:
         client.close()
+
+
+def test_semantic_failure_after_one_retry_completes_without_exportable_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{tmp_path / 'product.db'}")
+    store = POCStore(tmp_path / "product.db")
+    store.seed_demo_data()
+    product = ProductStore(store)
+    product.initialize()
+    product.create_user("tenant-a", "unsafe-member@tenant-a.test", main.hash_password("ChangeMe!2026"), "成员", "member")
+    member = product.user_by_email("unsafe-member@tenant-a.test")
+    source = plan()
+    source["pending_items"] = ["工作人员未确认"]
+    source["invitation_copy"] = "工作人员将进行一对一跟进。"
+    runtime = ScriptedProvider([json.dumps(source, ensure_ascii=False)] * 2)
+    service = TaskService(product, AgentService(store, runtime, Settings.from_env()))
+    task = product.create_task("tenant-a", member["id"], "campaign-agent", full_request(), None)
+    asyncio.run(service.execute(task))
+    saved = product.task(task["id"], "tenant-a", member["id"])
+    trace = store.run_trace(saved["run_id"], "tenant-a")["payload"]
+    assert saved["status"] == "completed"
+    assert saved["structured_result"] is None
+    assert "暂无法生成" in saved["final_response"]
+    assert trace["structured_result_status"] == "semantic_guard_failed_after_retry"
+    assert trace["total_model_calls_for_structured_result"] == 2
+    assert trace["structured_attempt_trace"][-1]["correction_result"] == "FAIL"
 
 
 def test_rg12_validated_result_posts_to_document_generator(tmp_path, monkeypatch):

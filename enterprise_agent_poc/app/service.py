@@ -369,6 +369,9 @@ class AgentService:
         trace["final_result"] = turn.text
         trace["structured_result"] = turn.structured_result
         trace["structured_result_diagnostic"] = turn.structured_diagnostic
+        trace["structured_attempt_trace"] = list(turn.structured_attempt_trace)
+        trace["structured_result_status"] = turn.structured_result_status
+        trace["total_model_calls_for_structured_result"] = turn.structured_model_calls
         artifacts = dict(trace["artifacts"])
         for call in calls:
             if call["tool"] == "enterprise_config_get":

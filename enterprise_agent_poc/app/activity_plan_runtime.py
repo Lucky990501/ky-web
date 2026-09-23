@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from dataclasses import dataclass
 
 from pydantic import ValidationError
@@ -39,17 +40,33 @@ STRUCTURED_INSTRUCTION = (
 SAFE_FALLBACK = "本次方案暂无法生成可靠的可导出文档，请调整需求后重试。"
 _FULL_PLAN = re.compile(r"(?:完整|详细|正式).{0,12}(?:活动方案|活动策划|执行方案)|(?:活动方案|活动策划|执行方案).{0,8}(?:完整|详细|全套)|(?:社区|节日|教师节|客户答谢|开学季).{0,8}(?:活动方案|执行方案)")
 _SIMPLE = re.compile(r"(?:想|写|给我|提供).{0,6}(?:\d+|几|五|三).{0,8}(?:标题|主题|句邀约|条文案)|(?:标题|主题|文案).{0,8}(?:几个|几条)")
-_CONDITIONAL = re.compile(r"建议|拟|可考虑|计划|待确认|确认后|视.{0,12}情况|以.{0,18}为准|如.{0,18}确认|若.{0,18}确认|在.{0,18}确认后")
-_COMMITTED = re.compile(r"将|会|已|现场.{0,4}(?:有|设|提供|安排)|提供|安排|确保|赠送|免费|可获得|可领取")
+_CONDITIONAL = re.compile(r"建议|拟|可考虑|计划|待确认|(?<!未)确认后|视.{0,12}情况|以.{0,18}为准|在.{0,18}确认后")
+_IF_CLAUSE = re.compile(r"(?:^|[，,])\s*(?:若|如果|如|假如|倘若)([^，,]{1,60})")
+_COMMITTED = re.compile(r"将|会(?=在|于|由|安排|提供|开展|进行|有|赠送|领取|设置|组织|负责)|已(?:确认|安排|提供|采购|准备|落实)|现场.{0,4}(?:有|设|提供|安排)|(?<!未)(?<!不)提供|(?<!未)(?<!不)安排|确保|赠送|免费|可获得|可领取")
+_DISCLOSURE = re.compile(r"(?:将|会)?(?:另行通知|待通知|待公布|待确认|待定)")
 _BENEFIT = re.compile(r"(?:价值|售价|价格|优惠|权益|赠送|免费).{0,15}\d[\d,]*\s*元|\d[\d,]*\s*元.{0,15}(?:课程|礼品|权益|服务)")
 _DEPENDENCIES = {
     "staff": (r"工作人员|执行人员|志愿者|师资|讲师|顾问", r"工作人员|讲师|顾问|志愿者|一对一跟进|专人"),
     "material": (r"物料|材料|道具|手作|花材|桌椅|设备", r"手作|物料|材料|道具|花材|桌椅|设备|手作区"),
-    "benefit": (r"权益|礼品|赠品|奖品|预算|采购", r"权益|礼品|赠品|奖品|课程|免费|赠送|领取"),
+    "benefit": (r"权益|礼品|赠品|奖品|礼遇|预算|采购", r"权益|礼品|赠品|奖品|礼遇|优惠|免费|赠送|领取"),
     "location": (r"地点|场地|会场", r"地点|场地|会场"),
     "time": (r"时间|日期|档期", r"时间|日期|档期|开始|结束"),
-    "service": (r"服务|课程|外部资源|合作方", r"服务|课程|外部资源|合作方"),
+    "service": (r"服务|课程演示|课程讲解|外部资源|合作方", r"服务|课程演示|课程讲解|外部资源|合作方"),
 }
+
+
+def _conditional_clause(clause: str) -> bool:
+    if _CONDITIONAL.search(clause):
+        return True
+    premise = _IF_CLAUSE.search(clause)
+    if not premise:
+        return False
+    condition = premise.group(1)
+    if re.search(r"未|不足|无法|不能|缺少", condition):
+        # A missing dependency permits a fallback, not a promise to perform
+        # the same dependent activity anyway.
+        return bool(re.search(r"调整|改为|替代|取消|顺延|不开展|转为", clause))
+    return bool(re.search(r"确认|到位|备齐|落实|获批|可用|采购完成|充足|有保障", condition))
 
 
 def is_full_activity_plan(agent_id: str, message: str) -> bool:
@@ -73,9 +90,11 @@ class Violation:
     field: str
     evidence: str
     pending_item: str = ""
+    dependency_kind: str = ""
 
     def public(self) -> dict[str, str]:
-        return {"type": self.type, "field": self.field, "evidence": self.evidence, "pending_item": self.pending_item}
+        return {"type": self.type, "field": self.field, "evidence": self.evidence,
+                "pending_item": self.pending_item, "dependency_kind": self.dependency_kind}
 
 
 def semantic_guard(plan: ActivityPlanContent, grounding: tuple[str, ...] = ()) -> list[Violation]:
@@ -90,46 +109,76 @@ def semantic_guard(plan: ActivityPlanContent, grounding: tuple[str, ...] = ()) -
             if not re.search(pending_pattern, pending):
                 continue
             for field, value in fields.items():
-                if field == "activity_time" and kind != "time" or field == "activity_location" and kind != "location":
+                if (field == "activity_time" and kind != "time"
+                        or field == "activity_location" and kind != "location"
+                        or kind in {"time", "location"} and field not in
+                        {"activity_time", "activity_location", "invitation_copy"}):
                     continue
                 for clause in re.split(r"[。！？；;\n]", value):
-                    if re.search(use_pattern, clause) and _COMMITTED.search(clause) and not _CONDITIONAL.search(clause):
-                        violations.append(Violation("pending_dependency_committed", field, clause[:180], pending[:180]))
+                    if _conditional_clause(clause):
+                        continue
+                    checked = _DISCLOSURE.sub("", clause)
+                    if re.search(use_pattern, checked) and _COMMITTED.search(checked):
+                        violations.append(Violation("pending_dependency_committed", field, clause[:180], pending[:180], kind))
     evidence = " ".join(grounding)
     for field, value in fields.items():
         for clause in re.split(r"[。！？；;\n]", value):
             match = _BENEFIT.search(clause)
-            if match and not _CONDITIONAL.search(clause) and match.group() not in evidence:
-                violations.append(Violation("unverified_enterprise_benefit", field, match.group()[:180]))
+            if match and not _conditional_clause(clause) and match.group() not in evidence:
+                violations.append(Violation("unverified_enterprise_benefit", field, match.group()[:180], dependency_kind="benefit"))
     return list(dict.fromkeys(violations))
 
 
 def correction_prompt(plan: ActivityPlanContent | None, violations: list[Violation]) -> str:
     if plan is None:
         return STRUCTURED_INSTRUCTION + " 上轮输出不是完整合法的 JSON object；请重新输出，不要代码块或附言。"
-    details = json.dumps([item.public() for item in violations], ensure_ascii=False)
+    required = {
+        "pending_dependency_committed": "仅在该字段中把未确认的人、物料、时间、场地或服务表述为条件性提案、明确待确认，或删除确定性承诺。",
+        "unverified_enterprise_benefit": "仅在该字段中删除未经核实的企业权益，或明确改为待确认提案；不得编造新权益。",
+    }
+    details = json.dumps([
+        {**item.public(), "required_correction": required.get(item.type, "仅修正该字段的已标记冲突。")}
+        for item in violations
+    ], ensure_ascii=False)
     return (
         "请修正上一轮活动方案 JSON 中的语义冲突，并仍只返回完整严格 JSON object。"
-        "仅修改以下冲突字段，其他字段和已核实事实保持原样；不可增加企业事实。"
-        "待确认依赖须条件化，未经依据的企业权益须删除或明确待确认。冲突：" + details
+        "只修改下面列出的冲突字段；document_title、activity_theme、target_audience、已有活动创意、"
+        "已验证企业事实和其他字段必须逐字保留，不可增加企业事实。"
+        "Runtime 会只提取冲突字段的修正并重新执行完整验证。冲突：" + details
+        + "\n原始 JSON：" + json.dumps(plan.model_dump(), ensure_ascii=False)
     )
 
 
-def correction_is_bounded(original: ActivityPlanContent, corrected: ActivityPlanContent,
-                          violations: list[Violation]) -> bool:
+def merge_targeted_correction(original: ActivityPlanContent, corrected: ActivityPlanContent,
+                              violations: list[Violation]) -> ActivityPlanContent | None:
+    """Keep every original field except model-authored fixes to named conflicts."""
     before, after = original.model_dump(), corrected.model_dump()
-    allowed = {item.field for item in violations}
     if len(before["activity_items"]) != len(after["activity_items"]):
-        return False
-    for key in before:
-        if key == "activity_items":
-            for index, (old, new) in enumerate(zip(before[key], after[key])):
-                for field in old:
-                    if old[field] != new[field] and f"activity_items.{index}.{field}" not in allowed:
-                        return False
-        elif before[key] != after[key] and key not in allowed:
-            return False
-    return True
+        return None
+    for violation in violations:
+        field = violation.field
+        if field in before and field != "activity_items":
+            before[field] = after[field]
+            continue
+        match = re.fullmatch(r"activity_items\.(\d+)\.(phase|name|description|image_requirement)", field)
+        if match:
+            index, child = int(match.group(1)), match.group(2)
+            if index >= len(before["activity_items"]):
+                return None
+            before["activity_items"][index][child] = after["activity_items"][index][child]
+    return ActivityPlanContent.model_validate(before)
+
+
+def safe_violations(violations: list[Violation]) -> list[dict[str, str]]:
+    """Diagnostic identities only; never persist model or enterprise prose."""
+    safe = []
+    for item in violations:
+        identity = "|".join((item.type, item.field, item.evidence, item.pending_item, item.dependency_kind))
+        safe.append({
+            "type": item.type, "field": item.field, "dependency_kind": item.dependency_kind,
+            "evidence_sha256": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+        })
+    return safe
 
 
 def result_envelope(plan: ActivityPlanContent) -> dict:

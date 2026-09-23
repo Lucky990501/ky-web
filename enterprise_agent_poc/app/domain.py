@@ -74,6 +74,9 @@ class RuntimeTurn:
     lifecycle_events: tuple[dict, ...] = ()
     structured_result: dict | None = None
     structured_diagnostic: dict | None = None
+    structured_attempt_trace: tuple[dict, ...] = ()
+    structured_result_status: str | None = None
+    structured_model_calls: int = 0
 
 
 @dataclass(frozen=True, slots=True)

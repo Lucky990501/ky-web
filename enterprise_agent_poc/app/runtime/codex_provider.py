@@ -13,12 +13,16 @@ from types import SimpleNamespace
 
 from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn, SandboxPolicy
 from app.activity_plan_runtime import (
-    PLAN_SCHEMA, SAFE_FALLBACK, STRUCTURED_INSTRUCTION, correction_is_bounded,
-    correction_prompt, is_full_activity_plan, parse_plan, render_markdown, result_envelope, semantic_guard,
+    PLAN_SCHEMA, SAFE_FALLBACK, STRUCTURED_INSTRUCTION, correction_prompt,
+    is_full_activity_plan, merge_targeted_correction, parse_plan, render_markdown,
+    result_envelope, safe_violations, semantic_guard,
 )
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.skills import SkillDeployment
 from app.settings import Settings
+
+
+MAX_STRUCTURED_MODEL_ATTEMPTS = 2
 from app.runtime.base import RuntimeProvider, RuntimeStartError
 
 
@@ -398,12 +402,30 @@ class CodexRuntimeProvider(RuntimeProvider):
         first_prompt = message + "\n\n" + STRUCTURED_INSTRUCTION
         prompt = first_prompt
         original = None
+        original_violations = []
         violations = []
-        diagnostic = "invalid_structured_output"
         last_turn = None
         use_schema = True
         grounding: tuple[str, ...] = ()
-        for attempt in range(2):
+        attempt_trace: list[dict] = []
+        model_calls = 0
+
+        def record(stage: str, attempt: int, *, format_valid: bool | None = None,
+                   semantic_valid: bool | None = None, correction_result: str | None = None,
+                   issues: list | None = None) -> None:
+            safe = safe_violations(issues or [])
+            attempt_trace.append({
+                "structured_attempt_index": attempt, "stage": stage,
+                "format_valid": format_valid, "semantic_valid": semantic_valid,
+                "violation_count": len(safe), "violation_type": sorted({item["type"] for item in safe}),
+                "violations": safe, "correction_attempted": attempt > 1,
+                "correction_result": correction_result,
+                "total_model_calls_for_structured_result": model_calls,
+            })
+
+        for attempt in range(1, MAX_STRUCTURED_MODEL_ATTEMPTS + 1):
+            model_calls += 1
+            record("INITIAL" if attempt == 1 else "CORRECTION", attempt)
             try:
                 async for event in self._stream_provider_turn(
                     session, profile, prompt, output_schema=PLAN_SCHEMA if use_schema else None,
@@ -417,10 +439,10 @@ class CodexRuntimeProvider(RuntimeProvider):
                 # A provider/adapter that rejects the schema can use one raw
                 # JSON attempt. Operational failures still follow normal error handling.
                 wording = str(exc).lower()
-                if attempt == 0 and any(part in wording for part in ("output_schema", "output schema", "json_schema", "json schema", "response_format")):
+                if attempt == 1 and any(part in wording for part in ("output_schema", "output schema", "json_schema", "json schema", "response_format")):
+                    record("FORMAT_VALIDATION", attempt, format_valid=False)
                     use_schema = False
                     prompt = first_prompt
-                    diagnostic = "native_schema_unavailable"
                     continue
                 raise
             if last_turn is None:
@@ -429,27 +451,47 @@ class CodexRuntimeProvider(RuntimeProvider):
                                if call.get("tool") in {"knowledge_search", "enterprise_config_get"}
                                and call.get("status") == "completed")
             candidate = parse_plan(last_turn.text)
+            record("FORMAT_VALIDATION", attempt, format_valid=candidate is not None)
+            correction_merge_valid = True
+            if attempt == 2 and candidate is not None and original is not None:
+                merged = merge_targeted_correction(original, candidate, original_violations)
+                correction_merge_valid = merged is not None
+                candidate = merged
             violations = semantic_guard(candidate, grounding) if candidate else []
-            if candidate and not violations and (original is None or correction_is_bounded(original, candidate, original_violations)):
+            valid = candidate is not None and correction_merge_valid and not violations
+            record("SEMANTIC_VALIDATION" if attempt == 1 else "REVALIDATION", attempt,
+                   format_valid=candidate is not None, semantic_valid=valid,
+                   correction_result=("PASS" if valid else "FAIL") if attempt == 2 else None,
+                   issues=violations)
+            if valid:
                 markdown = render_markdown(candidate)
+                record("FINAL", attempt, format_valid=True, semantic_valid=True,
+                       correction_result="PASS" if attempt == 2 else None)
                 yield RuntimeStreamEvent.visible_delta(markdown)
                 yield RuntimeStreamEvent.completed(replace(
                     last_turn, text=markdown, structured_result=result_envelope(candidate), structured_diagnostic=None,
+                    structured_attempt_trace=tuple(attempt_trace),
+                    structured_result_status="validated_after_retry" if attempt == 2 else "validated_initial",
+                    structured_model_calls=model_calls,
                 ))
                 return
-            diagnostic = "semantic_guard_failed" if violations else "invalid_structured_output"
-            if attempt == 0:
+            if attempt == 1:
                 original = candidate
                 original_violations = violations
                 prompt = correction_prompt(candidate, violations)
 
         fallback = SAFE_FALLBACK
+        status = ("semantic_guard_failed_after_retry" if violations else
+                  "targeted_correction_failed_after_retry" if not correction_merge_valid else
+                  "format_validation_failed_after_retry")
+        record("FINAL", MAX_STRUCTURED_MODEL_ATTEMPTS, format_valid=candidate is not None,
+               semantic_valid=False, correction_result="FAIL", issues=violations)
         yield RuntimeStreamEvent.visible_delta(fallback)
         yield RuntimeStreamEvent.completed(replace(
             last_turn, text=fallback, structured_result=None,
-            structured_diagnostic={"code": diagnostic, "violations": [
-                {"type": item.type, "field": item.field} for item in violations
-            ]},
+            structured_diagnostic={"code": status, "violations": safe_violations(violations)},
+            structured_attempt_trace=tuple(attempt_trace), structured_result_status=status,
+            structured_model_calls=model_calls,
         ))
 
     async def _stream_provider_turn(
