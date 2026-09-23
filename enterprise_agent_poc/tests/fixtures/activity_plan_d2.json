@@ -1,0 +1,20 @@
+{
+  "document_title": "周末邻里读书会活动方案",
+  "activity_theme": "共读一小时",
+  "activity_time": "周六 10:00",
+  "activity_location": "社区阅览室",
+  "target_audience": "社区居民",
+  "promotion_channels": [
+    "业主群通知"
+  ],
+  "activity_items": [
+    {
+      "phase": "共读",
+      "name": "主题分享",
+      "description": "参与者依次分享本周阅读内容。",
+      "image_requirement": ""
+    }
+  ],
+  "invitation_copy": "欢迎参加周末邻里读书会。",
+  "pending_items": []
+}

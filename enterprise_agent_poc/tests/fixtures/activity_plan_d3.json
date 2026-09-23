@@ -1,0 +1,31 @@
+{
+  "document_title": "企业客户答谢活动方案",
+  "activity_theme": "携手同行 共赴新程",
+  "activity_time": "[待确认] 2026年第四季度",
+  "activity_location": "[待确认] 城市会展中心",
+  "target_audience": "年度合作客户与合作伙伴",
+  "promotion_channels": [
+    "客户经理一对一邀约",
+    "企业公众号发布[待确认]"
+  ],
+  "activity_items": [
+    {
+      "phase": "开场",
+      "name": "年度回顾",
+      "description": "展示年度合作成果，具体数据与案例由业务部门[待确认]。",
+      "image_requirement": "年度成果数据大屏示意"
+    },
+    {
+      "phase": "交流",
+      "name": "客户圆桌",
+      "description": "围绕下一年度合作方向开展交流。",
+      "image_requirement": "圆桌座位布局示意"
+    }
+  ],
+  "invitation_copy": "诚邀您参加客户答谢活动，活动具体时间与地点将在确认后另行通知。",
+  "pending_items": [
+    "活动日期与场地[待确认]",
+    "出席嘉宾名单[待确认]",
+    "年度合作数据使用范围[待确认]"
+  ]
+}

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response, Request
 from fastapi.exceptions import RequestValidationError
@@ -26,6 +27,12 @@ from app.agent_execution import ExecutionResolver
 from app.agent_runtime_test import AgentRuntimeTest
 from app.product_service import TaskService
 from app.product_store import ProductStore
+from app.document_generator import (
+    ActivityPlanDocumentRequest,
+    ActivityPlanDocumentService,
+    DocumentGenerationError,
+    DocumentNotFound,
+)
 from app.knowledge import KnowledgeProcessingService, KnowledgeRetrievalService, embedding_provider_for, runtime_diagnostic, set_embedding_probe
 from app.storage import StorageObjectNotFound, StorageUnavailable, storage_provider
 from app.runtime.codex_provider import CodexRuntimeManager, CodexRuntimeProvider
@@ -102,6 +109,7 @@ manager = CodexRuntimeManager(settings, SkillDeployment(skill_registry.published
 runtime = CodexRuntimeProvider(manager)
 agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agent)
 product_store = ProductStore(store)
+document_service = ActivityPlanDocumentService(storage_provider(settings))
 agent_catalog_control = AgentProductization(store, settings.environment)
 task_service = TaskService(product_store, agents)
 execution_resolver = ExecutionResolver(store,skill_registry,agent_catalog_control,settings,settings.agent_runtime_test_tenant_id or (os.environ.get("STAGE2_RUNTIME_TEST_TENANT_ID") if settings.environment != 'production' else None))
@@ -904,6 +912,50 @@ async def unbind_platform_skill(agent_id: str, skill_slug: str, workbench_sessio
         return skill_registry.unbind_agent(agent_id, skill_slug)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/v1/documents/activity-plan", status_code=201)
+async def create_activity_plan_document(
+    payload: ActivityPlanDocumentRequest,
+    workbench_session: str | None = Cookie(default=None),
+) -> dict:
+    principal = current_user(workbench_session)
+    try:
+        return document_service.create(
+            principal.tenant_id,
+            principal.user_id,
+            payload.content,
+            payload.presentation,
+        ).public()
+    except StorageObjectNotFound as exc:
+        raise HTTPException(400, "Logo 文件不存在。") from exc
+    except DocumentGenerationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except StorageUnavailable as exc:
+        raise HTTPException(503, "文档存储暂时不可用，请稍后重试。") from exc
+
+
+@app.get("/api/v1/documents/activity-plan/{document_id}")
+async def download_activity_plan_document(
+    document_id: str,
+    workbench_session: str | None = Cookie(default=None),
+):
+    principal = current_user(workbench_session)
+    try:
+        document = document_service.get(principal.tenant_id, principal.user_id, document_id)
+    except DocumentNotFound as exc:
+        raise HTTPException(404, "文档不存在。") from exc
+    except StorageUnavailable as exc:
+        raise HTTPException(503, "文档存储暂时不可用，请稍后重试。") from exc
+    return Response(
+        document.content,
+        media_type=document.content_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f"attachment; filename=activity-plan.docx; filename*=UTF-8''{quote(document.filename)}",
+        },
+    )
 
 
 @app.get("/api/v1/storage/{storage_key:path}")
