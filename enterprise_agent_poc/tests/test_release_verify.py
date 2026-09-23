@@ -17,15 +17,26 @@ PLAN_TASK = {"id": "plan-task", "status": "completed", "conversation_id": "plan-
              "assistant_message_id": "task:plan-task:assistant", "structured_result": STRUCTURED}
 
 
-@pytest.mark.parametrize("fault", [None, "http500", "scope", "missing_delta", "error", "cancelled", "bad_delta", "bad_activity", "incomplete", "cancel", "plan_missing_structured", "plan_mismatch", "document500", "download500"])
-def test_real_smoke_protocol_http_boundary_only(fault):
+@pytest.mark.parametrize("fault", [None, "http500", "scope", "missing_delta", "error", "cancelled", "bad_delta", "bad_activity", "incomplete", "cancel", "plan_missing_structured", "plan_mismatch", "document500", "download500", "timeout_auth", "timeout_sse_connect", "timeout_sse_first", "timeout_sse_complete", "timeout_document", "timeout_download"])
+def test_real_smoke_protocol_http_boundary_only(fault, capsys):
     calls = []
     runs = []
     task = {"id": "task", "status": "completed", "conversation_id": "conversation", "final_response": "ok"}
+    class TimeoutStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if fault == "timeout_sse_complete":
+                yield b'event: progress\ndata: {"stage":"queued"}\n\n'
+            raise httpx.ReadTimeout("private-timeout-body")
     def handler(request):
         path = request.url.path
         calls.append((request.method, path))
         assert request.url.host == "127.0.0.1" and request.url.port == 18090
+        if fault == "timeout_auth" and path.endswith("/auth/login"):
+            raise httpx.ReadTimeout("private-timeout-body")
+        if fault == "timeout_document" and path.endswith("/documents/activity-plan"):
+            raise httpx.ReadTimeout("private-timeout-body")
+        if fault == "timeout_download" and path.endswith("/documents/activity-plan/document"):
+            raise httpx.ReadTimeout("private-timeout-body")
         if fault == "http500":
             return httpx.Response(500, text="must-not-log-private-body")
         if path.endswith("/auth/login"):
@@ -41,6 +52,10 @@ def test_real_smoke_protocol_http_boundary_only(fault):
             return httpx.Response(202, json={"id": "task" if len(runs) == 1 else "plan-task"})
         if path.endswith("/events"):
             plan_event = "/plan-task/" in path
+            if fault == "timeout_sse_connect" and not plan_event:
+                raise httpx.ConnectTimeout("private-timeout-body")
+            if fault in {"timeout_sse_first", "timeout_sse_complete"} and not plan_event:
+                return httpx.Response(200, stream=TimeoutStream(), headers={"content-type": "text/event-stream"})
             completed = PLAN_TASK if plan_event else task
             events = [("progress", {"stage": "queued"}),
                       ("activity", {"sequence": 1, "stage": "generating", "status": "started"}),
@@ -74,16 +89,68 @@ def test_real_smoke_protocol_http_boundary_only(fault):
     async def run():
         return await verify.technical_smoke(CONFIG, transport=httpx.MockTransport(handler))
     if fault:
-        with pytest.raises(verify.GateFailed):
+        with pytest.raises(verify.GateFailed) as failed:
             asyncio.run(run())
+        expected_stage = {
+            "timeout_auth": "SMOKE_01_AUTH",
+            "timeout_sse_connect": "SMOKE_05_SSE_FIRST_EVENT",
+            "timeout_sse_first": "SMOKE_05_SSE_FIRST_EVENT",
+            "timeout_sse_complete": "SMOKE_06_SSE_COMPLETE",
+            "timeout_document": "SMOKE_09_DOCUMENT_GENERATOR_POST",
+            "timeout_download": "SMOKE_10_DOCUMENT_DOWNLOAD",
+        }.get(fault)
+        if expected_stage:
+            assert f"stage={expected_stage}" in str(failed.value)
+            scope = ("sse_connect" if fault == "timeout_sse_connect" else
+                     "sse_read" if "sse" in fault else "http_request")
+            assert f"scope={scope}" in str(failed.value)
+            assert f"timeout={120 if scope == 'sse_read' else 20}s" in str(failed.value)
+            assert "last_successful_stage=" in str(failed.value)
+            if "sse" in fault:
+                assert "last_event_type=" in str(failed.value)
+                assert "longest_event_gap=" in str(failed.value)
+            if fault == "timeout_auth":
+                assert "last_successful_stage=NONE" in str(failed.value)
+            if fault == "timeout_sse_complete":
+                assert "last_successful_stage=SMOKE_05_SSE_FIRST_EVENT" in str(failed.value)
+                assert "last_event_type=progress" in str(failed.value)
+            if fault == "timeout_document":
+                assert "last_successful_stage=SMOKE_14_STRUCTURED_RESULT" in str(failed.value)
         if fault not in {"http500", "scope"}:
-            assert ("POST", "/api/v1/tasks/task/cancel") in calls
+            if fault != "timeout_auth":
+                assert ("POST", "/api/v1/tasks/task/cancel") in calls
     else:
         result = asyncio.run(run())
         assert result["status"] == "technical_smoke_passed"
         assert result["events"] == ["activity", "complete", "delta", "progress"]
         assert result["activity_plan_document_export"] == "PASS"
         assert calls[-1] == ("GET", "/api/v1/documents/activity-plan/document")
+    output = capsys.readouterr().out
+    assert CONFIG["password"] not in output and "private-timeout-body" not in output
+    records = [json.loads(line) for line in output.splitlines()]
+    starts = [item["stage"] for item in records if item["status"] == "smoke_stage_start"]
+    ends = [item["stage"] for item in records if item["status"] == "smoke_stage_end"]
+    assert ends == starts
+    if fault in {"plan_missing_structured", "plan_mismatch"}:
+        assert any(item.get("stage") == "SMOKE_14_STRUCTURED_RESULT"
+                   and item.get("result") == "FAIL" for item in records)
+    if fault is None:
+        assert {"SMOKE_01_AUTH", "SMOKE_02_BASE_API", "SMOKE_03_CONVERSATION_CREATE",
+                "SMOKE_04_CONVERSATION_RUN", "SMOKE_05_SSE_FIRST_EVENT",
+                "SMOKE_06_SSE_COMPLETE", "SMOKE_07_STOP_CANCEL",
+                "SMOKE_08_AGENT_SKILL_RESOLUTION", "SMOKE_09_DOCUMENT_GENERATOR_POST",
+                "SMOKE_10_DOCUMENT_DOWNLOAD", "SMOKE_12_FULL_PLAN_SSE_FIRST_EVENT",
+                "SMOKE_13_FULL_PLAN_SSE_COMPLETE"} <= set(ends)
+        assert all(item["result"] == "PASS" and item["duration_ms"] >= 0
+                   and item["started_at"] and item["ended_at"]
+                   for item in records if item["status"] == "smoke_stage_end")
+        summaries = [item for item in records if item["status"] == "smoke_sse_summary"]
+        assert len(summaries) == 2
+        assert all(item["first_event_ms"] is not None
+                   and item["first_delta_ms"] is not None
+                   and item["complete_ms"] is not None
+                   and item["max_inter_event_gap_ms"] >= 0
+                   for item in summaries)
 
 
 def test_smoke_timeout_cancels_only_own_task():
@@ -104,8 +171,16 @@ def test_smoke_timeout_cancels_only_own_task():
         return httpx.Response(200, json={"status": "cancelling"})
     async def run():
         await asyncio.wait_for(verify.technical_smoke(CONFIG, transport=httpx.MockTransport(handler)), 0.05)
-    with pytest.raises(TimeoutError): asyncio.run(run())
+    with pytest.raises(verify.GateFailed, match="stage=SMOKE_05_SSE_FIRST_EVENT.*scope=overall_deadline"):
+        asyncio.run(run())
     assert cancelled == ["/api/v1/tasks/owned-task/cancel"]
+
+
+def test_smoke_timeout_configuration_is_stage_scoped():
+    assert verify.SMOKE_HTTP_TIMEOUT_SECONDS == 20
+    assert verify.SMOKE_SSE_CONNECT_TIMEOUT_SECONDS == 20
+    assert verify.SMOKE_SSE_READ_TIMEOUT_SECONDS == 120
+    assert verify.SMOKE_TOTAL_TIMEOUT_SECONDS == 180
 
 
 @pytest.mark.parametrize("fault", [None, "permissions", "symlink", "missing", "fields"])

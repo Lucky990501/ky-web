@@ -12,9 +12,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -275,56 +278,210 @@ def check_event(event, value, seen):
     seen.add(event)
 
 
+SMOKE_HTTP_TIMEOUT_SECONDS = 20
+SMOKE_SSE_CONNECT_TIMEOUT_SECONDS = 20
+# Full-plan output is withheld until semantic validation; the verified Runtime
+# observed an 87.702-second SSE event gap without a guaranteed heartbeat.
+SMOKE_SSE_READ_TIMEOUT_SECONDS = 120
+SMOKE_TOTAL_TIMEOUT_SECONDS = 180
+_SAFE_TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+
+
+class SmokeTimeline:
+    """Emit allowlisted timing metadata, never request/response bodies or auth data."""
+
+    def __init__(self):
+        self.current = None
+        self.task_id = None
+        self.last_successful_stage = None
+        self.sse_last_event_type = None
+        self.sse_last_event_at = None
+        self.sse_longest_gap_seconds = 0.0
+
+    def start(self, stage, *, timeout=SMOKE_HTTP_TIMEOUT_SECONDS, scope="http_request"):
+        require(self.current is None, "smoke_stage_overlap")
+        self.current = {"stage": stage, "start": time.monotonic(),
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                        "timeout_seconds": timeout, "timeout_scope": scope,
+                        "http_status": None}
+        self._emit({"status": "smoke_stage_start", "stage": stage,
+                    "started_at": self.current["started_at"],
+                    "timeout_seconds": timeout, "timeout_scope": scope})
+
+    def status(self, response):
+        require(self.current is not None, "smoke_stage_missing")
+        self.current["http_status"] = response.status_code
+
+    def set_task_id(self, value):
+        if isinstance(value, str) and _SAFE_TASK_ID.fullmatch(value):
+            self.task_id = value
+
+    def end(self, *, result="PASS", error_type=None):
+        require(self.current is not None, "smoke_stage_missing")
+        current, self.current = self.current, None
+        record = {"status": "smoke_stage_end", "stage": current["stage"],
+                  "started_at": current["started_at"],
+                  "ended_at": datetime.now(timezone.utc).isoformat(),
+                  "duration_ms": round((time.monotonic() - current["start"]) * 1000, 1),
+                  "result": result, "timeout_seconds": current["timeout_seconds"],
+                  "timeout_scope": current["timeout_scope"]}
+        if current["http_status"] is not None:
+            record["http_status"] = current["http_status"]
+        if self.task_id:
+            record["task_id"] = self.task_id
+        if error_type:
+            record["error_type"] = error_type
+        if result == "PASS":
+            self.last_successful_stage = current["stage"]
+        self._emit(record)
+        return current, record
+
+    def fail(self, exc):
+        import httpx
+
+        current = self.current
+        if current is None:
+            return exc
+        is_timeout = isinstance(exc, (httpx.TimeoutException, TimeoutError, asyncio.CancelledError))
+        _, record = self.end(result="TIMEOUT" if is_timeout else "FAIL",
+                             error_type=type(exc).__name__)
+        if is_timeout:
+            timeout = (SMOKE_TOTAL_TIMEOUT_SECONDS if isinstance(exc, asyncio.CancelledError)
+                       else current["timeout_seconds"])
+            scope = ("overall_deadline" if isinstance(exc, asyncio.CancelledError)
+                     else current["timeout_scope"])
+            if isinstance(exc, httpx.ConnectTimeout) and scope == "sse_read":
+                timeout, scope = SMOKE_SSE_CONNECT_TIMEOUT_SECONDS, "sse_connect"
+            reason = ("TECHNICAL_SMOKE_TIMEOUT "
+                      f"stage={current['stage']} elapsed={record['duration_ms'] / 1000:.3f}s "
+                      f"timeout={timeout}s scope={scope} "
+                      f"last_successful_stage={self.last_successful_stage or 'NONE'}")
+            if current["timeout_scope"] == "sse_read":
+                ongoing_gap = (time.monotonic() - self.sse_last_event_at
+                               if self.sse_last_event_at is not None else 0.0)
+                reason += (f" last_event_type={self.sse_last_event_type or 'NONE'}"
+                           f" longest_event_gap={max(self.sse_longest_gap_seconds, ongoing_gap):.3f}s")
+            return GateFailed(reason)
+        return exc
+
+    @staticmethod
+    def _emit(record):
+        print(json.dumps(record, ensure_ascii=False, sort_keys=True), flush=True)
+
+
+async def smoke_sse(client, task_id, timeline, first_stage, complete_stage):
+    import httpx
+
+    seen, terminal = set(), None
+    opened_at = last_event_at = time.monotonic()
+    first_event_ms = first_delta_ms = complete_ms = None
+    max_gap_ms = 0.0
+    last_event = None
+    event_counts = {}
+    timeline.sse_last_event_type = None
+    timeline.sse_last_event_at = opened_at
+    timeline.sse_longest_gap_seconds = 0.0
+    timeline.start(first_stage, timeout=SMOKE_SSE_READ_TIMEOUT_SECONDS, scope="sse_read")
+    try:
+        sse_timeout = httpx.Timeout(connect=SMOKE_SSE_CONNECT_TIMEOUT_SECONDS,
+                                    read=SMOKE_SSE_READ_TIMEOUT_SECONDS,
+                                    write=SMOKE_HTTP_TIMEOUT_SECONDS, pool=SMOKE_HTTP_TIMEOUT_SECONDS)
+        async with client.stream("GET", f"/api/v1/tasks/{task_id}/events", timeout=sse_timeout) as response:
+            timeline.status(response)
+            require(response.status_code == 200
+                    and "text/event-stream" in response.headers.get("content-type", ""), "sse_response")
+            event, data = "", []
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    data.append(line[5:].strip())
+                elif not line and data:
+                    value = json.loads("\n".join(data))
+                    check_event(event, value, seen)
+                    now = time.monotonic()
+                    max_gap_ms = max(max_gap_ms, (now - last_event_at) * 1000)
+                    last_event_at = now
+                    last_event = event
+                    timeline.sse_last_event_type = event
+                    timeline.sse_last_event_at = now
+                    timeline.sse_longest_gap_seconds = max_gap_ms / 1000
+                    event_counts[event] = event_counts.get(event, 0) + 1
+                    if first_event_ms is None:
+                        first_event_ms = round((now - opened_at) * 1000, 1)
+                    if event == "delta" and first_delta_ms is None:
+                        first_delta_ms = round((now - opened_at) * 1000, 1)
+                    if event == "complete":
+                        complete_ms = round((now - opened_at) * 1000, 1)
+                    if timeline.current["stage"] == first_stage:
+                        timeline.end()
+                        timeline.start(complete_stage, timeout=SMOKE_SSE_READ_TIMEOUT_SECONDS,
+                                       scope="sse_read")
+                    if event == "complete":
+                        terminal = value
+                        break
+                    event, data = "", []
+        require(terminal is not None, "sse_incomplete")
+        timeline.end()
+        return seen, terminal
+    except BaseException as exc:
+        raise timeline.fail(exc) from None
+    finally:
+        timeline._emit({"status": "smoke_sse_summary", "task_id": timeline.task_id,
+                        "first_stage": first_stage, "first_event_ms": first_event_ms,
+                        "first_delta_ms": first_delta_ms, "complete_ms": complete_ms,
+                        "max_inter_event_gap_ms": round(max_gap_ms, 1),
+                        "idle_ms_until_exit": round((time.monotonic() - last_event_at) * 1000, 1),
+                        "last_event": last_event, "event_counts": event_counts})
+
+
 async def technical_smoke(config, *, transport=None):
     import httpx
+
     task_id, completed = None, False
+    timeline = SmokeTimeline()
     async with httpx.AsyncClient(base_url="http://127.0.0.1:18090", trust_env=False,
-                                 follow_redirects=False, timeout=20, transport=transport) as client:
-        async def request(method, path, **kwargs):
-            response = await client.request(method, path, **kwargs)
-            require(response.status_code in {200, 202}, "smoke_http_status")
-            return response.json()
+                                 follow_redirects=False, timeout=SMOKE_HTTP_TIMEOUT_SECONDS,
+                                 transport=transport) as client:
+        async def request(stage, method, path, **kwargs):
+            timeline.start(stage)
+            try:
+                response = await client.request(method, path, **kwargs)
+                timeline.status(response)
+                require(response.status_code in {200, 202}, "smoke_http_status")
+                value = response.json()
+                timeline.end()
+                return value
+            except BaseException as exc:
+                raise timeline.fail(exc) from None
         try:
-            login = await request("POST", "/api/v1/auth/login", json={"account": config["account"], "password": config["password"]})
+            login = await request("SMOKE_01_AUTH", "POST", "/api/v1/auth/login",
+                                  json={"account": config["account"], "password": config["password"]})
             require(login["user"]["tenant_id"] == config["tenant_id"] and login["user"]["id"] == config["user_id"], "smoke_account_scope")
             token = client.cookies.get("workbench_session")
             require(bool(token), "login_session_missing")
             # Forward the returned Secure cookie only to this fixed loopback origin.
             client.headers["Cookie"] = f"workbench_session={token}"
-            me = await request("GET", "/api/v1/me")
+            me = await request("SMOKE_02_BASE_API", "GET", "/api/v1/me")
             require(me["user_id"] == config["user_id"] and me["tenant_id"] == config["tenant_id"], "authenticated_api")
-            agent = await request("GET", "/api/v1/agents/campaign-agent")
+            agent = await request("SMOKE_08_AGENT_SKILL_RESOLUTION", "GET", "/api/v1/agents/campaign-agent")
             require(agent["id"] == "campaign-agent" and agent.get("enabled"), "campaign_agent_load")
-            task = await request("POST", "/api/v1/agents/campaign-agent/runs", json={
+            task = await request("SMOKE_03_CONVERSATION_CREATE", "POST", "/api/v1/agents/campaign-agent/runs", json={
                 "message": "发布技术连通性验证：请简短回复‘连接正常’。无需检索资料或生成活动方案。"})
             task_id = task["id"]
             require(isinstance(task_id, str) and task_id and "/" not in task_id, "smoke_task_id")
-            seen, terminal = set(), None
-            async with client.stream("GET", f"/api/v1/tasks/{task_id}/events") as response:
-                require(response.status_code == 200 and "text/event-stream" in response.headers.get("content-type", ""), "sse_response")
-                event, data = "", []
-                async for line in response.aiter_lines():
-                    if line.startswith("event:"):
-                        event = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data.append(line[5:].strip())
-                    elif not line and data:
-                        value = json.loads("\n".join(data))
-                        check_event(event, value, seen)
-                        if event == "complete":
-                            terminal = value
-                            break
-                        event, data = "", []
-            require(terminal is not None, "sse_incomplete")
-            task = await request("GET", f"/api/v1/tasks/{task_id}")
+            timeline.set_task_id(task_id)
+            seen, terminal = await smoke_sse(client, task_id, timeline,
+                                             "SMOKE_05_SSE_FIRST_EVENT", "SMOKE_06_SSE_COMPLETE")
+            task = await request("SMOKE_04_CONVERSATION_RUN", "GET", f"/api/v1/tasks/{task_id}")
             require(task["status"] == "completed" and bool(task.get("final_response")), "worker_completion")
             conversation_id = task.get("conversation_id")
             require(isinstance(conversation_id, str) and conversation_id and "/" not in conversation_id, "conversation_id")
-            conversation = await request("GET", f"/api/v1/conversations/{conversation_id}")
+            conversation = await request("SMOKE_04_CONVERSATION_READBACK", "GET", f"/api/v1/conversations/{conversation_id}")
             require(conversation.get("id") == conversation_id, "conversation_readback")
-            cancelled = await request("POST", f"/api/v1/tasks/{task_id}/cancel")
+            cancelled = await request("SMOKE_07_STOP_CANCEL", "POST", f"/api/v1/tasks/{task_id}/cancel")
             require(cancelled["status"] == "completed" and cancelled.get("final_response") == task["final_response"], "cancel_terminal_idempotency")
-            document_export = await activity_plan_document_export_smoke(client, request)
+            document_export = await activity_plan_document_export_smoke(client, request, timeline)
             completed = True
             return {"status": "technical_smoke_passed", "events": sorted(seen), "task_id": task_id,
                     "conversation_id": conversation_id, "cancel": "terminal_idempotency_PASS",
@@ -337,56 +494,59 @@ async def technical_smoke(config, *, transport=None):
                     pass  # Preserve the blocking failure; never log response bodies.
 
 
-async def activity_plan_document_export_smoke(client, request):
+async def activity_plan_document_export_smoke(client, request, timeline):
     """Exercise the real full-plan result through authenticated DOCX download."""
     from app.activity_plan_runtime import validated_envelope
 
     task_id, passed = None, False
     try:
-        task = await request("POST", "/api/v1/agents/campaign-agent/runs", json={
+        task = await request("SMOKE_11_FULL_PLAN_CREATE", "POST", "/api/v1/agents/campaign-agent/runs", json={
             "message": "发布技术验证：请为社区教师节设计完整活动方案，包含主题、时间、地点、对象、宣发、活动环节和邀约文案。时间地点未定，保留待确认；不要承诺企业权益。"
         })
         task_id = task.get("id")
         require(isinstance(task_id, str) and task_id and "/" not in task_id, "document_smoke_task_id")
-        seen, terminal = set(), None
-        async with client.stream("GET", f"/api/v1/tasks/{task_id}/events") as response:
-            require(response.status_code == 200 and "text/event-stream" in response.headers.get("content-type", ""), "document_smoke_sse_response")
-            event, data = "", []
-            async for line in response.aiter_lines():
-                if line.startswith("event:"):
-                    event = line[6:].strip()
-                elif line.startswith("data:"):
-                    data.append(line[5:].strip())
-                elif not line and data:
-                    value = json.loads("\n".join(data))
-                    check_event(event, value, seen)
-                    if event == "complete":
-                        terminal = value
-                        break
-                    event, data = "", []
-        require(terminal is not None, "document_smoke_sse_incomplete")
-        saved = await request("GET", f"/api/v1/tasks/{task_id}")
-        structured = saved.get("structured_result")
-        require(saved.get("status") == "completed" and isinstance(structured, dict)
-                and structured.get("type") == "activity_plan" and structured.get("version") == "1"
-                and terminal.get("structured_result") == structured
-                and terminal.get("assistant_message_id") == saved.get("assistant_message_id")
-                and bool(saved.get("assistant_message_id"))
-                and validated_envelope(structured, saved.get("final_response") or "") == structured,
-                "document_smoke_structured_result")
-        created = await client.post("/api/v1/documents/activity-plan", json={"content": structured["data"]})
-        require(created.status_code == 201, "document_smoke_create_status")
-        document = created.json()
+        timeline.set_task_id(task_id)
+        _, terminal = await smoke_sse(client, task_id, timeline,
+                                      "SMOKE_12_FULL_PLAN_SSE_FIRST_EVENT", "SMOKE_13_FULL_PLAN_SSE_COMPLETE")
+        saved = await request("SMOKE_14_STRUCTURED_RESULT_FETCH", "GET", f"/api/v1/tasks/{task_id}")
+        timeline.start("SMOKE_14_STRUCTURED_RESULT")
+        try:
+            structured = saved.get("structured_result")
+            require(saved.get("status") == "completed" and isinstance(structured, dict)
+                    and structured.get("type") == "activity_plan" and structured.get("version") == "1"
+                    and terminal.get("structured_result") == structured
+                    and terminal.get("assistant_message_id") == saved.get("assistant_message_id")
+                    and bool(saved.get("assistant_message_id"))
+                    and validated_envelope(structured, saved.get("final_response") or "") == structured,
+                    "document_smoke_structured_result")
+            timeline.end()
+        except BaseException as exc:
+            raise timeline.fail(exc) from None
+        timeline.start("SMOKE_09_DOCUMENT_GENERATOR_POST")
+        try:
+            created = await client.post("/api/v1/documents/activity-plan", json={"content": structured["data"]})
+            timeline.status(created)
+            require(created.status_code == 201, "document_smoke_create_status")
+            document = created.json()
+            timeline.end()
+        except BaseException as exc:
+            raise timeline.fail(exc) from None
         document_id = document.get("document_id")
         require(isinstance(document_id, str) and document_id and "/" not in document_id
                 and isinstance(document.get("filename"), str) and document["filename"].endswith(".docx")
                 and document.get("download_url") == f"/api/v1/documents/activity-plan/{document_id}",
                 "document_smoke_create_identity")
-        downloaded = await client.get(document["download_url"])
-        require(downloaded.status_code == 200
-                and downloaded.headers.get("content-type", "").split(";", 1)[0]
-                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                and downloaded.content.startswith(b"PK"), "document_smoke_download")
+        timeline.start("SMOKE_10_DOCUMENT_DOWNLOAD")
+        try:
+            downloaded = await client.get(document["download_url"])
+            timeline.status(downloaded)
+            require(downloaded.status_code == 200
+                    and downloaded.headers.get("content-type", "").split(";", 1)[0]
+                    == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    and downloaded.content.startswith(b"PK"), "document_smoke_download")
+            timeline.end()
+        except BaseException as exc:
+            raise timeline.fail(exc) from None
         passed = True
         return "PASS"
     finally:

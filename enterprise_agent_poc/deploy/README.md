@@ -314,6 +314,28 @@ to request cancellation of its own unfinished task; it never cancels other work.
 No generated answer, login response, cookie or password is logged. MCP health
 uses initialize/ping/list_tools; completed Redis-backed work proves the worker path.
 
+Each smoke step emits allowlisted
+`smoke_stage_start` and `smoke_stage_end` JSON with UTC timestamps, elapsed
+milliseconds, result, HTTP status when applicable, and a validated task ID when
+available. It never logs credentials, request/response bodies, tokens or model
+content. Timeout failures identify the stage, elapsed time, configured timeout,
+whether the timeout was an HTTP request, SSE stream or overall deadline, and
+the last successful stage. SSE timeouts also report the last validated event
+type and longest observed or ongoing event gap.
+
+The smoke client uses a 20-second httpx timeout for authentication, base API,
+conversation creation/readback, SSE connect, document creation and download.
+SSE read alone has a 120-second limit. The Runtime Semantic Stability 10-run
+verification of deepseek-v4-pro/high observed a maximum 87.702-second SSE
+event gap and 88.405-second completion/total duration, with 10/10 valid
+structured results and no semantic-guard failures. The former 20-second
+limit and the provisional 75-second limit are shorter than observed valid
+Runtime behavior; neither should be used as this release gate.
+The whole technical smoke retains its separate 180-second bound;
+best-effort cancellation cleanup has a 10-second bound. These are diagnostics,
+not new readiness or model runtime settings. Do not increase them further
+without stage-specific evidence and review.
+
 Exact TO plus a runtime/health/smoke failure follows the unchanged TO-to-FROM
 transition and predecessor restoration, with final state/health verification
 before `PRODUCTION_DEPLOYMENT_ROLLED_BACK`. A pre-activation staging failure may
