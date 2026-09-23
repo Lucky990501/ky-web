@@ -1,7 +1,8 @@
 """Release-owned read-only state checks, recovery evidence and bounded smoke.
 
 No Registry initialization, package staging or account provisioning. Only smoke
-creates a task, using an explicitly supplied, operator-approved smoke account.
+creates tasks and a document, using an explicitly supplied, operator-approved
+smoke account.
 """
 from __future__ import annotations
 
@@ -323,15 +324,77 @@ async def technical_smoke(config, *, transport=None):
             require(conversation.get("id") == conversation_id, "conversation_readback")
             cancelled = await request("POST", f"/api/v1/tasks/{task_id}/cancel")
             require(cancelled["status"] == "completed" and cancelled.get("final_response") == task["final_response"], "cancel_terminal_idempotency")
+            document_export = await activity_plan_document_export_smoke(client, request)
             completed = True
             return {"status": "technical_smoke_passed", "events": sorted(seen), "task_id": task_id,
-                    "conversation_id": conversation_id, "cancel": "terminal_idempotency_PASS"}
+                    "conversation_id": conversation_id, "cancel": "terminal_idempotency_PASS",
+                    "activity_plan_document_export": document_export}
         finally:
             if task_id and not completed:
                 try:
                     await asyncio.wait_for(client.post(f"/api/v1/tasks/{task_id}/cancel"), 10)
                 except Exception:
                     pass  # Preserve the blocking failure; never log response bodies.
+
+
+async def activity_plan_document_export_smoke(client, request):
+    """Exercise the real full-plan result through authenticated DOCX download."""
+    from app.activity_plan_runtime import validated_envelope
+
+    task_id, passed = None, False
+    try:
+        task = await request("POST", "/api/v1/agents/campaign-agent/runs", json={
+            "message": "发布技术验证：请为社区教师节设计完整活动方案，包含主题、时间、地点、对象、宣发、活动环节和邀约文案。时间地点未定，保留待确认；不要承诺企业权益。"
+        })
+        task_id = task.get("id")
+        require(isinstance(task_id, str) and task_id and "/" not in task_id, "document_smoke_task_id")
+        seen, terminal = set(), None
+        async with client.stream("GET", f"/api/v1/tasks/{task_id}/events") as response:
+            require(response.status_code == 200 and "text/event-stream" in response.headers.get("content-type", ""), "document_smoke_sse_response")
+            event, data = "", []
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    data.append(line[5:].strip())
+                elif not line and data:
+                    value = json.loads("\n".join(data))
+                    check_event(event, value, seen)
+                    if event == "complete":
+                        terminal = value
+                        break
+                    event, data = "", []
+        require(terminal is not None, "document_smoke_sse_incomplete")
+        saved = await request("GET", f"/api/v1/tasks/{task_id}")
+        structured = saved.get("structured_result")
+        require(saved.get("status") == "completed" and isinstance(structured, dict)
+                and structured.get("type") == "activity_plan" and structured.get("version") == "1"
+                and terminal.get("structured_result") == structured
+                and terminal.get("assistant_message_id") == saved.get("assistant_message_id")
+                and bool(saved.get("assistant_message_id"))
+                and validated_envelope(structured, saved.get("final_response") or "") == structured,
+                "document_smoke_structured_result")
+        created = await client.post("/api/v1/documents/activity-plan", json={"content": structured["data"]})
+        require(created.status_code == 201, "document_smoke_create_status")
+        document = created.json()
+        document_id = document.get("document_id")
+        require(isinstance(document_id, str) and document_id and "/" not in document_id
+                and isinstance(document.get("filename"), str) and document["filename"].endswith(".docx")
+                and document.get("download_url") == f"/api/v1/documents/activity-plan/{document_id}",
+                "document_smoke_create_identity")
+        downloaded = await client.get(document["download_url"])
+        require(downloaded.status_code == 200
+                and downloaded.headers.get("content-type", "").split(";", 1)[0]
+                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                and downloaded.content.startswith(b"PK"), "document_smoke_download")
+        passed = True
+        return "PASS"
+    finally:
+        if task_id and not passed:
+            try:
+                await asyncio.wait_for(client.post(f"/api/v1/tasks/{task_id}/cancel"), 10)
+            except Exception:
+                pass  # Preserve the blocking failure; never log response bodies.
 
 
 def evidence(base, candidate, predecessor, snapshot):
