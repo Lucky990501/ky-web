@@ -110,7 +110,9 @@ manager = CodexRuntimeManager(settings, SkillDeployment(skill_registry.published
 runtime = CodexRuntimeProvider(manager)
 agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agent)
 product_store = ProductStore(store)
-document_service = ActivityPlanDocumentService(storage_provider(settings))
+document_service = ActivityPlanDocumentService(
+    storage_provider(settings), brand_provider=lambda tenant_id: store.enterprise_config(tenant_id),
+)
 brand_logo_service = BrandLogoService(storage_provider(settings), product_store)
 agent_catalog_control = AgentProductization(store, settings.environment)
 task_service = TaskService(product_store, agents)

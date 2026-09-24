@@ -7,6 +7,8 @@ DOCX, and stores the immutable result through the existing object-store layer.
 from __future__ import annotations
 
 import io
+import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,12 +25,14 @@ from docx.oxml.ns import qn
 from docx.shared import Emu, Mm, Pt, RGBColor
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.storage import StorageObjectNotFound, StorageProvider
+from app.brand_logo import BrandLogoError, inspect_transparent_png, validate_brand_logo_key
+from app.storage import StorageObjectNotFound, StorageProvider, StorageUnavailable
 
 
 DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_DOCUMENT_BYTES = 12 * 1024 * 1024
 MAX_LOGO_BYTES = 2 * 1024 * 1024
+TEMPLATE_LOGGER = logging.getLogger(__name__)
 DOCUMENT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 WINDOWS_ILLEGAL_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 INVALID_XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -108,6 +112,7 @@ class DocumentPresentationOptions(BaseModel):
 
     brand_name: Annotated[str, Field(max_length=120)] = ""
     logo_path: Annotated[str, Field(max_length=512)] = ""
+    image_paths: dict[int, Annotated[str, Field(max_length=512)]] = Field(default_factory=dict, max_length=80)
     primary_color: Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")] = "#173B65"
     secondary_color: Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")] = "#EAF1F8"
     footer_text: Annotated[str, Field(max_length=200)] = ""
@@ -118,6 +123,13 @@ class DocumentPresentationOptions(BaseModel):
     def valid_xml_text(cls, value: str) -> str:
         if INVALID_XML_CONTROL.search(value):
             raise ValueError("展示参数包含不支持的控制字符。")
+        return value
+
+    @field_validator("image_paths")
+    @classmethod
+    def valid_image_indexes(cls, value: dict[int, str]) -> dict[int, str]:
+        if any(index < 0 or index >= 80 for index in value):
+            raise ValueError("示意图索引无效。")
         return value
 
 
@@ -152,6 +164,14 @@ class GeneratedDocument:
             "content_type": self.content_type,
             "download_url": self.download_url,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityPlanTemplateSelection:
+    variant: str
+    fallback_reason: str | None = None
+    logo_bytes: bytes | None = None
+    brand_name: str = ""
 
 
 def _set_cell_shading(cell, color: str) -> None:
@@ -493,6 +513,19 @@ def validate_logo_storage_key(value: str, tenant_id: str) -> str:
     return path.as_posix()
 
 
+def validate_illustration_storage_key(value: str, tenant_id: str) -> str:
+    if not isinstance(value, str) or "\\" in value or len(value) > 512:
+        raise DocumentGenerationError("示意图路径无效。")
+    path = PurePosixPath(value)
+    parts = path.parts
+    expected = ("brand-assets", tenant_id, "activity-plan-images")
+    if (path.is_absolute() or any(part in {"", ".", ".."} for part in parts)
+            or len(parts) != 4 or tuple(parts[:3]) != expected
+            or path.suffix.lower() not in {".png", ".jpg", ".jpeg"}):
+        raise DocumentGenerationError("示意图只能引用当前企业的活动图片对象。")
+    return path.as_posix()
+
+
 class ActivityPlanDocumentService:
     def __init__(
         self,
@@ -500,10 +533,56 @@ class ActivityPlanDocumentService:
         *,
         renderer: ActivityPlanDocxRenderer | None = None,
         clock: Callable[[], datetime] | None = None,
+        brand_provider: Callable[[str], dict] | None = None,
     ) -> None:
         self._storage = storage
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._renderer = renderer or ActivityPlanDocxRenderer(self._clock)
+        self._brand_provider = brand_provider
+
+    def resolve_activity_plan_template(self, tenant_id: str) -> ActivityPlanTemplateSelection:
+        """Select from the current tenant asset, without trusting request presentation paths."""
+        if self._brand_provider is None:
+            return ActivityPlanTemplateSelection("legacy", "logo_missing")
+        try:
+            config = self._brand_provider(tenant_id)
+        except Exception:
+            return ActivityPlanTemplateSelection("legacy", "logo_unreadable")
+        if not isinstance(config, dict):
+            return ActivityPlanTemplateSelection("legacy", "logo_invalid")
+        key = config.get("brand_logo")
+        if not key:
+            return ActivityPlanTemplateSelection("legacy", "logo_missing")
+        try:
+            key = validate_brand_logo_key(key, tenant_id)
+        except BrandLogoError:
+            return ActivityPlanTemplateSelection("legacy", "ownership_invalid")
+        try:
+            logo_bytes = self._storage.get(key)
+        except Exception:
+            return ActivityPlanTemplateSelection("legacy", "logo_unreadable")
+        try:
+            inspect_transparent_png(logo_bytes)
+        except BrandLogoError:
+            return ActivityPlanTemplateSelection("legacy", "logo_invalid")
+        brand_name = config.get("brand_name")
+        if (not isinstance(brand_name, str) or not brand_name.strip() or len(brand_name) > 120
+                or INVALID_XML_CONTROL.search(brand_name)):
+            return ActivityPlanTemplateSelection("legacy", "logo_invalid")
+        return ActivityPlanTemplateSelection("branded", logo_bytes=logo_bytes, brand_name=brand_name.strip())
+
+    def _illustrations(self, tenant_id: str, content: ActivityPlanContent,
+                       presentation: DocumentPresentationOptions) -> dict[int, bytes]:
+        result = {}
+        for index, path in presentation.image_paths.items():
+            if index >= len(content.activity_items):
+                raise DocumentGenerationError("示意图索引超出活动环节范围。")
+            key = validate_illustration_storage_key(path, tenant_id)
+            picture = self._storage.get(key)
+            if not picture or len(picture) > MAX_LOGO_BYTES:
+                raise DocumentGenerationError("示意图文件为空或超过 2MB。")
+            result[index] = picture
+        return result
 
     def create(
         self,
@@ -512,15 +591,36 @@ class ActivityPlanDocumentService:
         content: ActivityPlanContent,
         presentation: DocumentPresentationOptions,
     ) -> GeneratedDocument:
-        logo_bytes = None
-        logo_key = validate_logo_storage_key(presentation.logo_path, tenant_id)
-        if logo_key:
-            logo_bytes = self._storage.get(logo_key)
-            if not logo_bytes or len(logo_bytes) > MAX_LOGO_BYTES:
-                raise DocumentGenerationError("Logo 文件为空或超过 2MB。")
+        selection = self.resolve_activity_plan_template(tenant_id)
+        TEMPLATE_LOGGER.info("activity_plan_template_selection %s", json.dumps({
+            "tenant_id": tenant_id,
+            "template_variant": selection.variant,
+            "fallback_reason": selection.fallback_reason,
+        }, ensure_ascii=False, sort_keys=True))
         try:
-            value = self._renderer.render(content, presentation, logo_bytes=logo_bytes)
+            if selection.variant == "branded":
+                from app.branded_activity_plan_template import BrandedActivityPlanDocxRenderer
+
+                branded_presentation = presentation.model_copy(update={
+                    "brand_name": selection.brand_name,
+                    "logo_path": "",
+                })
+                value = BrandedActivityPlanDocxRenderer(self._clock).render(
+                    content, branded_presentation, logo_bytes=selection.logo_bytes,
+                    illustration_bytes=self._illustrations(tenant_id, content, presentation),
+                )
+            else:
+                # Preserve the Production renderer and its existing request behavior.
+                logo_bytes = None
+                logo_key = validate_logo_storage_key(presentation.logo_path, tenant_id)
+                if logo_key:
+                    logo_bytes = self._storage.get(logo_key)
+                    if not logo_bytes or len(logo_bytes) > MAX_LOGO_BYTES:
+                        raise DocumentGenerationError("Logo 文件为空或超过 2MB。")
+                value = self._renderer.render(content, presentation, logo_bytes=logo_bytes)
         except DocumentGenerationError:
+            raise
+        except (StorageObjectNotFound, StorageUnavailable):
             raise
         except Exception as exc:
             raise DocumentGenerationError("DOCX 生成失败。") from exc
