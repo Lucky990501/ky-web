@@ -1,0 +1,35 @@
+{
+  "mode": "redis-postgres",
+  "root": "__RUNTIME_ROOT__",
+  "api_port": "__API_PORT__",
+  "credential_file": "__TEST_CREDENTIAL_FILE__",
+  "environment": {
+    "APP_ENV": "test",
+    "ENTERPRISE_POC_DATABASE_URL": "__DATABASE_URL__",
+    "ENTERPRISE_POC_DATA_DIR": "__DATA_DIR__",
+    "ENTERPRISE_POC_OBJECT_STORAGE_DIR": "__OBJECT_DIR__",
+    "ENTERPRISE_POC_OBJECT_STORAGE_PROVIDER": "local",
+    "ENTERPRISE_POC_TASK_QUEUE": "redis",
+    "ENTERPRISE_POC_MCP_URL": "__MCP_URL__",
+    "ENTERPRISE_POC_TOKEN_SECRET": "release-test-isolated-only",
+    "ENTERPRISE_POC_MODEL_PROVIDER_ID": "deepseek",
+    "ENTERPRISE_POC_MODEL_ID": "deepseek-v4-pro",
+    "ENTERPRISE_POC_REASONING_EFFORT": "high",
+    "ENTERPRISE_POC_CODEX_API_KEY_ENV": "STAGE2_DEEPSEEK_TEST_API_KEY",
+    "ENTERPRISE_POC_BOOTSTRAP_DEMO_DATA": "false",
+    "STAGE2_RUNTIME_TEST_TENANT_ID": "__TEST_TENANT__",
+    "ENTERPRISE_POC_AGENT_RUNTIME_TEST_TENANT_ID": "__TEST_TENANT__",
+    "REDIS_URL": "__REDIS_URL__",
+    "ENTERPRISE_POC_TASK_QUEUE_NAMESPACE": "__NAMESPACE__"
+  },
+  "snapshot": {
+    "environment": "test",
+    "database_url": "__DATABASE_URL__",
+    "data_dir": "__DATA_DIR__",
+    "object_storage_dir": "__OBJECT_DIR__",
+    "mcp_url": "__MCP_URL__",
+    "test_tenant": "__TEST_TENANT__",
+    "redis_url": "__REDIS_URL__",
+    "namespace": "__NAMESPACE__"
+  }
+}
