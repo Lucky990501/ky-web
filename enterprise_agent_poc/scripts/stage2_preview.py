@@ -11,7 +11,7 @@ from scripts.stage2_isolation import bootstrap, assert_isolated, assert_worker_i
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("role",choices=("check","provision","api","mcp","worker"))
+    parser.add_argument("role",choices=("check","migrate","provision","api","mcp","worker"))
     parser.add_argument("--config",required=True)
     args = parser.parse_args()
     config,settings = bootstrap(args.config)
@@ -22,6 +22,13 @@ def main():
         checker=assert_worker_isolated if config.get('mode')=='redis-postgres' else assert_isolated
         checker(settings,config["root"],config["snapshot"])
     gate()
+    if args.role == 'migrate':
+        if config.get('mode')!='redis-postgres':
+            raise IsolationError("PostgreSQL migration requires private Stage 2 Worker fixture")
+        from app.store import POCStore
+        from scripts.migrate import up
+        gate()
+        return up(POCStore(settings.database_url))
     if args.role == 'worker' or (args.role=='api' and config.get('mode')!='redis-postgres'):
         secret_file = Path(config["credential_file"])
         if secret_file.stat().st_mode & 0o077:

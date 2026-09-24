@@ -66,7 +66,10 @@ def probe(config_path):
             before=[dict(r) for r in conn.execute('SELECT id,task_id,amount FROM credit_transactions WHERE task_id=?',(task['id'],))]
             assert len(before)==1 and before[0]['amount']==-3
             assert len(conn.execute("SELECT id FROM agent_templates WHERE definition_source='legacy' AND id IN ('image-agent','copywriting-agent','campaign-agent')").fetchall())==3
-            assert len(conn.execute('SELECT * FROM schema_migrations').fetchall())==10
+            from scripts.migrate import migration_files
+            migrations=conn.execute('SELECT version,name FROM schema_migrations ORDER BY version').fetchall()
+            assert len(migrations)==len(migration_files())
+            assert migrations[-1]['version']==migration_files()[-1].name[:3]
             public_runs=[dict(r) for r in conn.execute("SELECT t.id,t.status,t.conversation_id,m.context_id,c.agent_template_version_id,c.configuration_fingerprint,c.credit_cost FROM tasks t JOIN task_agent_contexts m ON m.task_id=t.id JOIN agent_execution_contexts c ON c.id=m.context_id WHERE t.agent_id=? AND t.id NOT IN (SELECT task_id FROM agent_template_tests WHERE task_id IS NOT NULL)",(tid,))]
             assert len(public_runs)==2 and all(t['status']=='completed' for t in public_runs)
             assert len({t['conversation_id'] for t in public_runs})==len({t['context_id'] for t in public_runs})==1

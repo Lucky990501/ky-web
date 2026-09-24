@@ -286,6 +286,7 @@ class IsolatedServices:
                 or self.credential_file.stat().st_mode & 0o077):
             raise RuntimeError("Non-Production Stage 2 credential file with mode 0600 required")
         root = self._safe_root()
+        self.migrate()
         for role in ("provision", "mcp", "api", "worker"):
             if role == "provision":
                 subprocess.run([sys.executable, str(PROJECT / "scripts/stage2_preview.py"), role,
@@ -310,6 +311,13 @@ class IsolatedServices:
             except (URLError, TimeoutError):
                 time.sleep(0.25)
         raise RuntimeError("Isolated API health timeout")
+
+    def migrate(self) -> None:
+        """Apply the project's formal ordered migration runner to this private DB."""
+        self.validate_manifest()
+        subprocess.run([sys.executable, str(PROJECT / "scripts/stage2_preview.py"), "migrate",
+                        "--config", str(self.manifest)], cwd=PROJECT, env=self._child_env(),
+                       check=True, stdout=subprocess.DEVNULL)
 
     def run_pytest(self, arguments: list[str]) -> int:
         self.start_app()

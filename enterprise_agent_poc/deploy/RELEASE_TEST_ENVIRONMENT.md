@@ -44,7 +44,9 @@ existing `stage2_preview.py check` gate before provisioning anything.
 1. Prepare/verify Node and Redis versions.
 2. Create a marked private root and start isolated PostgreSQL and Redis.
 3. Verify Redis `PING`, `INFO server` exact version, and Stage 2 isolation.
-4. Provision isolated data and start isolated MCP, API, and Worker.
+4. Apply all current ordered PostgreSQL migrations through the formal
+   `scripts/migrate.py` runner, provision isolated data, and start isolated
+   MCP, API, and Worker.
 5. Supply `STAGE25_REDIS_E2E_CONFIG` and `STAGE25_API_PID` to pytest.
 6. Stop the three application processes, Redis, and PostgreSQL, then delete
    only the marked root created by this invocation, also when pytest fails.
