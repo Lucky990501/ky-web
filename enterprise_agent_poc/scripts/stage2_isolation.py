@@ -97,6 +97,18 @@ def assert_worker_isolated(settings,root,expected=None):
         or redis.scheme!='unix' or redis.netloc or redis.path!=str(root/'redis.sock') or redis.query!='db=0'
         or settings.task_queue!='redis' or settings.task_queue_namespace!=root.name or settings.object_storage_provider!='local'):
         raise IsolationError('Private PG / Redis queue configuration required; BLOCK')
+    mcp=urlparse(settings.platform_mcp_url)
+    configured_port=os.environ.get('ENTERPRISE_POC_MCP_PORT','')
+    configured_host=os.environ.get('ENTERPRISE_POC_MCP_HOST','')
+    try:
+        mcp_port=mcp.port
+        listener_port=int(configured_port)
+    except (ValueError,TypeError):
+        raise IsolationError('MCP_ENDPOINT_CONFIGURATION_MISMATCH; BLOCK') from None
+    if (mcp.scheme!='http' or mcp.hostname!='127.0.0.1' or configured_host!=mcp.hostname
+        or mcp.path!='/mcp' or mcp.username or mcp.password or mcp.query or mcp.fragment
+        or not 1<=listener_port<=65535 or mcp_port!=listener_port):
+        raise IsolationError('MCP_ENDPOINT_CONFIGURATION_MISMATCH; BLOCK')
     for socket in (root/'pg/socket',root/'redis.sock'):
         if socket.is_symlink() or socket.stat().st_uid!=os.getuid() or socket.stat().st_mode & 0o077:
             raise IsolationError('Private socket permissions / owner mismatch; BLOCK')

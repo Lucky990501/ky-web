@@ -190,6 +190,7 @@ class IsolatedServices:
         self.root.chmod(0o700)
         (self.root / "stage2-isolated.marker").write_text(MARKER, encoding="utf-8")
         try:
+            self._prepare_evidence()
             self._start_pg(pg_bin)
             self._start_redis()
             self._manifest()
@@ -197,6 +198,21 @@ class IsolatedServices:
         except BaseException:
             self.stop()
             raise
+
+    def _prepare_evidence(self) -> Path:
+        """Keep test evidence private, writable, and inside the disposable root."""
+        evidence = self._safe_root() / "evidence"
+        evidence.mkdir(mode=0o700)
+        if (evidence.is_symlink() or evidence.stat().st_uid != os.getuid()
+                or evidence.stat().st_mode & 0o077):
+            raise RuntimeError("Isolated evidence directory permissions invalid")
+        try:
+            with tempfile.TemporaryFile(dir=evidence) as probe:
+                probe.write(b"writable")
+                probe.flush()
+        except OSError as exc:
+            raise RuntimeError("Isolated evidence directory is not writable") from exc
+        return evidence
 
     def _start_pg(self, pg_bin: Path) -> None:
         root = self._safe_root()
@@ -246,14 +262,17 @@ class IsolatedServices:
         root = self._safe_root()
         template = PROJECT / contract()["manifest_template"]
         config = json.loads(template.read_text(encoding="utf-8"))
-        self.api_port, mcp_port = _available_port(), _available_port()
+        self.api_port = _available_port()
+        mcp_host, mcp_port = "127.0.0.1", _available_port()
         tenant = "stage25-test-tenant"
         db_url = f"postgresql:///{self.database}?" + urlencode({"host": str(root / "pg/socket"), "port": PG_PORT, "user": "stage1_fixture"})
         values = {
             "__RUNTIME_ROOT__": str(root), "__API_PORT__": self.api_port,
             "__TEST_CREDENTIAL_FILE__": str(self.credential_file or root / "unused-credential"),
             "__DATABASE_URL__": db_url, "__DATA_DIR__": str(root / "data"),
-            "__OBJECT_DIR__": str(root / "objects"), "__MCP_URL__": f"http://127.0.0.1:{mcp_port}/mcp",
+            "__OBJECT_DIR__": str(root / "objects"),
+            "__MCP_HOST__": mcp_host, "__MCP_PORT__": str(mcp_port),
+            "__MCP_URL__": f"http://{mcp_host}:{mcp_port}/mcp",
             "__TEST_TENANT__": tenant, "__REDIS_URL__": f"unix://{root / 'redis.sock'}?db=0",
             "__NAMESPACE__": root.name,
         }

@@ -11,6 +11,8 @@
     "ENTERPRISE_POC_OBJECT_STORAGE_PROVIDER": "local",
     "ENTERPRISE_POC_TASK_QUEUE": "redis",
     "ENTERPRISE_POC_MCP_URL": "__MCP_URL__",
+    "ENTERPRISE_POC_MCP_HOST": "__MCP_HOST__",
+    "ENTERPRISE_POC_MCP_PORT": "__MCP_PORT__",
     "ENTERPRISE_POC_TOKEN_SECRET": "release-test-isolated-only",
     "ENTERPRISE_POC_MODEL_PROVIDER_ID": "deepseek",
     "ENTERPRISE_POC_MODEL_ID": "deepseek-v4-pro",
