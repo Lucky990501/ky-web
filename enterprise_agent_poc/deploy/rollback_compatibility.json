@@ -18,10 +18,10 @@
     }
   ],
   "forward_predecessor_approval": {
-    "release_id": "20260923-3e7ea8b",
-    "source_commit": "3e7ea8bfd771d12211ae885b4bbb1c8009933aa7",
-    "archive_sha256": "48971b9c6726d31b1242a46fd446daaede25808e658ec3eff0ea049a860e9bec",
-    "manifest_sha256": "e4e457c19d6c80ba2a758ad11d72b92129aae4989ac4b7c8e2a87fd429cfd03e",
+    "release_id": "20260923-12e5b9e",
+    "source_commit": "12e5b9e7ca1d8c07a4da411753c5b69b83238831",
+    "archive_sha256": "b19746b25c7b828e82515c699d229e1ace98eb7bb4a93bbb9a32844cda0f34af",
+    "manifest_sha256": "b9bd4fbb2b7318a818816f01e8beb2cf5a604ce9eccdf4ece59cddf972f2da82",
     "schema_fingerprint": "1a704f578e9721e2a6537bd2a4b452528f18ed671cb2225558a5c990c9160baf",
     "data_contract": "member_account_status_v1"
   },
