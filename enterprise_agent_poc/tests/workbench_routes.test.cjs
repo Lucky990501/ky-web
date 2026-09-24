@@ -98,7 +98,7 @@ function harness(pathname = '/platform/skills', state = null) {
   class BrowserURL extends URL {}
   BrowserURL.createObjectURL=()=>`blob:http://localhost/document-${downloads.length+1}`;
   BrowserURL.revokeObjectURL=()=>{};
-  const context = vm.createContext({document,window,location,sessionStorage,console,Map,Set,Date,URL:BrowserURL,EventSource,setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
+  const context = vm.createContext({document,window,location,sessionStorage,console,Map,Set,Date,URL:BrowserURL,EventSource,FormData:class{constructor(){this.items=[];}append(name,file,filename){this.items.push({name,file,filename});}},setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
     fetch(url,options){return new Promise((resolve,reject)=>pending.push({url,options,resolve(body){resolve({ok:true,json:async()=>body});},resolveResponse:resolve,reject}));},
   });
   vm.runInContext(source,context);
@@ -345,8 +345,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=activity-plan-export-ux-polish-v1/);
-  assert.match(index,/workbench\.js\?v=activity-plan-full-streaming-ux-final/);
+  assert.match(index,/workbench\.css\?v=enterprise-brand-logo-phase-a-v1/);
+  assert.match(index,/workbench\.js\?v=enterprise-brand-logo-phase-a-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -845,4 +845,74 @@ test('network completion drains only received delta text across frames before vi
   assert.ok(h.run('drainState.completedAt')>=h.run('drainState.networkCompletedAt'));
   assert.equal(h.run('drainState.run.phase'),'IDLE');
   assert.equal(h.run('drainState.displayText'),h.run('drainState.text'));
+});
+
+test('brand Logo missing, existing, permission and tenant-safe card states',()=>{
+  const h=harness('/enterprise-config');
+  h.run("brandState={logo:null,phase:'idle',error:'',previewVersion:1,canEdit:true}");
+  const missing=h.run('brandLogoCardHtml(brandState)');
+  assert.match(missing,/尚未上传品牌 Logo/);
+  assert.match(missing,/当前 Word 导出仍可使用/);
+  assert.ok(!missing.includes('Word 暂无法生成'));
+  assert.match(missing,/仅支持透明背景 PNG/);
+  assert.match(missing,/512–2048px/);
+  assert.match(missing,/最大 5MB/);
+  assert.match(missing,/最大 4096 × 4096/);
+  assert.match(missing,/accept="image\/png,\.png"/);
+  assert.match(missing,/上传 Logo/);
+  h.run("brandState.logo={filename:'brand.png',width:1024,height:512,content_type:'image/png',download_url:'/api/v1/enterprise-config/brand-logo',asset_id:'private-id',storage_key:'private-path'}");
+  const existing=h.run('brandLogoCardHtml(brandState)');
+  assert.match(existing,/更换 Logo/);assert.match(existing,/1024 × 512px/);
+  assert.match(existing,/当前企业品牌 Logo/);
+  assert.ok(!existing.includes('private-id')&&!existing.includes('private-path'));
+  h.run('brandState.canEdit=false');
+  assert.ok(!h.run('brandLogoCardHtml(brandState)').includes('brand-logo-upload'));
+});
+
+test('brand Logo error codes provide precise safe guidance, including opaque and fake PNG',()=>{
+  const h=harness('/enterprise-config');
+  for(const [code,expected] of [['LOGO_TRANSPARENCY_REQUIRED','没有透明背景'],['LOGO_FORMAT_NOT_SUPPORTED','仅支持 PNG'],['LOGO_INVALID_PNG','图片文件无效'],['LOGO_TOO_LARGE','不能超过 5MB'],['LOGO_DIMENSIONS_TOO_LARGE','4096 × 4096'],['LOGO_PERMISSION_DENIED','无权修改'],['LOGO_STORAGE_FAILED','保存失败']]){
+    assert.ok(h.run(`brandLogoErrorMessage({error_code:'INVALID_INPUT',detail:'${code}'})`).includes(expected));
+  }
+  assert.equal(h.run("brandLogoErrorMessage({detail:'traceback /secret/path'})"),'Logo 上传失败，请稍后重试');
+});
+
+test('brand Logo upload waits for formal config refresh and replaces preview only after success',async()=>{
+  const h=harness('/enterprise-config');
+  h.run("logoCard={innerHTML:'',querySelector(){return null}};logoMain={querySelector(selector){return selector==='#brand-logo-card'?logoCard:null}};logoFile={name:'transparent.png'};logoState={logo:null,phase:'idle',error:'',previewVersion:0,canEdit:true};logoUpload=uploadBrandLogo(logoMain,logoState,logoFile)");
+  assert.equal(h.run('logoState.phase'),'uploading');
+  assert.match(h.run('logoCard.innerHTML'),/正在上传\.\.\./);
+  assert.match(h.run('logoCard.innerHTML'),/disabled aria-busy="true"/);
+  assert.equal(h.pending[0].url,'/api/v1/enterprise-config/brand-logo');
+  assert.equal(h.pending[0].options.method,'POST');
+  assert.equal(h.pending[0].options.body.items[0].name,'file');
+  h.respond('/api/v1/enterprise-config/brand-logo',{brand_logo:{filename:'transparent.png'}});await flush();
+  assert.equal(h.run('logoState.phase'),'uploading','POST metadata alone must not become the saved preview');
+  assert.equal(h.pending[1].url,'/api/v1/enterprise-config');
+  h.respond('/api/v1/enterprise-config',{brand_logo:{filename:'saved.png',width:512,height:512,content_type:'image/png',download_url:'/api/v1/enterprise-config/brand-logo'}});
+  await h.run('logoUpload');
+  assert.equal(h.run('logoState.phase'),'success');
+  assert.equal(h.run('logoState.logo.filename'),'saved.png');
+  assert.match(h.run('logoCard.innerHTML'),/上传成功/);
+  assert.match(h.run('logoCard.innerHTML'),/更换 Logo/);
+});
+
+test('brand Logo replacement failure retains the old preview and permits retry',async()=>{
+  const h=harness('/enterprise-config');
+  h.run("oldLogo={filename:'old.png',width:512,height:512,content_type:'image/png',download_url:'/api/v1/enterprise-config/brand-logo'};logoCard={innerHTML:'',querySelector(){return null}};logoMain={querySelector(selector){return selector==='#brand-logo-card'?logoCard:null}};logoState={logo:oldLogo,phase:'idle',error:'',previewVersion:1,canEdit:true};logoUpload=uploadBrandLogo(logoMain,logoState,{name:'opaque.png'})");
+  h.pending[0].done=true;h.pending[0].resolveResponse({ok:false,status:422,json:async()=>({error_code:'INVALID_INPUT',detail:'LOGO_TRANSPARENCY_REQUIRED'})});await h.run('logoUpload');
+  assert.equal(h.run('logoState.phase'),'error');
+  assert.equal(h.run('logoState.logo.filename'),'old.png');
+  assert.match(h.run('logoCard.innerHTML'),/没有透明背景/);
+  assert.match(h.run('logoCard.innerHTML'),/更换 Logo/);
+  const denied=h.run("logoState.canEdit=false;uploadBrandLogo(logoMain,logoState,{name:'blocked.png'})");await denied;
+  assert.equal(h.pending.length,1,'read-only state must not issue another POST');
+});
+
+test('brand Logo mobile card scales within 375px and has a touch-sized button',()=>{
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(css,/\.brand-logo-preview\{[^}]*width:min\(100%,340px\)/);
+  assert.match(css,/\.brand-logo-preview img\{[^}]*max-width:100%/);
+  assert.match(css,/\.brand-logo-upload-button\{min-height:44px\}/);
+  assert.match(css,/@media\(max-width:860px\)\{\.brand-logo-preview\{width:100%\}/);
 });

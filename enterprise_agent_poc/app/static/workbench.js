@@ -674,7 +674,58 @@ function filterAssets(){const q=document.querySelector('#asset-filter').value.to
 function assetForm(main){main.querySelector('.toolbar').insertAdjacentHTML('afterend',`<form class="inline-form" id="asset-form"><label>名称<input name="name" required></label><label>类型<select name="asset_type"><option value="poster_reference">海报参考</option><option value="logo">Logo</option><option value="product_image">产品图片</option><option value="teacher_image">人物素材</option><option value="other">其他</option></select></label><label>URL<input name="url" type="url" required></label><label>描述<input name="description"></label><button class="button primary">保存素材</button></form>`);main.querySelector('#asset-form').onsubmit=async e=>{e.preventDefault();const p=Object.fromEntries(new FormData(e.target));p.tags=[];await api('/api/v1/assets',{method:'POST',body:JSON.stringify(p)});assets(main);};}
 const typeText=x=>({logo:'Logo',poster_reference:'海报参考',product_image:'产品图片',teacher_image:'人物素材',other:'其他'})[x]||x;
 
-async function enterprise(main){const data=await api('/api/v1/enterprise-config');main.innerHTML=`${header('企业配置','设置企业的品牌信息与内容规则，AI 将基于这些配置创作内容。','settings')}<div class="config-layout"><form id="config-form"><section class="panel form-section"><h2>${icon('building-2')} 企业信息</h2><div class="form-grid"><label>企业名称<input name="brand_name" value="${escapeHtml(data.brand_name||'')}"></label><label>企业简介<textarea name="company_intro" placeholder="介绍企业的定位与业务范围">${escapeHtml(data.company_intro||'')}</textarea></label></div></section><section class="panel form-section"><h2>${icon('palette')} 品牌设置</h2><div class="form-grid"><label>品牌主色<input name="primary_color" value="${escapeHtml(data.primary_color||'#2563EB')}"></label><label>品牌辅色<input name="secondary_color" value="${escapeHtml(data.secondary_color||'#F59E0B')}"></label><label>品牌 Slogan<input name="slogan" value="${escapeHtml(data.slogan||'')}"></label><label>品牌标签<input name="brand_tags" value="${escapeHtml((data.brand_tags||[]).join('、'))}"></label></div></section><section class="panel form-section"><h2>${icon('shield-check')} 内容规则</h2><div class="form-grid"><label>目标用户<input name="target_users" value="${escapeHtml(data.target_users||'')}"></label><label>必须遵循的规则<textarea name="required_rules">${escapeHtml((data.required_rules||[]).join('\n'))}</textarea></label><label>禁止内容<textarea name="forbidden_claims">${escapeHtml((data.forbidden_claims||[]).join('\n'))}</textarea></label><label>自定义规则<textarea name="custom_rules">${escapeHtml((data.custom_rules||[]).join('\n'))}</textarea></label></div></section><div class="form-actions">${button('取消','x')}<button class="button primary" type="submit">${icon('save')}保存配置</button></div></form><aside class="panel brand-preview"><h3>品牌效果预览</h3><div class="brand-preview-art" style="--brand:${escapeHtml(data.primary_color||'#2563EB')};--accent:${escapeHtml(data.secondary_color||'#F59E0B')}"><b>${escapeHtml(data.brand_name||'企业品牌')}</b><span>${escapeHtml(data.slogan||'让 AI 成为创造力')}</span></div><h3>品牌信息</h3><p><b>主色</b> ${escapeHtml(data.primary_color||'未设置')}</p><p><b>辅色</b> ${escapeHtml(data.secondary_color||'未设置')}</p><p><b>规则</b> 后续 AI 创作将自动遵循</p></aside></div>`;main.querySelector('#config-form').onsubmit=async e=>{e.preventDefault();const p=Object.fromEntries(new FormData(e.target));['brand_tags','required_rules','forbidden_claims','custom_rules'].forEach(k=>p[k]=p[k].split(/[\n、,]/).map(x=>x.trim()).filter(Boolean));await api('/api/v1/enterprise-config',{method:'PUT',body:JSON.stringify({payload:p})});alert('企业配置已保存');};refreshIcons();}
+const brandLogoPath='/api/v1/enterprise-config/brand-logo';
+const brandLogoErrorMessages=Object.freeze({
+  LOGO_FILE_REQUIRED:'请选择 Logo 文件',
+  LOGO_FORMAT_NOT_SUPPORTED:'仅支持 PNG 格式 Logo',
+  LOGO_INVALID_PNG:'图片文件无效或已损坏，请重新上传',
+  LOGO_TRANSPARENCY_REQUIRED:'检测到当前 Logo 没有透明背景，请上传透明背景 PNG。',
+  LOGO_TOO_LARGE:'Logo 文件不能超过 5MB',
+  LOGO_DIMENSIONS_TOO_LARGE:'Logo 图片尺寸过大，请使用不超过 4096 × 4096 的图片',
+  LOGO_STORAGE_FAILED:'Logo 保存失败，请稍后重试',
+  LOGO_CONFIG_UPDATE_FAILED:'Logo 保存失败，请稍后重试',
+  LOGO_PERMISSION_DENIED:'当前账号无权修改企业 Logo',
+  FORBIDDEN:'当前账号无权修改企业 Logo',
+});
+function brandLogoErrorMessage(payload={}){
+  const code=[payload.error_code,payload.detail,payload.user_message,payload.code].find(value=>Object.hasOwn(brandLogoErrorMessages,value));
+  return brandLogoErrorMessages[code]||'Logo 上传失败，请稍后重试';
+}
+const brandLogoMetadata=value=>value&&value.download_url===brandLogoPath&&value.content_type==='image/png'&&typeof value.filename==='string'?value:null;
+function brandLogoCardHtml(state){
+  const logo=brandLogoMetadata(state.logo),uploading=state.phase==='uploading',canEdit=state.canEdit;
+  const preview=logo?`<div class="brand-logo-preview"><img src="${brandLogoPath}?v=${state.previewVersion}" alt="当前企业品牌 Logo"></div><div class="brand-logo-file"><strong>${escapeHtml(logo.filename)}</strong>${Number.isInteger(logo.width)&&Number.isInteger(logo.height)?`<span>${logo.width} × ${logo.height}px</span>`:''}</div>`:`<div class="brand-logo-preview brand-logo-empty">${icon('image',28)}<span>尚未上传品牌 Logo</span></div><p class="brand-logo-missing">品牌 Logo 尚未配置。当前 Word 导出仍可使用；配置 Logo 后可用于后续品牌模板。</p>`;
+  return `<h2>${icon('image')} 品牌 Logo</h2><p class="brand-logo-description">上传后可用于后续品牌 Word 模板的页眉和水印。</p>${preview}<p class="brand-logo-requirements">仅支持透明背景 PNG · 最大 5MB · 最大 4096 × 4096 · 建议长边 512–2048px</p>${canEdit?`<input id="brand-logo-file" type="file" accept="image/png,.png" aria-label="选择透明背景 PNG Logo" hidden ${uploading?'disabled':''}><button class="button secondary brand-logo-upload-button" type="button" id="brand-logo-upload" ${uploading?'disabled aria-busy="true"':''}>${icon(uploading?'loader-circle':'upload',16)}${uploading?'正在上传...':logo?'更换 Logo':'上传 Logo'}</button>`:''}${state.phase==='success'?'<p class="brand-logo-feedback" role="status">上传成功，当前预览已更新。</p>':''}${state.phase==='error'?`<p class="brand-logo-feedback brand-logo-feedback-error" role="alert">${escapeHtml(state.error)}</p>`:''}`;
+}
+function renderBrandLogoCard(main,state){
+  const card=main.querySelector?.('#brand-logo-card');if(!card)return;
+  card.innerHTML=brandLogoCardHtml(state);
+  const picker=card.querySelector?.('#brand-logo-file'),button=card.querySelector?.('#brand-logo-upload');
+  if(button&&picker){button.onclick=()=>picker.click();picker.onchange=()=>{const file=picker.files?.[0];if(file)uploadBrandLogo(main,state,file);};}
+  refreshIcons();
+}
+async function uploadBrandLogo(main,state,file){
+  if(!state.canEdit||state.phase==='uploading')return;
+  if(!file){state.phase='error';state.error=brandLogoErrorMessages.LOGO_FILE_REQUIRED;renderBrandLogoCard(main,state);return;}
+  state.phase='uploading';state.error='';renderBrandLogoCard(main,state);
+  try{
+    const form=new FormData();form.append('file',file,file.name);
+    const response=await fetch(brandLogoPath,{method:'POST',credentials:'same-origin',body:form});
+    let payload={};try{payload=await response.json();}catch{}
+    if(!response.ok)throw payload;
+    pageCache.delete('/api/v1/enterprise-config');
+    const config=await api('/api/v1/enterprise-config'),saved=brandLogoMetadata(config.brand_logo);
+    if(!saved)throw {code:'LOGO_REFRESH_FAILED'};
+    state.logo=saved;state.previewVersion=Date.now();state.phase='success';
+  }catch(error){state.phase='error';state.error=error?.code==='LOGO_REFRESH_FAILED'?'Logo 已上传，但未能读取最新配置，请刷新页面确认。':brandLogoErrorMessage(error);}
+  renderBrandLogoCard(main,state);
+}
+async function enterprise(main){
+  const data=await api('/api/v1/enterprise-config');
+  main.innerHTML=`${header('企业配置','设置企业的品牌信息与内容规则，AI 将基于这些配置创作内容。','settings')}<div class="config-layout"><form id="config-form"><section class="panel form-section"><h2>${icon('building-2')} 企业信息</h2><div class="form-grid"><label>企业名称<input name="brand_name" value="${escapeHtml(data.brand_name||'')}"></label><label>企业简介<textarea name="company_intro" placeholder="介绍企业的定位与业务范围">${escapeHtml(data.company_intro||'')}</textarea></label></div></section><section class="panel form-section"><h2>${icon('palette')} 品牌设置</h2><div class="form-grid"><label>品牌主色<input name="primary_color" value="${escapeHtml(data.primary_color||'#2563EB')}"></label><label>品牌辅色<input name="secondary_color" value="${escapeHtml(data.secondary_color||'#F59E0B')}"></label><label>品牌 Slogan<input name="slogan" value="${escapeHtml(data.slogan||'')}"></label><label>品牌标签<input name="brand_tags" value="${escapeHtml((data.brand_tags||[]).join('、'))}"></label></div></section><section class="panel form-section brand-logo-card" id="brand-logo-card" aria-label="品牌 Logo"></section><section class="panel form-section"><h2>${icon('shield-check')} 内容规则</h2><div class="form-grid"><label>目标用户<input name="target_users" value="${escapeHtml(data.target_users||'')}"></label><label>必须遵循的规则<textarea name="required_rules">${escapeHtml((data.required_rules||[]).join('\n'))}</textarea></label><label>禁止内容<textarea name="forbidden_claims">${escapeHtml((data.forbidden_claims||[]).join('\n'))}</textarea></label><label>自定义规则<textarea name="custom_rules">${escapeHtml((data.custom_rules||[]).join('\n'))}</textarea></label></div></section><div class="form-actions">${button('取消','x')}<button class="button primary" type="submit">${icon('save')}保存配置</button></div></form><aside class="panel brand-preview"><h3>品牌效果预览</h3><div class="brand-preview-art" style="--brand:${escapeHtml(data.primary_color||'#2563EB')};--accent:${escapeHtml(data.secondary_color||'#F59E0B')}"><b>${escapeHtml(data.brand_name||'企业品牌')}</b><span>${escapeHtml(data.slogan||'让 AI 成为创造力')}</span></div><h3>品牌信息</h3><p><b>主色</b> ${escapeHtml(data.primary_color||'未设置')}</p><p><b>辅色</b> ${escapeHtml(data.secondary_color||'未设置')}</p><p><b>规则</b> 后续 AI 创作将自动遵循</p></aside></div>`;
+  renderBrandLogoCard(main,{logo:data.brand_logo,phase:'idle',error:'',previewVersion:Date.now(),canEdit:me?.role==='enterprise_admin'});
+  main.querySelector('#config-form').onsubmit=async e=>{e.preventDefault();const p=Object.fromEntries(new FormData(e.target));['brand_tags','required_rules','forbidden_claims','custom_rules'].forEach(k=>p[k]=p[k].split(/[\n、,]/).map(x=>x.trim()).filter(Boolean));await api('/api/v1/enterprise-config',{method:'PUT',body:JSON.stringify({payload:p})});alert('企业配置已保存');};refreshIcons();
+}
 
 async function members(main){
   const items=await api('/api/v1/members');if(main.dataset.page!=='members')return;
