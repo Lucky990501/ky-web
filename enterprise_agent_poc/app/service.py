@@ -270,9 +270,10 @@ class AgentService:
         async def consume():
             completed = None
             generating_started = False
+            explicit_full_plan_generation = False
             async for event in stream_turn(session, message):
                 if event.kind == "delta":
-                    if not generating_started and on_execution_activity:
+                    if not generating_started and not explicit_full_plan_generation and on_execution_activity:
                         on_execution_activity("generating", "started")
                         generating_started = True
                     if on_visible_delta and event.text:
@@ -280,6 +281,8 @@ class AgentService:
                 elif event.kind == "activity" and on_execution_activity and event.text:
                     stage, separator, status = event.text.partition(":")
                     if separator:
+                        if stage == "full_plan_generating" and status == "started":
+                            explicit_full_plan_generation = True
                         on_execution_activity(stage, status)
                 elif event.kind == "completed":
                     completed = event.turn

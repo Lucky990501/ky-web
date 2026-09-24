@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn, SandboxPolicy
 from app.activity_plan_runtime import (
-    PLAN_SCHEMA, SAFE_FALLBACK, STRUCTURED_INSTRUCTION, correction_prompt,
+    PLAN_SCHEMA, SAFE_FALLBACK, STRUCTURED_INSTRUCTION, chunk_validated_markdown, correction_prompt,
     is_full_activity_plan, merge_targeted_correction, parse_plan, render_markdown,
     result_envelope, safe_violations, semantic_guard,
 )
@@ -424,6 +424,9 @@ class CodexRuntimeProvider(RuntimeProvider):
             })
 
         for attempt in range(1, MAX_STRUCTURED_MODEL_ATTEMPTS + 1):
+            generation_stage = ("semantic_correcting" if attempt == 2 and original is not None
+                                and original_violations else "full_plan_generating")
+            yield RuntimeStreamEvent.activity(generation_stage, "started")
             model_calls += 1
             record("INITIAL" if attempt == 1 else "CORRECTION", attempt)
             try:
@@ -440,6 +443,7 @@ class CodexRuntimeProvider(RuntimeProvider):
                 # JSON attempt. Operational failures still follow normal error handling.
                 wording = str(exc).lower()
                 if attempt == 1 and any(part in wording for part in ("output_schema", "output schema", "json_schema", "json schema", "response_format")):
+                    yield RuntimeStreamEvent.activity(generation_stage, "completed")
                     record("FORMAT_VALIDATION", attempt, format_valid=False)
                     use_schema = False
                     prompt = first_prompt
@@ -447,9 +451,11 @@ class CodexRuntimeProvider(RuntimeProvider):
                 raise
             if last_turn is None:
                 raise RuntimeError("structured turn completed event not received")
+            yield RuntimeStreamEvent.activity(generation_stage, "completed")
             grounding += tuple(str(call.get("output_summary") or "") for call in last_turn.mcp_calls
                                if call.get("tool") in {"knowledge_search", "enterprise_config_get"}
                                and call.get("status") == "completed")
+            yield RuntimeStreamEvent.activity("structured_validating", "started")
             candidate = parse_plan(last_turn.text)
             record("FORMAT_VALIDATION", attempt, format_valid=candidate is not None)
             correction_merge_valid = True
@@ -457,17 +463,26 @@ class CodexRuntimeProvider(RuntimeProvider):
                 merged = merge_targeted_correction(original, candidate, original_violations)
                 correction_merge_valid = merged is not None
                 candidate = merged
-            violations = semantic_guard(candidate, grounding) if candidate else []
+            yield RuntimeStreamEvent.activity("structured_validating", "completed")
+            violations = []
+            if candidate is not None:
+                yield RuntimeStreamEvent.activity("semantic_validating", "started")
+                violations = semantic_guard(candidate, grounding)
+                yield RuntimeStreamEvent.activity("semantic_validating", "completed")
             valid = candidate is not None and correction_merge_valid and not violations
             record("SEMANTIC_VALIDATION" if attempt == 1 else "REVALIDATION", attempt,
                    format_valid=candidate is not None, semantic_valid=valid,
                    correction_result=("PASS" if valid else "FAIL") if attempt == 2 else None,
                    issues=violations)
             if valid:
+                yield RuntimeStreamEvent.activity("result_rendering", "started")
                 markdown = render_markdown(candidate)
+                chunks = chunk_validated_markdown(markdown)
+                yield RuntimeStreamEvent.activity("result_rendering", "completed")
                 record("FINAL", attempt, format_valid=True, semantic_valid=True,
                        correction_result="PASS" if attempt == 2 else None)
-                yield RuntimeStreamEvent.visible_delta(markdown)
+                for chunk in chunks:
+                    yield RuntimeStreamEvent.visible_delta(chunk)
                 yield RuntimeStreamEvent.completed(replace(
                     last_turn, text=markdown, structured_result=result_envelope(candidate), structured_diagnostic=None,
                     structured_attempt_trace=tuple(attempt_trace),

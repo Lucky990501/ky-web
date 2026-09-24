@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app import main
 from app.activity_plan_runtime import (
-    is_full_activity_plan, parse_plan, render_markdown, semantic_guard,
+    SAFE_FALLBACK, chunk_validated_markdown, is_full_activity_plan, parse_plan, render_markdown, semantic_guard,
 )
 from app.document_generator import ActivityPlanContent, ActivityPlanDocumentService
 from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn
@@ -79,6 +80,71 @@ def full_request() -> str:
     return "请给社区教师节设计完整活动方案，包含主题、时间、地点、宣发、执行和邀约"
 
 
+def activity_stages(events) -> list[str]:
+    return [event.text for event in events if event.kind == "activity"]
+
+
+def test_rs1_simple_request_keeps_multiple_raw_token_deltas_without_plan_stages():
+    class MultiTokenProvider(ScriptedProvider):
+        async def _stream_provider_turn(self, session, profile, message, *, output_schema=None, visible_deltas=True):
+            for token in ("五", "个", "标题"):
+                yield RuntimeStreamEvent.visible_delta(token)
+            yield RuntimeStreamEvent.completed(RuntimeTurn(session.thread_id, "五个标题"))
+
+    events = collect(MultiTokenProvider([]), "给我想5个社区教师节活动标题")
+    assert [event.text for event in events if event.kind == "delta"] == ["五", "个", "标题"]
+    assert not any(stage.startswith(("structured_validating", "semantic_validating", "semantic_correcting"))
+                   for stage in activity_stages(events))
+
+
+def test_rs2_full_plan_real_stage_order_without_unneeded_correction():
+    events = collect(ScriptedProvider([json.dumps(plan(), ensure_ascii=False)]), full_request())
+    stages = activity_stages(events)
+    expected = ["full_plan_generating:started", "full_plan_generating:completed",
+                "structured_validating:started", "structured_validating:completed",
+                "semantic_validating:started", "semantic_validating:completed",
+                "result_rendering:started", "result_rendering:completed"]
+    positions = [stages.index(stage) for stage in expected]
+    assert positions == sorted(positions)
+    assert not any(stage.startswith("semantic_correcting:") for stage in stages)
+
+
+def test_rs3_correction_stage_only_when_a_second_semantic_model_call_occurs():
+    source = plan()
+    source["pending_items"] = ["工作人员未确认"]
+    source["invitation_copy"] = "工作人员将进行一对一跟进。"
+    fixed = {**source, "invitation_copy": "如工作人员确认到位，可安排一对一跟进。"}
+    events = collect(ScriptedProvider([
+        json.dumps(source, ensure_ascii=False), json.dumps(fixed, ensure_ascii=False)
+    ]), full_request())
+    stages = activity_stages(events)
+    assert stages.count("semantic_correcting:started") == 1
+    assert stages.count("semantic_correcting:completed") == 1
+    assert stages.count("structured_validating:started") == 2
+    assert stages.count("semantic_validating:started") == 2
+
+
+def test_rs4_safe_before_visible_and_rs5_validated_chunks_and_rs6_reconstruction():
+    events = collect(ScriptedProvider([json.dumps(plan(), ensure_ascii=False)]), full_request())
+    first_delta = next(index for index, event in enumerate(events) if event.kind == "delta")
+    guard_completed = next(index for index, event in enumerate(events)
+                           if event.text == "semantic_validating:completed")
+    assert first_delta > guard_completed
+    chunks = [event.text for event in events if event.kind == "delta"]
+    assert len(chunks) > 1
+    assert max(map(len, chunks)) <= 120
+    assert "".join(chunks) == events[-1].turn.text
+
+
+def test_rs7_table_rows_and_unicode_reconstruct_exactly():
+    markdown = render_markdown(ActivityPlanContent.model_validate(plan()))
+    chunks = chunk_validated_markdown(markdown, max_chars=80)
+    assert len(chunks) > 1
+    assert max(map(len, chunks)) <= 80
+    assert "".join(chunks) == markdown
+    assert "| 环节 | 名称 | 说明 | 示意图需求 |" in "".join(chunks)
+
+
 def test_rg1_simple_request_and_other_agents_keep_text_path():
     simple = "给我想5个社区教师节活动标题"
     assert not is_full_activity_plan("campaign-agent", simple)
@@ -97,7 +163,9 @@ def test_rg2_rg3_full_plan_contract_and_deterministic_markdown():
     assert final.text == render_markdown(ActivityPlanContent.model_validate(source))
     assert "社区教师节" in final.text
     assert provider.options == [(provider.options[0][0], True, False)]
-    assert [event.kind for event in events] == ["activity", "delta", "completed"]
+    assert events[0].text == "full_plan_generating:started"
+    assert len([event for event in events if event.kind == "delta"]) > 1
+    assert "".join(event.text for event in events if event.kind == "delta") == final.text
 
 
 def test_rg4_fenced_or_explained_json_needs_one_correction_or_fails_safe():
@@ -279,9 +347,17 @@ def test_rg10_rg11_message_association_and_sse_compatibility(tmp_path, monkeypat
             body = "".join(response.iter_text())
         assert response.status_code == 200
         assert all(f"event: {event}" in body for event in ("progress", "activity", "delta", "complete"))
+        event_names = set(re.findall(r"^event: ([a-z]+)$", body, re.MULTILINE))
+        assert event_names <= {"progress", "activity", "delta", "complete", "error", "cancelled"}
+        assert "full_plan_generating" in body and "structured_validating" in body
+        assert "semantic_validating" in body and "result_rendering" in body
+        assert "created_at" in body
         complete = json.loads(body.split("event: complete\ndata: ", 1)[1].split("\n\n", 1)[0])
         assert complete["assistant_message_id"] == second_saved["assistant_message_id"]
         assert complete["structured_result"] == second_saved["structured_result"]
+        sse_deltas = [json.loads(value)["text"] for value in re.findall(r"event: delta\ndata: (.+?)\n\n", body)]
+        assert len(sse_deltas) > 1
+        assert "".join(sse_deltas) == second_saved["final_response"]
     finally:
         client.close()
 
@@ -310,6 +386,11 @@ def test_semantic_failure_after_one_retry_completes_without_exportable_result(tm
     assert trace["structured_result_status"] == "semantic_guard_failed_after_retry"
     assert trace["total_model_calls_for_structured_result"] == 2
     assert trace["structured_attempt_trace"][-1]["correction_result"] == "FAIL"
+    events = product.task_events_since(task["id"], "tenant-a", member["id"], 0)
+    visible = [json.loads(event["message"])["text"] for event in events if event["stage"] == "delta"]
+    assert visible == [SAFE_FALLBACK]
+    assert "工作人员将" not in "".join(visible)
+    assert not any("result_rendering" in event["message"] for event in events if event["stage"] == "activity")
 
 
 def test_rg12_validated_result_posts_to_document_generator(tmp_path, monkeypatch):

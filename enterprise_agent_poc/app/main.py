@@ -647,14 +647,17 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
                     if (
                         isinstance(activity, dict)
                         and isinstance(activity.get("sequence"), int)
-                        and activity.get("stage") in {"queued", "context_loading", "enterprise_config_loading", "knowledge_retrieving", "asset_retrieving", "tool_running", "generating", "persisting", "completed", "failed", "cancelled"}
+                        and activity.get("stage") in {"queued", "context_loading", "enterprise_config_loading", "knowledge_retrieving", "asset_retrieving", "tool_running", "generating", "full_plan_generating", "structured_validating", "semantic_validating", "semantic_correcting", "result_rendering", "persisting", "completed", "failed", "cancelled"}
                         and activity.get("status") in {"started", "completed"}
                     ):
                         labels = {
                             "queued": "任务已进入队列", "context_loading": "正在加载执行上下文",
                             "enterprise_config_loading": "正在加载企业配置", "knowledge_retrieving": "正在检索企业知识",
                             "asset_retrieving": "正在查找企业素材", "tool_running": "正在调用工具",
-                            "generating": "正在生成回答", "persisting": "正在保存结果", "completed": "已完成",
+                            "generating": "正在生成回答", "full_plan_generating": "正在生成活动方案",
+                            "structured_validating": "正在校验方案结构", "semantic_validating": "正在校验方案内容",
+                            "semantic_correcting": "正在优化待确认内容", "result_rendering": "正在整理最终结果",
+                            "persisting": "正在保存结果", "completed": "已完成",
                             "failed": "执行失败", "cancelled": "已停止生成",
                         }
                         activity = {

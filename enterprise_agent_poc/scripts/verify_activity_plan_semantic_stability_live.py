@@ -31,11 +31,21 @@ SCENARIOS = (
     ("R9 repeat", "发布技术验证：请为社区教师节设计完整活动方案，包含主题、时间、地点、对象、宣发、活动环节和邀约文案。时间地点未定，保留待确认；不要承诺企业权益。"),
     ("R10 repeat", "发布技术验证：请为社区教师节设计完整活动方案，包含主题、时间、地点、对象、宣发、活动环节和邀约文案。时间地点未定，保留待确认；不要承诺企业权益。"),
 )
+UX_SCENARIOS = (
+    ("UX simple", "给我想5个社区教师节活动标题"),
+    ("UX full initial", "请为社区阅读日设计完整活动方案。隔离测试设定活动时间已确认为2026年10月10日14:00，地点已确认为社区图书馆，对象为社区家庭；不依赖未确认的人员、物料或企业权益，活动环节只提出共读交流建议。"),
+    ("UX full correction", "请设计完整社区教师节活动方案。心愿卡和手作物料尚未采购，保留创意但将执行与邀约写成条件性提案。"),
+)
 
 
 async def _collect_sse(response) -> dict:
     first = complete = previous = None
+    first_activity = first_delta = previous_delta = None
     longest_gap = 0.0
+    max_delta_gap = 0.0
+    delta_sizes: list[int] = []
+    delta_fragments: list[str] = []
+    stage_sequence: list[str] = []
     terminal = {}
     async for chunk in response.body_iterator:
         now = time.monotonic()
@@ -45,15 +55,35 @@ async def _collect_sse(response) -> dict:
             longest_gap = max(longest_gap, now - previous)
         previous = now
         data = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+        if data.startswith("event: activity\ndata: "):
+            activity = json.loads(data.split("\ndata: ", 1)[1].split("\n\n", 1)[0])
+            if first_activity is None:
+                first_activity = now
+            stage_sequence.append(f"{activity['stage']}:{activity['status']}")
+        elif data.startswith("event: delta\ndata: "):
+            delta = json.loads(data.split("\ndata: ", 1)[1].split("\n\n", 1)[0])
+            if first_delta is None:
+                first_delta = now
+            if previous_delta is not None:
+                max_delta_gap = max(max_delta_gap, now - previous_delta)
+            previous_delta = now
+            delta_sizes.append(len(delta["text"]))
+            delta_fragments.append(delta["text"])
         if "event: complete\ndata: " in data:
             terminal = json.loads(data.split("event: complete\ndata: ", 1)[1].split("\n\n", 1)[0])
             complete = now
-    return {"first": first, "complete": complete, "longest_gap": longest_gap, "terminal": terminal}
+    return {"first": first, "first_activity": first_activity, "first_delta": first_delta,
+            "complete": complete, "longest_gap": longest_gap, "max_delta_gap": max_delta_gap,
+            "delta_sizes": delta_sizes, "delta_text": "".join(delta_fragments),
+            "stage_sequence": stage_sequence, "terminal": terminal}
 
 
 async def _run() -> None:
     diagnose = sys.argv[1] if len(sys.argv) == 2 and sys.argv[1] in {"--diagnose-r1", "--diagnose-r4"} else None
+    ux_mode = sys.argv[1] if len(sys.argv) == 2 and sys.argv[1] in {"--ux-signal", "--ux-simple", "--ux-initial", "--ux-correction"} else None
     scenarios = (SCENARIOS[0],) if diagnose == "--diagnose-r1" else (SCENARIOS[3],) if diagnose == "--diagnose-r4" else SCENARIOS
+    if ux_mode:
+        scenarios = UX_SCENARIOS if ux_mode == "--ux-signal" else (UX_SCENARIOS[{"--ux-simple": 0, "--ux-initial": 1, "--ux-correction": 2}[ux_mode]],)
     _load_key()
     isolated = Path(tempfile.mkdtemp(prefix="activity-plan-stability-"))
     server = None
@@ -74,7 +104,7 @@ async def _run() -> None:
             "ENTERPRISE_POC_MODEL_ID": "deepseek-v4-pro",
             "ENTERPRISE_POC_REASONING_EFFORT": "high",
         })
-        from app.activity_plan_runtime import is_full_activity_plan, validated_envelope
+        from app.activity_plan_runtime import SAFE_FALLBACK, is_full_activity_plan, validated_envelope
         from app.agent_catalog import CATALOG
         from app.auth import SessionIssuer, hash_password
         from app.product_service import TaskService
@@ -144,7 +174,7 @@ async def _run() -> None:
         results = []
         try:
             for name, prompt in scenarios:
-                if not is_full_activity_plan("campaign-agent", prompt):
+                if is_full_activity_plan("campaign-agent", prompt) != (name != "UX simple"):
                     raise RuntimeError(f"scenario not classified as full plan: {name}")
                 task = product.create_task("tenant-a", member["id"], "campaign-agent", prompt, None)
                 started = time.monotonic()
@@ -178,6 +208,14 @@ async def _run() -> None:
                     "correction_invoked": any(step.get("stage") == "CORRECTION" for step in attempts),
                     "correction_success": evidence.get("structured_result_status") == "validated_after_retry",
                     "first_event_seconds": round(sse["first"] - started, 3) if sse["first"] else None,
+                    "first_activity_seconds": round(sse["first_activity"] - started, 3) if sse["first_activity"] else None,
+                    "stage_sequence": sse["stage_sequence"],
+                    "first_visible_delta_seconds": round(sse["first_delta"] - started, 3) if sse["first_delta"] else None,
+                    "delta_count": len(sse["delta_sizes"]),
+                    "average_delta_chars": round(sum(sse["delta_sizes"]) / len(sse["delta_sizes"]), 3) if sse["delta_sizes"] else 0,
+                    "max_delta_chars": max(sse["delta_sizes"], default=0),
+                    "safe_fallback_only": sse["delta_text"] == SAFE_FALLBACK,
+                    "max_visible_delta_gap_seconds": round(sse["max_delta_gap"], 3),
                     "complete_seconds": round(sse["complete"] - started, 3) if sse["complete"] else None,
                     "longest_event_gap_seconds": round(sse["longest_gap"], 3),
                     "total_runtime_seconds": round(runtime_seconds, 3),
@@ -205,6 +243,40 @@ async def _run() -> None:
         }
         print("SUMMARY " + json.dumps(summary, ensure_ascii=False), flush=True)
         if diagnose:
+            return
+        def correction_path_verified(item):
+            return (item["correction_invoked"] and item["model_calls"] == 2
+                    and "semantic_correcting:started" in item["stage_sequence"]
+                    and "semantic_correcting:completed" in item["stage_sequence"]
+                    and ((item["status"] == "validated_after_retry" and item["contract_valid"]
+                          and item["document_post_ok"] and item["delta_count"] > 1)
+                         or (item["status"] == "semantic_guard_failed_after_retry"
+                             and not item["structured_result"] and not item["document_post_ok"]
+                             and item["safe_fallback_only"] and item["delta_count"] == 1)))
+        if ux_mode == "--ux-simple":
+            if not (results[0]["conversation_completed"] and results[0]["sse_complete_match"]
+                    and results[0]["delta_count"] > 1 and not results[0]["structured_result"]):
+                raise RuntimeError("real model simple UX signal gate failed")
+            return
+        if ux_mode == "--ux-initial":
+            if not (results[0]["conversation_completed"] and results[0]["sse_complete_match"]
+                    and results[0]["status"] == "validated_initial" and results[0]["delta_count"] > 1
+                    and results[0]["document_post_ok"]):
+                raise RuntimeError("real model initial UX signal gate failed")
+            return
+        if ux_mode == "--ux-correction":
+            if not (results[0]["conversation_completed"] and results[0]["sse_complete_match"]
+                    and correction_path_verified(results[0])):
+                raise RuntimeError("real model correction UX signal gate failed")
+            return
+        if ux_mode == "--ux-signal":
+            simple, initial, correction = results
+            if (not all(item["conversation_completed"] and item["sse_complete_match"] for item in results)
+                    or simple["delta_count"] <= 1 or simple["structured_result"]
+                    or initial["status"] != "validated_initial" or initial["delta_count"] <= 1
+                    or not correction_path_verified(correction)
+                    or not initial["document_post_ok"]):
+                raise RuntimeError("real model UX signal gate failed")
             return
         if (summary["final_valid"] != 10 or summary["document_eligible"] != 10
                 or summary["final_semantic_guard_failed"] or summary["max_model_calls"] > 2

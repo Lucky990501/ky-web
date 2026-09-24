@@ -213,3 +213,35 @@ def render_markdown(plan: ActivityPlanContent) -> str:
         lines.extend(["", "## 待确认事项"])
         lines.extend(f"- {value}" for value in plan.pending_items)
     return "\n".join(lines).strip()
+
+
+def chunk_validated_markdown(markdown: str, max_chars: int = 120) -> tuple[str, ...]:
+    """Split only already-validated text, preferring intact Markdown lines/rows.
+
+    No pacing is applied. Python string slices preserve Unicode code points,
+    and concatenation must reproduce the deterministic renderer exactly.
+    """
+    if max_chars < 40:
+        raise ValueError("max_chars must be at least 40")
+    chunks: list[str] = []
+    current = ""
+    for line in markdown.splitlines(keepends=True):
+        remaining = line
+        while remaining:
+            if len(remaining) <= max_chars:
+                piece, remaining = remaining, ""
+            else:
+                cut = remaining.rfind("|", 40, max_chars + 1)
+                if cut < 40:
+                    cut = remaining.rfind(" ", 40, max_chars + 1)
+                cut = cut + 1 if cut >= 40 else max_chars
+                piece, remaining = remaining[:cut], remaining[cut:]
+            if current and len(current) + len(piece) > max_chars:
+                chunks.append(current)
+                current = ""
+            current += piece
+    if current:
+        chunks.append(current)
+    if "".join(chunks) != markdown:
+        raise RuntimeError("validated Markdown chunk reconstruction mismatch")
+    return tuple(chunks)
