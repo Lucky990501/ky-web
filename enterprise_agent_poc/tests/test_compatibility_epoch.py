@@ -50,13 +50,13 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260923-12e5b9e'
-PRODUCTION_PREDECESSOR_ID = '20260923-12e5b9e'
-PRODUCTION_PREDECESSOR_COMMIT = '12e5b9e7ca1d8c07a4da411753c5b69b83238831'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'b19746b25c7b828e82515c699d229e1ace98eb7bb4a93bbb9a32844cda0f34af'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'b9bd4fbb2b7318a818816f01e8beb2cf5a604ce9eccdf4ece59cddf972f2da82'
-OLD_DIRECT_PREDECESSOR_ID = '20260923-3e7ea8b'
-OLD_DIRECT_PREDECESSOR_COMMIT = '3e7ea8bfd771d12211ae885b4bbb1c8009933aa7'
+PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260924-0cc592b'
+PRODUCTION_PREDECESSOR_ID = '20260924-0cc592b'
+PRODUCTION_PREDECESSOR_COMMIT = '0cc592ba6c6aaf42927de94d3e2330b75618fd85'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '2a6aa637308027298882cd60876b7e17632c31fe6ae3d863221224f1b1e59c88'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'f155af9ca4b3d471a94bb72ea0e147d4279279051b66d3a4b4e4a5c1bae6e966'
+OLD_DIRECT_PREDECESSOR_ID = '20260923-12e5b9e'
+OLD_DIRECT_PREDECESSOR_COMMIT = '12e5b9e7ca1d8c07a4da411753c5b69b83238831'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -287,6 +287,21 @@ def test_current_original_manifest_is_pinned_and_floor_declaration_unchanged():
     assert not any(t['release_id']==B930_ID for t in old_b930_json['approved_targets'])
 
 
+def test_exact_predecessor_code_and_declaration_pin_the_same_identity():
+    declaration = json.loads((SQL.parents[2] / 'deploy/rollback_compatibility.json').read_text())
+    predecessor = declaration['forward_predecessor_approval']
+    gate_source = (SQL.parents[2] / 'scripts/rollback_preflight.py').read_text()
+    for field, expected in (
+        ('release_id', PRODUCTION_PREDECESSOR_ID),
+        ('source_commit', PRODUCTION_PREDECESSOR_COMMIT),
+        ('archive_sha256', PRODUCTION_PREDECESSOR_ARCHIVE_SHA),
+        ('manifest_sha256', PRODUCTION_PREDECESSOR_MANIFEST_SHA),
+    ):
+        assert predecessor[field] == expected
+        assert f"predecessor['{field}'] == '{expected}'" in gate_source
+    assert OLD_DIRECT_PREDECESSOR_ID not in gate_source
+
+
 def test_postgres_current_tooling_application_separation_and_permanent_floor(pg_epoch):
     h=pg_epoch;activate_b930(h);before=h['snapshot']()
     assert pg_gate(h)['compatibility_epoch']=='legacy_v1'
@@ -364,8 +379,8 @@ def test_member_status_floor_schema012_accepts_only_exact_production_predecessor
 @pytest.mark.parametrize(('field', 'check'), [
     ('release_id', 'forward_predecessor_declaration'),
     ('source_commit', 'forward_predecessor_declaration'),
-    ('archive_sha256', 'approved_manifest_identity'),
-    ('manifest_sha256', 'approved_manifest_identity'),
+    ('archive_sha256', 'forward_predecessor_declaration'),
+    ('manifest_sha256', 'forward_predecessor_declaration'),
     ('schema_fingerprint', 'forward_predecessor_declaration'),
     ('data_contract', 'forward_predecessor_declaration'),
 ])
