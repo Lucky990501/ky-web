@@ -27,6 +27,7 @@ from app.agent_execution import ExecutionResolver
 from app.agent_runtime_test import AgentRuntimeTest
 from app.product_service import TaskService
 from app.product_store import ProductStore
+from app.brand_logo import BrandLogoError, BrandLogoService, MAX_LOGO_BYTES, public_brand_logo
 from app.document_generator import (
     ActivityPlanDocumentRequest,
     ActivityPlanDocumentService,
@@ -110,6 +111,7 @@ runtime = CodexRuntimeProvider(manager)
 agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agent)
 product_store = ProductStore(store)
 document_service = ActivityPlanDocumentService(storage_provider(settings))
+brand_logo_service = BrandLogoService(storage_provider(settings), product_store)
 agent_catalog_control = AgentProductization(store, settings.environment)
 task_service = TaskService(product_store, agents)
 execution_resolver = ExecutionResolver(store,skill_registry,agent_catalog_control,settings,settings.agent_runtime_test_tenant_id or (os.environ.get("STAGE2_RUNTIME_TEST_TENANT_ID") if settings.environment != 'production' else None))
@@ -749,10 +751,49 @@ async def delete_conversation(conversation_id: str,workbench_session: str | None
 
 @app.get("/api/v1/enterprise-config")
 async def get_enterprise_config(workbench_session: str | None = Cookie(default=None)) -> dict:
-    principal=require_admin(workbench_session); return store.enterprise_config(principal.tenant_id)
+    principal=require_admin(workbench_session); return public_brand_logo(store.enterprise_config(principal.tenant_id))
 @app.put("/api/v1/enterprise-config")
 async def put_enterprise_config(payload: EnterpriseConfigRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
-    principal=require_admin(workbench_session); return product_store.update_enterprise_config(principal.tenant_id,payload.payload)
+    principal=require_admin(workbench_session)
+    try:
+        return public_brand_logo(product_store.update_enterprise_config(principal.tenant_id,payload.payload))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _require_brand_logo_admin(workbench_session: str | None) -> UserPrincipal:
+    try:
+        return require_admin(workbench_session)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            raise HTTPException(403, "LOGO_PERMISSION_DENIED") from exc
+        raise
+
+
+@app.post("/api/v1/enterprise-config/brand-logo", status_code=201)
+async def upload_enterprise_brand_logo(
+    file: UploadFile | None = File(default=None), workbench_session: str | None = Cookie(default=None),
+) -> dict:
+    principal = _require_brand_logo_admin(workbench_session)
+    if file is None:
+        raise HTTPException(400, "LOGO_FILE_REQUIRED")
+    content = await file.read(MAX_LOGO_BYTES + 1)
+    try:
+        return {"brand_logo": brand_logo_service.upload(principal.tenant_id, file.filename or "", content)}
+    except BrandLogoError as exc:
+        raise HTTPException(exc.status_code, exc.code) from exc
+
+
+@app.get("/api/v1/enterprise-config/brand-logo")
+async def get_enterprise_brand_logo(workbench_session: str | None = Cookie(default=None)) -> Response:
+    principal = _require_brand_logo_admin(workbench_session)
+    try:
+        content = brand_logo_service.current_bytes(principal.tenant_id, store.enterprise_config(principal.tenant_id))
+    except BrandLogoError as exc:
+        raise HTTPException(exc.status_code, exc.code) from exc
+    return Response(content, media_type="image/png", headers={
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+    })
 @app.get("/api/v1/knowledge/files")
 async def list_knowledge_files(workbench_session: str | None = Cookie(default=None)) -> list[dict]:
     principal=require_admin(workbench_session); return [_public_knowledge_file(item) for item in product_store.knowledge_files(principal.tenant_id)]

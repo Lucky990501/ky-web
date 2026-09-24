@@ -1065,9 +1065,39 @@ class ProductStore:
         return {"id":asset_id,"name":name,"type":"poster_reference"}
 
     def update_enterprise_config(self, tenant_id: str, payload: dict) -> dict:
-        current=self._store.enterprise_config(tenant_id); current.update({k:v for k,v in payload.items() if v is not None})
-        with self._store.connection() as conn: conn.execute("UPDATE enterprise_configs SET payload=? WHERE tenant_id=?",(json.dumps(current,ensure_ascii=False),tenant_id))
+        if {"brand_logo", "brand_logo_metadata", "brand_mark_logo"} & payload.keys():
+            raise ValueError("BRAND_LOGO_UPLOAD_REQUIRED")
+        with self._store.connection() as conn:
+            if not self._store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
+            lock = " FOR UPDATE" if self._store.is_postgres else ""
+            row = conn.execute(f"SELECT payload FROM enterprise_configs WHERE tenant_id=?{lock}", (tenant_id,)).fetchone()
+            if not row:
+                raise LookupError("企业配置不存在。")
+            current = json.loads(row["payload"])
+            current.update({key: value for key, value in payload.items() if value is not None})
+            conn.execute("UPDATE enterprise_configs SET payload=? WHERE tenant_id=?",
+                         (json.dumps(current, ensure_ascii=False), tenant_id))
         return current
+
+    def set_brand_logo(self, tenant_id: str, storage_key: str, metadata: dict) -> None:
+        """Commit the new logo pointer only after the object-store write succeeds."""
+        from app.brand_logo import validate_brand_logo_key
+
+        validate_brand_logo_key(storage_key, tenant_id)
+        with self._store.connection() as conn:
+            if not self._store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
+            lock = " FOR UPDATE" if self._store.is_postgres else ""
+            row = conn.execute(f"SELECT payload FROM enterprise_configs WHERE tenant_id=?{lock}", (tenant_id,)).fetchone()
+            if not row:
+                raise LookupError("企业配置不存在。")
+            current = json.loads(row["payload"])
+            current["brand_logo"] = storage_key
+            current["brand_logo_metadata"] = metadata
+            current.pop("brand_mark_logo", None)
+            conn.execute("UPDATE enterprise_configs SET payload=? WHERE tenant_id=?",
+                         (json.dumps(current, ensure_ascii=False), tenant_id))
 
     def knowledge_files(self, tenant_id: str) -> list[dict]:
         with self._store.connection() as conn: rows=conn.execute("SELECT * FROM knowledge_files WHERE tenant_id=? ORDER BY created_at DESC",(tenant_id,)).fetchall()

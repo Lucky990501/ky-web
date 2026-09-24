@@ -54,6 +54,10 @@ fi
 [[ -d "$runtime_data_dir" ]] || { echo "shared runtime data directory missing" >&2; exit 2; }
 
 "$runtime_venv/bin/python" -c 'import openai_codex'
+if ! "$runtime_venv/bin/python" -c 'from PIL import Image; import PIL'; then
+  printf '{"status":"BLOCKED","check":"PILLOW_RUNTIME_MISSING"}\n' >&2
+  exit 2
+fi
 "$runtime_venv/bin/pip" check
 set -a; . "$shared_env"; set +a
 [[ -z "${ENTERPRISE_POC_DATA_DIR:-}" || "$ENTERPRISE_POC_DATA_DIR" == "$runtime_data_dir" ]] || { echo "shared DATA_DIR conflicts with controlled service configuration" >&2; exit 2; }
