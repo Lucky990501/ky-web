@@ -11,7 +11,7 @@ from scripts.stage2_isolation import bootstrap, assert_isolated, assert_worker_i
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("role",choices=("check","migrate","provision","api","mcp","worker"))
+    parser.add_argument("role",choices=("check","migrate","system-provision","provision","domain-provision","api","mcp","worker"))
     parser.add_argument("--config",required=True)
     args = parser.parse_args()
     config,settings = bootstrap(args.config)
@@ -29,6 +29,13 @@ def main():
         from scripts.migrate import up
         gate()
         return up(POCStore(settings.database_url))
+    if args.role == 'system-provision':
+        if config.get('mode') != 'redis-postgres':
+            raise IsolationError('Fresh compatibility bootstrap requires private Stage 2 Worker fixture')
+        from app.store import POCStore
+        gate()
+        POCStore(settings.database_url).initialize()
+        return
     if args.role == 'worker' or (args.role=='api' and config.get('mode')!='redis-postgres'):
         secret_file = Path(config["credential_file"])
         if secret_file.stat().st_mode & 0o077:
@@ -80,6 +87,16 @@ def main():
                 skill_registry.grant_platform_admin(product_store.user_by_email('runtime@stage2.test')['id'])
             gate()
             agent_catalog_control.ensure_initialized()
+            return
+        if args.role == 'domain-provision':
+            if config.get('mode') != 'redis-postgres':
+                raise IsolationError('Domain Bootstrap requires private Stage 2 Worker fixture')
+            from scripts.stage2_domain_fixture import bootstrap_domain
+            gate()
+            result = bootstrap_domain(store=store, product=product_store, registry=skill_registry,
+                                      control=agent_catalog_control, tasks=task_service,
+                                      test_tenant=settings.agent_runtime_test_tenant_id, isolation_guard=gate)
+            print(result)
             return
         gate()
         # Local worker and Runtime Test share these exact object instances / Settings.

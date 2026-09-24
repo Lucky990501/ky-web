@@ -45,7 +45,14 @@ existing `stage2_preview.py check` gate before provisioning anything.
 2. Create a marked private root and start isolated PostgreSQL and Redis.
 3. Verify Redis `PING`, `INFO server` exact version, and Stage 2 isolation.
 4. Apply all current ordered PostgreSQL migrations through the formal
-   `scripts/migrate.py` runner, provision isolated data, and start isolated
+   `scripts/migrate.py` runner. Initialize only empty system tables, then run
+   `scripts/compatibility_epoch.py bootstrap-current --config <private manifest>`.
+   This command requires the marked private PostgreSQL/Redis fixture, exact
+   current migrations and data-contract floor, zero business rows, and a clean
+   committed source. It never accepts a caller-selected epoch and does not
+   replace the historical `advance` path. After it succeeds, provision the
+   synthetic tenants/user, bootstrap the published `social-content-agent` and
+   two public completed tasks through the normal services, then start isolated
    MCP, API, and Worker.
 5. Supply `STAGE25_REDIS_E2E_CONFIG` and `STAGE25_API_PID` to pytest.
 6. Stop the three application processes, Redis, and PostgreSQL, then delete

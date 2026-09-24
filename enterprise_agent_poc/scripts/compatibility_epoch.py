@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 ROOT = Path(__file__).absolute().parents[1]
@@ -147,6 +148,79 @@ def require_running_release(source):
         require(pid>0 and Path(f'/proc/{pid}/cwd').resolve(strict=True)==source, 'current_service_release_identity')
 
 
+def _write_epoch_transition(conn, release_id, source_commit):
+    """The guarded, single-row transition used by both approved entry points."""
+    conn.execute("UPDATE platform_compatibility_state SET epoch='productized_v1',epoch_rank=2,advanced_at=CURRENT_TIMESTAMP,advanced_by_release_id=%s,advanced_by_source_commit=%s,advance_origin='controlled_advance' WHERE scope=%s",
+                 (release_id, source_commit, SCOPE))
+
+
+def _current_source_identity():
+    """A fresh environment must run exactly a clean, committed source tree."""
+    repository = ROOT.parent
+    commit = subprocess.run(['git', '-C', str(repository), 'rev-parse', '--verify', 'HEAD'],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    require(len(commit) == 40 and all(ch in '0123456789abcdef' for ch in commit), 'source_commit_identity')
+    changed = subprocess.run(['git', '-C', str(repository), 'status', '--porcelain', '--untracked-files=no'],
+                             capture_output=True, text=True, check=True).stdout
+    require(not changed.strip(), 'source_worktree_not_clean')
+    return commit
+
+
+def bootstrap_current(config_path):
+    """Initialize only a marked, empty, non-production Stage 2 database.
+
+    This is not a historical Release advance: it has no predecessor. The
+    original advance() and its historical rollback gate remain unchanged.
+    """
+    from psycopg import connect, sql
+    from psycopg.rows import dict_row
+    from scripts import rollback_preflight as gate
+    from scripts.stage2_isolation import bootstrap, assert_worker_isolated
+
+    config, settings = bootstrap(config_path)
+    require(config.get('mode') == 'redis-postgres' and settings.environment in {'test', 'development'},
+            'fresh_bootstrap_nonproduction_required')
+    assert_worker_isolated(settings, config['root'], config['snapshot'])
+    source_commit = _current_source_identity()
+    declaration = gate.read_json(ROOT / 'deploy/rollback_compatibility.json')
+    contract = gate.epoch_contract(declaration)
+    target = contract['epochs'][-1]
+    require(target['epoch'] == 'productized_v1' and target['epoch_rank'] == EPOCHS['productized_v1'],
+            'current_epoch_declaration')
+    schema_lock = contract['schema_migrations']
+    source_items = gate.check_sources(ROOT, schema_lock)
+    floors = gate.data_contract_floors(declaration, schema_lock)
+    require(len(schema_lock) == 12 and schema_lock[-1]['filename'] == '012_member_account_status.sql',
+            'current_migration_declaration')
+    with connect(settings.database_url, row_factory=dict_row) as conn:
+        state = read_state(conn, lock=True)
+        rows = conn.execute('SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version').fetchall()
+        gate.check_history(rows, source_items)
+        require(gate.active_contract_floors(rows, floors, source_items) == ['member_account_status_v1'],
+                'current_data_contract_floor')
+        column = conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='account_status'").fetchone()
+        require(bool(column), 'current_data_contract_column')
+        require(state['epoch'] in {'legacy_v1', target['epoch']}, 'fresh_bootstrap_epoch_unknown')
+        require(not has_productized_data(conn), 'fresh_bootstrap_v2_data_present')
+        # The migration runner owns metadata; tool_capabilities is a static
+        # migration catalog. Every other public table must have zero rows.
+        allowed = {'schema_migrations', 'platform_compatibility_state', 'tool_capabilities'}
+        tables = [row['tablename'] for row in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")]
+        for table in tables:
+            if table not in allowed:
+                require(not conn.execute(sql.SQL('SELECT 1 FROM {} LIMIT 1').format(sql.Identifier(table))).fetchone(),
+                        'fresh_bootstrap_business_state_present')
+        # The isolation boundary is rechecked inside the same transaction as
+        # the singleton lock and write; no caller-supplied epoch is accepted.
+        assert_worker_isolated(settings, config['root'], config['snapshot'])
+        if state['epoch'] == target['epoch']:
+            return {'status': 'already_bootstrapped', 'epoch': target['epoch'], 'source_commit': source_commit}
+        _write_epoch_transition(conn, 'fresh-source-' + source_commit[:12], source_commit)
+        require(read_state(conn)['epoch'] == target['epoch'], 'fresh_bootstrap_write_identity')
+    return {'status': 'bootstrapped', 'epoch': target['epoch'], 'source_commit': source_commit}
+
+
 def advance(base, trusted_root, database_url, *, policy_enabled=False, running_identity_check=None):
     """Testable core; CLI resolves these inputs exclusively from controlled config."""
     from psycopg import connect
@@ -184,8 +258,7 @@ def advance(base, trusted_root, database_url, *, policy_enabled=False, running_i
         require(not policy_enabled, 'runtime_test_policy_must_be_disabled')
         require(not has_productized_data(conn), 'legacy_epoch_productized_data_conflict')
         # V2 evidence is zero and DB guards prevent any new V2 commit until advance.
-        conn.execute("UPDATE platform_compatibility_state SET epoch='productized_v1',epoch_rank=2,advanced_at=CURRENT_TIMESTAMP,advanced_by_release_id=?,advanced_by_source_commit=?,advance_origin='controlled_advance' WHERE scope=?".replace('?', '%s'),
-                     (tooling_id, tooling_commit, SCOPE))
+        _write_epoch_transition(conn, tooling_id, tooling_commit)
         return {'status': 'advanced', 'epoch': 'productized_v1', 'epoch_rank': 2,
                 'release_id': tooling_id, 'source_commit': tooling_commit}
 
@@ -197,11 +270,15 @@ def main():
     sub.add_parser('quiescence')
     command = sub.add_parser('advance')
     command.add_argument('--to', required=True, choices=('productized_v1',))
+    fresh = sub.add_parser('bootstrap-current')
+    fresh.add_argument('--config', required=True, type=Path)
     args = parser.parse_args()
     from app.settings import settings
     from scripts import rollback_preflight as gate
     try:
-        if args.operation in {'status','quiescence'}:
+        if args.operation == 'bootstrap-current':
+            result = bootstrap_current(args.config)
+        elif args.operation in {'status','quiescence'}:
             from psycopg import connect
             from psycopg.rows import dict_row
             require(settings.database_url.startswith(('postgresql://', 'postgres://')), 'postgresql_required')

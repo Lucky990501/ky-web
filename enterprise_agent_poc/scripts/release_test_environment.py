@@ -287,8 +287,14 @@ class IsolatedServices:
             raise RuntimeError("Non-Production Stage 2 credential file with mode 0600 required")
         root = self._safe_root()
         self.migrate()
-        for role in ("provision", "mcp", "api", "worker"):
-            if role == "provision":
+        subprocess.run([sys.executable, str(PROJECT / "scripts/stage2_preview.py"), "system-provision",
+                        "--config", str(self.manifest)], cwd=PROJECT, env=self._child_env(),
+                       check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([sys.executable, str(PROJECT / "scripts/compatibility_epoch.py"), "bootstrap-current",
+                        "--config", str(self.manifest)], cwd=PROJECT, env=self._child_env(),
+                       check=True, stdout=subprocess.DEVNULL)
+        for role in ("provision", "domain-provision", "mcp", "api", "worker"):
+            if role in {"provision", "domain-provision"}:
                 subprocess.run([sys.executable, str(PROJECT / "scripts/stage2_preview.py"), role,
                                 "--config", str(self.manifest)], cwd=PROJECT, env=self._child_env(), check=True)
                 continue
