@@ -305,7 +305,7 @@ function bindConversationActions(main){
   main.querySelectorAll('[data-document-download]').forEach(node=>node.onclick=event=>{event.preventDefault();handleActivityPlanDocumentAction(main,node.dataset.documentDownload);});
   main.querySelectorAll('[data-open-message-generation]').forEach(node=>node.onclick=()=>openGenerationViewer(node.dataset.openMessageGeneration,'本次生成图片',node));
 }
-const safeActivityLabels=Object.freeze({queued:true,context_loading:true,enterprise_config_loading:true,knowledge_retrieving:true,asset_retrieving:true,tool_running:true,generating:true,persisting:true,completed:true,failed:true,cancelled:true});
+const safeActivityLabels=Object.freeze({queued:true,context_loading:true,enterprise_config_loading:true,knowledge_retrieving:true,asset_retrieving:true,tool_running:true,generating:true,full_plan_generating:true,structured_validating:true,semantic_validating:true,semantic_correcting:true,result_rendering:true,persisting:true,completed:true,failed:true,cancelled:true});
 const activityDisplayLabel=(stage,status,planMode='generic')=>{
   const done=status==='completed';
   const labels={
@@ -316,6 +316,11 @@ const activityDisplayLabel=(stage,status,planMode='generic')=>{
     asset_retrieving:['正在查找可用素材','可用素材已查找'],
     tool_running:['正在处理所需资料','所需资料已处理'],
     generating:planMode==='full'?['正在生成活动方案','活动方案已生成']:['正在生成内容','内容已生成'],
+    full_plan_generating:['正在生成活动方案','活动方案已生成'],
+    structured_validating:['正在校验方案结构','方案结构已校验'],
+    semantic_validating:['正在校验方案内容','方案内容已校验'],
+    semantic_correcting:['正在优化待确认内容','待确认内容已优化'],
+    result_rendering:['正在整理最终结果','最终结果已整理'],
     persisting:['正在整理最终结果','最终结果已整理'],
     completed:['已完成','已完成'],failed:['执行失败','执行失败'],cancelled:['已停止','已停止'],
   };
@@ -330,7 +335,7 @@ function transitionConversationRun(run,next){
   if(!run||!conversationRunTransitions[run.phase]?.has(next))return false;
   run.phase=next;return true;
 }
-const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',displayText:'',visualPending:'',status:'正在思考',completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true,activities:[],activityEvents:[],activitySequence:0,currentActivity:null,conversationStartedAt:Date.now(),taskStartedAt:null,firstDeltaAt:null,completedAt:null,thinkingAutoCollapsed:false,thinkingTimer:null,planMode:'generic',visualGeneration:0,visualStopped:false,run:createConversationRunState()});
+const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',displayText:'',visualPending:'',status:'正在思考',networkComplete:false,networkCompletedAt:null,completed:false,error:null,renderedStable:null,renderedActive:null,lastRenderAt:0,lastScrollAt:0,follow:true,activities:[],activityEvents:[],activitySequence:0,currentActivity:null,conversationStartedAt:Date.now(),taskStartedAt:null,firstDeltaAt:null,completedAt:null,thinkingAutoCollapsed:false,thinkingTimer:null,planMode:'generic',visualGeneration:0,visualStopped:false,run:createConversationRunState()});
 const streamingActionsHtml = (content,sourcePrompt='',messageId='') => messageActionsHtml(content,sourcePrompt,messageId);
 const streamingThinkingHtml = () => `<details class="thinking-summary" data-thinking open><summary><span data-thinking-title>正在思考 · 不足 1 秒</span></summary><ol data-thinking-list hidden></ol></details>`;
 const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true">${streamingThinkingHtml(status)}<div class="chat-message-content chat-message-content-markdown" data-stream-content><div data-stream-stable></div><div data-stream-active><p class="streaming-placeholder">${escapeHtml(status)}</p></div></div><div class="message-actions" data-stream-actions hidden></div><div data-stream-document-result></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
@@ -358,11 +363,11 @@ function applyStreamingActivity(state,payload={}){
 }
 function markFirstVisibleDelta(state){if(state.firstDeltaAt===null)state.firstDeltaAt=Date.now();}
 function applyStreamingEvent(state,kind,payload={}){
-  if(state.completed||state.error||state.run?.terminal==='cancelled')return false;
+  if(state.completed||state.networkComplete||state.error||state.run?.terminal==='cancelled')return false;
   if(kind==='activity')return applyStreamingActivity(state,payload);
   if(kind==='progress'){state.status=taskStageLabel(payload.stage);return true;}
   if(kind==='delta'){const changed=acceptStreamingDelta(state,payload);if(changed)markFirstVisibleDelta(state);return changed;}
-  if(kind==='complete'){state.completed=true;state.finalResponse=typeof payload.final_response==='string'?payload.final_response:state.text;return true;}
+  if(kind==='complete'){state.networkComplete=true;state.networkCompletedAt=Date.now();state.finalResponse=typeof payload.final_response==='string'?payload.final_response:state.text;return true;}
   if(kind==='error'){state.error=payload.message||customerErrorMessages.TASK_FAILED;state.diagnosticId=payload.diagnostic_id||'';return true;}
   return false;
 }
@@ -433,14 +438,14 @@ function composerRunControls(main){
 }
 function updateComposerRunState(main,state){
   const run=state?.run;if(!run)return;
-  const {input,submit,feedback}=composerRunControls(main),stopping=run.phase===ConversationRunPhase.STOPPING,running=run.phase===ConversationRunPhase.RUNNING;
-  if(input)input.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping;
+  const {input,submit,feedback}=composerRunControls(main),stopping=run.phase===ConversationRunPhase.STOPPING,running=run.phase===ConversationRunPhase.RUNNING,draining=state.networkComplete&&!state.completed;
+  if(input)input.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining;
   if(submit){
-    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping;
+    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining;
     submit.type=running||stopping?'button':'submit';
     submit.classList?.toggle?.('composer-stop-button',running||stopping);
-    submit.setAttribute?.('aria-label',stopping?'正在停止生成':running?'停止生成':'发送消息');
-    submit.setAttribute?.('title',stopping?'正在停止生成':running?'停止生成':'发送');
+    submit.setAttribute?.('aria-label',stopping?'正在停止生成':running?'停止生成':draining?'正在显示回复':'发送消息');
+    submit.setAttribute?.('title',stopping?'正在停止生成':running?'停止生成':draining?'正在显示回复':'发送');
     submit.innerHTML=running||stopping?`<span class="stop-generation-glyph" aria-hidden="true"></span><span class="sr-only">${stopping?'正在停止生成':'停止生成'}</span>`:icon('send');
     submit.onclick=running?()=>requestStopGeneration(main,state):null;
   }
@@ -528,12 +533,12 @@ function renderStreamingMessage(node,state){
 function canRenderStreamingVisual(state,generation){return Boolean(state&&generation===state.visualGeneration&&!state.visualStopped&&!state.completed&&!state.error&&!state.run?.terminal);}
 function scheduleStreamingRender(node,state){
   if(state.renderPending||!canRenderStreamingVisual(state,state.visualGeneration))return;
-  const generation=state.visualGeneration,flush=()=>{if(!canRenderStreamingVisual(state,generation))return;state.renderPending=false;state.renderTimer=null;state.renderFrame=null;renderStreamingMessage(node,state);if(state.visualPending)scheduleStreamingRender(node,state);},queueFrame=()=>{if(!canRenderStreamingVisual(state,generation))return;if(typeof requestAnimationFrame==='function')state.renderFrame=requestAnimationFrame(flush);else state.renderTimer=setTimeout(flush,0);},wait=Math.max(0,STREAM_VISUAL_FRAME_MS-(Date.now()-state.lastRenderAt));
+  const generation=state.visualGeneration,flush=()=>{if(!canRenderStreamingVisual(state,generation))return;state.renderPending=false;state.renderTimer=null;state.renderFrame=null;renderStreamingMessage(node,state);if(state.visualPending)scheduleStreamingRender(node,state);else if(state.networkComplete)state.onVisualDrained?.();},queueFrame=()=>{if(!canRenderStreamingVisual(state,generation))return;if(typeof requestAnimationFrame==='function')state.renderFrame=requestAnimationFrame(flush);else state.renderTimer=setTimeout(flush,0);},wait=Math.max(0,STREAM_VISUAL_FRAME_MS-(Date.now()-state.lastRenderAt));
   state.renderPending=true;if(wait)state.renderTimer=setTimeout(typeof requestAnimationFrame==='function'?queueFrame:flush,wait);else queueFrame();
 }
 function completeStreamingMessage(node,state,sourcePrompt,main){
   if(!node)return;
-  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;const follow=syncStreamingFollow(state),finalResponse=state.finalResponse||state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
+  clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;const follow=syncStreamingFollow(state),finalResponse=state.finalResponse??state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
   if(content&&actions){
     content.querySelector?.('[data-stream-caret]')?.remove?.();content.innerHTML=markdownHtml(finalResponse);
     if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt,state.assistantMessageId);
@@ -596,7 +601,7 @@ async function submitAgentTaskV2(event,agentId,main){
 }
 function streamPayload(event){try{return JSON.parse(event.data||'{}');}catch{return {};}}
 function finishStreamTask(node,state,done,agentId,main,retryText){
-  if(state?.run?.terminal==='cancelled')return;
+  if(state?.run?.terminal==='cancelled'||state?.networkComplete||state?.completed)return;
   if(done.status==='cancelled'){cancelStreamingMessage(node,state,main);return;}
   if(done.status!=='completed'){applyStreamingEvent(state,'error',done);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);return;}
   state.assistantMessageId=typeof done.assistant_message_id==='string'?done.assistant_message_id:'';
@@ -604,9 +609,10 @@ function finishStreamTask(node,state,done,agentId,main,retryText){
     state.planMode='full';
     for(const activity of state.activities)activity.label=activityDisplayLabel(activity.stage,activity.status,state.planMode);
   }
-  state.run=state.run||createConversationRunState();state.run.terminal='completed';transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);
-  applyStreamingEvent(state,'complete',done);activeConversationId=done.conversation_id||activeConversationId;
-  pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');completeStreamingMessage(node,state,retryText,main);settleConversationRun(main,state,'completed');
+  state.run=state.run||createConversationRunState();applyStreamingEvent(state,'complete',done);transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);updateComposerRunState(main,state);activeConversationId=done.conversation_id||activeConversationId;
+  pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');
+  state.onVisualDrained=()=>{if(state.completed||state.run?.terminal==='cancelled'||state.visualPending)return;state.onVisualDrained=null;completeStreamingMessage(node,state,retryText,main);settleConversationRun(main,state,'completed');};
+  if(state.visualPending){if(!state.renderPending)scheduleStreamingRender(node,state);}else state.onVisualDrained();
 }
 function streamTask(taskId,agentId,main,retryText,node,state){
   const source=new EventSource(`/api/v1/tasks/${taskId}/events`);state.streamSource=source;let settled=false;

@@ -346,7 +346,7 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
   assert.match(index,/workbench\.css\?v=activity-plan-export-ux-polish-v1/);
-  assert.match(index,/workbench\.js\?v=activity-plan-export-ux-polish-v1/);
+  assert.match(index,/workbench\.js\?v=activity-plan-full-streaming-ux-final/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -814,4 +814,35 @@ test('validated full-plan completion relabels only its real generating activity'
   assert.equal(h.run('fullState.activities.length'),1);
   assert.ok(h.run('fullNode.innerHTML').includes('导出 Word'));
   assert.ok(!h.run('fullNode.innerHTML').includes('正在校验方案内容'));
+});
+
+test('full-plan thinking uses only the real ordered validation and conditional correction activities',()=>{
+  const h=harness('/agents/campaign');
+  h.run("planStages=createStreamingState();for(const [stage,status] of [['full_plan_generating','started'],['full_plan_generating','completed'],['structured_validating','started'],['structured_validating','completed'],['semantic_validating','started'],['semantic_validating','completed'],['result_rendering','started'],['result_rendering','completed']])applyStreamingEvent(planStages,'activity',{sequence:planStages.activitySequence+1,stage,status});");
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(planStages.activities.map(item=>item.label))')),['活动方案已生成','方案结构已校验','方案内容已校验','最终结果已整理']);
+  assert.ok(!h.run('JSON.stringify(planStages.activities)').includes('待确认内容'));
+  h.run("correctionStages=createStreamingState();for(const stage of ['full_plan_generating','structured_validating','semantic_validating','semantic_correcting','structured_validating','semantic_validating','result_rendering']){applyStreamingEvent(correctionStages,'activity',{sequence:correctionStages.activitySequence+1,stage,status:'started'});applyStreamingEvent(correctionStages,'activity',{sequence:correctionStages.activitySequence+1,stage,status:'completed'});}");
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(correctionStages.activities.map(item=>item.stage))')),['full_plan_generating','structured_validating','semantic_validating','semantic_correcting','structured_validating','semantic_validating','result_rendering']);
+  assert.equal(h.run("activityDisplayLabel('semantic_correcting','started')"),'正在优化待确认内容');
+  assert.equal(h.run("activityDisplayLabel('result_rendering','started')"),'正在整理最终结果');
+  assert.equal(h.run("activityDisplayLabel('generating','started')"),'正在生成内容');
+  assert.equal(h.run("applyStreamingEvent(correctionStages,'activity',{sequence:99,stage:'invented_stage',status:'started'})"),false);
+});
+
+test('network completion drains only received delta text across frames before visual completion',()=>{
+  const h=harness('/agents/campaign');
+  h.run("drainNode={innerHTML:'',dataset:{},removeAttribute(){},classList:{remove(){}},querySelector(){return null}};drainState=createStreamingState();drainState.conversationStartedAt=Date.now()-2000;for(let sequence=1;sequence<=12;sequence++)applyStreamingEvent(drainState,'delta',{sequence,text:'真实内容'.repeat(20)});drainState.lastRenderAt=Date.now();scheduleStreamingRender(drainNode,drainState);finishStreamTask(drainNode,drainState,{status:'completed',final_response:drainState.text},'campaign-agent',document.main,'需求');");
+  assert.equal(h.run('drainState.networkComplete'),true);
+  assert.equal(h.run('drainState.completed'),false);
+  assert.equal(h.run('drainState.completedAt'),null);
+  assert.equal(h.run('drainState.displayText.length'),0);
+  assert.equal(h.run('drainState.run.terminal'),null);
+  assert.equal(h.run("applyStreamingEvent(drainState,'delta',{sequence:13,text:'伪造追加'})"),false);
+  const visible=[];
+  for(let frame=0;frame<100&&!h.run('drainState.completed');frame++){h.runTimers();visible.push(h.run('drainState.displayText.length'));}
+  assert.ok(visible.filter((value,index)=>value>(visible[index-1]||0)).length>1);
+  assert.equal(h.run('drainState.completed'),true);
+  assert.ok(h.run('drainState.completedAt')>=h.run('drainState.networkCompletedAt'));
+  assert.equal(h.run('drainState.run.phase'),'IDLE');
+  assert.equal(h.run('drainState.displayText'),h.run('drainState.text'));
 });
