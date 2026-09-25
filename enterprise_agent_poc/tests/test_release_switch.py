@@ -179,7 +179,7 @@ if args and args[0] == "scripts/release_verify.py":
         return {{"api": "PASS", "mcp": "PASS", "redis": "PASS"}}
     rv.health = health
     from scripts import rollback_preflight, migrate
-    rollback_preflight.verify = lambda *a: {{"applied_versions": [],
+    rollback_preflight.verify = lambda *a, **kw: {{"applied_versions": [],
         "epoch_schema_fingerprint": ("0" if os.environ.get("SWITCH_TEST_FAULT") == "schema" else "e") * 64,
         "active_data_contract_floors": [] if os.environ.get("SWITCH_TEST_FAULT") == "contract" else ["member_account_status_v1"]}}
     migrate.migration_items = lambda: []
