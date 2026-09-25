@@ -711,7 +711,8 @@ def test_postgres_old_runner_stays_failed_new_normal_runner_strict_and_preflight
     assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010', '011']
     # Migration-NONE release entry must now reject the pending 012 before writes.
     assert pg_entry(h, '--preflight-only').returncode == 2
-    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('013','unknown.sql',?)", ('0' * 64,))
+    # 013/014 are now declared; a future unknown version must still fail closed.
+    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('015','unknown.sql',?)", ('0' * 64,))
     assert migrate.status(h['store']) == 2
     with pytest.raises(RuntimeError, match='未知'):migrate.up(h['store'])
     assert not h['events'].exists()
