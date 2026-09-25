@@ -36,17 +36,17 @@ def migrated():
         yield services
 
 
-def test_m2_formal_migrations_001_through_012_applied(migrated):
+def test_m2_formal_migrations_001_through_014_applied(migrated):
     assert [row[0] for row in _history(migrated)] == [path.name[:3] for path in migration_files()]
 
 
 def test_m3_migration_count_is_current(migrated):
-    assert len(_history(migrated)) == len(migration_files()) == 12
+    assert len(_history(migrated)) == len(migration_files()) == 14
 
 
-def test_m4_latest_migration_is_member_account_status(migrated):
-    assert migration_files()[-1].name == "012_member_account_status.sql"
-    assert _history(migrated)[-1][:2] == ("012", "member_account_status.sql")
+def test_m4_latest_migration_is_agent_release_provenance(migrated):
+    assert migration_files()[-1].name == "014_agent_release_provenance.sql"
+    assert _history(migrated)[-1][:2] == ("014", "agent_release_provenance.sql")
 
 
 def test_m5_user_account_status_column_exists(migrated):

@@ -190,7 +190,7 @@ def bootstrap_current(config_path):
     schema_lock = contract['schema_migrations']
     source_items = gate.check_sources(ROOT, schema_lock)
     floors = gate.data_contract_floors(declaration, schema_lock)
-    require(len(schema_lock) == 12 and schema_lock[-1]['filename'] == '012_member_account_status.sql',
+    require(len(schema_lock) == 14 and schema_lock[-1]['filename'] == '014_agent_release_provenance.sql',
             'current_migration_declaration')
     with connect(settings.database_url, row_factory=dict_row) as conn:
         state = read_state(conn, lock=True)
