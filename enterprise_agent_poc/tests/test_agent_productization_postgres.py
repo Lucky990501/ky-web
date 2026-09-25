@@ -212,7 +212,9 @@ def test_postgres_all_new_foreign_keys_enforced(pg_catalog):
 def test_postgres_skill_and_template_composite_fk(pg_catalog):
     t, v = new_draft(pg_catalog)
     with pg_catalog.store.connection() as conn:
-        skills = conn.execute("SELECT skill_id,id FROM skill_versions ORDER BY id LIMIT 2").fetchall()
+        skills = conn.execute("SELECT DISTINCT ON (skill_id) skill_id,id FROM skill_versions "
+                              "ORDER BY skill_id,id LIMIT 2").fetchall()
+    assert len(skills) == 2 and skills[0]["skill_id"] != skills[1]["skill_id"]
     with pytest.raises(psycopg.errors.ForeignKeyViolation), pg_catalog.store.connection() as conn:
         conn.execute("INSERT INTO agent_template_version_skills VALUES (?,?,?)", (v, skills[0]["skill_id"], skills[1]["id"]))
     other = pg_catalog.control.create_template({"name": "Other", "slug": "other-agent"}, pg_catalog.actor)["id"]
