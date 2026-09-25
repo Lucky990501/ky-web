@@ -351,6 +351,12 @@ class AgentProductization:
                 conn.execute("BEGIN IMMEDIATE")
             template = self._template(conn, template_id, lock=True)
             self._productized(template)
+            from app.agent_availability import release_aborted
+            if release_aborted(conn, template_id, postgres=self.store.is_postgres):
+                raise AgentCatalogError("Aborted release Agent cannot gain a new Revision", 409)
+            from app.agent_release_provenance import AgentReleaseProvenance
+            if AgentReleaseProvenance(self).provisional_owner(conn, template_id):
+                raise AgentCatalogError("Release-owned Revision must use internal provenance creation", 409)
             base = {**DEFAULTS, **{f: template[f] for f in ["name", "description", "icon", "category"]}}
             if source_id:
                 source = self._version(conn, template_id, source_id)
@@ -374,6 +380,8 @@ class AgentProductization:
     def edit_version(self, template_id, version_id, payload, actor):
         with self.store.connection() as conn:
             self._productized(self._template(conn, template_id, lock=True))
+            from app.agent_release_provenance import AgentReleaseProvenance
+            AgentReleaseProvenance(self).require_unsealed_draft(conn, template_id)
             version = self._version(conn, template_id, version_id, draft=True)
             base = {k: version[k] for k in DEFAULTS}
             base["tenant_override_schema"] = json.loads(base["tenant_override_schema"])
@@ -385,6 +393,8 @@ class AgentProductization:
     def bind_skills(self, template_id, version_id, bindings, actor):
         with self.store.connection() as conn:
             self._productized(self._template(conn, template_id, lock=True))
+            from app.agent_release_provenance import AgentReleaseProvenance
+            AgentReleaseProvenance(self).require_unsealed_draft(conn, template_id)
             self._version(conn, template_id, version_id, draft=True)
             if not isinstance(bindings, list) or len(bindings) > 30:
                 raise AgentCatalogError("Invalid Skill bindings")
@@ -408,6 +418,8 @@ class AgentProductization:
     def bind_tools(self, template_id, version_id, bindings, actor):
         with self.store.connection() as conn:
             self._productized(self._template(conn, template_id, lock=True))
+            from app.agent_release_provenance import AgentReleaseProvenance
+            AgentReleaseProvenance(self).require_unsealed_draft(conn, template_id)
             self._version(conn, template_id, version_id, draft=True)
             if not isinstance(bindings, list) or len(bindings) > len(TOOL_CAPABILITIES):
                 raise AgentCatalogError("Invalid Tool bindings")
@@ -494,10 +506,20 @@ class AgentProductization:
             conn.execute("INSERT INTO agent_template_tests(id,agent_template_version_id,configuration_fingerprint,test_type,task_id,status,result_json,created_at) VALUES (?,?,?,'validation',NULL,?,?,?)", (str(uuid.uuid4()), version_id, version["configuration_fingerprint"], "failed" if errors else "passed", canonical(result), datetime.now(timezone.utc).isoformat()))
         return self.detail(template_id)
 
-    def publish(self, template_id, version_id, actor, mode="production"):
+    def publish(self, template_id, version_id, actor, mode="production", *, release_operation_id=None):
         with self.store.connection() as conn:
             self._productized(self._template(conn, template_id, lock=True))
+            from app.agent_availability import release_aborted
+            if release_aborted(conn, template_id, postgres=self.store.is_postgres):
+                raise AgentCatalogError("Aborted release Agent cannot be republished", 409)
+            from app.agent_release_provenance import AgentReleaseProvenance
+            release = AgentReleaseProvenance(self)
+            owner = release.require_provisional_owner(conn, template_id, release_operation_id, {"staged"})
             version = self._version(conn, template_id, version_id, draft=True)
+            if owner:
+                release._template_mapping(conn, release_operation_id, template_id)
+                release._revision_identity(conn, release_operation_id, template_id, version_id)
+                release._verify_seal(conn, release_operation_id, template_id, version)
             errors = self._validation_errors(conn, version)
             if errors:
                 raise AgentCatalogError("; ".join(errors), 409)
@@ -511,6 +533,8 @@ class AgentProductization:
                 raise AgentCatalogError("Runtime Test Pending: local_test publish is forbidden in production", 409)
             conn.execute("UPDATE agent_template_versions SET status='published',publication_scope=?,published_at=CURRENT_TIMESTAMP,updated_by=? WHERE id=?", (mode, actor, version_id))
             conn.execute("UPDATE agent_templates SET current_published_version_id=?,lifecycle_status='published',published_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,updated_by=? WHERE id=?", (version_id, actor, template_id))
+            if owner:
+                conn.execute("UPDATE agent_release_operations SET status='published' WHERE operation_id=?", (release_operation_id,))
         return self.detail(template_id)
 
     def deprecate(self, template_id, version_id, actor):
@@ -523,7 +547,7 @@ class AgentProductization:
             conn.execute("UPDATE agent_templates SET current_published_version_id=NULL,lifecycle_status='deprecated',updated_at=CURRENT_TIMESTAMP,updated_by=? WHERE id=? AND current_published_version_id=?", (actor, template_id, version_id))
         return self.detail(template_id)
 
-    def configure_instance(self, template_id, tenant_id, version_id, overrides):
+    def configure_instance(self, template_id, tenant_id, version_id, overrides, *, release_operation_id=None):
         if not isinstance(overrides, dict) or set(overrides) - set(OVERRIDE_SCHEMA):
             raise AgentCatalogError("Tenant Override outside V1 allowlist")
         for key, value in overrides.items():
@@ -533,6 +557,12 @@ class AgentProductization:
             if not self.store.is_postgres:
                 conn.execute("BEGIN IMMEDIATE")
             self._productized(self._template(conn, template_id, lock=True))
+            from app.agent_availability import release_aborted
+            if release_aborted(conn, template_id, postgres=self.store.is_postgres):
+                raise AgentCatalogError("Aborted release Agent cannot be configured", 409)
+            from app.agent_release_provenance import AgentReleaseProvenance
+            release = AgentReleaseProvenance(self)
+            owner = release.require_provisional_owner(conn, template_id, release_operation_id, {"staged", "published", "enabled"})
             version = self._version(conn, template_id, version_id)
             if version["status"] != "published":
                 raise AgentCatalogError("Only Published revisions may configure a new Instance", 409)
@@ -544,12 +574,23 @@ class AgentProductization:
             ).fetchone()
             if existing and existing["status"] == "enabled":
                 raise AgentCatalogError("INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE", 409)
+            if release_operation_id:
+                operation = release._operation(conn, release_operation_id)
+                release._template_mapping(conn, release_operation_id, template_id)
+                release._verify_seal(conn, release_operation_id, template_id, version)
+                if operation["status"] not in {"staged", "published", "enabled"}:
+                    raise AgentCatalogError("Release operation state mismatch", 409)
+                prior = conn.execute("SELECT instance_id FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, template_id)).fetchone()
+                if prior and not conn.execute("SELECT 1 FROM agent_release_artifacts WHERE operation_id=? AND artifact_type='tenant_instance' AND artifact_id=?", (release_operation_id, prior["instance_id"])).fetchone():
+                    raise AgentCatalogError("AGENT_PRODUCTIZATION_MANUAL_RECOVERY_REQUIRED", 409)
             instance_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status,instance_id,agent_template_version_id,overrides_json,created_at,updated_at) VALUES (?,?,'configured',?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(tenant_id,agent_id) DO UPDATE SET status='configured',agent_template_version_id=excluded.agent_template_version_id,overrides_json=excluded.overrides_json,updated_at=CURRENT_TIMESTAMP", (tenant_id, template_id, instance_id, version_id, canonical(overrides)))
             row = dict(conn.execute("SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, template_id)).fetchone())
+            if release_operation_id and not conn.execute("SELECT 1 FROM agent_release_artifacts WHERE operation_id=? AND artifact_type='tenant_instance' AND artifact_id=?", (release_operation_id, row["instance_id"])).fetchone():
+                release._artifact(conn, release_operation_id, "tenant_instance", row["instance_id"], {"tenant_id": tenant_id, "template_id": template_id, "revision_id": version_id, "instance_id": row["instance_id"]})
         return {**row, "execution_enabled": False, "workspace_visible": False, "runtime_test_status": "Runtime Test Pending"}
 
-    def set_instance_status(self, template_id, tenant_id, status):
+    def set_instance_status(self, template_id, tenant_id, status, *, release_operation_id=None):
         if status not in {"enabled", "disabled"} or not self.execution_resolver:
             raise AgentCatalogError("Execution Resolver unavailable", 409)
         blocked_error = None
@@ -557,11 +598,27 @@ class AgentProductization:
             if not self.store.is_postgres:
                 conn.execute("BEGIN IMMEDIATE")
             self._productized(self._template(conn, template_id, lock=True))
+            from app.agent_availability import release_aborted
+            if status == "enabled" and release_aborted(conn, template_id, postgres=self.store.is_postgres):
+                raise AgentCatalogError("Aborted release Agent cannot be enabled", 409)
+            from app.agent_release_provenance import AgentReleaseProvenance
+            release = AgentReleaseProvenance(self)
+            owner = release.require_provisional_owner(
+                conn, template_id, release_operation_id,
+                {"published", "enabled"} if status == "enabled" else {"staged", "published", "enabled"},
+            ) if status == "enabled" or release_operation_id else None
             instance = conn.execute("SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?" + (" FOR UPDATE" if self.store.is_postgres else ""), (tenant_id,template_id)).fetchone()
             if not instance:
                 raise AgentCatalogError("Instance not found", 404)
             if status == "enabled":
                 try:
+                    if owner:
+                        release._template_mapping(conn, release_operation_id, template_id)
+                        revision = release._revision_identity(conn, release_operation_id, template_id, instance["agent_template_version_id"])
+                        release._verify_seal(conn, release_operation_id, template_id, revision)
+                        mapping = conn.execute("SELECT identity FROM agent_release_artifacts WHERE operation_id=? AND artifact_type='tenant_instance' AND artifact_id=?", (release_operation_id, instance["instance_id"])).fetchone()
+                        if not mapping or mapping["identity"] != {"tenant_id": tenant_id, "template_id": template_id, "revision_id": revision["id"], "instance_id": instance["instance_id"]}:
+                            raise AgentCatalogError("AGENT_PRODUCTIZATION_MANUAL_RECOVERY_REQUIRED", 409)
                     version = self._version(conn, template_id, instance["agent_template_version_id"])
                     if version["status"] != "published" or not self.execution_resolver._runtime_passed(conn, version):
                         raise AgentCatalogError("Published revision / current real Runtime Test required", 409)
@@ -580,6 +637,8 @@ class AgentProductization:
                     blocked_error = exc
                     status = "blocked"
             conn.execute("UPDATE tenant_agent_instances SET status=?,updated_at=CURRENT_TIMESTAMP WHERE tenant_id=? AND agent_id=?", (status,tenant_id,template_id))
+            if owner and status == "enabled" and not blocked_error and owner["status"] == "published":
+                conn.execute("UPDATE agent_release_operations SET status='enabled' WHERE operation_id=?", (release_operation_id,))
         if blocked_error:
             raise AgentCatalogError("Instance blocked: enable prerequisite failed",409) from blocked_error
         return {"tenant_id":tenant_id,"agent_id":template_id,"status":status}

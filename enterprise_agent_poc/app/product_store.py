@@ -337,10 +337,13 @@ class ProductStore:
         if self.execution_resolver:
             with self._store.connection() as conn:
                 if "definition_source" in columns:
-                    candidates = conn.execute("SELECT v.*,i.overrides_json,t.slug AS public_slug FROM agent_templates t JOIN tenant_agent_instances i ON i.agent_id=t.id JOIN agent_template_versions v ON v.id=i.agent_template_version_id WHERE i.tenant_id=? AND i.status='enabled' AND t.definition_source='productized' AND v.status='published'", (tenant_id,)).fetchall()
+                    candidates = conn.execute("SELECT v.*,i.overrides_json,t.slug AS public_slug FROM agent_templates t JOIN tenant_agent_instances i ON i.agent_id=t.id JOIN agent_template_versions v ON v.id=i.agent_template_version_id WHERE i.tenant_id=? AND i.status='enabled' AND t.definition_source='productized' AND v.status='published' AND t.lifecycle_status='published' AND t.current_published_version_id=v.id", (tenant_id,)).fetchall()
                     for row in candidates:
                         v = dict(row)
                         try:
+                            from app.agent_availability import tenant_available
+                            if not tenant_available(conn, tenant_id, v["agent_template_id"], postgres=self._store.is_postgres):
+                                continue
                             if not self.execution_resolver._runtime_passed(conn, v):
                                 continue
                             self.execution_resolver._ready(conn, tenant_id, v)
@@ -354,16 +357,20 @@ class ProductStore:
     def resolve_agent_reference(self, reference):
         from app.agent_reference import resolve_agent_reference
         with self._store.connection() as conn:
-            return resolve_agent_reference(conn,reference)
+            return resolve_agent_reference(conn,reference,postgres=self._store.is_postgres)
 
     def agent_enabled(self, tenant_id: str, agent_id: str) -> bool:
         if agent_id not in CATALOG:
-            return any(a["id"] == agent_id and a["enabled"] for a in self.agents(tenant_id))
+            from app.agent_availability import tenant_available
+            with self._store.connection() as conn:
+                return tenant_available(conn, tenant_id, agent_id, postgres=self._store.is_postgres)
         with self._store.connection() as conn:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, _test_revision=None, _test_id=None, _test_fingerprint=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
+        if _release_operation_id and not _test_revision:
+            raise PermissionError("Release ownership is only valid for controlled Runtime Test")
         with self._store.connection() as conn:
             context = None
             if agent_id not in CATALOG:
@@ -400,6 +407,21 @@ class ProductStore:
                 if not _test_id or not context:
                     raise PermissionError("Controlled Runtime Test association required")
                 conn.execute("INSERT INTO agent_template_tests(id,agent_template_version_id,configuration_fingerprint,test_type,task_id,status,result_json) VALUES (?,?,?,'runtime',?,'queued',?)", (_test_id,_test_revision,context["configuration_fingerprint"],task_id,json.dumps({"runtime_test_status":"queued"})))
+                if _release_operation_id:
+                    from app.agent_release_provenance import AgentReleaseProvenance
+                    release = AgentReleaseProvenance(self.execution_resolver.catalog)
+                    operation = release._operation(conn, _release_operation_id)
+                    if operation["status"] not in {"staged", "published", "enabled"} or operation["agent_slug"] != agent.slug:
+                        raise PermissionError("Release Runtime Test ownership mismatch")
+                    release._template_mapping(conn, _release_operation_id, agent_id)
+                    release._revision_identity(conn, _release_operation_id, agent_id, _test_revision)
+                    release._artifact(conn, _release_operation_id, "runtime_validation", task_id, {
+                        "task_id": task_id, "test_id": _test_id, "context_id": context["id"],
+                        "template_id": agent_id, "revision_id": _test_revision,
+                        "fingerprint": context["configuration_fingerprint"],
+                        "tenant_id": tenant_id, "instance_id": context["instance_id"],
+                    })
+                    release._event(conn, _release_operation_id, "runtime_validation_created", json.dumps({"task_id": task_id, "test_id": _test_id}))
         return self.task(task_id, tenant_id, user_id) or {}
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:
@@ -702,6 +724,9 @@ class ProductStore:
 
     def conversation_detail(self, tenant_id: str, user_id: str, conversation_id: str) -> dict | None:
         with self._store.connection() as conn:
+            from app.agent_availability import retired_validation_conversation
+            if retired_validation_conversation(conn, conversation_id, postgres=self._store.is_postgres):
+                return None
             conversation = conn.execute(
                 "SELECT c.id,c.agent_id,c.runtime_thread_id,c.created_at,o.title FROM conversations c JOIN conversation_owners o ON o.conversation_id=c.id WHERE c.id=? AND c.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL",
                 (conversation_id, tenant_id, user_id),
@@ -880,6 +905,9 @@ class ProductStore:
 
     def task(self, task_id: str, tenant_id: str, user_id: str) -> dict | None:
         with self._store.connection() as conn:
+            from app.agent_availability import retired_validation_task
+            if retired_validation_task(conn, task_id, postgres=self._store.is_postgres):
+                return None
             row = conn.execute("SELECT t.*, r.final_response,r.result_json FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id WHERE t.id=? AND t.tenant_id=? AND t.user_id=?", (task_id,tenant_id,user_id)).fetchone()
             events = conn.execute("SELECT stage,message,created_at FROM task_events WHERE task_id=? AND stage<>'delta' ORDER BY id", (task_id,)).fetchall()
             generation = None
@@ -930,6 +958,9 @@ class ProductStore:
 
     def task_events_since(self, task_id: str, tenant_id: str, user_id: str, after_id: int = 0) -> list[dict]:
         with self._store.connection() as conn:
+            from app.agent_availability import retired_validation_task
+            if retired_validation_task(conn, task_id, postgres=self._store.is_postgres):
+                return []
             rows = conn.execute(
                 "SELECT e.id,e.stage,e.message,e.created_at FROM task_events e JOIN tasks t ON t.id=e.task_id WHERE e.task_id=? AND t.tenant_id=? AND t.user_id=? AND e.id>? ORDER BY e.id",
                 (task_id, tenant_id, user_id, after_id),
@@ -944,12 +975,20 @@ class ProductStore:
 
     def conversations(self, tenant_id: str, user_id: str, limit: int = 50, offset: int = 0) -> list[dict]:
         with self._store.connection() as conn:
+            from app.agent_availability import release_provenance_available
+            hidden_validation = (
+                "AND NOT EXISTS (SELECT 1 FROM agent_release_operations ro "
+                "JOIN agent_release_artifacts ra ON ra.operation_id=ro.operation_id "
+                "AND ra.artifact_type='runtime_validation' JOIN tasks rt ON rt.id=ra.artifact_id "
+                "WHERE ro.status='aborted' AND rt.conversation_id=c.id) "
+                if release_provenance_available(conn, postgres=self._store.is_postgres) else ""
+            )
             rows = conn.execute(
                 "SELECT c.id,c.agent_id,c.runtime_thread_id,o.title,c.created_at,"
                 "COALESCE(MAX(COALESCE(t.completed_at,t.started_at,t.created_at)),c.created_at) AS updated_at "
                 "FROM conversations c JOIN conversation_owners o ON o.conversation_id=c.id "
                 "LEFT JOIN tasks t ON t.conversation_id=c.id AND t.tenant_id=c.tenant_id AND t.user_id=o.user_id "
-                "WHERE c.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL "
+                "WHERE c.tenant_id=? AND o.user_id=? AND o.deleted_at IS NULL " + hidden_validation +
                 "GROUP BY c.id,c.agent_id,c.runtime_thread_id,o.title,c.created_at "
                 "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
                 (tenant_id, user_id, limit, offset),

@@ -101,12 +101,17 @@ class ExecutionResolver:
     def resolve(self, conn, tenant, user, agent_id, conversation_id=None, *, test_revision=None):
         if agent_id in CATALOG:
             return None
+        from app.agent_availability import release_aborted, tenant_available
+        if release_aborted(conn, agent_id, postgres=self.store.is_postgres):
+            raise LookupError("该智能体暂不可用。")
         if not conn.execute("SELECT 1 FROM users WHERE id=? AND tenant_id=?", (user, tenant)).fetchone():
             raise PermissionError("Authenticated user / tenant mismatch")
         instance = conn.execute("SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?" + (" FOR UPDATE" if self.store.is_postgres else ""), (tenant, agent_id)).fetchone()
         test = test_revision is not None
         if not instance or (not test and instance["status"] != "enabled"):
             raise LookupError("该智能体尚未为当前企业启用。")
+        if not test and not conversation_id and not tenant_available(conn, tenant, agent_id, postgres=self.store.is_postgres):
+            raise AgentCatalogError("Published revision / current real Runtime Test required", 409)
         if test and (not self.test_allowed(conn, tenant, agent_id) or instance["status"] != "configured"):
             raise PermissionError("Runtime test requires explicit isolated test tenant")
         if conversation_id:
@@ -151,6 +156,9 @@ class ExecutionResolver:
         return context
 
     def check_context(self, conn, context):
+        from app.agent_availability import release_aborted
+        if release_aborted(conn, context["agent_id"], postgres=self.store.is_postgres):
+            raise PermissionError("Aborted release Agent cannot resume")
         policy = json.loads(context["tool_policy_snapshot"])
         self._skills(conn, context["agent_template_version_id"], historical=True, fixed=policy["skill_refs"])
         instance = conn.execute("SELECT * FROM tenant_agent_instances WHERE instance_id=? AND tenant_id=? AND agent_id=?", (context["instance_id"], context["tenant_id"], context["agent_id"])).fetchone()

@@ -14,7 +14,7 @@ class AgentRuntimeTest:
         self.isolation_guard = None
         self.enqueue = None
 
-    async def run(self, template_id, version_id, actor, fingerprint=None):
+    async def run(self, template_id, version_id, actor, fingerprint=None, *, release_operation_id=None):
         r=self.resolver
         if r.settings.environment != 'production':
             if not self.isolation_guard:
@@ -29,9 +29,15 @@ class AgentRuntimeTest:
         with r.store.connection() as conn:
             if not r.store.is_postgres:conn.execute('BEGIN IMMEDIATE')
             r.catalog._productized(r.catalog._template(conn,template_id,lock=True))
+            from app.agent_availability import release_aborted
+            if release_aborted(conn,template_id,postgres=r.store.is_postgres):
+                raise AgentCatalogError('Aborted release Agent cannot run Runtime Test',409)
             if not r.test_allowed(conn,r.test_tenant_id,template_id):
                 raise AgentCatalogError('Server Runtime Test policy denied',409)
             version=r.catalog._version(conn,template_id,version_id,draft=True)
+            from app.agent_release_provenance import AgentReleaseProvenance
+            release=AgentReleaseProvenance(r.catalog)
+            release.require_provisional_owner(conn,template_id,release_operation_id,{'staged','published','enabled'})
             if not fingerprint or fingerprint != version['configuration_fingerprint']:
                 raise AgentCatalogError('Current configuration fingerprint required',409)
             errors=r.catalog._validation_errors(conn,version)
@@ -44,12 +50,31 @@ class AgentRuntimeTest:
             instance=conn.execute('SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?',(r.test_tenant_id,template_id)).fetchone()
             if instance and instance['status']=='enabled':
                 raise AgentCatalogError('Disable Pilot instance before testing another Draft',409)
+            if release_operation_id:
+                from app.agent_release_provenance import AgentReleaseProvenance
+                release=AgentReleaseProvenance(r.catalog)
+                operation=release._operation(conn,release_operation_id)
+                release._template_mapping(conn,release_operation_id,template_id)
+                release._verify_seal(conn,release_operation_id,template_id,version)
+                if operation['status'] not in {'staged','published','enabled'}:
+                    raise AgentCatalogError('Release Runtime Test operation state mismatch',409)
+                if instance and not conn.execute("SELECT 1 FROM agent_release_artifacts WHERE operation_id=? AND artifact_type='tenant_instance' AND artifact_id=?",(release_operation_id,instance['instance_id'])).fetchone():
+                    raise AgentCatalogError('AGENT_PRODUCTIZATION_MANUAL_RECOVERY_REQUIRED',409)
             conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status,instance_id,agent_template_version_id,overrides_json) VALUES (?,?,'configured',?,?, '{}') ON CONFLICT(tenant_id,agent_id) DO UPDATE SET status='configured',agent_template_version_id=excluded.agent_template_version_id",
                          (r.test_tenant_id,template_id,str(uuid4()),version_id))
+            if release_operation_id:
+                row=conn.execute("SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?",(r.test_tenant_id,template_id)).fetchone()
+                existing=conn.execute("SELECT identity FROM agent_release_artifacts WHERE operation_id=? AND artifact_type='tenant_instance' AND artifact_id=?",(release_operation_id,row['instance_id'])).fetchone()
+                identity={'tenant_id':r.test_tenant_id,'template_id':template_id,'revision_id':version_id,'instance_id':row['instance_id']}
+                if existing and existing['identity'] != identity:
+                    raise AgentCatalogError('AGENT_PRODUCTIZATION_MANUAL_RECOVERY_REQUIRED',409)
+                if not existing:
+                    release._artifact(conn,release_operation_id,'tenant_instance',row['instance_id'],identity)
         test_id=str(uuid4())
         task=self.product.create_task(r.test_tenant_id,actor,template_id,
             '读取绑定 Skill 的 SKILL.md，按 Persona 用一句中文介绍能力。调用全部 required 工具；若绑定 optional enterprise_config_get，请读取企业配置。只返回最终结果。',
-            None,_test_revision=version_id,_test_id=test_id,_test_fingerprint=fingerprint)
+            None,_test_revision=version_id,_test_id=test_id,_test_fingerprint=fingerprint,
+            _release_operation_id=release_operation_id)
         try:self.enqueue(task['id'])
         except Exception:
             self.product.set_task(task['id'],r.test_tenant_id,'failed','enqueue_failed','任务入队失败',error_code='enqueue_failed')

@@ -4,7 +4,7 @@ import re
 from app.agent_catalog import CATALOG
 
 
-def resolve_agent_reference(conn, reference):
+def resolve_agent_reference(conn, reference, *, postgres=False):
     if not isinstance(reference,str):raise LookupError('Unknown Agent reference')
     if reference in CATALOG:
         return reference
@@ -12,6 +12,7 @@ def resolve_agent_reference(conn, reference):
         raise LookupError("Unknown Agent reference")
     # UUID references remain accepted for historical URLs, never advertised.
     row = conn.execute("SELECT id FROM agent_templates WHERE definition_source='productized' AND (slug=? OR id=?)", (reference, reference)).fetchone()
-    if not row:
+    from app.agent_availability import current_published_revision
+    if not row or not current_published_revision(conn, row["id"], postgres=postgres):
         raise LookupError("Unknown Agent reference")
     return row['id']
