@@ -321,7 +321,7 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     # rollback behavior.  Any unknown or altered 012 still fails below.
     require(len(rows) >= len(target_items) or (plan and self_target),
             'target_required_migrations_missing')
-    check_history(rows[:len(target_items)], target_items)
+    check_history(rows[:len(target_items)], target_items, plan=plan and self_target)
     return {'status': 'rollback_plan_passed' if plan else 'rollback_preflight_passed',
             'read_only': True, 'target_release_id': target_id, 'target_source_commit': target_commit,
             'schema_baseline_id': baseline['id'], 'schema_baseline_source_commit': baseline['source_commit'],
