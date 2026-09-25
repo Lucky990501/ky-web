@@ -96,7 +96,7 @@ def switch_harness(tmp_path):
     shutil.copytree(project / "app", candidate / "app", ignore=shutil.ignore_patterns("__pycache__", "static"))
     shutil.copytree(project / "skill_packages", candidate / "skill_packages")
     (candidate / "scripts").mkdir()
-    for name in ("verify_bundled_skills.py", "verify_runtime_config.py", "release_binding_transition.py", "release_verify.py", "rollback_preflight.py", "release_manifest.py", "migrate.py"):
+    for name in ("verify_bundled_skills.py", "verify_runtime_config.py", "release_binding_transition.py", "release_migration_transition.py", "release_verify.py", "rollback_preflight.py", "release_manifest.py", "migrate.py"):
         shutil.copyfile(project / "scripts" / name, candidate / "scripts" / name)
     (candidate / "pyproject.toml").write_text("# fixture\n")
     data = base / "shared/runtime-data"
