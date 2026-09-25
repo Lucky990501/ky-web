@@ -79,7 +79,7 @@ def test_c3_missing_012_blocks_without_epoch_change(fresh):
 
 def test_c4_extra_pending_or_unknown_migration_blocks(fresh):
     with _connect(fresh) as conn:
-        conn.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('013','unknown.sql',%s)", ('0'*64,))
+        conn.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('015','unknown.sql',%s)", ('0'*64,))
     with pytest.raises(gate.RollbackBlocked):
         invoke(fresh)
     assert state(fresh) == 'legacy_v1'
