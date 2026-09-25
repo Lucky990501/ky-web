@@ -53,7 +53,7 @@ def _fingerprints(conn):
 
 
 def _wechat_absent(conn):
-    require(not conn.execute("SELECT 1 FROM agent_templates WHERE slug=?", (WECHAT_SLUG,)).fetchone(),
+    require(not conn.execute("SELECT 1 FROM agent_templates WHERE slug=%s", (WECHAT_SLUG,)).fetchone(),
             "phase_a_wechat_agent_must_remain_absent")
 
 
@@ -102,7 +102,7 @@ def apply_declared(store: POCStore, declared: dict) -> dict:
                 "historical_revision_fingerprint_changed")
         for count, item in enumerate(items, start=1):
             conn.execute(item["path"].read_text(encoding="utf-8"))
-            conn.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES (?,?,?)",
+            conn.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES (%s,%s,%s)",
                          (item["version"], item["name"], item["canonical_checksum"]))
             state = verify_history(conn, declared, applied_count=count)
             require(state["fingerprints"] == before["fingerprints"],
