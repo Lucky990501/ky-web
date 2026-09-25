@@ -253,10 +253,10 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     floors = data_contract_floors(declaration, schema_lock)
     predecessor = declaration['forward_predecessor_approval']
     require(set(predecessor) == {'release_id','source_commit','archive_sha256','manifest_sha256','schema_fingerprint','data_contract'}
-            and predecessor['release_id'] == '20260924-efdc4df'
-            and predecessor['source_commit'] == 'efdc4dff4fcfb58c39d4d107c8e21524e36e4297'
-            and predecessor['archive_sha256'] == 'ff174d4f9ed3e19483f731d3667309988f527948305df9c810be8a48b78b913e'
-            and predecessor['manifest_sha256'] == 'e6dab894f6c488cdf638b652a668e137dadb676ac5c05bd1424188116a916ef4'
+            and predecessor['release_id'] == '20260925-67e993e'
+            and predecessor['source_commit'] == '67e993eb9b08e71d3d83076982b170fbc30b4fd4'
+            and predecessor['archive_sha256'] == '54f22e5c5d5be8f6b318934baa84e07f856e614bb2928ba9849de8f31fdefdb6'
+            and predecessor['manifest_sha256'] == 'fe7ab9ac33ad7d106cc0a4cb5fd3d2c4d2b46f1affec17987285bd83e3877a8e'
             and predecessor['schema_fingerprint'] == digest(schema_lock)
             and predecessor['data_contract'] == 'member_account_status_v1', 'forward_predecessor_declaration')
     own_reference = {'release_id': own_manifest['release_id'], 'source_commit': own_manifest['source_commit']}
