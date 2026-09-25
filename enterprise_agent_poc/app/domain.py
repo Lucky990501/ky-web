@@ -27,6 +27,7 @@ class RuntimeProfile:
     instance_id: str | None = None
     tool_scopes: tuple[str, ...] = ()
     required_tools: tuple[str, ...] = ()
+    grounding_policy: dict | None = None
 
     @classmethod
     def build(
@@ -77,6 +78,7 @@ class RuntimeTurn:
     structured_attempt_trace: tuple[dict, ...] = ()
     structured_result_status: str | None = None
     structured_model_calls: int = 0
+    grounding_telemetry: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)

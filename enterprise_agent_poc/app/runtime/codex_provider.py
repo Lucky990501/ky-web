@@ -17,6 +17,11 @@ from app.activity_plan_runtime import (
     is_full_activity_plan, merge_targeted_correction, parse_plan, render_markdown,
     result_envelope, safe_violations, semantic_guard,
 )
+from app.grounded_writing_runtime import (
+    AUDIT_INSTRUCTION, MAX_PRIVATE_TEXT, SAFE_RESPONSE, apply_targeted_correction,
+    audit_prompt, correction_prompt as grounding_correction_prompt, generation_prompt,
+    parse_audit, parse_draft,
+)
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.skills import SkillDeployment
 from app.settings import Settings
@@ -218,6 +223,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         self._profiles: dict[str, RuntimeProfile] = {}
         self._threads: dict[str, object] = {}
         self._active_turns: dict[str, object] = {}
+        self._grounding_child_sessions: dict[str, RuntimeSession] = {}
 
     @staticmethod
     def _sandbox(policy: SandboxPolicy):
@@ -302,7 +308,8 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn:
         profile = self._profiles[session.profile_id]
-        if is_full_activity_plan(getattr(profile, "agent_id", ""), message):
+        if (getattr(profile, "grounding_policy", None) and profile.grounding_policy.get("enabled") is True
+                or is_full_activity_plan(getattr(profile, "agent_id", ""), message)):
             async for event in self.stream_turn(session, message):
                 if event.kind == "completed" and event.turn is not None:
                     return event.turn
@@ -394,6 +401,10 @@ class CodexRuntimeProvider(RuntimeProvider):
     async def stream_turn(self, session: RuntimeSession, message: str) -> AsyncIterator[RuntimeStreamEvent]:
         """Stream public text for simple turns, validated Markdown for full plans."""
         profile = self._profiles[session.profile_id]
+        if getattr(profile, "grounding_policy", None) and profile.grounding_policy.get("enabled") is True:
+            async for event in self._grounded_stream_turn(session, profile, message):
+                yield event
+            return
         if not is_full_activity_plan(getattr(profile, "agent_id", ""), message):
             async for event in self._stream_provider_turn(session, profile, message):
                 yield event
@@ -509,9 +520,171 @@ class CodexRuntimeProvider(RuntimeProvider):
             structured_model_calls=model_calls,
         ))
 
+    async def _grounded_stream_turn(
+        self, session: RuntimeSession, profile: RuntimeProfile, message: str,
+    ) -> AsyncIterator[RuntimeStreamEvent]:
+        """No article delta leaves this boundary before independent audit PASS."""
+        started = time.monotonic()
+        telemetry = {
+            "grounding_enabled": True, "grounding_mode": "claim_audit_v1",
+            "generation_calls": 0, "audit_calls": 0, "initial_pass": False,
+            "correction_invoked": False, "final_pass": False,
+            "violation_categories": [], "draft_duration_ms": None,
+            "audit_duration_ms": None, "correction_duration_ms": None,
+            "re_audit_duration_ms": None, "duration_ms": None,
+        }
+        generation_turns: list[RuntimeTurn] = []
+        material: list[str] = []
+        final = SAFE_RESPONSE
+        audit_session = None
+        phase = None
+        try:
+            if len(message) > MAX_PRIVATE_TEXT:
+                raise ValueError("Grounding input exceeds private limit")
+            phase = "grounded_drafting"
+            yield RuntimeStreamEvent.activity(phase, "started")
+            stage_started = time.monotonic()
+            telemetry["generation_calls"] = 1
+            draft_turn = await self._collect_hidden_turn(
+                session, profile, generation_prompt(message), material_sink=material,
+            )
+            telemetry["draft_duration_ms"] = round((time.monotonic() - stage_started) * 1000)
+            generation_turns.append(draft_turn)
+            yield RuntimeStreamEvent.activity(phase, "completed")
+            if sum(len(item) for item in material) > MAX_PRIVATE_TEXT:
+                raise ValueError("Grounding material exceeds private limit")
+            draft = parse_draft(draft_turn.text, len(material))
+            if draft is None:
+                raise ValueError("Invalid private grounded draft")
+
+            # A separate tool-less profile and developer instruction keep the
+            # audit independent of the drafting thread and tenant data scopes.
+            audit_profile = replace(
+                profile,
+                id=hashlib.sha256((profile.id + ":grounding-audit-v1").encode()).hexdigest()[:24],
+                skill_manifest={}, tool_scopes=(), required_tools=(), grounding_policy=None,
+            )
+            audit_session = await self.create_session(audit_profile, AUDIT_INSTRUCTION)
+            self._grounding_child_sessions[session.thread_id] = audit_session
+            phase = "grounding_auditing"
+            yield RuntimeStreamEvent.activity(phase, "started")
+            stage_started = time.monotonic()
+            telemetry["audit_calls"] = 1
+            audit_turn = await self._collect_hidden_turn(
+                audit_session, audit_profile,
+                audit_prompt(message, material, draft.fact_ledger, draft.article),
+            )
+            telemetry["audit_duration_ms"] = round((time.monotonic() - stage_started) * 1000)
+            audit = parse_audit(audit_turn.text, draft.article)
+            if audit is None:
+                raise ValueError("Invalid private grounding audit")
+            telemetry["violation_categories"] = audit.categories
+            telemetry["initial_pass"] = audit.grounded
+            yield RuntimeStreamEvent.activity(phase, "completed")
+            if audit.grounded:
+                final = draft.article
+                telemetry["final_pass"] = True
+            else:
+                phase = "grounding_correcting"
+                yield RuntimeStreamEvent.activity(phase, "started")
+                stage_started = time.monotonic()
+                telemetry["generation_calls"] = 2
+                telemetry["correction_invoked"] = True
+                correction_turn = await self._collect_hidden_turn(
+                    session, profile,
+                    grounding_correction_prompt(message, material, draft.fact_ledger, draft.article, audit),
+                )
+                telemetry["correction_duration_ms"] = round((time.monotonic() - stage_started) * 1000)
+                generation_turns.append(correction_turn)
+                corrected = apply_targeted_correction(correction_turn.text, draft.article, audit)
+                if corrected is None:
+                    raise ValueError("Invalid private targeted correction")
+                yield RuntimeStreamEvent.activity(phase, "completed")
+                phase = "grounding_revalidating"
+                yield RuntimeStreamEvent.activity(phase, "started")
+                stage_started = time.monotonic()
+                telemetry["audit_calls"] = 2
+                re_audit_turn = await self._collect_hidden_turn(
+                    audit_session, audit_profile,
+                    audit_prompt(message, material, draft.fact_ledger, corrected),
+                )
+                telemetry["re_audit_duration_ms"] = round((time.monotonic() - stage_started) * 1000)
+                re_audit = parse_audit(re_audit_turn.text, corrected)
+                if re_audit is None:
+                    raise ValueError("Invalid private grounding re-audit")
+                telemetry["violation_categories"] = sorted(
+                    set(telemetry["violation_categories"]) | set(re_audit.categories)
+                )
+                yield RuntimeStreamEvent.activity(phase, "completed")
+                if re_audit.grounded:
+                    final = corrected
+                    telemetry["final_pass"] = True
+            if telemetry["final_pass"] and not self._grounding_required_tools_satisfied(profile, generation_turns):
+                final = SAFE_RESPONSE
+                telemetry["final_pass"] = False
+        except Exception:
+            # Provider, parse, tool, and audit failures all close to the same
+            # content-free public response; no draft or exception is traced.
+            final = SAFE_RESPONSE
+            telemetry["final_pass"] = False
+        finally:
+            self._grounding_child_sessions.pop(session.thread_id, None)
+        phase = "grounded_rendering"
+        yield RuntimeStreamEvent.activity(phase, "started")
+        from app.activity_plan_runtime import chunk_validated_markdown
+        for chunk in chunk_validated_markdown(final):
+            yield RuntimeStreamEvent.visible_delta(chunk)
+        telemetry["duration_ms"] = round((time.monotonic() - started) * 1000)
+        yield RuntimeStreamEvent.activity(phase, "completed")
+        turns = generation_turns
+        yield RuntimeStreamEvent.completed(RuntimeTurn(
+            thread_id=session.thread_id, text=final,
+            input_tokens=sum(turn.input_tokens or 0 for turn in turns) or None,
+            output_tokens=sum(turn.output_tokens or 0 for turn in turns) or None,
+            latency_ms=telemetry["duration_ms"],
+            mcp_calls=tuple(call for turn in turns for call in turn.mcp_calls),
+            lifecycle_events=tuple(event for turn in turns for event in turn.lifecycle_events),
+            grounding_telemetry=telemetry,
+        ))
+
+    async def _collect_hidden_turn(
+        self, session: RuntimeSession, profile: RuntimeProfile, prompt: str,
+        *, material_sink: list[str] | None = None,
+    ) -> RuntimeTurn:
+        completed = None
+        async for event in self._stream_provider_turn(
+            session, profile, prompt, visible_deltas=False, material_sink=material_sink,
+        ):
+            if event.kind == "completed":
+                completed = event.turn
+        if completed is None:
+            raise RuntimeError("Hidden turn did not complete")
+        status = str(getattr(completed.status, "value", completed.status) or "unknown").rsplit(".", 1)[-1].lower()
+        if status not in {"completed", "success"} or completed.error:
+            raise RuntimeError("Hidden turn failed")
+        return completed
+
+    @staticmethod
+    def _grounding_required_tools_satisfied(profile: RuntimeProfile, turns: list[RuntimeTurn]) -> bool:
+        calls = [call for turn in turns for call in turn.mcp_calls]
+        final_attempts = {}
+        for call in calls:
+            final_attempts[(call.get("tool"), call.get("server"), call.get("dependency_id", "legacy-tool"))] = call
+        if not all(
+            call.get("status") == "completed" and not call.get("error")
+            and not call.get("result_is_error") for call in final_attempts.values()
+        ):
+            return False
+        return all(any(
+            call.get("tool") == required and call.get("status") == "completed"
+            and not call.get("error") and not call.get("result_is_error")
+            for call in final_attempts.values()
+        ) for required in profile.required_tools)
+
     async def _stream_provider_turn(
         self, session: RuntimeSession, profile: RuntimeProfile, message: str,
         *, output_schema: dict | None = None, visible_deltas: bool = True,
+        material_sink: list[str] | None = None,
     ) -> AsyncIterator[RuntimeStreamEvent]:
         """Collect one SDK turn, preserving public activity and tool evidence."""
         from openai_codex.generated.v2_all import (
@@ -550,6 +723,11 @@ class CodexRuntimeProvider(RuntimeProvider):
                         yield activity
                 elif isinstance(payload, ItemCompletedNotification) and payload.turn_id == handle.id:
                     items.append(payload.item)
+                    item = getattr(payload.item, "root", payload.item)
+                    if (material_sink is not None and getattr(item, "tool", None) in
+                            {"knowledge_search", "enterprise_config_get", "asset_search"}
+                            and getattr(item, "result", None) is not None):
+                        material_sink.append(str(item.result))
                     activity = self._safe_tool_activity(payload.item, "completed")
                     if activity:
                         yield activity
@@ -604,6 +782,10 @@ class CodexRuntimeProvider(RuntimeProvider):
         it is deliberately kept distinct from closing this process's stream.
         """
         handle = self._active_turns.get(session.thread_id)
+        if handle is None:
+            child = self._grounding_child_sessions.get(session.thread_id)
+            if child is not None:
+                handle = self._active_turns.get(child.thread_id)
         if handle is None:
             return False
         await handle.interrupt()

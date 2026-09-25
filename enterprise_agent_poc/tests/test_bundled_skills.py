@@ -31,6 +31,7 @@ EXPECTED_BUNDLED_SKILL_VERSIONS = {
     ("marketing-copywriting", "1.0.0"),
     ("poster-design", "1.0.0"),
     ("social-copywriting", "1.0.0"),
+    ("wechat-official-account-writing", "1.0.0"),
 }
 EXPECTED_DEFAULT_BINDINGS = {
     ("campaign-agent", "event-campaign-plan", "1.0.1"),
@@ -129,7 +130,11 @@ def test_empty_registry_bootstraps_exact_historical_bytes_then_zero_writes(regis
             row = conn.execute("SELECT p.storage_path,v.checksum FROM skill_versions v JOIN skills s ON s.id=v.skill_id JOIN skill_packages p ON p.skill_version_id=v.id WHERE s.slug=? AND v.version=?", (entry["skill_slug"], entry["version"])).fetchone()
         assert Path(row["storage_path"]).read_bytes() == (registry.bundled_root / entry["artifact_path"]).read_bytes()
         assert row["checksum"] == entry["artifact_sha256"]
-        assert b"\r\n" in (registry.published_root / entry["skill_slug"] / "1.0.0" / "SKILL.md").read_bytes()
+        published_skill = (registry.published_root / entry["skill_slug"] / entry["version"] / "SKILL.md").read_bytes()
+        if entry["legacy_artifact"] or bundled.pre_release_correction_state(entry) == "corrected":
+            assert b"\r\n" in published_skill
+        else:
+            assert published_skill == (registry.bundled_root / entry["source_identity"]["path"] / "SKILL.md").read_bytes()
         assert b"\r" not in (registry.bundled_root / entry["source_identity"]["path"] / "SKILL.md").read_bytes()
     assert not hasattr(SkillRegistry, "_zip_directory")
     before = snapshot(registry)

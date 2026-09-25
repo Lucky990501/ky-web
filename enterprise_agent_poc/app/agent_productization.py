@@ -46,11 +46,38 @@ DEFAULTS = {
     "knowledge_requirement": "optional", "asset_requirement": "optional",
     "enterprise_config_requirement": "optional", "output_policy": "text", "credit_cost": 1,
     "tenant_override_schema": OVERRIDE_SCHEMA,
+    "grounding_policy": None,
 }
 
 
 def canonical(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def normalize_grounding_policy(value, *, stored=False):
+    """Canonical revision policy; NULL is the only persisted disabled form."""
+    if stored and isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            raise AgentCatalogError("Invalid stored grounding_policy", 409) from None
+    if value is None:
+        return None
+    if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
+        raise AgentCatalogError("Invalid grounding_policy")
+    if value == {"enabled": False}:
+        return None
+    if (set(value) != {"enabled", "mode", "max_corrections"}
+            or value["enabled"] is not True
+            or value["mode"] != "claim_audit_v1"
+            or type(value["max_corrections"]) is not int
+            or value["max_corrections"] != 1):
+        raise AgentCatalogError("Invalid grounding_policy")
+    return {"enabled": True, "mode": "claim_audit_v1", "max_corrections": 1}
+
+
+def effective_grounding_policy(value, *, stored=False):
+    return normalize_grounding_policy(value, stored=stored) or {"enabled": False}
 
 
 class AgentProductization:
@@ -69,8 +96,9 @@ class AgentProductization:
                 with self.store.connection() as conn:
                     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                     columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")}
+                    revision_columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_template_versions)")} if "agent_template_versions" in tables else set()
                 required = {"agent_template_versions", "agent_template_version_skills", "tool_capabilities", "agent_template_version_tools", "agent_template_tests"}
-                if not required <= tables or "current_published_version_id" not in columns:
+                if not required <= tables or "current_published_version_id" not in columns or "grounding_policy" not in revision_columns:
                     self.initialize()
                 if self.execution_resolver:
                     self.execution_resolver.initialize_local()
@@ -98,6 +126,8 @@ class AgentProductization:
                             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
                     else:
                         conn.execute(statement)
+                if "grounding_policy" not in {r["name"] for r in conn.execute("PRAGMA table_info(agent_template_versions)")}:
+                    conn.execute("ALTER TABLE agent_template_versions ADD COLUMN grounding_policy TEXT")
                 fields = list(DEFAULTS) + ["id", "agent_template_id", "revision", "configuration_fingerprint",
                                            "publication_scope", "created_at", "updated_at", "published_at", "created_by", "updated_by"]
                 unchanged = " AND ".join(f"NEW.{f} IS OLD.{f}" for f in fields)
@@ -105,6 +135,9 @@ class AgentProductization:
                     CREATE TRIGGER IF NOT EXISTS guard_agent_revision_update BEFORE UPDATE ON agent_template_versions
                     WHEN OLD.status <> 'draft' AND NOT (OLD.status='published' AND NEW.status='deprecated' AND {unchanged})
                     BEGIN SELECT RAISE(ABORT,'Published revision is immutable'); END;
+                    CREATE TRIGGER IF NOT EXISTS guard_agent_revision_grounding_update BEFORE UPDATE OF grounding_policy ON agent_template_versions
+                    WHEN OLD.status <> 'draft' AND NEW.grounding_policy IS NOT OLD.grounding_policy
+                    BEGIN SELECT RAISE(ABORT,'Published revision grounding policy is immutable'); END;
                     CREATE TRIGGER IF NOT EXISTS guard_agent_revision_delete BEFORE DELETE ON agent_template_versions
                     WHEN OLD.status <> 'draft' BEGIN SELECT RAISE(ABORT,'Published revision is immutable'); END;
                 """)
@@ -135,6 +168,9 @@ class AgentProductization:
             exists = conn.execute("SELECT to_regclass('public.agent_template_versions') AS name").fetchone()
             if not exists["name"]:
                 raise AgentCatalogError("Stage 1 migration 008 pending; existing Agents unchanged.", 503)
+            policy_column = conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='agent_template_versions' AND column_name='grounding_policy'").fetchone()
+            if not policy_column:
+                raise AgentCatalogError("Grounding Policy migration 013 pending; existing Agents unchanged.", 503)
 
     def options(self):
         return {"model_configs": list(MODEL_CONFIGS.values()), "tool_capabilities": list(TOOL_CAPABILITIES.values()),
@@ -167,6 +203,9 @@ class AgentProductization:
         if not isinstance(payload, dict) or set(payload) - set(DEFAULTS):
             raise AgentCatalogError("Unknown configuration field; model/secret/tool metadata not editable")
         fields = {**(base or DEFAULTS), **payload}
+        fields["grounding_policy"] = normalize_grounding_policy(
+            fields["grounding_policy"], stored="grounding_policy" not in payload
+        )
         for name, limit in {"name": 120, "description": 2000, "icon": 40, "category": 80, "persona": 16000}.items():
             if not isinstance(fields[name], str) or len(fields[name]) > limit:
                 raise AgentCatalogError(f"Invalid {name}")
@@ -185,6 +224,16 @@ class AgentProductization:
             raise AgentCatalogError("V1 Tenant Override schema is fixed")
         return fields
 
+    def _db_field(self, key, value):
+        if key == "tenant_override_schema":
+            return canonical(value)
+        if key == "grounding_policy" and value is not None:
+            if self.store.is_postgres:
+                from psycopg.types.json import Jsonb
+                return Jsonb(value)
+            return canonical(value)
+        return value
+
     def list_templates(self):
         with self.store.connection() as conn:
             self._ready(conn)
@@ -198,6 +247,7 @@ class AgentProductization:
 
     def _view(self, conn, version):
         version["tenant_override_schema"] = json.loads(version["tenant_override_schema"])
+        version["grounding_policy"] = normalize_grounding_policy(version["grounding_policy"], stored=True)
         version["skills"] = [dict(r) for r in conn.execute("SELECT b.skill_id,b.skill_version_id,s.slug,v.version,v.status,v.checksum FROM agent_template_version_skills b JOIN skills s ON s.id=b.skill_id JOIN skill_versions v ON v.id=b.skill_version_id WHERE b.agent_template_version_id=? ORDER BY b.skill_id", (version["id"],))]
         version["tools"] = [dict(r) for r in conn.execute("SELECT tool_capability_id,invocation_requirement FROM agent_template_version_tools WHERE agent_template_version_id=? ORDER BY tool_capability_id", (version["id"],))]
         version["tests"] = [dict(r) for r in conn.execute("SELECT * FROM agent_template_tests WHERE agent_template_version_id=? ORDER BY created_at DESC,id", (version["id"],))]
@@ -225,6 +275,7 @@ class AgentProductization:
             "model": {"id": model["id"], "label": model["label"]},
             "output_policy": version["output_policy"],
             "credit_cost": version["credit_cost"],
+            "grounding_policy": version["grounding_policy"],
             "skills": [{"slug": item["slug"], "version": item["version"]} for item in version["skills"]],
             "tools": [
                 {"id": item["tool_capability_id"], "requirement": item["invocation_requirement"]}
@@ -312,7 +363,7 @@ class AgentProductization:
             revision = conn.execute("SELECT COALESCE(MAX(revision),0)+1 AS next FROM agent_template_versions WHERE agent_template_id=?", (template_id,)).fetchone()["next"]
             version_id = str(uuid.uuid4())
             columns = list(DEFAULTS)
-            values = [canonical(fields[k]) if k == "tenant_override_schema" else fields[k] for k in columns]
+            values = [self._db_field(k, fields[k]) for k in columns]
             conn.execute(f"INSERT INTO agent_template_versions(id,agent_template_id,revision,{','.join(columns)},configuration_fingerprint,created_by,updated_by) VALUES ({','.join('?' for _ in range(len(columns)+6))})", (version_id, template_id, revision, *values, "pending", actor, actor))
             if source_id:
                 for table, columns in [("agent_template_version_skills", "skill_id,skill_version_id"), ("agent_template_version_tools", "tool_capability_id,invocation_requirement")]:
@@ -327,7 +378,7 @@ class AgentProductization:
             base = {k: version[k] for k in DEFAULTS}
             base["tenant_override_schema"] = json.loads(base["tenant_override_schema"])
             fields = self._fields(payload, base)
-            conn.execute(f"UPDATE agent_template_versions SET {','.join(k+'=?' for k in DEFAULTS)} WHERE id=?", (*[canonical(fields[k]) if k == "tenant_override_schema" else fields[k] for k in DEFAULTS], version_id))
+            conn.execute(f"UPDATE agent_template_versions SET {','.join(k+'=?' for k in DEFAULTS)} WHERE id=?", (*[self._db_field(k, fields[k]) for k in DEFAULTS], version_id))
             self._refresh_fingerprint(conn, version_id, actor)
         return self.detail(template_id)
 
@@ -383,6 +434,10 @@ class AgentProductization:
     def _fingerprint(self, conn, version):
         config = {k: version[k] for k in DEFAULTS}
         config["tenant_override_schema"] = json.loads(config["tenant_override_schema"])
+        config["grounding_policy"] = normalize_grounding_policy(config["grounding_policy"], stored=True)
+        if config["grounding_policy"] is None:
+            # Preserve the exact pre-013 canonical payload for historical rows.
+            del config["grounding_policy"]
         config["model_config"] = MODEL_CONFIGS.get(config["model_config_id"])
         config["skills"] = [dict(r) for r in conn.execute("SELECT b.skill_id,b.skill_version_id,v.checksum FROM agent_template_version_skills b JOIN skill_versions v ON v.id=b.skill_version_id WHERE b.agent_template_version_id=? ORDER BY b.skill_id", (version["id"],))]
         config["tools"] = [{**dict(r), "capability": TOOL_CAPABILITIES.get(r["tool_capability_id"])} for r in conn.execute("SELECT tool_capability_id,invocation_requirement FROM agent_template_version_tools WHERE agent_template_version_id=? ORDER BY tool_capability_id", (version["id"],))]
@@ -400,6 +455,7 @@ class AgentProductization:
         try:
             fields = {k: version[k] for k in DEFAULTS}
             fields["tenant_override_schema"] = json.loads(fields["tenant_override_schema"])
+            fields["grounding_policy"] = normalize_grounding_policy(fields["grounding_policy"], stored=True)
             self._fields(fields)
         except (AgentCatalogError, ValueError, TypeError):
             errors.append("Invalid revision configuration")

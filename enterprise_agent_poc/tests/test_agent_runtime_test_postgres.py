@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -21,7 +22,13 @@ def pg_before010(tmp_path,approved_bundle,monkeypatch):
     for p in migrate.migration_files()[:9]:shutil.copy(p,baseline/p.name)
     with monkeypatch.context() as patch:
         patch.setattr(migrate,'MIGRATIONS',baseline)
-        return pg_catalog.__wrapped__(tmp_path,approved_bundle,patch)
+        catalog = pg_catalog.__wrapped__(tmp_path,approved_bundle,patch)
+    # Current revision writes require the additive 013 column, while this fixture
+    # intentionally keeps the unrelated test-status schema at its pre-010 state.
+    migration_013 = Path(__file__).resolve().parents[1] / 'migrations/postgres/013_agent_revision_grounding_policy.sql'
+    with catalog.store.connection() as conn:
+        conn.execute(migration_013.read_text())
+    return catalog
 
 
 def test_real_010_preserves_rows_expands_only_status_and_is_idempotent(pg_before010,capsys):
@@ -35,7 +42,7 @@ def test_real_010_preserves_rows_expands_only_status_and_is_idempotent(pg_before
     assert migrate.up(c.store)==0
     assert migrate.status(c.store)==0
     state=json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert len(state['migrations'])==12 and state['pending']==state['checksum_mismatch']==0
+    assert len(state['migrations'])==len(migrate.migration_files()) and state['pending']==state['checksum_mismatch']==0
     with c.store.connection() as conn:
         assert before==[dict(r) for r in conn.execute('SELECT * FROM agent_template_tests ORDER BY id')]
         assert keys_before==[dict(r) for r in conn.execute("SELECT conname,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='agent_template_tests'::regclass AND conname<>'agent_template_tests_status_check' ORDER BY conname")]

@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.agent_catalog import CATALOG, AgentDefinition
-from app.agent_productization import AgentCatalogError, MODEL_CONFIGS, TOOL_CAPABILITIES, canonical
+from app.agent_productization import AgentCatalogError, MODEL_CONFIGS, TOOL_CAPABILITIES, canonical, effective_grounding_policy
 from app.domain import RuntimeProfile, SandboxPolicy
 from app.security import TokenError
 
@@ -32,7 +32,8 @@ def profile(context):
                           context["model_provider_id_snapshot"], context["model_id_snapshot"],
                           context["reasoning_level_snapshot"], json.loads(context["skill_manifest_snapshot"]),
                           SandboxPolicy.READ_ONLY, "openai-codex==0.147.0", "v2", context["id"], context["instance_id"],
-                          tuple(policy["scopes"]), tuple(policy["required_tools"]))
+                          tuple(policy["scopes"]), tuple(policy["required_tools"]),
+                          effective_grounding_policy(policy.get("grounding")))
 
 
 class ExecutionResolver:
@@ -136,6 +137,7 @@ class ExecutionResolver:
         policy = {"scopes": sorted(TOOL_CAPABILITIES[r["tool_capability_id"]]["required_scope"] for r in tools),
                   "required_tools": ["enterprise_config_get" if r["tool_capability_id"] == "config_get" else r["tool_capability_id"] for r in tools if r["invocation_requirement"] == "required"],
                   "bindings": tools, "skill_refs": refs, "runtime_test": test,
+                  "grounding": effective_grounding_policy(version["grounding_policy"], stored=True),
                   "display": {"name": overrides.get("display_name") or version["name"], "description": version["description"], "icon": version["icon"], "slug": self.catalog._template(conn,agent_id)['slug']}}
         context = {"id": str(uuid4()), "tenant_id": tenant, "agent_id": agent_id, "instance_id": instance["instance_id"],
                    "agent_template_version_id": version["id"], "definition_source": "productized", "configuration_fingerprint": version["configuration_fingerprint"],

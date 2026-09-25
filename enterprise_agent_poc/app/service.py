@@ -82,6 +82,7 @@ class AgentService:
                 raise PermissionError("Execution context identity mismatch")
             profile = context_profile(execution_context)
             agent = definition(execution_context)
+        grounding_enabled = bool(profile.grounding_policy and profile.grounding_policy.get("enabled") is True)
         is_resume = bool(conversation_id)
         if conversation_id:
             existing = self._store.conversation(conversation_id, tenant_id)
@@ -134,7 +135,7 @@ class AgentService:
             "error": None,
             "final_result": None,
             "artifacts": {
-                "design_brief": message,
+                "design_brief": None if grounding_enabled else message,
                 "image_prompt": None,
                 "reference_assets": [],
                 "enterprise_context_used": None,
@@ -178,7 +179,11 @@ class AgentService:
                     )
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
-            turn = await self._run_turn(session, message, on_visible_delta, cancellation_requested, on_execution_activity)
+            turn = await self._run_turn(
+                session, message, on_visible_delta, cancellation_requested,
+                on_execution_activity,
+                grounding_enabled=grounding_enabled,
+            )
             trace = self._completed_trace(trace, turn, agent.allows_image_generation)
             if execution_context:
                 for tool in profile.required_tools:
@@ -195,7 +200,8 @@ class AgentService:
                     error_code="runtime_terminal_error",
                     failure_stage="runtime_terminal",
                 )
-            if not trace["required_tool_calls_completed"]:
+            if (not trace["required_tool_calls_completed"]
+                    and not (turn.grounding_telemetry and not turn.grounding_telemetry["final_pass"])):
                 missing = ", ".join(name for name, item in trace["required_tool_calls"].items() if not item["satisfied"])
                 raise AgentRunError(
                     f"必需工具依赖未完成：{missing}。",
@@ -240,7 +246,11 @@ class AgentService:
             if lifecycle_events[: len(startup_events)] != startup_events:
                 lifecycle_events = startup_events + lifecycle_events
             trace["lifecycle_events"] = lifecycle_events
-            trace["error"] = "Codex Runtime 未能启动；请查看安全运行时 Trace。" if isinstance(exc, RuntimeStartError) else self._safe_error(str(exc))
+            trace["error"] = (
+                "Grounded Runtime 未能安全完成。" if grounding_enabled else
+                "Codex Runtime 未能启动；请查看安全运行时 Trace。" if isinstance(exc, RuntimeStartError) else
+                self._safe_error(str(exc))
+            )
             thread_id = trace.get("codex_thread_id") or "pending"
             self._store.finish_run_trace(run_id, "failed", trace, thread_id)
             if trace.get("codex_thread_id"):
@@ -262,6 +272,7 @@ class AgentService:
         on_visible_delta: Callable[[str], Awaitable[None]] | None,
         cancellation_requested: Callable[[], bool] | None = None,
         on_execution_activity: Callable[[str, str], None] | None = None,
+        *, grounding_enabled: bool = False,
     ):
         stream_turn = getattr(self._runtime, "stream_turn", None)
         if not callable(stream_turn):
@@ -273,6 +284,8 @@ class AgentService:
             explicit_full_plan_generation = False
             async for event in stream_turn(session, message):
                 if event.kind == "delta":
+                    if grounding_enabled and cancellation_requested and cancellation_requested():
+                        raise GenerationCancelled()
                     if not generating_started and not explicit_full_plan_generation and on_execution_activity:
                         on_execution_activity("generating", "started")
                         generating_started = True
@@ -290,6 +303,8 @@ class AgentService:
                 raise RuntimeError("Runtime stream ended without a final turn.")
             if generating_started and on_execution_activity:
                 on_execution_activity("generating", "completed")
+            if grounding_enabled and cancellation_requested and cancellation_requested():
+                raise GenerationCancelled()
             return completed
 
         consumer = asyncio.create_task(consume())
@@ -332,6 +347,12 @@ class AgentService:
     def _completed_trace(trace: dict, turn, requires_image_generation: bool = False) -> dict:
         trace = {**trace}
         calls = list(turn.mcp_calls)
+        if turn.grounding_telemetry:
+            # Do not persist private source material or tool argument summaries.
+            # These fields suffice for dependency checks and artifact ownership.
+            safe_keys = {"server", "tool", "status", "duration_ms", "dependency_id",
+                         "result_is_error", "artifact", "retrieval_observation"}
+            calls = [{key: value for key, value in call.items() if key in safe_keys} for call in calls]
         trace["mcp_calls"] = calls
         trace["tool_calls"] = [{"server": call["server"], "tool": call["tool"], "status": call["status"]} for call in calls]
         trace["lifecycle_events"] = list(turn.lifecycle_events)
@@ -375,16 +396,21 @@ class AgentService:
         trace["structured_attempt_trace"] = list(turn.structured_attempt_trace)
         trace["structured_result_status"] = turn.structured_result_status
         trace["total_model_calls_for_structured_result"] = turn.structured_model_calls
+        if turn.grounding_telemetry:
+            # Bounded metadata only; no article, ledger, evidence, or audit text.
+            trace["grounding"] = dict(turn.grounding_telemetry)
         artifacts = dict(trace["artifacts"])
         for call in calls:
             if call["tool"] == "enterprise_config_get":
-                artifacts["enterprise_context_used"] = call["output_summary"]
+                artifacts["enterprise_context_used"] = call.get("output_summary")
             elif call["tool"] == "knowledge_search":
-                artifacts["knowledge_context_used"].append(call["output_summary"])
+                if call.get("output_summary"):
+                    artifacts["knowledge_context_used"].append(call["output_summary"])
             elif call["tool"] == "asset_search":
-                artifacts["reference_assets"].append(call["output_summary"])
+                if call.get("output_summary"):
+                    artifacts["reference_assets"].append(call["output_summary"])
             elif call["tool"] == "image_generation":
-                artifacts["image_prompt"] = call["input_summary"]
+                artifacts["image_prompt"] = call.get("input_summary")
         trace["artifacts"] = artifacts
         return trace
 

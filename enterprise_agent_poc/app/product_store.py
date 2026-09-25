@@ -40,6 +40,11 @@ _SAFE_ACTIVITY_LABELS = {
     "semantic_validating": "正在校验方案内容",
     "semantic_correcting": "正在优化待确认内容",
     "result_rendering": "正在整理最终结果",
+    "grounded_drafting": "正在准备可核实的文稿",
+    "grounding_auditing": "正在核对事实依据",
+    "grounding_correcting": "正在修正未获支持的表述",
+    "grounding_revalidating": "正在复核修订内容",
+    "grounded_rendering": "正在整理核实后的结果",
     "persisting": "正在保存结果",
     "completed": "已完成",
     "failed": "执行失败",
@@ -325,11 +330,12 @@ class ProductStore:
     def agents(self, tenant_id: str) -> list[dict]:
         with self._store.connection() as conn:
             # Stage 1 catalog drafts / configured instances are not runnable.
-            rows = conn.execute("SELECT t.id,t.name,t.slug,t.description,t.icon,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? WHERE t.id IN (?,?,?) ORDER BY t.id", (tenant_id, *CATALOG)).fetchall()
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")} if not self._store.is_postgres else {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='agent_templates'")}
+            category = "COALESCE(t.category,'general')" if "category" in columns else "'general'"
+            rows = conn.execute(f"SELECT t.id,t.name,t.slug,t.description,t.icon,{category} AS category,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? WHERE t.id IN (?,?,?) ORDER BY t.id", (tenant_id, *CATALOG)).fetchall()
         result = [{**dict(row), "enabled": dict(row).get("tenant_status") == "enabled"} for row in rows]
         if self.execution_resolver:
             with self._store.connection() as conn:
-                columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")} if not self._store.is_postgres else {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='agent_templates'")}
                 if "definition_source" in columns:
                     candidates = conn.execute("SELECT v.*,i.overrides_json,t.slug AS public_slug FROM agent_templates t JOIN tenant_agent_instances i ON i.agent_id=t.id JOIN agent_template_versions v ON v.id=i.agent_template_version_id WHERE i.tenant_id=? AND i.status='enabled' AND t.definition_source='productized' AND v.status='published'", (tenant_id,)).fetchall()
                     for row in candidates:
@@ -340,7 +346,7 @@ class ProductStore:
                             self.execution_resolver._ready(conn, tenant_id, v)
                             manifest, _ = self.execution_resolver._skills(conn, v["id"])
                             overrides = json.loads(v["overrides_json"] or "{}")
-                            result.append({"id": v["agent_template_id"], "name": overrides.get("display_name") or v["name"], "description": v["description"], "icon": v["icon"], "slug": v["public_slug"], "conversation_path": f"/agents/{v['public_slug']}", "credit_cost": v["credit_cost"], "skill_manifest": json.dumps(manifest), "allows_image_generation": v["output_policy"] == "image_required", "output_policy": v["output_policy"], "placeholder": "描述你希望创作的内容…", "enabled": True, "definition_source": "productized"})
+                            result.append({"id": v["agent_template_id"], "name": overrides.get("display_name") or v["name"], "description": v["description"], "icon": v["icon"], "category": v["category"] or "general", "slug": v["public_slug"], "conversation_path": f"/agents/{v['public_slug']}", "credit_cost": v["credit_cost"], "skill_manifest": json.dumps(manifest), "allows_image_generation": v["output_policy"] == "image_required", "output_policy": v["output_policy"], "placeholder": "描述你希望创作的内容…", "enabled": True, "definition_source": "productized"})
                         except (ValueError, LookupError):
                             continue
         return result

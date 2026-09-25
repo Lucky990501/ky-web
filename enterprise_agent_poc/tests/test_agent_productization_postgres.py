@@ -84,7 +84,7 @@ def pg_catalog(tmp_path, approved_bundle, monkeypatch):
 def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
     assert migrate.status(pg_catalog.store) == 0
     status = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, 13)]
+    assert [r["version"] for r in status["migrations"]] == [f"{i:03}" for i in range(1, len(migrate.migration_files()) + 1)]
     assert status["pending"] == status["checksum_mismatch"] == 0
     assert all(r["status"] == "applied" for r in status["migrations"])
     with pg_catalog.store.connection() as conn:
@@ -100,10 +100,10 @@ def test_postgres_migration_order_status_and_schema(pg_catalog, capsys):
         conn.execute(migrate.migration_files()[-1].read_text())
     assert migrate.up(pg_catalog.store) == 0
     with pg_catalog.store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == 12
+        assert conn.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()["n"] == len(migrate.migration_files())
 
 
-def test_postgres_001_012_preserves_existing_user_and_adds_constrained_default(tmp_path, monkeypatch, capsys):
+def test_postgres_001_013_preserves_existing_user_and_adds_constrained_default(tmp_path, monkeypatch, capsys):
     root = Path(os.environ["STAGE1_POSTGRES_ROOT"]).resolve()
     socket = root / "socket"
     port = int(os.environ.get("STAGE1_POSTGRES_PORT", "54329"))
@@ -128,7 +128,7 @@ def test_postgres_001_012_preserves_existing_user_and_adds_constrained_default(t
         assert migrate.up(migration_store) == 0
         assert migrate.status(migration_store) == 0
         status = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-        assert len(status["migrations"]) == 12
+        assert len(status["migrations"]) == len(migrate.migration_files())
         assert status["pending"] == status["checksum_mismatch"] == 0
         assert status["unknown_history_versions"] == []
         assert all(item["status"] == "applied" for item in status["migrations"])

@@ -71,6 +71,16 @@
       "bootstrap_default": ["copywriting-agent"],
       "builder_policy": "legacy-production-zip-v1",
       "legacy_artifact": true
+    },
+    {
+      "skill_slug": "wechat-official-account-writing",
+      "version": "1.0.0",
+      "source_identity": {"path": "wechat-official-account-writing/1.0.0", "files": [{"path": "SKILL.md", "sha256": "f66f22e9e36e11b95301983f12a7b1550081f1e8c024bea7c955d90fc65dd1ae", "git_mode": "100644"}]},
+      "artifact_sha256": "b0e54bc57e271b6b0c094f7dcfcb94d234f609b8925eb5937b105ccd6463c157",
+      "artifact_path": "wechat-official-account-writing/1.0.0.zip",
+      "bootstrap_default": [],
+      "builder_policy": "native-zip-stored-v1",
+      "legacy_artifact": false
     }
   ]
 }

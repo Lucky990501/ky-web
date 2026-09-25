@@ -239,12 +239,13 @@ test('member status UI exposes enable and disable without deleting identities',(
   assert.ok(!source.includes('data-delete-member'));
 });
 
-test('P1 customer agent UX keeps examples for image and copywriting, plus response actions',()=>{
+test('P1 customer agent UX keeps shared greeting for image and copywriting, plus response actions',()=>{
   const h=harness('/workspace');
   for(const id of ['image-agent','copywriting-agent']){
-    const html=h.run(`agentFirstUseHtml({id:'${id}',name:'测试智能体',description:'说明'})`);
-    assert.ok(html.includes('适合做什么'));
-    assert.ok(html.includes('data-example-prompt'));
+    const html=h.run(`agentGreetingHtml({id:'${id}',name:'测试智能体',description:'说明'})`);
+    assert.ok(html.includes('class="agent-greeting"'));
+    assert.ok(!html.includes('适合做什么'));
+    assert.ok(!html.includes('data-example-prompt'));
   }
   const message=h.run("messageHtml({role:'assistant',content:'最终回复',created_at:'2026-09-15T00:00:00',references:{knowledge:[{id:'file-1',name:'品牌规范.pdf'}]}},'原始需求')");
   assert.ok(message.includes('data-copy-response'));
@@ -291,11 +292,11 @@ test('Polish batch keeps the customer workspace focused and renders asset tags a
   const h=harness('/workspace');
   const pending=h.run("render('workspace')");
   h.respond('/api/v1/workspace',{brand_name:'测试企业',credit_balance:100,agents:[
-    {id:'image-agent',name:'图片生成智能体',description:'制作企业视觉内容',enabled:true,credit_cost:20,icon:'image'},
+    {id:'image-agent',name:'图片生成智能体',description:'制作企业视觉内容',category:'视觉创作',enabled:true,credit_cost:20,icon:'image'},
     {id:'social-content-agent',name:'未开放智能体',description:'不应展示',enabled:false,credit_cost:3,icon:'bot'}
   ],recent_conversations:[],recent_generations:[]});
   await pending;
-  assert.ok(h.document.main.innerHTML.includes('适用场景'));
+  assert.ok(h.document.main.innerHTML.includes('视觉创作'));
   assert.ok(h.document.main.innerHTML.includes('开始第一次 AI 对话'));
   assert.ok(!h.document.main.innerHTML.includes('未开放智能体'));
   assert.ok(!h.document.main.innerHTML.includes('即将上线'));
@@ -345,8 +346,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=ui-small-polish-v1/);
-  assert.match(index,/workbench\.js\?v=ui-small-polish-v1/);
+  assert.match(index,/workbench\.css\?v=agent-registry-v1/);
+  assert.match(index,/workbench\.js\?v=agent-registry-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -364,14 +365,67 @@ test('live task state stays compact and uses customer-facing thinking copy',()=>
   assert.ok(source.includes("source.addEventListener('activity'"));
 });
 
-test('U1-U3 campaign landing keeps only the concise opening, not the heading or recommendations',()=>{
+test('R2 four agents share Registry-driven greeting without name matching',()=>{
   const h=harness('/agents/campaign');
+  const cases=[
+    ['campaign-agent','campaign-planning','活动策划智能体'],
+    ['copywriting-agent','copywriting','文案创作智能体'],
+    ['image-agent','image-generation','图片生成智能体'],
+    ['productized-uuid','wechat-official-account-writing','公众号编写智能体'],
+  ];
+  for(const [id,slug,name] of cases){
+    const html=h.run(`agentGreetingHtml({id:${JSON.stringify(id)},slug:${JSON.stringify(slug)},name:${JSON.stringify(name)},description:'Registry 说明',icon:'newspaper',category:'content'})`);
+    assert.match(html,/^<div class="agent-greeting"><span class="agent-greeting-icon" aria-hidden="true">/);
+    assert.ok(html.includes(`<h1>你好，我是${name}</h1>`));
+    assert.ok(html.includes('<p>Registry 说明</p>'));
+    assert.ok(html.includes('>content</span>'));
+    assert.ok(html.includes('data-lucide="newspaper"'));
+    for(const removed of ['适合做什么','data-example-prompt','快捷推荐','积分 / 次','历史项目'])assert.ok(!html.includes(removed));
+  }
+  assert.equal((source.match(/const agentGreetingHtml=/g)||[]).length,1);
+  assert.ok(source.includes(':agentGreetingHtml(agent)'));
+  assert.ok(!source.includes('agentGreetingConfig'));
+  assert.ok(!source.includes('agentFirstUse'));
+  const v2=source.slice(source.indexOf('async function agentWorkspaceV2('),source.indexOf('async function submitAgentTaskV2('));
+  assert.ok(!v2.includes('class="agent-heading"'));
+  assert.ok(!v2.includes('history-shortcut" data-go="history"'));
+  assert.ok(!v2.includes('发送前可先选择示例'));
+});
+
+test('G6-G9 greeting uses one responsive style scale and mobile-safe text wrapping',()=>{
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
-  const html=h.run("agentFirstUseHtml({id:'campaign-agent',name:'活动策划智能体',description:'说明'})");
-  assert.match(html,/你好，我是活动策划智能体，可以帮你生成活动主题、流程和执行方案。/);
-  for(const removed of ['适合做什么','data-example-prompt','开放日策划','8 积分','历史项目'])assert.ok(!html.includes(removed));
-  assert.ok(source.includes("if(agentId==='campaign-agent')main.querySelector('.agent-heading')?.remove()"));
-  assert.match(css,/\.campaign-opening\{margin:0;/);
+  assert.match(css,/\.agent-greeting\{--agent-greeting-icon-size:48px;--agent-greeting-title-size:22px;--agent-greeting-description-size:15px;/);
+  assert.match(css,/\.agent-greeting-copy\{min-width:0;overflow-wrap:anywhere\}/);
+  assert.match(css,/@media\(max-width:860px\)\{\.agent-greeting\{--agent-greeting-icon-size:44px;--agent-greeting-title-size:20px;/);
+  assert.ok(!css.includes('.campaign-opening'));
+  assert.ok(source.includes('id="composer"'));
+  assert.ok(source.includes('id="chat-body"'));
+});
+
+test('R3 R4 R5 R8 renamed and new Registry agents retain stable routes',async()=>{
+  const h=harness('/workspace');const pending=h.run("render('workspace')");
+  h.respond('/api/v1/workspace',{agents:[
+    {id:'campaign-agent',slug:'campaign-planning',name:'活动策划智能体',description:'活动方案',icon:'calendar-days',category:'general',enabled:true,credit_cost:8},
+    {id:'copywriting-agent',slug:'copywriting',name:'文案创作智能体',description:'传播文案',icon:'type',category:'general',enabled:true,credit_cost:3},
+    {id:'image-agent',slug:'image-generation',name:'图片生成智能体',description:'视觉内容',icon:'image',category:'general',enabled:true,credit_cost:20},
+    {id:'wechat-uuid',slug:'wechat-official-account-writing',name:'公众号运营助手',description:'新的 Registry 说明',icon:'newspaper',category:'content',enabled:true,definition_source:'productized',credit_cost:5},
+    {id:'mock-uuid',slug:'future-agent',name:'新增测试智能体',description:'自动出现的能力',icon:'bot',category:'experimental',enabled:true,definition_source:'productized',credit_cost:1},
+  ],credit_balance:100});await pending;
+  const html=h.document.main.innerHTML;
+  for(const slug of ['campaign-agent','copywriting-agent','image-agent','wechat-official-account-writing','future-agent'])assert.ok(html.includes(`data-agent="${slug}"`));
+  for(const label of ['活动策划智能体','文案创作智能体','图片生成智能体','公众号运营助手','新增测试智能体','新的 Registry 说明','experimental'])assert.ok(html.includes(label));
+  assert.ok(!html.includes('data-agent="wechat-uuid"'));
+  assert.ok(!html.includes('data-agent="mock-uuid"'));
+  assert.equal(h.run("agentPage('wechat-official-account-writing')"),'agent:wechat-official-account-writing');
+  assert.ok(h.run("conversationRowHtml({id:'old',agent_id:'wechat-uuid',agent:{slug:'wechat-official-account-writing',name:'公众号编写智能体'}},'data-agent-conversation')").includes('data-agent-id="wechat-official-account-writing"'));
+});
+
+test('R6 R7 registry cards keep mobile and wide responsive layout rules',()=>{
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(css,/\.agent-card\{min-width:0;overflow-wrap:anywhere\}/);
+  assert.match(css,/@media\(max-width:860px\)[^\n]*\.agent-grid/);
+  assert.match(css,/\.agent-category,\.agent-greeting-category\{[^\n]*overflow-wrap:anywhere/);
+  assert.match(css,/\.agent-grid\{display:grid;grid-template-columns:repeat\(3,1fr\)/);
 });
 
 test('U4-U6 sidebar uses one shared scale without conversation-route typography overrides',()=>{
