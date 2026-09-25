@@ -253,11 +253,11 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     floors = data_contract_floors(declaration, schema_lock)
     predecessor = declaration['forward_predecessor_approval']
     require(set(predecessor) == {'release_id','source_commit','archive_sha256','manifest_sha256','schema_fingerprint','data_contract'}
-            and predecessor['release_id'] == '20260925-67e993e'
-            and predecessor['source_commit'] == '67e993eb9b08e71d3d83076982b170fbc30b4fd4'
-            and predecessor['archive_sha256'] == '54f22e5c5d5be8f6b318934baa84e07f856e614bb2928ba9849de8f31fdefdb6'
-            and predecessor['manifest_sha256'] == 'fe7ab9ac33ad7d106cc0a4cb5fd3d2c4d2b46f1affec17987285bd83e3877a8e'
-            and predecessor['schema_fingerprint'] == digest(schema_lock)
+            and predecessor['release_id'] == '20260925-124d860'
+            and predecessor['source_commit'] == '124d8600c16bed820c3effc41ea5e26f2d57c6ff'
+            and predecessor['archive_sha256'] == 'feb5e8610597f4564ffa8cda366da6f875b3c9c9fbad2afa403518ea3711c658'
+            and predecessor['manifest_sha256'] == 'cddfe9917602830c52c6fd0457596f9cb70a436ece9c9c851e28d8c01f7d3054'
+            and predecessor['schema_fingerprint'] == digest(schema_lock[:12])
             and predecessor['data_contract'] == 'member_account_status_v1', 'forward_predecessor_declaration')
     own_reference = {'release_id': own_manifest['release_id'], 'source_commit': own_manifest['source_commit']}
     reference = {'release_id': target_id, 'source_commit': target_commit}
@@ -293,7 +293,9 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
         target_root, _ = release_identity(base, target_id, target_commit, target)
     elif predecessor_target:
         target_root, _ = release_identity(base, target_id, target_commit, predecessor)
-        target_lock = schema_lock
+        # This immutable predecessor contains Schema 012. The Release may
+        # leave forward-safe 013/014 in the database after code rollback.
+        target_lock = schema_lock[:12]
         evidence = {'version': 'fixed_3cb1939_member_status_predecessor', 'data_scope': 'productized_v1'}
     else:
         require(self_target and bool(active_floors), 'unapproved_target')
@@ -317,7 +319,8 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     # A pre-012 database remains an exact, trusted prefix.  It has not yet
     # activated the member-status floor, so it retains the established 011
     # rollback behavior.  Any unknown or altered 012 still fails below.
-    require(len(rows) >= len(target_items), 'target_required_migrations_missing')
+    require(len(rows) >= len(target_items) or (plan and self_target),
+            'target_required_migrations_missing')
     check_history(rows[:len(target_items)], target_items)
     return {'status': 'rollback_plan_passed' if plan else 'rollback_preflight_passed',
             'read_only': True, 'target_release_id': target_id, 'target_source_commit': target_commit,

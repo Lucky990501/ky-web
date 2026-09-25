@@ -42,6 +42,16 @@ def test_release_switch_snapshots_dropins_before_enabling_rollback_trap():
     assert "set +e" in source[source.index("rollback() {"):trap_enabled]
 
 
+def test_phase_a_forward_migration_is_locked_snapshotted_and_predecessor_verified_before_switch():
+    source = SCRIPT.read_text()
+    assert source.index("flock -n -E 75 9") < source.index("release_migration_transition.py preflight")
+    assert source.index('verify_release capture capture') < source.index("trap 'fail_release' ERR")
+    assert source.index("trap 'fail_release' ERR") < source.index("release_migration_transition.py apply")
+    assert source.index("release_migration_transition.py apply") < source.index("release_migration_transition.py verify")
+    assert source.index("predecessor-on-schema-014 state --rollback") < source.index('ln -sfn "$release_root" "$current_link"')
+    assert "scripts/migrate.py up" not in source
+
+
 def test_release_switch_health_gate_requires_healthy_production_json():
     source = SCRIPT.read_text(encoding="utf-8")
 

@@ -50,13 +50,13 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260925-67e993e'
-PRODUCTION_PREDECESSOR_ID = '20260925-67e993e'
-PRODUCTION_PREDECESSOR_COMMIT = '67e993eb9b08e71d3d83076982b170fbc30b4fd4'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '54f22e5c5d5be8f6b318934baa84e07f856e614bb2928ba9849de8f31fdefdb6'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'fe7ab9ac33ad7d106cc0a4cb5fd3d2c4d2b46f1affec17987285bd83e3877a8e'
-OLD_DIRECT_PREDECESSOR_ID = '20260924-0cc592b'
-OLD_DIRECT_PREDECESSOR_COMMIT = '0cc592ba6c6aaf42927de94d3e2330b75618fd85'
+PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260925-124d860'
+PRODUCTION_PREDECESSOR_ID = '20260925-124d860'
+PRODUCTION_PREDECESSOR_COMMIT = '124d8600c16bed820c3effc41ea5e26f2d57c6ff'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'feb5e8610597f4564ffa8cda366da6f875b3c9c9fbad2afa403518ea3711c658'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'cddfe9917602830c52c6fd0457596f9cb70a436ece9c9c851e28d8c01f7d3054'
+OLD_DIRECT_PREDECESSOR_ID = '20260925-67e993e'
+OLD_DIRECT_PREDECESSOR_COMMIT = '67e993eb9b08e71d3d83076982b170fbc30b4fd4'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
 
 
@@ -222,7 +222,7 @@ def epoch_gate():
 
 @pytest.fixture
 def pg_current(pg_rollback_harness):
-    """Current 001–012 model backed by the current trusted fixture source."""
+    """Current 001–014 tooling with explicit Schema-012 predecessor fixtures."""
     h = pg_rollback_harness
     _install_bd(h)
     manifest = _install_b930(h)
