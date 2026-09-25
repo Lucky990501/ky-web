@@ -62,7 +62,13 @@ def test_013_real_migration_preserves_old_revision_fingerprint(pg_catalog, tmp_p
             before = dict(conn.execute("SELECT * FROM agent_template_versions WHERE id='historical-revision'").fetchone())
             old_fingerprint = _old_fingerprint(conn, before)
             conn.execute("UPDATE agent_template_versions SET configuration_fingerprint=? WHERE id='historical-revision'", (old_fingerprint,))
-        assert migrate.up(store) == 0
+        migration_013_only = tmp_path / "through-013"
+        migration_013_only.mkdir()
+        for path in migrate.migration_files()[:13]:
+            shutil.copy2(path, migration_013_only / path.name)
+        with monkeypatch.context() as patch:
+            patch.setattr(migrate, "MIGRATIONS", migration_013_only)
+            assert migrate.up(store) == 0
         with store.connection() as conn:
             row = dict(conn.execute("SELECT * FROM agent_template_versions WHERE id='historical-revision'").fetchone())
             assert row["grounding_policy"] is None

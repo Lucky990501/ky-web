@@ -22,6 +22,8 @@ from test_release_switch import pg_rollback_catalog, pg_rollback_harness, pg_gat
 
 CURRENT_EPOCH = epoch
 CURRENT_MIGRATE = migrate
+CURRENT_AGENT_PRODUCTIZATION = AgentProductization
+CURRENT_AGENT_CATALOG_ERROR = AgentCatalogError
 
 SQL = Path(__file__).resolve().parents[1] / 'migrations/postgres/011_platform_compatibility_epoch.sql'
 TEST_RUNTIME_ROOT = Path(os.environ.get('ENTERPRISE_AGENT_TEST_RUNTIME_ROOT') or Path.home() / '.cache/enterprise-agent-test-runtime')
@@ -149,8 +151,13 @@ def _assert_archive_matches_source(source):
 
 @pytest.fixture(autouse=True)
 def current_modules_between_tests():
+    global AgentProductization, AgentCatalogError
+    AgentProductization = CURRENT_AGENT_PRODUCTIZATION
+    AgentCatalogError = CURRENT_AGENT_CATALOG_ERROR
     _use_epoch_modules(CURRENT_EPOCH, CURRENT_GATE, CURRENT_MIGRATE)
     yield
+    AgentProductization = CURRENT_AGENT_PRODUCTIZATION
+    AgentCatalogError = CURRENT_AGENT_CATALOG_ERROR
     _use_epoch_modules(CURRENT_EPOCH, CURRENT_GATE, CURRENT_MIGRATE)
 
 
@@ -186,6 +193,13 @@ def pg_epoch(pg_rollback_harness):
     historical_epoch = _load_module('historical_compatibility_epoch', helper)
     h['gate'] = historical_gate
     _use_epoch_modules(historical_epoch, historical_gate, historical_migrate)
+    # This 001–011 epoch fixture must execute the matching immutable application
+    # control plane; current code intentionally requires migration 013 first.
+    historical_productization = _load_module('historical_agent_productization',
+                                             h['new'] / 'app' / 'agent_productization.py')
+    global AgentProductization, AgentCatalogError
+    AgentProductization = historical_productization.AgentProductization
+    AgentCatalogError = historical_productization.AgentCatalogError
     _assert_archive_matches_source(h['new'])
     return h
 
@@ -351,8 +365,8 @@ def test_member_status_floor_schema012_blocks_old_artifacts_and_accepts_declared
     for release_id, source_commit in ((h['old_id'], h['commit']), (BD_ID, BD_COMMIT), (B930_ID, B930_COMMIT)):
         with pytest.raises(h['gate'].RollbackBlocked, match='rollback_target_below_member_account_status_floor'):
             pg_gate(h, target_id=release_id, commit=source_commit)
-    candidate = pg_gate(h, target_id='fixture-new', commit='f' * 40)
-    assert candidate['status'] == 'rollback_preflight_passed'
+    candidate = pg_gate(h, target_id='fixture-new', commit='f' * 40, plan=True)
+    assert candidate['status'] == 'rollback_plan_passed'
     assert candidate['active_data_contract_floors'] == ['member_account_status_v1']
 
 
@@ -425,7 +439,7 @@ def test_member_status_floor_schema012_production_predecessor_manifest_tamper_bl
     (B930_ID, B930_COMMIT, 2, 'rollback_target_below_member_account_status_floor'),
     (PRODUCTION_PREDECESSOR_ID, PRODUCTION_PREDECESSOR_COMMIT, 0, 'rollback_preflight_passed'),
     ('20260915-909203d', '909203dfb1d4bf4016b44977ce4a0553a32bf7c8', 2, 'unapproved_target'),
-    ('fixture-new', 'f' * 40, 0, 'rollback_preflight_passed'),
+    ('fixture-new', 'f' * 40, 0, 'rollback_plan_passed'),
 ])
 def test_member_status_floor_schema012_real_cli_path(pg_current, release_id, source_commit, returncode, check):
     h = pg_current
@@ -434,7 +448,8 @@ def test_member_status_floor_schema012_real_cli_path(pg_current, release_id, sou
     _set_productized_epoch(h['store'])
     result = subprocess.run(
         [sys.executable, str(h['helper']), '--target-release-id', release_id,
-         '--target-source-commit', source_commit],
+         '--target-source-commit', source_commit,
+         *(['--check-plan'] if release_id == 'fixture-new' else [])],
         env={**h['env'], 'ENTERPRISE_POC_DATABASE_URL': h['store'].database_url},
         capture_output=True, text=True, timeout=60,
     )
