@@ -197,6 +197,7 @@ def pg_epoch(pg_rollback_harness):
     # control plane; current code intentionally requires migration 013 first.
     historical_productization = _load_module('historical_agent_productization',
                                              h['new'] / 'app' / 'agent_productization.py')
+    h['historical_defaults'] = historical_productization.DEFAULTS
     global AgentProductization, AgentCatalogError
     AgentProductization = historical_productization.AgentProductization
     AgentCatalogError = historical_productization.AgentCatalogError
@@ -605,9 +606,8 @@ def test_postgres_existing_productized_before011_initializes_upward_without_fake
 
 
 def test_postgres011_conflicting_legacy_revision_blocks_initialization_atomically(pg_epoch):
-    from app.agent_productization import DEFAULTS
     h=pg_epoch;store=h['fresh_database'](count=10)
-    fields={**DEFAULTS,'id':'synthetic-revision','agent_template_id':'synthetic-legacy',
+    fields={**h['historical_defaults'],'id':'synthetic-revision','agent_template_id':'synthetic-legacy',
             'revision':1,'status':'draft','configuration_fingerprint':'synthetic'}
     fields['tenant_override_schema']=json.dumps(fields['tenant_override_schema'])
     with store.connection() as c:
