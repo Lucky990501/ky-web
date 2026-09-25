@@ -110,9 +110,15 @@ if [[ "$mode" == "--rollback-preflight" ]]; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$3" --target-source-commit "$4"
   exit 0
 fi
-# This application release requires Migration NONE. Never advance schema before
-# snapshot/trap preparation (or silently turn pending DDL into a deployment).
-MIGRATION_RESULT="$migration_result" "$runtime_venv/bin/python" -c 'import json, os; raise SystemExit(0 if json.loads(os.environ["MIGRATION_RESULT"])["pending"] == 0 else 2)'
+declared_forward=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "forward_migrations" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+if [[ "$declared_forward" == yes ]]; then
+  # The plan gate reads PostgreSQL in a read-only transaction. No DDL runs in
+  # either preflight-only or rollback-preflight mode.
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_migration_transition.py preflight \
+    --candidate-manifest "$candidate_manifest"
+else
+  MIGRATION_RESULT="$migration_result" "$runtime_venv/bin/python" -c 'import json, os; raise SystemExit(0 if json.loads(os.environ["MIGRATION_RESULT"])["pending"] == 0 else 2)'
+fi
 # The script owns FD 9 continuously: final preflight, snapshot, first mutation,
 # smoke, final state and commit/recovery. No outer lock or lock handoff exists.
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py preflight \
@@ -211,6 +217,24 @@ fail_release() {
 }
 trap 'fail_release' ERR
 final_status=PRODUCTION_DEPLOYMENT_MANUAL_RECOVERY_REQUIRED
+
+if [[ "$declared_forward" == yes ]]; then
+  printf 'declared-forward-migrations\n' > "$backup/last-step.log"
+  if ! PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_migration_transition.py apply \
+      --candidate-manifest "$candidate_manifest" > "$backup/migration-apply.log" 2>&1; then
+    cat "$backup/migration-apply.log"
+    # DDL runs in one PostgreSQL transaction. If its outcome cannot be proven,
+    # preserve the snapshot and evidence under the lock; never run a down SQL.
+    trap - ERR
+    verify_release evidence evidence || true
+    exit 1
+  fi
+  cat "$backup/migration-apply.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_migration_transition.py verify \
+    --candidate-manifest "$candidate_manifest"
+  printf 'predecessor-on-schema-014\n' > "$backup/last-step.log"
+  verify_release predecessor-on-schema-014 state --rollback
+fi
 
 printf 'binding-apply\n' > "$backup/last-step.log"
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --apply

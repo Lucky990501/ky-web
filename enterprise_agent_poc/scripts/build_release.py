@@ -88,7 +88,8 @@ def build(commit: str, output: Path) -> dict:
     }
 
 
-def write_manifest(result: dict, release_id: str, output: Path, binding_transition: dict | None = None) -> dict:
+def write_manifest(result: dict, release_id: str, output: Path, binding_transition: dict | None = None,
+                   *, forward_migrations: dict | None = None, deferred_skill: dict | None = None) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", release_id):
         raise ValueError("Release ID 只能包含字母、数字、点、下划线和连字符。")
     manifest = {
@@ -101,6 +102,10 @@ def write_manifest(result: dict, release_id: str, output: Path, binding_transiti
     }
     if binding_transition is not None:
         manifest["binding_transition"] = binding_transition
+    if forward_migrations is not None:
+        manifest["forward_migrations"] = forward_migrations
+    if deferred_skill is not None:
+        manifest["deferred_skill"] = deferred_skill
     validate_manifest_contract(manifest)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -114,9 +119,11 @@ def main() -> int:
     parser.add_argument("--release-id")
     parser.add_argument("--manifest-output", type=Path)
     parser.add_argument("--binding-transition", type=Path)
+    parser.add_argument("--forward-migrations", type=Path)
+    parser.add_argument("--deferred-skill", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if bool(args.release_id) != bool(args.manifest_output) or (args.binding_transition and not args.manifest_output):
+    if bool(args.release_id) != bool(args.manifest_output) or ((args.binding_transition or args.forward_migrations or args.deferred_skill) and not args.manifest_output):
         parser.error("--release-id 与 --manifest-output 必须同时提供。")
     commit = validate_commit(args.commit)
     if args.dry_run:
@@ -127,9 +134,12 @@ def main() -> int:
     if args.manifest_output:
         try:
             transition = json.loads(args.binding_transition.read_text(encoding="utf-8")) if args.binding_transition else None
+            migrations = json.loads(args.forward_migrations.read_text(encoding="utf-8")) if args.forward_migrations else None
+            deferred = json.loads(args.deferred_skill.read_text(encoding="utf-8")) if args.deferred_skill else None
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("Binding transition declaration is unreadable.") from exc
-        write_manifest(result, args.release_id, args.manifest_output, transition)
+        write_manifest(result, args.release_id, args.manifest_output, transition,
+                       forward_migrations=migrations, deferred_skill=deferred)
         result["manifest"] = str(args.manifest_output)
     print(json.dumps({"status": "built", **result}, ensure_ascii=False))
     return 0

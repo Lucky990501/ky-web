@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "from_schema": "012",
+  "target_schema": "014",
+  "rollback_strategy": "code_only_forward_safe",
+  "migrations": [
+    {
+      "version": "013",
+      "filename": "013_agent_revision_grounding_policy.sql",
+      "canonical_sha256": "259db96ce57ae3df6eb9f67ecea60f46a0664ee25e120e2d51af8dd25098cad3"
+    },
+    {
+      "version": "014",
+      "filename": "014_agent_release_provenance.sql",
+      "canonical_sha256": "a364decbe0f1c68cb981b0249edf2efcc4d0b63b2bc7aaa7a8fa1c4a6173ce43"
+    }
+  ]
+}

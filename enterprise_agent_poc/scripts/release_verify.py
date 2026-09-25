@@ -148,6 +148,7 @@ def final_preflight(base, candidate, predecessor):
     """
     from scripts import rollback_preflight as gate, migrate
     from scripts import release_binding_transition as transition
+    from scripts import release_migration_transition as forward_transition
     root = candidate.parent / "enterprise_agent_poc"
     require(root == ROOT and root.parent.parent == base / "releases", "candidate_controlled_path")
     manifest = gate.read_json(candidate)
@@ -181,6 +182,16 @@ def final_preflight(base, candidate, predecessor):
     registry = registry_for(base)
     active = bindings(registry)  # Includes manifest consistency for every agent.
     packages = transition.candidate_packages(root / "skill_packages")
+    deferred = manifest.get("deferred_skill")
+    if deferred:
+        require(deferred == json.loads((root / "deploy/phase_a_deferred_wechat_skill.json").read_text()),
+                "deferred_skill_declaration_mismatch")
+        entry = packages.get((deferred["slug"], deferred["version"]))
+        require(entry is not None and entry["artifact_sha256"] == deferred["artifact_sha256"]
+                and entry["source_identity"]["files"] == [{"path": "SKILL.md",
+                    "sha256": deferred["source_sha256"], "git_mode": "100644"}]
+                and hashlib.sha256((root / "skill_packages/manifest.json").read_bytes()).hexdigest()
+                    == deferred["bundled_manifest_sha256"], "deferred_skill_bundle_identity")
     transitions = []
     if "binding_transition" in manifest:
         transitions = transition.declaration(manifest, prior, hashlib.sha256(predecessor.read_bytes()).hexdigest())
@@ -206,14 +217,26 @@ def final_preflight(base, candidate, predecessor):
                 registry._verify_package(row, expected=entry["artifact_sha256"])
                 reusable.append({"slug": slug, "version": version})
             else:
-                # Only declared transitions use the existing staging consumer.
+                if deferred and (slug, version) == (deferred["slug"], deferred["version"]):
+                    # Phase A carries the immutable package but must not stage it.
+                    continue
                 require(bool(transitions), "legacy_package_missing")
                 stageable.append({"slug": slug, "version": version})
 
-    schema = gate.verify(base, root, manifest["release_id"], manifest["source_commit"])
-    gate.verify(base, root, prior["release_id"], prior["source_commit"])
-    require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
-    require(schema["epoch_schema_fingerprint"] == exact["schema_fingerprint"], "preflight_schema_fingerprint")
+    forward = manifest.get("forward_migrations")
+    schema = gate.verify(base, root, manifest["release_id"], manifest["source_commit"], plan=bool(forward))
+    gate.verify(base, root, prior["release_id"], prior["source_commit"], plan=bool(forward))
+    if forward:
+        migration_plan = forward_transition.read_only_plan(registry._store, forward_transition.declaration(manifest))
+        require(schema["applied_versions"] == migration_plan["applied_versions"]
+                and migration_plan["pending_versions"] == ["013", "014"], "declared_migration_plan")
+        require(gate.digest(compatibility["epoch_contract"]["schema_migrations"][:12])
+                == exact["schema_fingerprint"], "preflight_predecessor_schema_fingerprint")
+    else:
+        require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
+        require(schema["epoch_schema_fingerprint"] == exact["schema_fingerprint"], "preflight_schema_fingerprint")
+    if deferred:
+        phase_a_absence(registry, deferred)
     require(exact["data_contract"] in compatibility["supported_data_contracts"]
             and exact["data_contract"] in schema["active_data_contract_floors"], "preflight_data_contract")
     smoke_config(base)  # Existing credential checker; never output its values.
@@ -221,7 +244,9 @@ def final_preflight(base, candidate, predecessor):
             "release_id": manifest["release_id"], "source_commit": manifest["source_commit"],
             **pins, "exact_predecessor": prior["release_id"], "services": services,
             "bindings": active, "registry_exact_reusable": reusable, "registry_stageable": stageable,
-            "schema": schema, "pending": 0, "migration": "NONE",
+            "schema": schema, "pending": 2 if forward else 0,
+            "migration": ["013", "014"] if forward else "NONE",
+            "deferred_skill": "NOT_STAGED" if deferred else None,
             "data_contract": exact["data_contract"], "credentials": "READY"}
 
 
@@ -243,12 +268,26 @@ def verify_state(base, candidate, predecessor, snapshot, *, rollback=False):
     require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
     registry = registry_for(base)
     registry.verify_bootstrap()
+    declared = json.loads(candidate.read_text()).get("deferred_skill")
+    if declared:
+        phase_a_absence(registry, declared)
     require(bool(active.get("campaign-agent")), "campaign_skills_missing")
     for slug, version in active["campaign-agent"].items():
         require((registry.published_root / slug / version / "SKILL.md").is_file(), "skill_resolution")
     return {"status": "rollback_state_verified" if rollback else "final_state_verified",
             "release_id": target["release_id"], "services": services,
             "campaign_binding": active["campaign-agent"], "schema": schema, "health": health()}
+
+
+def phase_a_absence(registry, deferred):
+    """Both sides of a Phase A switch must leave WeChat unresolvable."""
+    with registry._read_connection() as conn:
+        require(not conn.execute("SELECT 1 FROM agent_templates WHERE slug=?", (deferred["slug"],)).fetchone(),
+                "phase_a_agent_not_absent")
+        require(not conn.execute("SELECT 1 FROM skills s JOIN skill_versions v ON v.skill_id=s.id "
+                                 "WHERE s.slug=? AND v.version=?", (deferred["slug"], deferred["version"])).fetchone(),
+                "phase_a_deferred_skill_was_staged")
+    return {"agent": "ABSENT", "skill_registry": "NOT_STAGED"}
 
 
 def smoke_config(base):
