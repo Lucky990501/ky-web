@@ -239,9 +239,9 @@ test('member status UI exposes enable and disable without deleting identities',(
   assert.ok(!source.includes('data-delete-member'));
 });
 
-test('P1 customer agent UX keeps examples, copy, regeneration and real reference rendering in the business UI',()=>{
+test('P1 customer agent UX keeps examples for image and copywriting, plus response actions',()=>{
   const h=harness('/workspace');
-  for(const id of ['image-agent','copywriting-agent','campaign-agent']){
+  for(const id of ['image-agent','copywriting-agent']){
     const html=h.run(`agentFirstUseHtml({id:'${id}',name:'测试智能体',description:'说明'})`);
     assert.ok(html.includes('适合做什么'));
     assert.ok(html.includes('data-example-prompt'));
@@ -345,8 +345,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=enterprise-brand-logo-phase-a-v1/);
-  assert.match(index,/workbench\.js\?v=enterprise-brand-logo-phase-a-v1/);
+  assert.match(index,/workbench\.css\?v=ui-small-polish-v1/);
+  assert.match(index,/workbench\.js\?v=ui-small-polish-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -364,10 +364,36 @@ test('live task state stays compact and uses customer-facing thinking copy',()=>
   assert.ok(source.includes("source.addEventListener('activity'"));
 });
 
+test('U1-U3 campaign landing keeps only the concise opening, not the heading or recommendations',()=>{
+  const h=harness('/agents/campaign');
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  const html=h.run("agentFirstUseHtml({id:'campaign-agent',name:'活动策划智能体',description:'说明'})");
+  assert.match(html,/你好，我是活动策划智能体，可以帮你生成活动主题、流程和执行方案。/);
+  for(const removed of ['适合做什么','data-example-prompt','开放日策划','8 积分','历史项目'])assert.ok(!html.includes(removed));
+  assert.ok(source.includes("if(agentId==='campaign-agent')main.querySelector('.agent-heading')?.remove()"));
+  assert.match(css,/\.campaign-opening\{margin:0;/);
+});
+
+test('U4-U6 sidebar uses one shared scale without conversation-route typography overrides',()=>{
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(css,/\.sidebar\{--sidebar-nav-size:14px;/);
+  assert.match(css,/\.sidebar \.brand-lockup b\{font-size:22px;font-weight:700;line-height:1\.1\}/);
+  assert.match(css,/\.sidebar \.side-nav button\{height:38px;gap:11px;padding:0 10px;font-size:var\(--sidebar-nav-size\);font-weight:500;line-height:var\(--sidebar-nav-leading\)\}/);
+  assert.match(css,/\.sidebar \.side-nav button svg\{flex:none;width:var\(--sidebar-icon-size\);height:var\(--sidebar-icon-size\)\}/);
+  assert.ok(!css.includes('.app-shell:has(.chatgpt-conversation-layout) .side-nav button{'));
+});
+
+test('U7-U8 login remember-me stays a native clickable label with inline checkbox',()=>{
+  const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  assert.match(source,/<label class="checkbox"><input type="checkbox" checked> 记住我<\/label>/);
+  assert.match(css,/\.login-card \.checkbox\{display:flex;align-items:center;gap:8px;/);
+  assert.match(css,/\.login-card \.checkbox input\[type="checkbox"\]\{flex:none;width:16px!important;height:16px;margin:0!important;padding:0;/);
+});
+
 test('desktop conversation layout keeps navigation and long replies inside stable viewport regions',()=>{
   const css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
   assert.match(css,/\.app-shell:has\(\.chatgpt-conversation-layout\)\{height:100dvh;min-height:0;overflow:hidden\}/);
-  assert.match(css,/\.app-shell:has\(\.chatgpt-conversation-layout\) \.sidebar\{min-height:0;overflow:hidden;padding:14px 16px 12px\}/);
+  assert.match(css,/\.app-shell:has\(\.chatgpt-conversation-layout\) \.sidebar\{min-height:0;overflow:hidden\}/);
   assert.match(css,/\.app-shell:has\(\.chatgpt-conversation-layout\) \.shell-main\{display:grid;grid-template-rows:70px minmax\(0,1fr\);height:100dvh;min-height:0;overflow:hidden\}/);
   assert.match(css,/\.chatgpt-conversation-layout\{height:100%;min-height:0;margin:0;overflow:hidden\}/);
   assert.match(css,/\.chatgpt-conversation-layout \.chat-body\{min-height:0;margin:0 auto;padding:26px 0 32px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable\}/);
