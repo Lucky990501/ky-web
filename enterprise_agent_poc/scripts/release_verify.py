@@ -657,7 +657,7 @@ def evidence(base, candidate, predecessor, snapshot):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("preflight", "credentials", "capture", "state", "smoke", "rollback-guard", "evidence"))
+    parser.add_argument("mode", choices=("preflight", "credentials", "capture", "state", "smoke", "rollback-guard", "evidence", "predecessor-probe"))
     parser.add_argument("--candidate-manifest", type=Path)
     parser.add_argument("--predecessor-manifest", type=Path)
     parser.add_argument("--snapshot", type=Path)
@@ -678,6 +678,12 @@ def main(argv=None):
             result = {"status": "rollback_binding_state_proven"}
         elif args.mode == "state":
             result = verify_state(base, args.candidate_manifest, args.predecessor_manifest, args.snapshot, rollback=args.rollback)
+        elif args.mode == "predecessor-probe":
+            from scripts.release_predecessor_probe import ProbeBlocked, probe
+            try:
+                result = probe(base, args.candidate_manifest, args.predecessor_manifest, args.snapshot)
+            except ProbeBlocked as exc:
+                raise GateFailed(str(exc)) from None
         elif args.mode == "evidence":
             result = evidence(base, args.candidate_manifest, args.predecessor_manifest, args.snapshot)
         else:

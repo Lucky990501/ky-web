@@ -111,6 +111,11 @@ if [[ "$mode" == "--rollback-preflight" ]]; then
   exit 0
 fi
 declared_forward=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "forward_migrations" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+declared_package_only=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "skill_package_staging" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+if [[ "$declared_package_only" == yes ]]; then
+  [[ -f "$release_root/scripts/release_predecessor_probe.py" ]] || { echo "post-staging predecessor probe missing" >&2; exit 2; }
+  command -v redis-server >/dev/null 2>&1 || { echo "isolated predecessor Redis prerequisite missing" >&2; exit 2; }
+fi
 if [[ "$declared_forward" == yes ]]; then
   # The plan gate reads PostgreSQL in a read-only transaction. No DDL runs in
   # either preflight-only or rollback-preflight mode.
@@ -237,7 +242,31 @@ if [[ "$declared_forward" == yes ]]; then
 fi
 
 printf 'binding-apply\n' > "$backup/last-step.log"
-PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --apply
+if [[ "$declared_package_only" == yes ]]; then
+  if ! PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --apply; then
+    trap - ERR
+    final_status=PRODUCTION_DEPLOYMENT_MANUAL_RECOVERY_REQUIRED
+    printf '{"mutation_reached":"possible","gate":"PACKAGE_ONLY_STAGING","candidate_switch":false}\n' > "$backup/post-staging-mutation.log"
+    verify_release evidence evidence || true
+    exit 1
+  fi
+else
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_binding_transition.py --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest" --bundle-root "$release_root/skill_packages" --data-dir "$runtime_data_dir" --apply
+fi
+
+if [[ "$declared_package_only" == yes ]]; then
+  # Immutable package and Schema 014 have now reached Production. A fresh
+  # predecessor startup failure is NOT an ordinary code-switch rollback: keep
+  # release-current untouched and preserve the recovery snapshot/evidence.
+  printf 'post-staging-exact-predecessor\n' > "$backup/last-step.log"
+  if ! verify_release post-staging-exact-predecessor predecessor-probe; then
+    trap - ERR
+    final_status=PRODUCTION_DEPLOYMENT_MANUAL_RECOVERY_REQUIRED
+    printf '{"mutation_reached":true,"gate":"POST_STAGING_EXACT_PREDECESSOR_GATE","candidate_switch":false}\n' > "$backup/post-staging-mutation.log"
+    verify_release evidence evidence || true
+    exit 1
+  fi
+fi
 
 printf 'service-activation\n' > "$backup/last-step.log"
 for service in "${services[@]}"; do

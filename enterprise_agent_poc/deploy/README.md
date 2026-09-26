@@ -299,6 +299,16 @@ second final-state check. Only then does the RELEASE COMMIT POINT disarm rollbac
 delete the snapshot and emit `PRODUCTION_DEPLOYMENT_PASS` (`status: switched`).
 The existing 60-attempt API readiness allowance is unchanged.
 
+For a declared Phase A package-only staging release, the same lock also covers a
+post-staging exact-predecessor gate **before** Candidate service activation. It
+rechecks Schema/Registry/Agent/Binding state, initializes the installed predecessor
+Registry in a fresh interpreter, and starts transient predecessor API/MCP/Worker
+processes using private localhost ports and an empty private Redis socket. It
+does not replace systemd services or consume the Production task queue. Failure
+after migration/package mutation keeps `release-current` on the predecessor,
+retains recovery evidence, and requires manual recovery review; it never runs a
+destructive down migration or deletes an immutable Skill package.
+
 Before normal activation, supply `/opt/enterprise-agent-workbench/shared/release-smoke.json`:
 a regular non-symlink file owned by the deploy user with mode `0600`, containing
 only string keys `account`, `password`, `tenant_id`, `user_id`. Use an explicitly
