@@ -52,11 +52,11 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260925-124d860'
-PRODUCTION_PREDECESSOR_ID = '20260925-124d860'
-PRODUCTION_PREDECESSOR_COMMIT = '124d8600c16bed820c3effc41ea5e26f2d57c6ff'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'feb5e8610597f4564ffa8cda366da6f875b3c9c9fbad2afa403518ea3711c658'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'cddfe9917602830c52c6fd0457596f9cb70a436ece9c9c851e28d8c01f7d3054'
+PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260926-0c7c62d'
+PRODUCTION_PREDECESSOR_ID = '20260926-0c7c62d'
+PRODUCTION_PREDECESSOR_COMMIT = '0c7c62d3d94f35c4bf933d86353287da1aab8fbf'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'fbe255bf687e47943efa8cfc549202c9944b78e9350f20864dd4842eb70e29b8'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = 'aa609d7d0be30c2ba31de45af36adef82820c047b1036c3fe74f67257e85d7d7'
 OLD_DIRECT_PREDECESSOR_ID = '20260925-67e993e'
 OLD_DIRECT_PREDECESSOR_COMMIT = '67e993eb9b08e71d3d83076982b170fbc30b4fd4'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
@@ -237,7 +237,7 @@ def epoch_gate():
 
 @pytest.fixture
 def pg_current(pg_rollback_harness):
-    """Current 001–014 tooling with explicit Schema-012 predecessor fixtures."""
+    """Current 001–014 tooling with an exact Schema-014 predecessor fixture."""
     h = pg_rollback_harness
     _install_bd(h)
     manifest = _install_b930(h)
@@ -284,7 +284,7 @@ def test_current_original_manifest_is_pinned_and_floor_declaration_unchanged():
         'source_commit': PRODUCTION_PREDECESSOR_COMMIT,
         'archive_sha256': PRODUCTION_PREDECESSOR_ARCHIVE_SHA,
         'manifest_sha256': PRODUCTION_PREDECESSOR_MANIFEST_SHA,
-        'schema_fingerprint': '1a704f578e9721e2a6537bd2a4b452528f18ed671cb2225558a5c990c9160baf',
+        'schema_fingerprint': '6209531538f525109aaef1e196403190b358de5695abf8f40969f5649f350137',
         'data_contract': 'member_account_status_v1',
     }
     contract=epoch_gate().epoch_contract(d)
@@ -371,14 +371,14 @@ def test_member_status_floor_schema012_blocks_old_artifacts_and_accepts_declared
     assert candidate['active_data_contract_floors'] == ['member_account_status_v1']
 
 
-def test_member_status_floor_schema012_accepts_only_exact_production_predecessor(pg_current):
+def test_member_status_floor_schema014_accepts_only_exact_production_predecessor(pg_current):
     h = pg_current
     directory = install_exact_production_predecessor(h)
-    h['store'] = h['fresh_database'](count=12)
+    h['store'] = h['fresh_database'](count=14)
     _set_productized_epoch(h['store'])
     result = pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['evidence_version'] == 'fixed_3cb1939_member_status_predecessor'
+    assert result['evidence_version'] == 'fixed_0c7c62d_member_status_predecessor'
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
         pg_gate(h, target_id=OLD_DIRECT_PREDECESSOR_ID, commit=OLD_DIRECT_PREDECESSOR_COMMIT)
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
@@ -399,10 +399,10 @@ def test_member_status_floor_schema012_accepts_only_exact_production_predecessor
     ('schema_fingerprint', 'forward_predecessor_declaration'),
     ('data_contract', 'forward_predecessor_declaration'),
 ])
-def test_member_status_floor_schema012_production_predecessor_declaration_tamper_blocks(pg_current, field, check):
+def test_member_status_floor_schema014_production_predecessor_declaration_tamper_blocks(pg_current, field, check):
     h = pg_current
     install_exact_production_predecessor(h)
-    h['store'] = h['fresh_database'](count=12)
+    h['store'] = h['fresh_database'](count=14)
     _set_productized_epoch(h['store'])
     declaration = h['new'] / 'deploy' / 'rollback_compatibility.json'
     payload = json.loads(declaration.read_text())
@@ -420,10 +420,10 @@ def test_member_status_floor_schema012_production_predecessor_declaration_tamper
         pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
 
 
-def test_member_status_floor_schema012_production_predecessor_manifest_tamper_blocks(pg_current):
+def test_member_status_floor_schema014_production_predecessor_manifest_tamper_blocks(pg_current):
     h = pg_current
     directory = install_exact_production_predecessor(h)
-    h['store'] = h['fresh_database'](count=12)
+    h['store'] = h['fresh_database'](count=14)
     _set_productized_epoch(h['store'])
     manifest = directory / f'{PRODUCTION_PREDECESSOR_ID}.manifest.json'
     payload = json.loads(manifest.read_text())
@@ -442,10 +442,10 @@ def test_member_status_floor_schema012_production_predecessor_manifest_tamper_bl
     ('20260915-909203d', '909203dfb1d4bf4016b44977ce4a0553a32bf7c8', 2, 'unapproved_target'),
     ('fixture-new', 'f' * 40, 0, 'rollback_plan_passed'),
 ])
-def test_member_status_floor_schema012_real_cli_path(pg_current, release_id, source_commit, returncode, check):
+def test_member_status_floor_schema014_real_cli_path(pg_current, release_id, source_commit, returncode, check):
     h = pg_current
     install_exact_production_predecessor(h)
-    h['store'] = h['fresh_database'](count=12)
+    h['store'] = h['fresh_database'](count=14)
     _set_productized_epoch(h['store'])
     result = subprocess.run(
         [sys.executable, str(h['helper']), '--target-release-id', release_id,

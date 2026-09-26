@@ -253,11 +253,11 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     floors = data_contract_floors(declaration, schema_lock)
     predecessor = declaration['forward_predecessor_approval']
     require(set(predecessor) == {'release_id','source_commit','archive_sha256','manifest_sha256','schema_fingerprint','data_contract'}
-            and predecessor['release_id'] == '20260925-124d860'
-            and predecessor['source_commit'] == '124d8600c16bed820c3effc41ea5e26f2d57c6ff'
-            and predecessor['archive_sha256'] == 'feb5e8610597f4564ffa8cda366da6f875b3c9c9fbad2afa403518ea3711c658'
-            and predecessor['manifest_sha256'] == 'cddfe9917602830c52c6fd0457596f9cb70a436ece9c9c851e28d8c01f7d3054'
-            and predecessor['schema_fingerprint'] == digest(schema_lock[:12])
+            and predecessor['release_id'] == '20260926-0c7c62d'
+            and predecessor['source_commit'] == '0c7c62d3d94f35c4bf933d86353287da1aab8fbf'
+            and predecessor['archive_sha256'] == 'fbe255bf687e47943efa8cfc549202c9944b78e9350f20864dd4842eb70e29b8'
+            and predecessor['manifest_sha256'] == 'aa609d7d0be30c2ba31de45af36adef82820c047b1036c3fe74f67257e85d7d7'
+            and predecessor['schema_fingerprint'] == digest(schema_lock)
             and predecessor['data_contract'] == 'member_account_status_v1', 'forward_predecessor_declaration')
     own_reference = {'release_id': own_manifest['release_id'], 'source_commit': own_manifest['source_commit']}
     reference = {'release_id': target_id, 'source_commit': target_commit}
@@ -293,10 +293,9 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
         target_root, _ = release_identity(base, target_id, target_commit, target)
     elif predecessor_target:
         target_root, _ = release_identity(base, target_id, target_commit, predecessor)
-        # This immutable predecessor contains Schema 012. The Release may
-        # leave forward-safe 013/014 in the database after code rollback.
-        target_lock = schema_lock[:12]
-        evidence = {'version': 'fixed_3cb1939_member_status_predecessor', 'data_scope': 'productized_v1'}
+        # This immutable predecessor contains the complete Schema 014 lock.
+        target_lock = schema_lock
+        evidence = {'version': 'fixed_0c7c62d_member_status_predecessor', 'data_scope': 'productized_v1'}
     else:
         require(self_target and bool(active_floors), 'unapproved_target')
         target_root, target_lock = own_source, schema_lock
