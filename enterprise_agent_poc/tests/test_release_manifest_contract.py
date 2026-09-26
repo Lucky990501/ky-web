@@ -61,28 +61,30 @@ def phase_a_declarations():
     return (
         json.loads((ROOT / "deploy/forward_migrations_013_014.json").read_text(encoding="utf-8")),
         json.loads((ROOT / "deploy/phase_a_deferred_wechat_skill.json").read_text(encoding="utf-8")),
+        json.loads((ROOT / "deploy/phase_a_skill_package_staging.json").read_text(encoding="utf-8")),
     )
 
 
 def test_phase_a_manifest_pins_order_and_deferred_skill_in_canonical_identity(tmp_path):
-    forward, deferred = phase_a_declarations()
+    forward, deferred, staging = phase_a_declarations()
     result = {"source_commit": "1" * 40, "archive_sha256": "2" * 64,
               "selected_files": ["enterprise_agent_poc/pyproject.toml"], "files": 1,
               "build_platform": "linux-contract-fixture"}
     path = tmp_path / "phase-a.json"
     manifest = build_release.write_manifest(result, "phase-a", path,
-                                            forward_migrations=forward, deferred_skill=deferred)
+                                            forward_migrations=forward, deferred_skill=deferred,
+                                            skill_package_staging=staging)
     assert manifest["forward_migrations"]["migrations"][0]["version"] == "013"
     assert manifest["forward_migrations"]["migrations"][1]["version"] == "014"
     before = rollback_preflight.digest(manifest)
     changed = copy.deepcopy(manifest)
-    changed["deferred_skill"]["artifact_sha256"] = "0" * 64
+    changed["skill_package_staging"]["package"]["artifact_sha256"] = "0" * 64
     assert rollback_preflight.digest(changed) != before
 
 
 @pytest.mark.parametrize("change", ("order", "hash", "rollback", "scope"))
 def test_phase_a_manifest_rejects_unsafe_plan(change, tmp_path):
-    forward, deferred = phase_a_declarations()
+    forward, deferred, staging = phase_a_declarations()
     if change == "order":
         forward["migrations"].reverse()
     elif change == "hash":
@@ -90,13 +92,30 @@ def test_phase_a_manifest_rejects_unsafe_plan(change, tmp_path):
     elif change == "rollback":
         forward["rollback_strategy"] = "destructive_down"
     else:
-        deferred["registry_action"] = "stage"
+        deferred["registry_action"] = "unreviewed_stage"
     result = {"source_commit": "1" * 40, "archive_sha256": "2" * 64,
               "selected_files": ["enterprise_agent_poc/pyproject.toml"], "files": 1,
               "build_platform": "linux-contract-fixture"}
     with pytest.raises(ManifestContractError):
         build_release.write_manifest(result, "phase-a", tmp_path / "blocked.json",
+                                     forward_migrations=forward, deferred_skill=deferred,
+                                     skill_package_staging=staging)
+
+
+def test_phase_a_package_only_manifest_requires_explicit_matching_staging(tmp_path):
+    forward, deferred, staging = phase_a_declarations()
+    result = {"source_commit": "1" * 40, "archive_sha256": "2" * 64,
+              "selected_files": ["enterprise_agent_poc/pyproject.toml"], "files": 1,
+              "build_platform": "linux-contract-fixture"}
+    with pytest.raises(ManifestContractError, match="skill_package_staging"):
+        build_release.write_manifest(result, "phase-a", tmp_path / "missing.json",
                                      forward_migrations=forward, deferred_skill=deferred)
+    wrong = copy.deepcopy(staging)
+    wrong["package"]["source_sha256"] = "0" * 64
+    with pytest.raises(ManifestContractError, match="skill_package_staging"):
+        build_release.write_manifest(result, "phase-a", tmp_path / "mismatch.json",
+                                     forward_migrations=forward, deferred_skill=deferred,
+                                     skill_package_staging=wrong)
 
 
 def release_fixture(tmp_path, *, transition=None, release_id="fixture-release", commit="1" * 40):

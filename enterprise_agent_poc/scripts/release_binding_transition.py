@@ -74,6 +74,80 @@ def candidate_packages(bundle_root: Path) -> dict[tuple[str, str], dict]:
     return {(entry["skill_slug"], entry["version"]): entry for entry in entries}
 
 
+def package_only_declaration(candidate: dict, packages: dict[tuple[str, str], dict], bundle_root: Path) -> tuple[dict, dict]:
+    """A single explicit immutable package, with no implicit binding or Agent action."""
+    from scripts.release_manifest import validate_skill_package_staging
+
+    value = candidate.get("skill_package_staging")
+    validate_skill_package_staging(value)
+    require("binding_transition" not in candidate, "package_only_binding_transition_forbidden")
+    pinned = value["package"]
+    deferred = candidate.get("deferred_skill")
+    require(isinstance(deferred, dict) and deferred.get("registry_action") == "package_only_stage_in_phase_a"
+            and {key: deferred.get(key) for key in pinned} == pinned, "package_only_agent_absence_declaration")
+    require(sha256((bundle_root / "manifest.json").read_bytes()) == pinned["bundled_manifest_sha256"],
+            "SKILL_PACKAGE_IDENTITY_CONFLICT")
+    entry = packages.get((pinned["slug"], pinned["version"]))
+    require(entry is not None and entry["artifact_sha256"] == pinned["artifact_sha256"]
+            and entry["source_identity"]["files"] == [{"path": "SKILL.md", "sha256": pinned["source_sha256"],
+                                                        "git_mode": "100644"}],
+            "SKILL_PACKAGE_IDENTITY_CONFLICT")
+    return pinned, entry
+
+
+def package_only_state(registry: SkillRegistry, pinned: dict, *, required: bool = False) -> str:
+    """Read-only ABSENT/EXACT check; conflict cannot be treated as an absent package."""
+    with registry._read_connection() as conn:
+        rows = conn.execute(
+            "SELECT s.slug,v.id,v.skill_id,v.version,v.status,v.checksum,"
+            "p.storage_path,p.sha256 AS package_sha256,p.size_bytes "
+            "FROM skill_versions v JOIN skills s ON s.id=v.skill_id "
+            "LEFT JOIN skill_packages p ON p.skill_version_id=v.id "
+            "WHERE s.slug=? AND v.version=?", (pinned["slug"], pinned["version"]),
+        ).fetchall()
+        require(len(rows) <= 1, "SKILL_PACKAGE_IDENTITY_CONFLICT")
+        require(not conn.execute(
+            "SELECT 1 FROM agent_skill_bindings b JOIN skills s ON s.id=b.skill_id "
+            "WHERE s.slug=? LIMIT 1", (pinned["slug"],)
+        ).fetchone(), "PACKAGE_ONLY_BINDING_FORBIDDEN")
+    if not rows:
+        require(not required, "DECLARED_SKILL_PACKAGE_MISSING")
+        return "ABSENT"
+    row = rows[0]
+    require(row["status"] == "published" and row["checksum"] == pinned["artifact_sha256"]
+            and row["storage_path"] is not None, "SKILL_PACKAGE_IDENTITY_CONFLICT")
+    try:
+        registry._verify_package(row, expected=pinned["artifact_sha256"])
+    except (SkillRegistryError, OSError) as exc:
+        raise TransitionBlocked("SKILL_PACKAGE_IDENTITY_CONFLICT") from exc
+    return "EXACT"
+
+
+def package_only_preflight(registry: SkillRegistry, pinned: dict, packages: dict[tuple[str, str], dict]) -> dict:
+    """No Registry writes. Every other bundled package must already be installed."""
+    state = package_only_state(registry, pinned)
+    declared_key = (pinned["slug"], pinned["version"])
+    with registry._read_connection() as conn:
+        require(not conn.execute("SELECT 1 FROM agent_templates WHERE slug=?", (pinned["slug"],)).fetchone(),
+                "PHASE_A_AGENT_VISIBILITY_BLOCK")
+        for key, entry in packages.items():
+            if key == declared_key:
+                continue
+            row = conn.execute(
+                "SELECT s.slug,v.id,v.skill_id,v.version,v.status,v.checksum,"
+                "p.storage_path,p.sha256 AS package_sha256,p.size_bytes "
+                "FROM skill_versions v JOIN skills s ON s.id=v.skill_id "
+                "LEFT JOIN skill_packages p ON p.skill_version_id=v.id "
+                "WHERE s.slug=? AND v.version=?", key,
+            ).fetchone()
+            require(row is not None and row["status"] in {"published", "deprecated"},
+                    "UNDECLARED_CANDIDATE_PACKAGE_MISSING")
+            registry._verify_package(row, expected=entry["artifact_sha256"])
+    return {"status": "DECLARED_PACKAGE_ONLY_READY", "registry_pre_state": state,
+            "package": {"slug": pinned["slug"], "version": pinned["version"]},
+            "binding_transition": "NONE"}
+
+
 def verify_candidate_packages(transitions: list[dict], packages: dict[tuple[str, str], dict]) -> None:
     for transition in transitions:
         required = {(x["slug"], x["version"]): x for x in transition["required"]}
@@ -216,21 +290,38 @@ def main(argv: list[str] | None = None) -> int:
     try:
         require(not (args.apply and args.rollback), "transition_mode_invalid")
         candidate, predecessor = load_json(args.candidate_manifest), load_json(args.predecessor_manifest)
-        if "binding_transition" not in candidate:
+        if "binding_transition" not in candidate and "skill_package_staging" not in candidate:
             print(json.dumps({"status": "NO_DECLARED_BINDING_TRANSITION"}))
             return 0
-        transitions = declaration(candidate, predecessor, sha256(args.predecessor_manifest.read_bytes()))
         packages = candidate_packages(args.bundle_root)
         database_url = os.environ["ENTERPRISE_POC_DATABASE_URL"]
         registry = SkillRegistry(POCStore(database_url), args.data_dir / "skill-registry", args.bundle_root)
-        if not args.apply and not args.rollback:
-            result = preflight(registry, transitions, packages)
+        if "skill_package_staging" in candidate:
+            pinned, entry = package_only_declaration(candidate, packages, args.bundle_root)
+            if args.rollback:
+                state = package_only_state(registry, pinned)
+                result = {"status": "package_only_rollback_guard_passed", "package_state": state,
+                          "rollback_strategy": "forward_safe_dormant", "binding_transition": "NONE"}
+            else:
+                result = package_only_preflight(registry, pinned, packages)
+                if args.apply:
+                    staged = stage_candidate_packages(registry, {(pinned["slug"], pinned["version"]): entry},
+                                                      args.bundle_root)
+                    require(package_only_state(registry, pinned, required=True) == "EXACT",
+                            "DECLARED_SKILL_PACKAGE_MISSING")
+                    result = {"status": "package_only_staged", "package_staging": staged,
+                              "rollback_strategy": "forward_safe_dormant", "binding_transition": "NONE"}
         else:
-            result = stage_and_apply(registry, transitions, packages, args.bundle_root, rollback=args.rollback)
+            transitions = declaration(candidate, predecessor, sha256(args.predecessor_manifest.read_bytes()))
+            if not args.apply and not args.rollback:
+                result = preflight(registry, transitions, packages)
+            else:
+                result = stage_and_apply(registry, transitions, packages, args.bundle_root, rollback=args.rollback)
         print(json.dumps(result, ensure_ascii=False))
         return 0
-    except (TransitionBlocked, SkillRegistryError, KeyError, OSError, ValueError):
-        print(json.dumps({"status": "BLOCKED", "check": "release_scoped_binding_transition"}))
+    except (TransitionBlocked, SkillRegistryError, KeyError, OSError, ValueError) as exc:
+        check = str(exc) if isinstance(exc, TransitionBlocked) and str(exc) == "SKILL_PACKAGE_IDENTITY_CONFLICT" else "release_scoped_binding_transition"
+        print(json.dumps({"status": "BLOCKED", "check": check}))
         return 2
 
 

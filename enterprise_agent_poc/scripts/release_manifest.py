@@ -12,7 +12,7 @@ BASE_FIELDS = {
     "selected_file_count",
     "build_platform",
 }
-OPTIONAL_FIELDS = {"binding_transition", "forward_migrations", "deferred_skill"}
+OPTIONAL_FIELDS = {"binding_transition", "forward_migrations", "deferred_skill", "skill_package_staging"}
 HASH = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASE = re.compile(r"[A-Za-z0-9._-]+")
@@ -122,10 +122,24 @@ def validate_deferred_skill(value: object) -> None:
         "registry_action"
     }, "deferred_skill")
     require(value["slug"] == "wechat-official-account-writing" and value["version"] == "1.0.0"
-            and value["registry_action"] == "none_in_phase_a"
+            and value["registry_action"] == "package_only_stage_in_phase_a"
             and all(isinstance(value[key], str) and HASH.fullmatch(value[key]) for key in (
                 "source_sha256", "artifact_sha256", "bundled_manifest_sha256"
             )), "deferred_skill")
+
+
+def validate_skill_package_staging(value: object) -> None:
+    require(isinstance(value, dict) and set(value) == {"schema_version", "package", "rollback_strategy"},
+            "skill_package_staging")
+    require(type(value["schema_version"]) is int and value["schema_version"] == 1
+            and value["rollback_strategy"] == "forward_safe_dormant", "skill_package_staging")
+    package = value["package"]
+    require(isinstance(package, dict) and set(package) == {
+        "slug", "version", "source_sha256", "artifact_sha256", "bundled_manifest_sha256"
+    } and package["slug"] == "wechat-official-account-writing" and package["version"] == "1.0.0"
+            and all(isinstance(package[key], str) and HASH.fullmatch(package[key]) for key in (
+                "source_sha256", "artifact_sha256", "bundled_manifest_sha256"
+            )), "skill_package_staging")
 
 
 def validate_manifest_contract(manifest: object) -> dict:
@@ -156,4 +170,13 @@ def validate_manifest_contract(manifest: object) -> dict:
         validate_forward_migrations(manifest["forward_migrations"])
     if "deferred_skill" in manifest:
         validate_deferred_skill(manifest["deferred_skill"])
+        require("skill_package_staging" in manifest, "skill_package_staging")
+    if "skill_package_staging" in manifest:
+        validate_skill_package_staging(manifest["skill_package_staging"])
+        require("deferred_skill" in manifest and "binding_transition" not in manifest,
+                "skill_package_staging")
+        require(manifest["skill_package_staging"]["package"] == {
+            key: manifest["deferred_skill"][key] for key in (
+                "slug", "version", "source_sha256", "artifact_sha256", "bundled_manifest_sha256"
+            )}, "skill_package_staging")
     return manifest

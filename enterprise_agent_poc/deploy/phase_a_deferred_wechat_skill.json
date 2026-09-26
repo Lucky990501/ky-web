@@ -4,5 +4,5 @@
   "source_sha256": "f66f22e9e36e11b95301983f12a7b1550081f1e8c024bea7c955d90fc65dd1ae",
   "artifact_sha256": "b0e54bc57e271b6b0c094f7dcfcb94d234f609b8925eb5937b105ccd6463c157",
   "bundled_manifest_sha256": "3b90dcc33d4d9855c82f50597c2df186b1cefb66ee2324b1a6ad36b57e114c5f",
-  "registry_action": "none_in_phase_a"
+  "registry_action": "package_only_stage_in_phase_a"
 }

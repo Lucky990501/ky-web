@@ -32,11 +32,11 @@ def require(value, reason):
         raise GateFailed(reason)
 
 
-def registry_for(base):
+def registry_for(base, bundle_root=None):
     from app.skill_registry import SkillRegistry
     from app.store import POCStore
     return SkillRegistry(POCStore(os.environ["ENTERPRISE_POC_DATABASE_URL"]),
-                         base / "shared/runtime-data/skill-registry", ROOT / "skill_packages")
+                         base / "shared/runtime-data/skill-registry", bundle_root or ROOT / "skill_packages")
 
 
 def bindings(registry):
@@ -82,6 +82,13 @@ def binding_gate(base, candidate, predecessor, snapshot, mode):
         require(actual == after or (pre_activation and actual == before), "UNKNOWN_BINDING_STATE")
     else:
         require(actual == (before if mode == "restored" else after), "UNKNOWN_BINDING_STATE")
+    manifest = json.loads(candidate.read_text())
+    if "skill_package_staging" in manifest:
+        from scripts.release_binding_transition import package_only_state
+        registry = registry_for(base)
+        phase_a_absence(registry, manifest["deferred_skill"])
+        package_only_state(registry, manifest["skill_package_staging"]["package"],
+                           required=mode == "state")
     return actual
 
 
@@ -179,10 +186,11 @@ def final_preflight(base, candidate, predecessor):
                 and state.get("cwd") == str(prior_root) and state.get("module_ok")
                 and state.get("exe") == str((base / "venv/bin/python").resolve()), f"preflight_{role}_runtime")
 
-    registry = registry_for(base)
+    registry = registry_for(base, prior_root / "skill_packages")
     active = bindings(registry)  # Includes manifest consistency for every agent.
     packages = transition.candidate_packages(root / "skill_packages")
     deferred = manifest.get("deferred_skill")
+    staging = manifest.get("skill_package_staging")
     if deferred:
         require(deferred == json.loads((root / "deploy/phase_a_deferred_wechat_skill.json").read_text()),
                 "deferred_skill_declaration_mismatch")
@@ -192,12 +200,18 @@ def final_preflight(base, candidate, predecessor):
                     "sha256": deferred["source_sha256"], "git_mode": "100644"}]
                 and hashlib.sha256((root / "skill_packages/manifest.json").read_bytes()).hexdigest()
                     == deferred["bundled_manifest_sha256"], "deferred_skill_bundle_identity")
+    if staging:
+        require(staging == json.loads((root / "deploy/phase_a_skill_package_staging.json").read_text()),
+                "skill_package_staging_declaration_mismatch")
+        pinned, _ = transition.package_only_declaration(manifest, packages, root / "skill_packages")
     transitions = []
     if "binding_transition" in manifest:
         transitions = transition.declaration(manifest, prior, hashlib.sha256(predecessor.read_bytes()).hexdigest())
         transition.preflight(registry, transitions, packages)
     else:
         registry.verify_bootstrap()
+        if staging:
+            transition.package_only_preflight(registry, pinned, packages)
     required_to = {key for item in transitions for key in item["to"].items()}
     reusable, stageable = [], []
     with registry._read_connection() as conn:
@@ -217,10 +231,8 @@ def final_preflight(base, candidate, predecessor):
                 registry._verify_package(row, expected=entry["artifact_sha256"])
                 reusable.append({"slug": slug, "version": version})
             else:
-                if deferred and (slug, version) == (deferred["slug"], deferred["version"]):
-                    # Phase A carries the immutable package but must not stage it.
-                    continue
-                require(bool(transitions), "legacy_package_missing")
+                declared_package = staging and (slug, version) == (pinned["slug"], pinned["version"])
+                require(bool(transitions) or declared_package, "UNDECLARED_CANDIDATE_PACKAGE_MISSING")
                 stageable.append({"slug": slug, "version": version})
 
     forward = manifest.get("forward_migrations")
@@ -246,7 +258,8 @@ def final_preflight(base, candidate, predecessor):
             "bindings": active, "registry_exact_reusable": reusable, "registry_stageable": stageable,
             "schema": schema, "pending": 2 if forward else 0,
             "migration": ["013", "014"] if forward else "NONE",
-            "deferred_skill": "NOT_STAGED" if deferred else None,
+            "skill_package_staging": "DECLARED_ONLY" if staging else None,
+            "deferred_agent": "ABSENT" if deferred else None,
             "data_contract": exact["data_contract"], "credentials": "READY"}
 
 
@@ -266,17 +279,26 @@ def verify_state(base, candidate, predecessor, snapshot, *, rollback=False):
     # Legacy approved subsets remain supported; require no pending trusted DDL.
     from scripts import migrate
     require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
-    registry = registry_for(base)
+    registry = registry_for(base, root / "skill_packages")
     registry.verify_bootstrap()
-    declared = json.loads(candidate.read_text()).get("deferred_skill")
+    candidate_manifest = json.loads(candidate.read_text())
+    declared = candidate_manifest.get("deferred_skill")
+    package_state = None
     if declared:
         phase_a_absence(registry, declared)
+    if "skill_package_staging" in candidate_manifest:
+        from scripts.release_binding_transition import package_only_state
+        package_state = package_only_state(registry, candidate_manifest["skill_package_staging"]["package"],
+                                           required=not rollback)
     require(bool(active.get("campaign-agent")), "campaign_skills_missing")
     for slug, version in active["campaign-agent"].items():
         require((registry.published_root / slug / version / "SKILL.md").is_file(), "skill_resolution")
     return {"status": "rollback_state_verified" if rollback else "final_state_verified",
             "release_id": target["release_id"], "services": services,
-            "campaign_binding": active["campaign-agent"], "schema": schema, "health": health()}
+            "campaign_binding": active["campaign-agent"], "schema": schema, "health": health(),
+            "phase_a_agent": "ABSENT" if declared else None,
+            "declared_package": package_state,
+            "package_rollback_strategy": "forward_safe_dormant" if rollback and package_state == "EXACT" else None}
 
 
 def phase_a_absence(registry, deferred):
@@ -284,10 +306,14 @@ def phase_a_absence(registry, deferred):
     with registry._read_connection() as conn:
         require(not conn.execute("SELECT 1 FROM agent_templates WHERE slug=?", (deferred["slug"],)).fetchone(),
                 "phase_a_agent_not_absent")
-        require(not conn.execute("SELECT 1 FROM skills s JOIN skill_versions v ON v.skill_id=s.id "
-                                 "WHERE s.slug=? AND v.version=?", (deferred["slug"], deferred["version"])).fetchone(),
-                "phase_a_deferred_skill_was_staged")
-    return {"agent": "ABSENT", "skill_registry": "NOT_STAGED"}
+        for query in (
+            "SELECT 1 FROM agent_template_versions v JOIN agent_templates t ON t.id=v.agent_template_id WHERE t.slug=? LIMIT 1",
+            "SELECT 1 FROM tenant_agent_instances i JOIN agent_templates t ON t.id=i.agent_id WHERE t.slug=? LIMIT 1",
+            "SELECT 1 FROM agent_skill_bindings b JOIN agent_templates t ON t.id=b.agent_id WHERE t.slug=? LIMIT 1",
+        ):
+            require(not conn.execute(query, (deferred["slug"],)).fetchone(), "phase_a_agent_not_absent")
+    return {"agent": "ABSENT", "published_revision": "ABSENT", "tenant_instance": "ABSENT",
+            "binding": "ABSENT", "discovery": "ABSENT"}
 
 
 def smoke_config(base):

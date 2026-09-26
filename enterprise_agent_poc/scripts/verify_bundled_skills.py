@@ -38,12 +38,22 @@ def main(argv: list[str] | None = None) -> int:
         if bool(args.candidate_release_manifest) != bool(args.predecessor_release_manifest):
             raise ValueError("transition manifests must be paired")
         if args.candidate_release_manifest:
-            from scripts.release_binding_transition import candidate_packages, declaration, load_json, preflight
+            from scripts.release_binding_transition import (candidate_packages, declaration, load_json,
+                                                            package_only_declaration, package_only_preflight,
+                                                            preflight)
             candidate = load_json(args.candidate_release_manifest)
             if "binding_transition" in candidate:
                 predecessor = load_json(args.predecessor_release_manifest)
                 transitions = declaration(candidate, predecessor, sha256(args.predecessor_release_manifest.read_bytes()))
                 result = preflight(registry, transitions, candidate_packages(ROOT / "skill_packages"))
+            elif "skill_package_staging" in candidate:
+                predecessor_bundle = args.predecessor_release_manifest.parent / "enterprise_agent_poc/skill_packages"
+                predecessor_registry = SkillRegistry(POCStore(database_url), data_root / "skill-registry",
+                                                     predecessor_bundle)
+                predecessor_registry.verify_bootstrap()
+                packages = candidate_packages(ROOT / "skill_packages")
+                pinned, _ = package_only_declaration(candidate, packages, ROOT / "skill_packages")
+                result = package_only_preflight(registry, pinned, packages)
             else:
                 result = registry.verify_bootstrap()
         else:
