@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "agent_slug": "wechat-official-account-writing",
+  "pre_state": "ABSENT",
+  "target_state": "published_enabled",
+  "rollback_strategy": "resolvable_absent",
+  "skill_source_sha256": "f66f22e9e36e11b95301983f12a7b1550081f1e8c024bea7c955d90fc65dd1ae",
+  "bundled_manifest_sha256": "3b90dcc33d4d9855c82f50597c2df186b1cefb66ee2324b1a6ad36b57e114c5f",
+  "runtime_test": {
+    "required": true,
+    "tenant": "zhiy-e-intelligence",
+    "agent_slug": "wechat-official-account-writing",
+    "actor": "ba2afd04-0cfd-45fe-9771-ef8e741796ba",
+    "exactly_one_validation_task": true,
+    "skill_slug": "wechat-official-account-writing",
+    "skill_version": "1.0.0",
+    "skill_package_sha256": "b0e54bc57e271b6b0c094f7dcfcb94d234f609b8925eb5937b105ccd6463c157",
+    "model_config_id": "codex-deepseek-v4-pro-high",
+    "credit_cost": 5
+  }
+}

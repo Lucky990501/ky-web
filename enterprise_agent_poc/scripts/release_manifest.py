@@ -12,7 +12,8 @@ BASE_FIELDS = {
     "selected_file_count",
     "build_platform",
 }
-OPTIONAL_FIELDS = {"binding_transition", "forward_migrations", "deferred_skill", "skill_package_staging"}
+OPTIONAL_FIELDS = {"binding_transition", "forward_migrations", "deferred_skill", "skill_package_staging",
+                   "agent_productization_transition"}
 HASH = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASE = re.compile(r"[A-Za-z0-9._-]+")
@@ -142,6 +143,38 @@ def validate_skill_package_staging(value: object) -> None:
             )), "skill_package_staging")
 
 
+def validate_agent_productization_transition(value: object) -> None:
+    """Phase B is one approved ABSENT -> enabled Agent, not a wildcard plan."""
+    require(isinstance(value, dict) and set(value) == {
+        "schema_version", "agent_slug", "pre_state", "target_state",
+        "rollback_strategy", "runtime_test", "skill_source_sha256",
+        "bundled_manifest_sha256",
+    }, "agent_productization_transition")
+    require(type(value["schema_version"]) is int and value["schema_version"] == 1
+            and value["agent_slug"] == "wechat-official-account-writing"
+            and value["pre_state"] == "ABSENT"
+            and value["target_state"] == "published_enabled"
+            and value["rollback_strategy"] == "resolvable_absent"
+            and value["skill_source_sha256"] == "f66f22e9e36e11b95301983f12a7b1550081f1e8c024bea7c955d90fc65dd1ae"
+            and value["bundled_manifest_sha256"] == "3b90dcc33d4d9855c82f50597c2df186b1cefb66ee2324b1a6ad36b57e114c5f",
+            "agent_productization_transition")
+    test = value["runtime_test"]
+    require(isinstance(test, dict) and set(test) == {
+        "required", "tenant", "agent_slug", "actor", "exactly_one_validation_task",
+        "skill_slug", "skill_version", "skill_package_sha256", "model_config_id",
+        "credit_cost",
+    } and test["required"] is True and test["exactly_one_validation_task"] is True
+            and test["tenant"] == "zhiy-e-intelligence"
+            and test["agent_slug"] == value["agent_slug"]
+            and test["actor"] == "ba2afd04-0cfd-45fe-9771-ef8e741796ba"
+            and test["skill_slug"] == value["agent_slug"]
+            and test["skill_version"] == "1.0.0"
+            and test["skill_package_sha256"] == "b0e54bc57e271b6b0c094f7dcfcb94d234f609b8925eb5937b105ccd6463c157"
+            and test["model_config_id"] == "codex-deepseek-v4-pro-high"
+            and type(test["credit_cost"]) is int and test["credit_cost"] == 5,
+            "agent_productization_transition")
+
+
 def validate_manifest_contract(manifest: object) -> dict:
     require(isinstance(manifest, dict), "manifest_fields")
     fields = set(manifest)
@@ -179,4 +212,8 @@ def validate_manifest_contract(manifest: object) -> dict:
             key: manifest["deferred_skill"][key] for key in (
                 "slug", "version", "source_sha256", "artifact_sha256", "bundled_manifest_sha256"
             )}, "skill_package_staging")
+    if "agent_productization_transition" in manifest:
+        validate_agent_productization_transition(manifest["agent_productization_transition"])
+        require(not ({"forward_migrations", "binding_transition", "skill_package_staging", "deferred_skill"}
+                     & fields), "agent_productization_transition")
     return manifest

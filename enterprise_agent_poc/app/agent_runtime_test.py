@@ -8,13 +8,106 @@ from app.agent_productization import AgentCatalogError, canonical
 from app.runtime.codex_provider import CodexRuntimeProvider
 
 
+RELEASE_WECHAT_DRAFT_PROMPT = (
+    "请写一篇关于社区开学季公益助学的微信公众号初稿。时间、地点和参与方式尚未确定；"
+    "只使用已知信息，未知细节标为待确认，不要虚构具体事实。"
+)
+
+
 class AgentRuntimeTest:
     def __init__(self, resolver, product, tasks):
         self.resolver, self.product, self.tasks = resolver, product, tasks
         self.isolation_guard = None
         self.enqueue = None
 
-    async def run(self, template_id, version_id, actor, fingerprint=None, *, release_operation_id=None):
+    async def run_release(self, *, release_operation_id, revision_id, fingerprint,
+                          tenant_id, agent_slug, actor_id, release_identity,
+                          source_identity, manifest_identity, runtime_test):
+        """Reserve one exact, release-owned validation before using the normal queue.
+
+        ``runtime_test`` is the validated immutable Release declaration. The
+        reservation is append-only and serialized by the provenance operation
+        row, so a failed enqueue cannot silently authorize a second Provider
+        attempt. No public Runtime Test endpoint calls this method.
+        """
+        from app.agent_release_provenance import AgentReleaseProvenance
+
+        required = {
+            "required", "tenant", "agent_slug", "actor", "exactly_one_validation_task",
+            "skill_slug", "skill_version", "skill_package_sha256", "model_config_id",
+            "credit_cost",
+        }
+        if (not release_operation_id or not isinstance(runtime_test, dict)
+                or set(runtime_test) != required
+                or runtime_test["required"] is not True
+                or runtime_test["exactly_one_validation_task"] is not True
+                or (tenant_id, agent_slug, actor_id) != (
+                    runtime_test["tenant"], runtime_test["agent_slug"], runtime_test["actor"])
+                or tenant_id != self.resolver.test_tenant_id):
+            raise AgentCatalogError("Release Runtime Test scope mismatch", 409)
+
+        release = AgentReleaseProvenance(self.resolver.catalog)
+        with self.resolver.store.connection() as conn:
+            operation = release._operation(conn, release_operation_id)
+            if (operation["status"] != "staged" or operation["pre_state"] != "ABSENT"
+                    or operation["agent_slug"] != agent_slug or operation["created_by"] != actor_id
+                    or (operation["release_identity"], operation["source_identity"],
+                        operation["manifest_identity"]) != (
+                        release_identity, source_identity, manifest_identity)):
+                raise AgentCatalogError("Release Runtime Test identity mismatch", 409)
+            templates = conn.execute(
+                "SELECT id FROM agent_templates WHERE slug=? AND definition_source='productized'",
+                (agent_slug,),
+            ).fetchall()
+            if len(templates) != 1:
+                raise AgentCatalogError("Release Runtime Test Agent mismatch", 409)
+            template_id = templates[0]["id"]
+            release._template_mapping(conn, release_operation_id, template_id)
+            revision = release._revision_identity(conn, release_operation_id, template_id, revision_id)
+            if (not revision or revision["status"] != "draft"
+                    or revision["configuration_fingerprint"] != fingerprint
+                    or revision["model_config_id"] != runtime_test["model_config_id"]
+                    or revision["credit_cost"] != runtime_test["credit_cost"]
+                    or type(runtime_test["credit_cost"]) is not int
+                    or not 0 <= runtime_test["credit_cost"] <= 5):
+                raise AgentCatalogError("Release Runtime Test Revision mismatch", 409)
+            release._verify_seal(conn, release_operation_id, template_id, revision)
+            skills = conn.execute(
+                "SELECT s.slug,v.version,v.status,v.checksum,p.sha256 AS package_sha256 "
+                "FROM agent_template_version_skills b JOIN skills s ON s.id=b.skill_id "
+                "JOIN skill_versions v ON v.id=b.skill_version_id AND v.skill_id=s.id "
+                "JOIN skill_packages p ON p.skill_version_id=v.id "
+                "WHERE b.agent_template_version_id=?", (revision_id,),
+            ).fetchall()
+            if len(skills) != 1 or (
+                skills[0]["slug"], skills[0]["version"], skills[0]["status"],
+                skills[0]["checksum"], skills[0]["package_sha256"],
+            ) != (
+                runtime_test["skill_slug"], runtime_test["skill_version"], "published",
+                runtime_test["skill_package_sha256"], runtime_test["skill_package_sha256"],
+            ):
+                raise AgentCatalogError("Release Runtime Test Skill identity mismatch", 409)
+            if conn.execute(
+                "SELECT 1 FROM agent_release_events WHERE operation_id=? "
+                "AND event_type='runtime_validation_reserved'", (release_operation_id,),
+            ).fetchone() or conn.execute(
+                "SELECT 1 FROM agent_release_artifacts WHERE operation_id=? "
+                "AND artifact_type='runtime_validation'", (release_operation_id,),
+            ).fetchone():
+                raise AgentCatalogError("Release Runtime Test already attempted", 409)
+            release._event(conn, release_operation_id, "runtime_validation_reserved", canonical({
+                "tenant_id": tenant_id, "agent_slug": agent_slug, "actor_id": actor_id,
+                "revision_id": revision_id, "fingerprint": fingerprint,
+                "credit_cost": revision["credit_cost"],
+            }))
+        return await self.run(template_id, revision_id, actor_id, fingerprint,
+                              release_operation_id=release_operation_id,
+                              release_prompt=RELEASE_WECHAT_DRAFT_PROMPT)
+
+    async def run(self, template_id, version_id, actor, fingerprint=None, *, release_operation_id=None,
+                  release_prompt=None):
+        if release_prompt is not None and (not release_operation_id or release_prompt != RELEASE_WECHAT_DRAFT_PROMPT):
+            raise AgentCatalogError('Release Runtime Test prompt scope mismatch', 409)
         r=self.resolver
         if r.settings.environment != 'production':
             if not self.isolation_guard:
@@ -72,7 +165,7 @@ class AgentRuntimeTest:
                     release._artifact(conn,release_operation_id,'tenant_instance',row['instance_id'],identity)
         test_id=str(uuid4())
         task=self.product.create_task(r.test_tenant_id,actor,template_id,
-            '读取绑定 Skill 的 SKILL.md，按 Persona 用一句中文介绍能力。调用全部 required 工具；若绑定 optional enterprise_config_get，请读取企业配置。只返回最终结果。',
+            release_prompt or '读取绑定 Skill 的 SKILL.md，按 Persona 用一句中文介绍能力。调用全部 required 工具；若绑定 optional enterprise_config_get，请读取企业配置。只返回最终结果。',
             None,_test_revision=version_id,_test_id=test_id,_test_fingerprint=fingerprint,
             _release_operation_id=release_operation_id)
         try:self.enqueue(task['id'])

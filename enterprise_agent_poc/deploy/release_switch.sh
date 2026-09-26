@@ -112,6 +112,13 @@ if [[ "$mode" == "--rollback-preflight" ]]; then
 fi
 declared_forward=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "forward_migrations" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
 declared_package_only=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "skill_package_staging" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+declared_productization=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "agent_productization_transition" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+if [[ "$declared_productization" == yes ]]; then
+  [[ -f "$release_root/scripts/release_agent_productization.py" && -f "$release_root/scripts/release_scoped_runtime_test.py" ]] || {
+    printf '{"status":"BLOCKED","check":"AGENT_PRODUCTIZATION_TRANSACTION_MISSING"}\n' >&2
+    exit 2
+  }
+fi
 if [[ "$declared_package_only" == yes ]]; then
   [[ -f "$release_root/scripts/release_predecessor_probe.py" ]] || { echo "post-staging predecessor probe missing" >&2; exit 2; }
   command -v redis-server >/dev/null 2>&1 || { echo "isolated predecessor Redis prerequisite missing" >&2; exit 2; }
@@ -128,6 +135,10 @@ fi
 # smoke, final state and commit/recovery. No outer lock or lock handoff exists.
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py preflight \
   --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest"
+if [[ "$declared_productization" == yes ]]; then
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py preflight \
+    --candidate-manifest "$candidate_manifest"
+fi
 if [[ "$mode" == "--preflight-only" ]]; then
   printf '{"status":"preflight_passed","release_id":"%s","data_dir_resolved":true}\n' "$release_id"
   exit 0
@@ -170,6 +181,16 @@ verify_release capture capture
 rollback() {
   trap - ERR
   set +e
+  if [[ "$declared_productization" == yes ]]; then
+    # Resolvable-Absent compensation must precede code rollback. A mixed or
+    # real-use state blocks here; never proceed with code-only rollback.
+    if ! PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py abort \
+        --candidate-manifest "$candidate_manifest" > "$backup/agent-abort.log" 2>&1; then
+      cat "$backup/agent-abort.log"
+      return 1
+    fi
+    cat "$backup/agent-abort.log"
+  fi
   # No code-only restore or unknown-state overwrite. This read-only guard also
   # protects unrelated agents and legacy releases. Keep the snapshot on failure.
   verify_release rollback-guard rollback-guard || return 1
@@ -306,9 +327,42 @@ for attempt in $(seq 1 "$api_readiness_attempts"); do
   fi
   sleep 1
 done
+if [[ "$declared_productization" == yes ]]; then
+  printf 'candidate-code-ready-before-agent-stage\n' > "$backup/last-step.log"
+  verify_release candidate-code-ready-before-agent-stage state
+  printf 'agent-stage\n' > "$backup/last-step.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py stage \
+    --candidate-manifest "$candidate_manifest" > "$backup/agent-stage.log"
+  cat "$backup/agent-stage.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py identity \
+    --candidate-manifest "$candidate_manifest" > "$backup/agent-identity.json"
+  phase_b_operation_id=$("$runtime_venv/bin/python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["operation_id"])' "$backup/agent-identity.json")
+  phase_b_revision_id=$("$runtime_venv/bin/python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["revision_id"])' "$backup/agent-identity.json")
+  phase_b_fingerprint=$("$runtime_venv/bin/python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["configuration_fingerprint"])' "$backup/agent-identity.json")
+  printf 'release-scoped-runtime-test\n' > "$backup/last-step.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_scoped_runtime_test.py \
+    --candidate-manifest "$candidate_manifest" --release-operation-id "$phase_b_operation_id" \
+    --revision-id "$phase_b_revision_id" --fingerprint "$phase_b_fingerprint" \
+    > "$backup/release-runtime-test.log"
+  cat "$backup/release-runtime-test.log"
+  printf 'agent-publish-disabled\n' > "$backup/last-step.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py publish \
+    --candidate-manifest "$candidate_manifest"
+  printf 'agent-enable\n' > "$backup/last-step.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py enable \
+    --candidate-manifest "$candidate_manifest"
+  printf 'agent-final-state\n' > "$backup/last-step.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py verify \
+    --candidate-manifest "$candidate_manifest"
+fi
 verify_release before-smoke state
 verify_release technical-smoke smoke
 verify_release final-state state
+if [[ "$declared_productization" == yes ]]; then
+  printf 'agent-release-commit\n' > "$backup/last-step.log"
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py commit \
+    --candidate-manifest "$candidate_manifest"
+fi
 # RELEASE COMMIT POINT: same global lock + rollback snapshot through all gates.
 trap - ERR
 rm -rf "$backup"

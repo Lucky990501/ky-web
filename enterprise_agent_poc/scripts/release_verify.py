@@ -70,9 +70,65 @@ def expected_bindings(candidate, predecessor, snapshot):
     return before, after
 
 
+def phase_b_binding_projection(registry, manifest, actual, mode):
+    """Exclude only the exact Release-owned new Agent from legacy bindings.
+
+    Productized Revision skills live in version bindings, not the legacy
+    agent_skill_bindings snapshot. Unknown templates or mixed ownership remain
+    visible and fail the ordinary exact snapshot comparison.
+    """
+    declared = manifest.get("agent_productization_transition")
+    if not declared:
+        return actual
+    from scripts.release_agent_productization import operation_id_for
+    from scripts.rollback_preflight import digest
+
+    slug = declared["agent_slug"]
+    with registry._read_connection() as conn:
+        rows = conn.execute(
+            "SELECT id,definition_source,lifecycle_status,current_published_version_id "
+            "FROM agent_templates WHERE slug=?", (slug,),
+        ).fetchall()
+        if not rows:
+            require(mode in {"state", "rollback-guard", "restored"},
+                    "PHASE_B_AGENT_IDENTITY_UNKNOWN")
+            return actual
+        require(len(rows) == 1 and rows[0]["definition_source"] == "productized",
+                "PHASE_B_AGENT_IDENTITY_UNKNOWN")
+        agent_id = rows[0]["id"]
+        operation = conn.execute(
+            "SELECT status,release_identity,source_identity,manifest_identity,agent_slug,pre_state "
+            "FROM agent_release_operations WHERE operation_id=?",
+            (operation_id_for(manifest),),
+        ).fetchone()
+        mapping = conn.execute(
+            "SELECT identity FROM agent_release_artifacts WHERE operation_id=? "
+            "AND artifact_type='template' AND artifact_id=?",
+            (operation_id_for(manifest), agent_id),
+        ).fetchone()
+        require(operation and mapping and mapping["identity"] == {
+            "template_id": agent_id, "slug": slug,
+        } and (operation["release_identity"], operation["source_identity"],
+               operation["manifest_identity"], operation["agent_slug"], operation["pre_state"]) == (
+                   manifest["release_id"], manifest["source_commit"], digest(manifest), slug, "ABSENT"),
+                "PHASE_B_AGENT_IDENTITY_UNKNOWN")
+        require(actual.get(agent_id) == {}, "PHASE_B_LEGACY_BINDING_UNEXPECTED")
+        if mode in {"rollback-guard", "restored"}:
+            require(operation["status"] == "aborted"
+                    and rows[0]["lifecycle_status"] == "deprecated"
+                    and rows[0]["current_published_version_id"] is None,
+                    "PHASE_B_ROLLBACK_NOT_RESOLVABLY_ABSENT")
+        else:
+            require(operation["status"] in {"provisioning", "staged", "published", "enabled", "committed"},
+                    "PHASE_B_AGENT_STATE_UNKNOWN")
+    return {key: value for key, value in actual.items() if key != agent_id}
+
+
 def binding_gate(base, candidate, predecessor, snapshot, mode):
     before, after = expected_bindings(candidate, predecessor, snapshot)
-    actual = bindings(registry_for(base))
+    manifest = json.loads(candidate.read_text())
+    registry = registry_for(base)
+    actual = phase_b_binding_projection(registry, manifest, bindings(registry), mode)
     if mode == "rollback-guard":
         # Before activation, a staging failure may leave the proven FROM state.
         # After activation only exact TO permits automatic mutation. Never
@@ -82,7 +138,6 @@ def binding_gate(base, candidate, predecessor, snapshot, mode):
         require(actual == after or (pre_activation and actual == before), "UNKNOWN_BINDING_STATE")
     else:
         require(actual == (before if mode == "restored" else after), "UNKNOWN_BINDING_STATE")
-    manifest = json.loads(candidate.read_text())
     if "skill_package_staging" in manifest:
         from scripts.release_binding_transition import package_only_state
         registry = registry_for(base)

@@ -461,7 +461,9 @@ def pg_rollback_catalog(request, tmp_path, approved_bundle):
     assert (root / 'stage1-isolated.marker').read_text().strip() == 'ky-web-stage1-local-only'
     socket = root / 'socket'
     assert socket.stat().st_mode & 0o077 == 0
-    args = dict(dbname='postgres', host=str(socket), port=54329, user='stage1_fixture')
+    args = dict(dbname='postgres', host=str(socket),
+                port=int(os.environ.get('STAGE1_POSTGRES_PORT', '54329')),
+                user='stage1_fixture')
 
     def fresh_database(count=11, fault=None):
         name = 'rollback_' + uuid.uuid4().hex

@@ -65,6 +65,43 @@ def phase_a_declarations():
     )
 
 
+def test_phase_b_runtime_test_scope_is_immutable_and_single_agent(tmp_path):
+    declaration = json.loads((ROOT / "deploy/phase_b_agent_productization.json").read_text())
+    result = {"source_commit": "1" * 40, "archive_sha256": "2" * 64,
+              "selected_files": ["enterprise_agent_poc/pyproject.toml"], "files": 1,
+              "build_platform": "linux-contract-fixture"}
+    manifest = build_release.write_manifest(
+        result, "phase-b", tmp_path / "phase-b.json",
+        agent_productization_transition=declaration,
+    )
+    assert manifest["agent_productization_transition"]["runtime_test"]["credit_cost"] == 5
+    identity = rollback_preflight.digest(manifest)
+    for path, wrong in (("tenant", "other-tenant"), ("agent_slug", "other-agent"),
+                        ("actor", "other-actor"), ("exactly_one_validation_task", False),
+                        ("credit_cost", 6), ("skill_package_sha256", "0" * 64)):
+        changed = copy.deepcopy(declaration)
+        changed["runtime_test"][path] = wrong
+        with pytest.raises(ManifestContractError, match="agent_productization_transition"):
+            build_release.write_manifest(result, "phase-b", tmp_path / "blocked.json",
+                                         agent_productization_transition=changed)
+    changed = copy.deepcopy(manifest)
+    changed["agent_productization_transition"]["runtime_test"]["credit_cost"] = 6
+    assert rollback_preflight.digest(changed) != identity
+
+
+def test_phase_b_rejects_combined_migration_or_staging(tmp_path):
+    declaration = json.loads((ROOT / "deploy/phase_b_agent_productization.json").read_text())
+    forward, deferred, staging = phase_a_declarations()
+    result = {"source_commit": "1" * 40, "archive_sha256": "2" * 64,
+              "selected_files": ["enterprise_agent_poc/pyproject.toml"], "files": 1,
+              "build_platform": "linux-contract-fixture"}
+    with pytest.raises(ManifestContractError, match="agent_productization_transition"):
+        build_release.write_manifest(result, "phase-b", tmp_path / "blocked.json",
+                                     agent_productization_transition=declaration,
+                                     forward_migrations=forward, deferred_skill=deferred,
+                                     skill_package_staging=staging)
+
+
 def test_phase_a_manifest_pins_order_and_deferred_skill_in_canonical_identity(tmp_path):
     forward, deferred, staging = phase_a_declarations()
     result = {"source_commit": "1" * 40, "archive_sha256": "2" * 64,
