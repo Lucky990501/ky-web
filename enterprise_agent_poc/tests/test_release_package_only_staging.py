@@ -1,4 +1,4 @@
-"""SP1-SP11: explicitly declared Phase A Skill package without Agent transition."""
+"""SP1-SP12: explicitly declared Phase A Skill package without Agent transition."""
 import copy
 import io
 import json
@@ -179,3 +179,11 @@ def test_sp11_post_stage_failure_keeps_proven_forward_safe_dormant_package(tmp_p
     assert bindings(candidate) == before
     assert all(agent["slug"] != SLUG for agent in ProductStore(candidate._store).agents("tenant-a"))
     assert transition.package_only_state(candidate, pinned, required=True) == "EXACT"
+
+
+def test_sp12_package_only_declaration_rejects_binding_transition():
+    staging, deferred = declarations()
+    manifest = {"skill_package_staging": staging, "deferred_skill": deferred,
+                "binding_transition": {"agents": []}}
+    with pytest.raises(transition.TransitionBlocked, match="package_only_binding_transition_forbidden"):
+        transition.package_only_declaration(manifest, transition.candidate_packages(BUNDLE), BUNDLE)
