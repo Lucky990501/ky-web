@@ -186,11 +186,11 @@ def final_preflight(base, candidate, predecessor):
                 and state.get("cwd") == str(prior_root) and state.get("module_ok")
                 and state.get("exe") == str((base / "venv/bin/python").resolve()), f"preflight_{role}_runtime")
 
-    registry = registry_for(base, prior_root / "skill_packages")
-    active = bindings(registry)  # Includes manifest consistency for every agent.
-    packages = transition.candidate_packages(root / "skill_packages")
     deferred = manifest.get("deferred_skill")
     staging = manifest.get("skill_package_staging")
+    registry = registry_for(base, prior_root / "skill_packages" if staging else None)
+    active = bindings(registry)  # Includes manifest consistency for every agent.
+    packages = transition.candidate_packages(root / "skill_packages")
     if deferred:
         require(deferred == json.loads((root / "deploy/phase_a_deferred_wechat_skill.json").read_text()),
                 "deferred_skill_declaration_mismatch")
@@ -279,9 +279,9 @@ def verify_state(base, candidate, predecessor, snapshot, *, rollback=False):
     # Legacy approved subsets remain supported; require no pending trusted DDL.
     from scripts import migrate
     require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
-    registry = registry_for(base, root / "skill_packages")
-    registry.verify_bootstrap()
     candidate_manifest = json.loads(candidate.read_text())
+    registry = registry_for(base, root / "skill_packages" if candidate_manifest.get("skill_package_staging") else None)
+    registry.verify_bootstrap()
     declared = candidate_manifest.get("deferred_skill")
     package_state = None
     if declared:
