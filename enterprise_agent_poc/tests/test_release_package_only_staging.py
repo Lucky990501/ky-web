@@ -9,6 +9,7 @@ import zipfile
 import pytest
 
 from app.product_store import ProductStore
+from app.agent_productization import AgentProductization
 from app.skill_registry import SkillRegistry, SkillRegistryError
 from app.store import POCStore
 from scripts import release_binding_transition as transition
@@ -44,6 +45,7 @@ def fixture_registry(tmp_path):
     store = POCStore(tmp_path / "registry.db")
     store.seed_demo_data()
     ProductStore(store).initialize()
+    AgentProductization(store).initialize()
     data_root = tmp_path / "skill-registry"
     predecessor = SkillRegistry(store, data_root, old_bundle)
     predecessor.initialize()
