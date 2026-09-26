@@ -306,11 +306,17 @@ def phase_a_absence(registry, deferred):
     with registry._read_connection() as conn:
         require(not conn.execute("SELECT 1 FROM agent_templates WHERE slug=?", (deferred["slug"],)).fetchone(),
                 "phase_a_agent_not_absent")
-        for query in (
-            "SELECT 1 FROM agent_template_versions v JOIN agent_templates t ON t.id=v.agent_template_id WHERE t.slug=? LIMIT 1",
+        revision_table = registry._store.is_postgres or bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_template_versions'"
+        ).fetchone())
+        queries = [
             "SELECT 1 FROM tenant_agent_instances i JOIN agent_templates t ON t.id=i.agent_id WHERE t.slug=? LIMIT 1",
             "SELECT 1 FROM agent_skill_bindings b JOIN agent_templates t ON t.id=b.agent_id WHERE t.slug=? LIMIT 1",
-        ):
+        ]
+        if revision_table:
+            queries.append("SELECT 1 FROM agent_template_versions v JOIN agent_templates t "
+                           "ON t.id=v.agent_template_id WHERE t.slug=? LIMIT 1")
+        for query in queries:
             require(not conn.execute(query, (deferred["slug"],)).fetchone(), "phase_a_agent_not_absent")
     return {"agent": "ABSENT", "published_revision": "ABSENT", "tenant_instance": "ABSENT",
             "binding": "ABSENT", "discovery": "ABSENT"}

@@ -123,6 +123,7 @@ def test_sp5_wrong_bundled_manifest_identity_blocks_before_stage(tmp_path):
     _, candidate, manifest, packages, _, _ = fixture_registry(tmp_path)
     before = counts(candidate)
     manifest["skill_package_staging"]["package"]["bundled_manifest_sha256"] = "0" * 64
+    manifest["deferred_skill"]["bundled_manifest_sha256"] = "0" * 64
     with pytest.raises(transition.TransitionBlocked, match="SKILL_PACKAGE_IDENTITY_CONFLICT"):
         transition.package_only_declaration(manifest, packages, BUNDLE)
     assert counts(candidate) == before
