@@ -8,7 +8,11 @@ from uuid import uuid4
 
 from app.security import RuntimeTokenIssuer, RuntimePrincipal, TokenError
 from app.store import POCStore
-from app.tool_dependencies import ToolInputValidationError
+from app.tool_dependencies import (
+    RECONSTRUCTION_CONTRACT,
+    RetryReceiptLedger,
+    ToolInputValidationError,
+)
 from app.product_store import ProductStore
 from app.knowledge import KnowledgeRetrievalService
 from app.settings import Settings
@@ -29,6 +33,7 @@ class PlatformMCPService:
         self._tokens = token_issuer
         self._settings = settings
         self._knowledge = KnowledgeRetrievalService(ProductStore(store), settings)
+        self._retry_receipts = RetryReceiptLedger()
 
     def enterprise_config_get(self, bearer_token: str) -> dict:
         principal = self._principal(bearer_token, "enterprise_config:read")
@@ -63,15 +68,49 @@ class PlatformMCPService:
         self._audit(principal.tenant_id, "asset_search", "completed")
         return self._store.asset_search(principal.tenant_id, query, asset_type)
 
-    async def image_generation(self, bearer_token: str, prompt: str, references: list[str], aspect_ratio: str) -> dict:
+    async def image_generation(self, bearer_token: str, prompt: str,
+                               references: list[str], aspect_ratio: str,
+                               *, retry_of: str | None = None,
+                               execution_scope: str = "legacy-runtime") -> dict:
         principal = self._principal(bearer_token, "image:generate")
+        submitted_args = {
+            "prompt": prompt,
+            "references": references,
+            "aspect_ratio": aspect_ratio,
+        }
+        retry_audit = None
+        if retry_of is not None:
+            effective_args, retry_audit = self._retry_receipts.reconstruct(
+                retry_of,
+                principal=principal,
+                execution_scope=execution_scope,
+                server="platform",
+                tool="image_generation",
+                submitted_args=submitted_args,
+            )
+        else:
+            effective_args = submitted_args
+        prompt = effective_args["prompt"]
+        references = effective_args["references"]
+        aspect_ratio = effective_args["aspect_ratio"]
         self._audit(principal.tenant_id, "image_generation", "started")
         if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5"}:
             self._audit(principal.tenant_id, "image_generation", "failed")
-            raise ToolInputValidationError(
+            error = ToolInputValidationError(
                 "当前图片网关只允许 1:1、9:16、16:9、4:5 比例。",
                 repairable_fields=("aspect_ratio",),
+                allowed_values={"aspect_ratio": ("1:1", "9:16", "16:9", "4:5")},
+                coupled_text_fields={"aspect_ratio": ("prompt",)},
             )
+            error.retry_receipt = self._retry_receipts.issue(
+                principal=principal,
+                execution_scope=execution_scope,
+                server="platform",
+                tool="image_generation",
+                original_args=effective_args,
+                error=error,
+            )
+            raise error
         api_key = os.environ.get(self._settings.image_api_key_env)
         if not api_key:
             raise RuntimeError(f"未配置图片服务 API Key 环境变量：{self._settings.image_api_key_env}。")
@@ -126,6 +165,22 @@ class PlatformMCPService:
                 }
             ],
         }
+        if retry_audit is not None:
+            result["_tool_dependency"] = {
+                **retry_audit,
+                "status": "completed",
+                "provider_invoked": True,
+            }
+        else:
+            result["_tool_dependency"] = {
+                "contract": RECONSTRUCTION_CONTRACT,
+                "status": "completed",
+                "provider_invoked": True,
+                "submitted_args": submitted_args,
+                "effective_args": effective_args,
+                "ignored_retry_argument_drift": [],
+                "coupled_repairs": [],
+            }
         self._audit(principal.tenant_id, "image_generation", "completed")
         return result
 

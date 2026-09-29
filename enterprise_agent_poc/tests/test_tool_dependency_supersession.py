@@ -16,8 +16,8 @@ from app.runtime.codex_provider import CodexRuntimeProvider
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.service import AgentService
 from app.tool_dependencies import (
-    ToolInputValidationError, attempt_observation, input_failure, now,
-    resolve_dependencies,
+    InvalidRetryLineage, RetryReceiptLedger, ToolInputValidationError,
+    attempt_observation, input_failure, now, resolve_dependencies,
 )
 from test_run_trace import FakeRuntime, product_task_fixture
 
@@ -47,6 +47,7 @@ class ReplayRuntime(FakeRuntime):
         self.turn_count = 0
         self.gateway_calls = 0
         self.downloads = 0
+        self.provider_payloads = []
 
     async def run_turn(self, session, message):
         self.turn_count += 1
@@ -80,11 +81,25 @@ class ReplayRuntime(FakeRuntime):
             await invoke({**base, "prompt": "image-A", "aspect_ratio": "4:5"})
             await invoke({**base, "prompt": "image-B", "aspect_ratio": "1:1"})
         else:
+            if self.mode in {"drift-replace", "drift-delete"}:
+                base["prompt"] = "秋季招生海报，构图比例 3:4，突出课程"
+            elif self.mode == "drift-rewrite":
+                base["prompt"] = "秋季招生海报，突出课程和报名方式，3:4"
             failure = await invoke(base)
             assert self.gateway_calls == 0 and self.downloads == 0
             if self.mode != "no-retry":
                 ratio = "invalid-again" if self.mode == "retry-fail" else "4:5"
-                await invoke({**base, "aspect_ratio": ratio, "retry_of": failure["retry_of"]})
+                retry = {**base, "aspect_ratio": ratio, "retry_of": failure["retry_of"]}
+                if self.mode == "drift-replace":
+                    retry["prompt"] = "秋季招生海报，构图比例 4:5，突出课程"
+                elif self.mode == "drift-delete":
+                    retry["prompt"] = "秋季招生海报，突出课程"
+                elif self.mode == "drift-rewrite":
+                    retry["prompt"] = "科幻电影海报，4:5"
+                    retry["references"] = ["model-added-reference"]
+                elif self.mode == "invalid-token":
+                    retry["retry_of"] = "forged-receipt"
+                await invoke(retry)
         result = SimpleNamespace(items=items, usage=None, final_response="完整海报回复",
                                  status="completed", error=None, duration_ms=1, turn_id="isolated-turn")
         return CodexRuntimeProvider(None)._runtime_turn_from_result(session, SimpleNamespace(), result)
@@ -115,6 +130,7 @@ def replay(tmp_path, monkeypatch, mode="correction"):
             assert url == "https://image-api.luckio.cn/api/v1/images/generate"
             assert json["size"] in {"1024x1024", "1024x1536"}
             runtime.gateway_calls += 1
+            runtime.provider_payloads.append(dict(json))
             return httpx.Response(200, json={"code": 0, "request_id": "stub-request",
                 "data": {"image_url": "https://stub.invalid/image.png", "file_name": "stub.png"}})
 
@@ -157,6 +173,57 @@ def test_DS2_DS3_DS4_original_case_retains_failed_attempt_and_explicit_lineage(t
     assert payload["logical_tool_dependencies"][0]["status"] == "satisfied"
 
 
+@pytest.mark.parametrize("mode,expected", [
+    ("drift-replace", "秋季招生海报，构图比例 4:5，突出课程"),
+    ("drift-delete", "秋季招生海报，构图比例 4:5，突出课程"),
+    ("drift-rewrite", "秋季招生海报，突出课程和报名方式，4:5"),
+])
+def test_V11_03_04_05_real_model_drift_is_reconstructed(tmp_path, monkeypatch, mode, expected):
+    runtime, _, _, saved, trace, _ = replay(tmp_path, monkeypatch, mode)
+    assert saved["status"] == "completed"
+    assert runtime.gateway_calls == 1
+    assert runtime.provider_payloads[0]["prompt"] == expected
+    first, second = trace["payload"]["mcp_calls"]
+    assert first["superseded_by"] == second["attempt_id"]
+    assert second["retry_receipt_validated"] is True
+    assert second["effective_args"]["prompt"] == expected
+    if mode in {"drift-delete", "drift-rewrite"}:
+        assert "prompt" in second["ignored_retry_argument_drift"]
+    if mode == "drift-rewrite":
+        assert second["effective_args"]["references"] == []
+        assert "references" in second["ignored_retry_argument_drift"]
+
+
+def test_V11_01_receipt_declares_retry_contract(tmp_path, monkeypatch):
+    _, _, _, _, trace, _ = replay(tmp_path, monkeypatch, "no-retry")
+    first = trace["payload"]["mcp_calls"][0]
+    assert first["failure_category"] == "argument_validation_error"
+    assert first["repairable_fields"] == ["aspect_ratio"]
+    assert first["coupled_repairs"] == [{
+        "field": "aspect_ratio", "from": "3:4",
+        "allowed_values": ["1:1", "9:16", "16:9", "4:5"],
+        "coupled_text_fields": ["prompt"],
+    }]
+    ledger, retry, principal, args = _ledger_receipt()
+    error = ToolInputValidationError(
+        "invalid", repairable_fields=("aspect_ratio",),
+        allowed_values={"aspect_ratio": ("1:1", "4:5")},
+        coupled_text_fields={"aspect_ratio": ("prompt",)},
+    )
+    public = input_failure(args, error, retry)
+    assert public["retryable"] is True
+    assert public["retry_of"].startswith("rtr1_")
+    assert public["repairable_fields"] == ["aspect_ratio"]
+
+
+def test_V11_02_06_submitted_and_effective_args_are_both_audited(tmp_path, monkeypatch):
+    _, _, _, saved, trace, _ = replay(tmp_path, monkeypatch, "drift-delete")
+    assert saved["status"] == "completed"
+    retry = trace["payload"]["mcp_calls"][1]
+    assert retry["submitted_args"]["prompt"] == "秋季招生海报，突出课程"
+    assert retry["effective_args"]["prompt"] == "秋季招生海报，构图比例 4:5，突出课程"
+
+
 @pytest.mark.parametrize("mode,expected,count", [
     ("independent-fail", "failed", 1), ("independent-success", "completed", 2),
 ])
@@ -171,6 +238,135 @@ def test_DS7_same_tool_different_requirement_without_lineage_never_merges():
     second.pop("retry_of")
     _, dependencies, required = resolve_dependencies([first, second])
     assert len(dependencies) == 2 and not required["image_generation"]["satisfied"]
+
+
+def _ledger_receipt(*, scope="turn-1", principal=None):
+    principal = principal or RuntimePrincipal(
+        "tenant-a", "image-agent", "profile-a", ("image:generate",), int(time.time()) + 60,
+    )
+    args = {"prompt": "海报 3:4", "references": [], "aspect_ratio": "3:4"}
+    error = ToolInputValidationError(
+        "invalid", repairable_fields=("aspect_ratio",),
+        allowed_values={"aspect_ratio": ("1:1", "4:5")},
+        coupled_text_fields={"aspect_ratio": ("prompt",)},
+    )
+    ledger = RetryReceiptLedger()
+    receipt = ledger.issue(principal=principal, execution_scope=scope,
+                           server="platform", tool="image_generation",
+                           original_args=args, error=error)
+    return ledger, receipt, principal, args
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("token", "invalid_or_forged_receipt"),
+    ("scope", "wrong_execution_scope"),
+    ("server", "wrong_server"),
+    ("tool", "wrong_tool"),
+    ("principal", "wrong_principal"),
+    ("value", "repair_value_not_allowed"),
+])
+def test_V11_07_08_10_invalid_receipt_is_fail_closed(change, reason):
+    ledger, receipt, principal, args = _ledger_receipt()
+    kwargs = dict(token=receipt["retry_of"], principal=principal,
+                  execution_scope="turn-1", server="platform",
+                  tool="image_generation",
+                  submitted_args={**args, "aspect_ratio": "4:5"})
+    if change == "token":
+        kwargs["token"] = "rtr1_forged"
+    elif change == "scope":
+        kwargs["execution_scope"] = "turn-2"
+    elif change == "server":
+        kwargs["server"] = "another-server"
+    elif change == "tool":
+        kwargs["tool"] = "another-tool"
+    elif change == "principal":
+        kwargs["principal"] = RuntimePrincipal(
+            "tenant-b", "image-agent", "profile-a", ("image:generate",), int(time.time()) + 60,
+        )
+    elif change == "value":
+        kwargs["submitted_args"]["aspect_ratio"] = "3:2"
+    with pytest.raises(InvalidRetryLineage) as caught:
+        ledger.reconstruct(**kwargs)
+    assert caught.value.reason == reason
+
+
+def test_V11_08_runtime_task_scope_is_not_model_authored():
+    from app.platform_mcp.server import _execution_scope_from_context
+    profile = SimpleNamespace(reasoning_effort="high")
+    config = CodexRuntimeProvider._runtime_session_config(profile, "task-scope-a")
+    assert config["mcp_servers"]["platform"]["http_headers"] == {
+        "X-Runtime-Execution-Scope": "task-scope-a",
+    }
+    ctx = SimpleNamespace(request_context=SimpleNamespace(
+        request=SimpleNamespace(headers={
+            "x-runtime-execution-scope": "task-scope-a",
+            "mcp-session-id": "transport-session",
+        })
+    ))
+    assert _execution_scope_from_context(ctx, "bearer") == "runtime:task-scope-a"
+
+
+def test_V11_09_unapproved_structured_drift_is_ignored_and_receipt_is_one_use():
+    ledger, receipt, principal, args = _ledger_receipt()
+    submitted = {**args, "prompt": "完全不同 4:5", "references": ["foreign"], "aspect_ratio": "4:5"}
+    effective, audit = ledger.reconstruct(
+        receipt["retry_of"], principal=principal, execution_scope="turn-1",
+        server="platform", tool="image_generation", submitted_args=submitted,
+    )
+    assert effective == {"prompt": "海报 4:5", "references": [], "aspect_ratio": "4:5"}
+    assert audit["ignored_retry_argument_drift"] == ["prompt", "references"]
+    with pytest.raises(InvalidRetryLineage) as caught:
+        ledger.reconstruct(
+            receipt["retry_of"], principal=principal, execution_scope="turn-1",
+            server="platform", tool="image_generation", submitted_args=submitted,
+        )
+    assert caught.value.reason == "receipt_already_consumed"
+
+
+def test_V11_10_receipt_cannot_be_issued_without_allowed_values():
+    principal = RuntimePrincipal(
+        "tenant-a", "image-agent", "profile-a", ("image:generate",), int(time.time()) + 60,
+    )
+    with pytest.raises(ValueError, match="allowed-values"):
+        RetryReceiptLedger().issue(
+            principal=principal, execution_scope="turn-1", server="platform",
+            tool="image_generation", original_args={"aspect_ratio": "bad"},
+            error=ToolInputValidationError("invalid", repairable_fields=("aspect_ratio",)),
+        )
+
+
+@pytest.mark.parametrize("prompt,expected,occurrences", [
+    ("首图 3:4，次图也标注 3:4", "首图 4:5，次图也标注 4:5", 2),
+    ("海报比例由结构化字段控制", "海报比例由结构化字段控制", 0),
+])
+def test_V11_coupled_repair_replaces_all_exact_occurrences_or_keeps_original(
+        prompt, expected, occurrences):
+    _, _, principal, args = _ledger_receipt()
+    # Issue a receipt whose canonical prompt exercises the requested boundary.
+    error = ToolInputValidationError(
+        "invalid", repairable_fields=("aspect_ratio",),
+        allowed_values={"aspect_ratio": ("1:1", "4:5")},
+        coupled_text_fields={"aspect_ratio": ("prompt",)},
+    )
+    ledger = RetryReceiptLedger()
+    args["prompt"] = prompt
+    receipt = ledger.issue(principal=principal, execution_scope="turn-1",
+                           server="platform", tool="image_generation",
+                           original_args=args, error=error)
+    effective, audit = ledger.reconstruct(
+        receipt["retry_of"], principal=principal, execution_scope="turn-1",
+        server="platform", tool="image_generation",
+        submitted_args={**args, "prompt": "MODEL DRIFT", "aspect_ratio": "4:5"},
+    )
+    assert effective["prompt"] == expected
+    assert audit["coupled_repairs"][0]["occurrences"] == occurrences
+
+
+def test_V11_07_invalid_token_blocks_provider(tmp_path, monkeypatch):
+    runtime, _, _, saved, trace, _ = replay(tmp_path, monkeypatch, "invalid-token")
+    assert saved["status"] == "failed"
+    assert runtime.gateway_calls == runtime.downloads == 0
+    assert trace["payload"]["mcp_calls"][1]["failure_category"] == "invalid_retry_lineage"
 
 
 def test_identical_modern_arguments_do_not_imply_same_requirement_or_retry():
@@ -279,9 +475,11 @@ def test_receipt_with_provider_side_effect_or_wrong_identity_is_rejected():
         assert "retry_token" not in call
 
 
-def test_validation_error_arguments_and_receipt_remain_content_free():
+def test_validation_receipt_is_content_free_while_attempt_audit_retains_arguments():
     args = {"prompt": "PRIVATE_ENTERPRISE_PROMPT", "format": "bad"}
     receipt = input_failure(args, ToolInputValidationError("invalid format", repairable_fields=("format",)))
     attempt = observed(args, result={"structuredContent": receipt})
-    assert "PRIVATE_ENTERPRISE_PROMPT" not in json.dumps(receipt) + json.dumps(attempt)
+    assert "PRIVATE_ENTERPRISE_PROMPT" not in json.dumps(receipt)
+    assert attempt["submitted_args"]["prompt"] == "PRIVATE_ENTERPRISE_PROMPT"
+    assert attempt["effective_args"] == attempt["submitted_args"]
     assert attempt["argument_fingerprints"] and attempt["provider_invoked"] is False

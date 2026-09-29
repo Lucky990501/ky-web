@@ -234,6 +234,20 @@ class CodexRuntimeProvider(RuntimeProvider):
         return Sandbox.read_only if policy is SandboxPolicy.READ_ONLY else Sandbox.workspace_write
 
     @staticmethod
+    def _runtime_session_config(profile: RuntimeProfile, execution_scope: str) -> dict:
+        """Install a server-visible, model-inaccessible scope per product Task."""
+        return {
+            "model_reasoning_effort": profile.reasoning_effort,
+            "mcp_servers": {
+                "platform": {
+                    "http_headers": {
+                        "X-Runtime-Execution-Scope": execution_scope,
+                    },
+                },
+            },
+        }
+
+    @staticmethod
     def _rollout_unavailable(error: Exception) -> bool:
         text = str(error).lower()
         return "no rollout found for thread id" in text or (
@@ -245,12 +259,13 @@ class CodexRuntimeProvider(RuntimeProvider):
     async def create_session(self, profile: RuntimeProfile, developer_instructions: str) -> RuntimeSession:
         codex = await self._manager.get(profile)
         self._manager._start_event(profile, "thread_start_requested")
+        execution_scope = uuid4().hex
         try:
             thread = await codex.thread_start(
                 cwd=str(self._manager._paths(profile)[1]),
                 developer_instructions=developer_instructions,
                 model=profile.model_id,
-                config={"model_reasoning_effort": profile.reasoning_effort},
+                config=self._runtime_session_config(profile, execution_scope),
                 model_provider=profile.model_provider_id,
                 sandbox=self._sandbox(profile.sandbox),
             )
@@ -274,12 +289,13 @@ class CodexRuntimeProvider(RuntimeProvider):
     ) -> RuntimeSession:
         codex = await self._manager.get(profile)
         self._manager._start_event(profile, "thread_resume_requested")
+        execution_scope = uuid4().hex
         try:
             thread = await codex.thread_resume(
                 thread_id,
                 cwd=str(self._manager._paths(profile)[1]),
                 model=profile.model_id,
-                config={"model_reasoning_effort": profile.reasoning_effort},
+                config=self._runtime_session_config(profile, execution_scope),
                 model_provider=profile.model_provider_id,
                 sandbox=self._sandbox(profile.sandbox),
             )
@@ -299,7 +315,7 @@ class CodexRuntimeProvider(RuntimeProvider):
                 cwd=str(self._manager._paths(profile)[1]),
                 developer_instructions=recovered_instructions,
                 model=profile.model_id,
-                config={"model_reasoning_effort": profile.reasoning_effort},
+                config=self._runtime_session_config(profile, execution_scope),
                 model_provider=profile.model_provider_id,
                 sandbox=self._sandbox(profile.sandbox),
             )
@@ -366,8 +382,9 @@ class CodexRuntimeProvider(RuntimeProvider):
                     "status": status,
                     "duration_ms": getattr(item, "duration_ms", None),
                     "error": self._summary(getattr(item, "error", None)),
-                    # Match retries by full arguments, not the truncated display
-                    # summary. Do not retain additional enterprise content.
+                    # Compatibility fingerprint uses full arguments, not the
+                    # truncated display summary. V1.1 separately retains
+                    # submitted/effective args in the authorized Run Trace.
                     "dependency_id": hashlib.sha256(json.dumps(parsed_arguments if parsed_arguments is not None else arguments, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest(),
                     "result_is_error": bool(getattr(tool_result, "is_error", False) or
                                             (isinstance(tool_result, dict) and (tool_result.get("isError") or tool_result.get("is_error")))),
