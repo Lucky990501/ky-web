@@ -378,7 +378,7 @@ def test_member_status_floor_schema014_accepts_only_exact_production_predecessor
     _set_productized_epoch(h['store'])
     result = pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['evidence_version'] == 'fixed_cc14481_member_status_predecessor'
+    assert result['evidence_version'] == 'fixed_7daaf0c_member_status_predecessor'
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
         pg_gate(h, target_id=OLD_DIRECT_PREDECESSOR_ID, commit=OLD_DIRECT_PREDECESSOR_COMMIT)
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):

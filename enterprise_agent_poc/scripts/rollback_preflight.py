@@ -295,7 +295,7 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
         target_root, _ = release_identity(base, target_id, target_commit, predecessor)
         # This immutable predecessor contains the complete Schema 014 lock.
         target_lock = schema_lock
-        evidence = {'version': 'fixed_cc14481_member_status_predecessor', 'data_scope': 'productized_v1'}
+        evidence = {'version': 'fixed_7daaf0c_member_status_predecessor', 'data_scope': 'productized_v1'}
     else:
         require(self_target and bool(active_floors), 'unapproved_target')
         target_root, target_lock = own_source, schema_lock
