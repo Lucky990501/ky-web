@@ -11,6 +11,7 @@ from app.runtime.base import RuntimeProvider, RuntimeStartError
 from app.settings import Settings
 from app.store import POCStore
 from app.agent_catalog import get_agent
+from app.tool_dependencies import AUDIT_FIELDS, call_completed, resolve_dependencies
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +115,7 @@ class AgentService:
             "lifecycle_events": [],
             "tool_calls_completed": False,
             "required_tool_calls": {},
+            "logical_tool_dependencies": [],
             "required_tool_calls_completed": False,
             "runtime_status": None,
             "runtime_completed": False,
@@ -351,34 +353,17 @@ class AgentService:
             # Do not persist private source material or tool argument summaries.
             # These fields suffice for dependency checks and artifact ownership.
             safe_keys = {"server", "tool", "status", "duration_ms", "dependency_id",
-                         "result_is_error", "artifact", "retrieval_observation"}
+                         "result_is_error", "artifact", "retrieval_observation"} | AUDIT_FIELDS
             calls = [{key: value for key, value in call.items() if key in safe_keys} for call in calls]
+        calls, logical_dependencies, required_status = resolve_dependencies(calls)
         trace["mcp_calls"] = calls
         trace["tool_calls"] = [{"server": call["server"], "tool": call["tool"], "status": call["status"]} for call in calls]
         trace["lifecycle_events"] = list(turn.lifecycle_events)
         trace["tool_calls_completed"] = bool(calls) and all(call.get("status", "").lower() == "completed" for call in calls)
-        # Observed MCP requests are the conservative dependency evidence; we do
-        # not infer semantic dependencies from model prose or impose tool order.
-        required = list(dict.fromkeys(call["tool"] for call in calls))
-        required_status = {}
-        for tool in required:
-            attempts = [call for call in calls if call.get("tool") == tool]
-            completed_attempts = sum(AgentService._call_completed(call) for call in attempts)
-            final_attempts = {}
-            for call in attempts:
-                # Older traces have no full-argument fingerprint. Keep their
-                # tool-level fallback explicit rather than invent query IDs.
-                key = (call.get("server"), call.get("dependency_id", "legacy-tool"))
-                final_attempts[key] = call
-            required_status[tool] = {
-                "attempts": len(attempts),
-                "completed_attempts": completed_attempts,
-                "failed_attempts": sum(call.get("status", "").lower().endswith("failed") for call in attempts),
-                "satisfied": bool(final_attempts) and all(AgentService._call_completed(call) for call in final_attempts.values()),
-            }
+        trace["logical_tool_dependencies"] = logical_dependencies
         trace["required_tool_calls"] = required_status
         trace["required_tool_calls_completed"] = all(item["satisfied"] for item in required_status.values())
-        trace["required_tool_dependency_source"] = "observed_mcp_requests"
+        trace["required_tool_dependency_source"] = "observed_mcp_requests_with_explicit_input_retry_lineage"
         trace["artifact_required"] = requires_image_generation
         trace["runtime_status"] = str(getattr(turn.status, "value", turn.status) or "unknown").rsplit(".", 1)[-1].lower()
         trace["runtime_completed"] = trace["runtime_status"] in {"completed", "success"} and not turn.error
@@ -416,8 +401,7 @@ class AgentService:
 
     @staticmethod
     def _call_completed(call: dict) -> bool:
-        status = str(getattr(call.get("status"), "value", call.get("status")) or "unknown").rsplit(".", 1)[-1].lower()
-        return status == "completed" and not call.get("error") and not call.get("result_is_error")
+        return call_completed(call)
 
     def mark_persistence_failed(self, run_id: str, tenant_id: str, stage: str) -> None:
         trace = self._store.run_trace(run_id, tenant_id)

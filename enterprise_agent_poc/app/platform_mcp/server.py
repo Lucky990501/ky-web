@@ -9,15 +9,17 @@ place this endpoint behind TLS and a service-only network policy.
 
 import os
 import asyncio
+import json
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import ToolAnnotations, CallToolResult, TextContent
 
 from app.platform_mcp.service import PlatformMCPService
 from app.security import RuntimeTokenIssuer
 from app.settings import settings
 from app.store import POCStore
+from app.tool_dependencies import ToolInputValidationError, input_failure
 
 
 store = POCStore(settings.database_url)
@@ -62,9 +64,22 @@ def create_mcp():
         return service.asset_search(_bearer_from_context(ctx), query, asset_type)
 
     @mcp.tool()
-    async def image_generation(prompt: str, references: list[str], aspect_ratio: str, ctx: Context = None) -> dict:
-        """Generate an image via the platform Tool Gateway."""
-        return await service.image_generation(_bearer_from_context(ctx), prompt, references, aspect_ratio)
+    async def image_generation(prompt: str, references: list[str], aspect_ratio: str,
+                               ctx: Context = None, retry_of: str | None = None) -> dict[str, Any]:
+        """Generate an image via the platform Tool Gateway.
+
+        For the SAME requirement's input correction, copy retry_of from the
+        validation error. For a new independent image, omit retry_of.
+        """
+        arguments = {"prompt": prompt, "references": references, "aspect_ratio": aspect_ratio}
+        try:
+            return await service.image_generation(_bearer_from_context(ctx), prompt, references, aspect_ratio)
+        except ToolInputValidationError as error:
+            # The generic contract is emitted only for typed, pre-side-effect
+            # input failures. Provider/auth/storage errors receive no receipt.
+            failure = input_failure(arguments, error)
+            return CallToolResult(isError=True, structuredContent=failure,
+                                  content=[TextContent(type="text", text=json.dumps(failure, ensure_ascii=False))])
 
     return mcp
 

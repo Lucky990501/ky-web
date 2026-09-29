@@ -182,10 +182,14 @@ class TaskService:
 
     @staticmethod
     def _image_storage_key(trace: dict) -> str | None:
+        dependencies = trace["payload"].get("logical_tool_dependencies")
+        active_ids = ({item["active_attempt_id"] for item in dependencies
+                       if item.get("satisfied")} if dependencies else None)
         completed_calls = [
             call
             for call in trace["payload"].get("mcp_calls", [])
-            if call.get("tool") == "image_generation" and call.get("status", "").lower() == "completed"
+            if call.get("tool") == "image_generation" and AgentService._call_completed(call)
+            and (active_ids is None or call.get("attempt_id") in active_ids)
         ]
         for call in completed_calls:
             artifact = call.get("artifact")

@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn, SandboxPolicy
 from app.activity_plan_runtime import (
@@ -25,6 +26,7 @@ from app.grounded_writing_runtime import (
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.skills import SkillDeployment
 from app.settings import Settings
+from app.tool_dependencies import attempt_observation, now, resolve_dependencies
 
 
 MAX_STRUCTURED_MODEL_ATTEMPTS = 2
@@ -330,7 +332,10 @@ class CodexRuntimeProvider(RuntimeProvider):
         lifecycle_events: list[dict] = [{"event": "turn_started"}]
         usage = result.usage
         mcp_calls: list[dict] = []
-        for wrapped_item in result.items:
+        scope = str(getattr(result, "turn_id", None) or uuid4().hex)
+        scope = f"{session.thread_id}:{scope}"
+        timestamps = getattr(result, "attempt_timestamps", {})
+        for index, wrapped_item in enumerate(result.items):
             item = getattr(wrapped_item, "root", wrapped_item)
             if getattr(profile,"profile_hash_version","v1") == "v2" and getattr(item,"exit_code",None) == 0:
                 for wrapped_action in getattr(item,"command_actions",()):
@@ -367,6 +372,18 @@ class CodexRuntimeProvider(RuntimeProvider):
                     "result_is_error": bool(getattr(tool_result, "is_error", False) or
                                             (isinstance(tool_result, dict) and (tool_result.get("isError") or tool_result.get("is_error")))),
                 }
+                call_id = str(getattr(item, "id", None) or f"observed-{index}")
+                times = timestamps.get(call_id, {})
+                observed_at = now()
+                call.update(attempt_observation(
+                    parsed_arguments if parsed_arguments is not None else arguments,
+                    tool_result, scope=scope, tool_call_id=call_id,
+                    created_at=times.get("created_at", observed_at),
+                    completed_at=times.get("completed_at", observed_at),
+                ))
+                if call.get("failure_category"):
+                    call["status"] = "failed"
+                    call["result_is_error"] = True
                 if tool == "image_generation":
                     artifact = self._image_artifact(tool_result)
                     if artifact:
@@ -667,19 +684,9 @@ class CodexRuntimeProvider(RuntimeProvider):
     @staticmethod
     def _grounding_required_tools_satisfied(profile: RuntimeProfile, turns: list[RuntimeTurn]) -> bool:
         calls = [call for turn in turns for call in turn.mcp_calls]
-        final_attempts = {}
-        for call in calls:
-            final_attempts[(call.get("tool"), call.get("server"), call.get("dependency_id", "legacy-tool"))] = call
-        if not all(
-            call.get("status") == "completed" and not call.get("error")
-            and not call.get("result_is_error") for call in final_attempts.values()
-        ):
-            return False
-        return all(any(
-            call.get("tool") == required and call.get("status") == "completed"
-            and not call.get("error") and not call.get("result_is_error")
-            for call in final_attempts.values()
-        ) for required in profile.required_tools)
+        _, dependencies, required = resolve_dependencies(calls)
+        return (all(item["satisfied"] for item in dependencies)
+                and all(required.get(tool, {}).get("satisfied") is True for tool in profile.required_tools))
 
     async def _stream_provider_turn(
         self, session: RuntimeSession, profile: RuntimeProfile, message: str,
@@ -703,6 +710,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         handle = await thread.turn(message, **options)
         self._active_turns[session.thread_id] = handle
         items: list[object] = []
+        attempt_timestamps: dict[str, dict] = {}
         usage = None
         completed = None
         stream = handle.stream()
@@ -718,12 +726,17 @@ class CodexRuntimeProvider(RuntimeProvider):
                     if visible_deltas:
                         yield RuntimeStreamEvent.visible_delta(payload.delta)
                 elif isinstance(payload, ItemStartedNotification) and payload.turn_id == handle.id:
+                    item = getattr(payload.item, "root", payload.item)
+                    if getattr(item, "tool", None) and getattr(item, "id", None):
+                        attempt_timestamps.setdefault(item.id, {})["created_at"] = now()
                     activity = self._safe_tool_activity(getattr(payload, "item", None), "started")
                     if activity:
                         yield activity
                 elif isinstance(payload, ItemCompletedNotification) and payload.turn_id == handle.id:
                     items.append(payload.item)
                     item = getattr(payload.item, "root", payload.item)
+                    if getattr(item, "tool", None) and getattr(item, "id", None):
+                        attempt_timestamps.setdefault(item.id, {})["completed_at"] = now()
                     if (material_sink is not None and getattr(item, "tool", None) in
                             {"knowledge_search", "enterprise_config_get", "asset_search"}
                             and getattr(item, "result", None) is not None):
@@ -751,6 +764,8 @@ class CodexRuntimeProvider(RuntimeProvider):
             status=completed.status,
             error=completed.error,
             duration_ms=completed.duration_ms,
+            turn_id=handle.id,
+            attempt_timestamps=attempt_timestamps,
         )
         yield RuntimeStreamEvent.completed(self._runtime_turn_from_result(session, profile, result))
 

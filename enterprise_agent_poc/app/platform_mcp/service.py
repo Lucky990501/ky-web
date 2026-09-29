@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.security import RuntimeTokenIssuer, RuntimePrincipal, TokenError
 from app.store import POCStore
+from app.tool_dependencies import ToolInputValidationError
 from app.product_store import ProductStore
 from app.knowledge import KnowledgeRetrievalService
 from app.settings import Settings
@@ -65,11 +66,15 @@ class PlatformMCPService:
     async def image_generation(self, bearer_token: str, prompt: str, references: list[str], aspect_ratio: str) -> dict:
         principal = self._principal(bearer_token, "image:generate")
         self._audit(principal.tenant_id, "image_generation", "started")
+        if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5"}:
+            self._audit(principal.tenant_id, "image_generation", "failed")
+            raise ToolInputValidationError(
+                "当前图片网关只允许 1:1、9:16、16:9、4:5 比例。",
+                repairable_fields=("aspect_ratio",),
+            )
         api_key = os.environ.get(self._settings.image_api_key_env)
         if not api_key:
             raise RuntimeError(f"未配置图片服务 API Key 环境变量：{self._settings.image_api_key_env}。")
-        if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5"}:
-            raise ValueError("当前图片网关只允许 1:1、9:16、16:9、4:5 比例。")
         size = {"1:1": "1024x1024", "9:16": "1024x1536", "16:9": "1536x1024", "4:5": "1024x1536"}[aspect_ratio]
         try:
             import httpx
