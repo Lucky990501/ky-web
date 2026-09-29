@@ -130,6 +130,15 @@ knowledge_processing = KnowledgeProcessingService(product_store, settings)
 knowledge_retrieval = KnowledgeRetrievalService(product_store, settings)
 sessions = SessionIssuer(settings.token_secret)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+HTML_REVALIDATION_CACHE_CONTROL = "no-cache, max-age=0, must-revalidate"
+
+
+class ReleaseStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: dict) -> Response:
+        response = await super().get_response(path, scope)
+        if path.replace("\\", "/").lstrip("/") == "index.html":
+            response.headers["Cache-Control"] = HTML_REVALIDATION_CACHE_CONTROL
+        return response
 
 
 @asynccontextmanager
@@ -161,7 +170,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Enterprise AI Agent Runtime POC", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", ReleaseStaticFiles(directory=STATIC_DIR), name="static")
 
 
 _CUSTOMER_ERROR_MESSAGES = {
@@ -392,7 +401,7 @@ async def production_health() -> dict:
 @app.get("/platform/skills", include_in_schema=False)
 @app.get("/platform/agents", include_in_schema=False)
 async def product_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": HTML_REVALIDATION_CACHE_CONTROL})
 
 
 @app.post("/api/v1/auth/login")

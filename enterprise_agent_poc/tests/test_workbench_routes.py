@@ -26,6 +26,19 @@ def test_static_routes_reuse_the_same_workbench_entry_without_redirect(path):
     assert response.content == (STATIC_DIR / 'index.html').read_bytes()
     assert 'location' not in response.headers
     assert response.headers['content-type'].startswith('text/html')
+    assert response.headers.get_list('cache-control') == ['no-cache, max-age=0, must-revalidate']
+
+
+def test_static_index_uses_exact_html_revalidation_policy():
+    client = TestClient(app)
+    response = client.get('/static/index.html')
+    assert response.status_code == 200
+    assert response.content == (STATIC_DIR / 'index.html').read_bytes()
+    assert response.headers.get_list('cache-control') == ['no-cache, max-age=0, must-revalidate']
+
+
+def test_root_index_path_remains_unrouted():
+    assert TestClient(app).get('/index.html').status_code == 404
 
 
 def test_profile_route_does_not_capture_api_or_static_assets():

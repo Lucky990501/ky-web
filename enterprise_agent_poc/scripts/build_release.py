@@ -10,6 +10,7 @@ import platform
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import sys
 
@@ -29,6 +30,17 @@ ALLOWED = (
     "enterprise_agent_poc/docker-compose.yml",
     "enterprise_agent_poc/pyproject.toml",
 )
+STATIC_ROOT = "enterprise_agent_poc/app/static"
+STATIC_INDEX = f"{STATIC_ROOT}/index.html"
+STATIC_ASSETS = {
+    "javascript": f"{STATIC_ROOT}/workbench.js",
+    "stylesheet": f"{STATIC_ROOT}/workbench.css",
+}
+STATIC_VERSION_PLACEHOLDERS = {
+    "javascript": b"__JS_SHA256_V1__",
+    "stylesheet": b"__CSS_SHA256_V1_",
+}
+STATIC_VERSION_LENGTH = 16
 
 
 def git(*args: str) -> str:
@@ -40,6 +52,78 @@ def validate_commit(revision: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", resolved):
         raise RuntimeError("无法解析为明确的 Git commit。")
     return resolved
+
+
+def _git_blob(commit: str, path: str) -> bytes:
+    try:
+        return subprocess.check_output(["git", "-C", str(REPO), "show", f"{commit}:{path}"])
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"发布静态文件缺失：{path}") from exc
+
+
+def _static_asset_contract(commit: str) -> dict:
+    index = _git_blob(commit, STATIC_INDEX)
+    identities = {}
+    for kind, path in STATIC_ASSETS.items():
+        content = _git_blob(commit, path)
+        digest = hashlib.sha256(content).hexdigest()
+        identities[kind] = {"path": path, "sha256": digest, "version": digest[:STATIC_VERSION_LENGTH]}
+
+    packaged_index = index
+    for kind, placeholder in STATIC_VERSION_PLACEHOLDERS.items():
+        if len(placeholder) != STATIC_VERSION_LENGTH:
+            raise RuntimeError(f"静态版本占位符长度无效：{kind}")
+        if packaged_index.count(placeholder) != 1:
+            raise RuntimeError(f"静态版本占位符必须且只能出现一次：{kind}")
+        packaged_index = packaged_index.replace(placeholder, identities[kind]["version"].encode("ascii"))
+
+    if any(placeholder in packaged_index for placeholder in STATIC_VERSION_PLACEHOLDERS.values()):
+        raise RuntimeError("发布 HTML 仍包含静态版本占位符。")
+    expected_references = {
+        "javascript": f'/static/workbench.js?v={identities["javascript"]["version"]}'.encode("ascii"),
+        "stylesheet": f'/static/workbench.css?v={identities["stylesheet"]["version"]}'.encode("ascii"),
+    }
+    for kind, reference in expected_references.items():
+        if packaged_index.count(reference) != 1:
+            raise RuntimeError(f"发布 HTML 静态资源引用不匹配：{kind}")
+    return {"source_index": index, "packaged_index": packaged_index, "identities": identities}
+
+
+def _inject_and_verify_static_assets(raw_archive: Path, contract: dict) -> None:
+    with tarfile.open(raw_archive, "r:") as archive:
+        try:
+            index_member = archive.getmember(STATIC_INDEX)
+        except KeyError as exc:
+            raise RuntimeError(f"发布归档缺少静态入口：{STATIC_INDEX}") from exc
+        if not index_member.isfile():
+            raise RuntimeError(f"发布静态入口不是普通文件：{STATIC_INDEX}")
+        archived_index = archive.extractfile(index_member)
+        if archived_index is None or archived_index.read() != contract["source_index"]:
+            raise RuntimeError("发布归档静态入口与 Git source 不一致。")
+        offset = index_member.offset_data
+        size = index_member.size
+
+    packaged_index = contract["packaged_index"]
+    if len(packaged_index) != size:
+        raise RuntimeError("静态版本注入不得改变归档成员长度。")
+    with raw_archive.open("r+b") as archive_bytes:
+        archive_bytes.seek(offset)
+        archive_bytes.write(packaged_index)
+
+    with tarfile.open(raw_archive, "r:") as archive:
+        packaged_member = archive.extractfile(STATIC_INDEX)
+        if packaged_member is None or packaged_member.read() != packaged_index:
+            raise RuntimeError("发布归档静态入口注入验证失败。")
+        for kind, identity in contract["identities"].items():
+            try:
+                asset_member = archive.extractfile(identity["path"])
+            except KeyError as exc:
+                raise RuntimeError(f"发布归档缺少静态文件：{identity['path']}") from exc
+            if asset_member is None:
+                raise RuntimeError(f"发布归档静态文件不可读：{identity['path']}")
+            actual_sha256 = hashlib.sha256(asset_member.read()).hexdigest()
+            if actual_sha256 != identity["sha256"] or actual_sha256[:STATIC_VERSION_LENGTH] != identity["version"]:
+                raise RuntimeError(f"发布归档静态文件身份不匹配：{kind}")
 
 
 def preflight(commit: str) -> list[str]:
@@ -63,15 +147,18 @@ def preflight(commit: str) -> list[str]:
     for name in selected:
         if secret_content(subprocess.check_output(["git", "-C", str(REPO), "cat-file", "blob", tree[name][2]])):
             raise RuntimeError(f"发布文件含禁止的秘密材料：{name}")
+    _static_asset_contract(commit)
     return selected
 
 
 def build(commit: str, output: Path) -> dict:
     selected = preflight(commit)
+    static_contract = _static_asset_contract(commit)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp_dir:
         raw = Path(temp_dir) / "source.tar"
         subprocess.run(["git", "-C", str(REPO), "archive", "--format=tar", "--output", str(raw), commit, "--", *selected], check=True)
+        _inject_and_verify_static_assets(raw, static_contract)
         with raw.open("rb") as source, output.open("wb") as destination:
             with gzip.GzipFile(filename="", mode="wb", fileobj=destination, compresslevel=9, mtime=0) as compressed:
                 shutil.copyfileobj(source, compressed)
@@ -85,6 +172,7 @@ def build(commit: str, output: Path) -> dict:
         "files": len(selected),
         "selected_files": selected,
         "build_platform": f"{platform.system()}-{platform.machine()}",
+        "static_assets": static_contract["identities"],
     }
 
 

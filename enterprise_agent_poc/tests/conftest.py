@@ -63,6 +63,14 @@ def bundle_git_repo(tmp_path, approved_bundle):
     shutil.copytree(approved_bundle, root / "skill_packages")
     (root / "app").mkdir()
     (root / "app" / "main.py").write_text("# fixture\n", encoding="utf-8")
+    static = root / "app" / "static"
+    static.mkdir()
+    (static / "workbench.js").write_bytes(b"console.log('fixture');\n")
+    (static / "workbench.css").write_bytes(b"body { display: block; }\n")
+    (static / "index.html").write_bytes(
+        b'<link rel="stylesheet" href="/static/workbench.css?v=__CSS_SHA256_V1_">'
+        b'<script src="/static/workbench.js?v=__JS_SHA256_V1__"></script>\n'
+    )
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "approved fixture"], check=True)
     return repo

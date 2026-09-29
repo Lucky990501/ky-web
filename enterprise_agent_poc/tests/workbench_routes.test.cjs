@@ -346,8 +346,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=image-result-ui-status-v1/);
-  assert.match(index,/workbench\.js\?v=image-result-ui-status-v1/);
+  assert.match(index,/workbench\.css\?v=__CSS_SHA256_V1_/);
+  assert.match(index,/workbench\.js\?v=__JS_SHA256_V1__/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
