@@ -134,9 +134,37 @@ const agentPlaceholder=agentId=>agentId==='image-agent'?'描述你想创作的�
 const formatHistoryTime=value=>String(value||'').replace('T',' ').slice(0,16);
 const compactHistoryText=(value,maxLength=10)=>Array.from(String(value||'')).slice(0,maxLength).join('');
 const taskStatusLabel=status=>({queued:'排队中',running:'处理中',completed:'已完成',failed:'失败',cancelled:'已取消'})[status]||'暂无任务';
-const conversationRowHtml=(item,attribute,selected=false)=>{const agent=item.agent||{name:item.agent_id,icon:'bot'},project=item.project||{name:item.title,type:'智能创作项目'},name=project.name||item.title||'未命名项目',prompt=item.latest_prompt||'尚无任务内容';return `<button class="conversation-row ${selected?'selected':''}" ${attribute}="${escapeHtml(item.id)}" data-agent-id="${escapeHtml(item.agent?.slug||item.agent_id)}"><span class="conversation-kind">${item.latest_generation?`<img data-generation-image src="${escapeHtml(storageUrl(item.latest_generation))}" alt="">`:icon(agent.icon||'bot',19)}</span><span class="conversation-copy"><span class="conversation-meta"><em>${escapeHtml(project.type)}</em><i class="history-status ${escapeHtml(item.latest_status||'none')}">${escapeHtml(taskStatusLabel(item.latest_status))}</i></span><b>${escapeHtml(compactHistoryText(name))}</b><small class="conversation-preview">${escapeHtml(compactHistoryText(prompt))}</small></span></button>`;};
-const historyCardHtml=item=>{const agent=item.agent||{name:item.agent_id,icon:'bot'},project=item.project||{name:item.title,type:'智能创作项目'},name=project.name||'未命名项目',prompt=item.latest_prompt||'尚无任务内容',search=[project.name,project.type,agent.name,item.latest_prompt].join(' ').toLowerCase();return `<button class="history-card" data-history-conversation="${escapeHtml(item.id)}" data-history-agent="${escapeHtml(item.agent?.slug||item.agent_id)}" data-history-search="${escapeHtml(search)}"><span class="history-card-visual ${item.latest_generation?'has-image':''}">${item.latest_generation?`<img loading="lazy" decoding="async" data-generation-image src="${escapeHtml(storageUrl(item.latest_generation))}" alt="${escapeHtml(name)}的生成图片">`:icon(agent.icon||'bot',30)}</span><span class="history-card-body"><span class="conversation-meta"><em>${escapeHtml(project.type)}</em><i class="history-status ${escapeHtml(item.latest_status||'none')}">${escapeHtml(taskStatusLabel(item.latest_status))}</i></span><b>${escapeHtml(compactHistoryText(name))}</b><span>${escapeHtml(compactHistoryText(prompt))}</span><small>${escapeHtml(agent.name||item.agent_id)}</small></span>${icon('chevron-right',18)}</button>`;};
+const conversationStatusLabel=item=>item.agent_id==='image-agent'&&item.latest_status==='failed'&&item.latest_generation?.task_id&&item.latest_task?.id&&item.latest_generation.task_id!==item.latest_task.id?'最近一次失败':taskStatusLabel(item.latest_status);
+const imageConversationStatusHtml=item=>item?.latest_status==='failed'?`<p>${conversationStatusLabel(item)==='最近一次失败'?'最近一次生成失败。此前已生成的图片仍可查看和下载。':'最近一次生成失败，请重试。'}</p>`:item?.latest_status==='cancelled'?'<p>已停止生成。已保存的历史结果仍可查看。</p>':'';
+const conversationRowHtml=(item,attribute,selected=false)=>{const agent=item.agent||{name:item.agent_id,icon:'bot'},project=item.project||{name:item.title,type:'智能创作项目'},name=project.name||item.title||'未命名项目',prompt=item.latest_prompt||'尚无任务内容';return `<button class="conversation-row ${selected?'selected':''}" ${attribute}="${escapeHtml(item.id)}" data-agent-id="${escapeHtml(item.agent?.slug||item.agent_id)}"><span class="conversation-kind">${item.latest_generation?`<img data-generation-image src="${escapeHtml(storageUrl(item.latest_generation))}" alt="">`:icon(agent.icon||'bot',19)}</span><span class="conversation-copy"><span class="conversation-meta"><em>${escapeHtml(project.type)}</em><i class="history-status ${escapeHtml(item.latest_status||'none')}">${escapeHtml(conversationStatusLabel(item))}</i></span><b>${escapeHtml(compactHistoryText(name))}</b><small class="conversation-preview">${escapeHtml(compactHistoryText(prompt))}</small></span></button>`;};
+const historyCardHtml=item=>{const agent=item.agent||{name:item.agent_id,icon:'bot'},project=item.project||{name:item.title,type:'智能创作项目'},name=project.name||'未命名项目',prompt=item.latest_prompt||'尚无任务内容',search=[project.name,project.type,agent.name,item.latest_prompt].join(' ').toLowerCase();return `<button class="history-card" data-history-conversation="${escapeHtml(item.id)}" data-history-agent="${escapeHtml(item.agent?.slug||item.agent_id)}" data-history-search="${escapeHtml(search)}"><span class="history-card-visual ${item.latest_generation?'has-image':''}">${item.latest_generation?`<img loading="lazy" decoding="async" data-generation-image src="${escapeHtml(storageUrl(item.latest_generation))}" alt="${escapeHtml(name)}的生成图片">`:icon(agent.icon||'bot',30)}</span><span class="history-card-body"><span class="conversation-meta"><em>${escapeHtml(project.type)}</em><i class="history-status ${escapeHtml(item.latest_status||'none')}">${escapeHtml(conversationStatusLabel(item))}</i></span><b>${escapeHtml(compactHistoryText(name))}</b><span>${escapeHtml(compactHistoryText(prompt))}</span><small>${escapeHtml(agent.name||item.agent_id)}</small></span>${icon('chevron-right',18)}</button>`;};
 const agentCategoryLabel=category=>category==='general'?'通用创作':category||'通用创作';
+const agentConversationRailHtml=(items,selectedId)=>`<button class="button primary full" id="new-chat">${icon('plus')}新建项目</button><div class="conversation-rail-heading"><h3>${escapeHtml(items[0]?.project?.type||'创作项目')}</h3><button class="link-button" data-go="history">全部历史</button></div>${items.map(item=>conversationRowHtml(item,'data-select-agent-conversation',selectedId===item.id)).join('')||'<div class="empty-state">暂无历史项目</div>'}`;
+function bindConversationRail(main,agentId){
+  main.querySelector('#new-chat').onclick=()=>{activeConversationId=null;navigate(agentPage(agentId));};
+  main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.selectAgentConversation;navigate(agentPage(agentId));});
+  bindNavigation();
+}
+async function refreshConversationRail(main,agentId,terminalTask={}){
+  for(const path of ['/api/v1/conversations','/api/v1/generations','/api/v1/workspace'])pageCache.delete(path);
+  if(!main||main.dataset?.page!==agentPage(agentId)||document.querySelector('#main')!==main)return;
+  const rail=main.querySelector('.conversation-rail');if(!rail)return;
+  const token={},identity=main.dataset.agentId;main._conversationRailRefresh=token;
+  // Only a real terminal task may update the existing badge immediately.
+  // An old generation thumbnail never turns a failed task into a success.
+  if(terminalTask.id&&terminalTask.conversation_id&&['completed','failed','cancelled'].includes(terminalTask.status)){
+    const row=[...rail.querySelectorAll('[data-select-agent-conversation]')].find(item=>item.dataset.selectAgentConversation===terminalTask.conversation_id),badge=row?.querySelector('.history-status');
+    if(badge){badge.className=`history-status ${terminalTask.status}`;badge.textContent=taskStatusLabel(terminalTask.status);}
+    const notice=main.querySelector('[data-conversation-result-status]');if(notice&&activeConversationId===terminalTask.conversation_id)notice.innerHTML=imageConversationStatusHtml({latest_status:terminalTask.status});
+  }
+  try{
+    const items=await api('/api/v1/conversations');
+    if(document.querySelector('#main')!==main||main.dataset.page!==agentPage(agentId)||main.dataset.agentId!==identity||main._conversationRailRefresh!==token)return;
+    const scrollTop=rail.scrollTop;rail.innerHTML=agentConversationRailHtml(items.filter(item=>item.agent_id===identity),activeConversationId);rail.scrollTop=scrollTop;
+    const notice=main.querySelector('[data-conversation-result-status]');if(notice)notice.innerHTML=imageConversationStatusHtml(items.find(item=>item.id===activeConversationId));
+    bindConversationRail(main,agentId);refreshIcons();
+  }catch{/* Keep the last authoritative badge if the list refresh is unavailable. */}
+}
 const agentGreetingHtml=agent=>{
   return `<div class="agent-greeting"><span class="agent-greeting-icon" aria-hidden="true">${icon(agent.icon||'bot',40)}</span><div class="agent-greeting-copy"><h1>你好，我是${escapeHtml(agent.name||'智能体')}</h1><p>${escapeHtml(agent.description||'')}</p><span class="agent-greeting-category">${escapeHtml(agentCategoryLabel(agent.category))}</span></div></div>`;
 };
@@ -444,8 +472,9 @@ function updateComposerRunState(main,state){
   if(feedback)feedback.textContent=run.stopError||'';
   refreshIcons();
 }
-function beginConversationRun(state,{taskId=null,agentId=null,phase=ConversationRunPhase.SUBMITTING,restored=false}={}){
+function beginConversationRun(state,{taskId=null,agentId=null,conversationId=activeConversationId,phase=ConversationRunPhase.SUBMITTING,restored=false}={}){
   state.run=state.run||createConversationRunState();state.run.taskId=taskId;state.run.agentId=agentId;state.run.terminal=null;state.run.stopError='';
+  if(agentId==='image-agent')state.run.conversationId=conversationId;
   if(state.run.phase!==phase&&!transitionConversationRun(state.run,phase)&&restored)state.run.phase=phase;
   return state.run;
 }
@@ -455,6 +484,7 @@ function closeStreamingSource(state){
 function settleConversationRun(main,state,terminal){
   const run=state?.run;if(!run)return;
   run.terminal=terminal;
+  if(run.agentId==='image-agent')refreshConversationRail(main,run.agentId,{id:run.taskId,conversation_id:run.conversationId,status:terminal==='error'?'failed':terminal});
   const phase=ConversationRunPhase[String(terminal||'').toUpperCase()];
   if(phase&&run.phase!==phase)transitionConversationRun(run,phase);
   updateComposerRunState(main,state);
@@ -537,6 +567,7 @@ function completeStreamingMessage(node,state,sourcePrompt,main){
     const result=node.querySelector?.('[data-stream-document-result]');if(result)result.innerHTML=documentResultSlotHtml(state.assistantMessageId);
   }else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
   if(state.assistantMessageId&&node.dataset)node.dataset.assistantMessageId=state.assistantMessageId;
+  if(state.generation&&!node.querySelector?.('.message-generation'))node.insertAdjacentHTML?.('beforeend',messageGenerationHtml(state.generation));
   node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);state.completedAt??=Date.now();renderThinkingSummary(node,state);stopWatchingStreamingFollow(state);
 }
 function cancelStreamingMessage(node,state,main){
@@ -567,6 +598,7 @@ async function agentWorkspaceV2(main, agentId) {
   let detail=activeConversationId?await api(`/api/v1/conversations/${activeConversationId}`).catch(()=>null):null;
   if(main.dataset.page!==agentPage(agentId))return;
   const internalId=agent?.id||(detail&&(detail.agent?.slug===agentId||detail.agent_id===agentId)?detail.agent_id:agentId);
+  main.dataset.agentId=internalId;
   const conversations=allConversations.filter(x=>x.agent_id===internalId);
   if(activeConversationId&&detail?.agent_id!==internalId){activeConversationId=null;detail=null;}
   const canRun=agent?.enabled===true;
@@ -576,8 +608,8 @@ async function agentWorkspaceV2(main, agentId) {
   const remainingImages=(detail?.generations||[]).filter(item=>!attachedIds.has(item.id));
   const historicalImages=remainingImages.length?`<section class="conversation-artifacts"><h3>${icon('images',18)}本项目生成图片 <span>${remainingImages.length}</span></h3><div>${remainingImages.map(item=>image(item,detail?.project?.name||'历史生成图片')).join('')}</div></section>`:'';
   const historyMarkup=history.length?`${history.map((item,index)=>messageHtml(item,item.role==='assistant'?[...history.slice(0,index)].reverse().find(previous=>previous.role==='user')?.content||'':'',agentId)).join('')}${historicalImages}`:agentGreetingHtml(agent);
-  main.innerHTML=`<div class="creation-layout chatgpt-conversation-layout"><aside class="conversation-rail"><button class="button primary full" id="new-chat">${icon('plus')}新建项目</button><div class="conversation-rail-heading"><h3>${escapeHtml((conversations[0]?.project?.type)||'创作项目')}</h3><button class="link-button" data-go="history">全部历史</button></div>${conversations.map(x=>conversationRowHtml(x,'data-select-agent-conversation',activeConversationId===x.id)).join('')||'<div class="empty-state">暂无历史项目</div>'}</aside><section class="creation-main"><div id="chat-body" class="chat-body" aria-live="polite">${historyMarkup}</div><form class="composer" id="composer"><textarea id="prompt" required placeholder="${escapeHtml(agentPlaceholder(agentId))}"></textarea><div><span>${detail?'继续在当前项目里提出修改，系统会保留上文。':'可按需使用企业资料与品牌素材。'}</span><p class="composer-run-feedback" id="composer-run-feedback" role="status"></p><button class="button primary" id="composer-submit" type="submit" aria-label="发送消息" title="发送">${icon('send')}</button></div></form></section><aside class="creation-right"><section class="panel"><h3>当前智能体</h3><p><b>${escapeHtml(agent.name)}</b></p><p class="muted">${escapeHtml(agent.description||'协助完成业务创作。')}</p></section><section class="panel"><h3>${detail?'当前项目':'本次执行'}</h3><p><b>${escapeHtml(detail?.project?.name||'新建项目')}</b></p><p class="muted">${detail?`最近保存：${escapeHtml(formatHistoryTime(detail.tasks?.at(-1)?.completed_at||detail.created_at))}`:'直接描述你的业务需求即可。'}</p></section></aside></div>`;
-  main.querySelector('#new-chat').onclick=()=>{activeConversationId=null;navigate(agentPage(agentId));}; main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.selectAgentConversation;navigate(agentPage(agentId));}); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
+  main.innerHTML=`<div class="creation-layout chatgpt-conversation-layout"><aside class="conversation-rail">${agentConversationRailHtml(conversations,activeConversationId)}</aside><section class="creation-main"><div id="chat-body" class="chat-body" aria-live="polite">${agentId==='image-agent'?`<div class="conversation-result-status" data-conversation-result-status>${imageConversationStatusHtml(conversations.find(item=>item.id===activeConversationId))}</div>`:''}${historyMarkup}</div><form class="composer" id="composer"><textarea id="prompt" required placeholder="${escapeHtml(agentPlaceholder(agentId))}"></textarea><div><span>${detail?'继续在当前项目里提出修改，系统会保留上文。':'可按需使用企业资料与品牌素材。'}</span><p class="composer-run-feedback" id="composer-run-feedback" role="status"></p><button class="button primary" id="composer-submit" type="submit" aria-label="发送消息" title="发送">${icon('send')}</button></div></form></section><aside class="creation-right"><section class="panel"><h3>当前智能体</h3><p><b>${escapeHtml(agent.name)}</b></p><p class="muted">${escapeHtml(agent.description||'协助完成业务创作。')}</p></section><section class="panel"><h3>${detail?'当前项目':'本次执行'}</h3><p><b>${escapeHtml(detail?.project?.name||'新建项目')}</b></p><p class="muted">${detail?`最近保存：${escapeHtml(formatHistoryTime(detail.tasks?.at(-1)?.completed_at||detail.created_at))}`:'直接描述你的业务需求即可。'}</p></section></aside></div>`;
+  bindConversationRail(main,agentId); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
   if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
   if(!canRun){main.querySelector('#new-chat').disabled=true;main.querySelector('#composer').innerHTML='<p role="status">智能体已停用，历史项目只读；不能创建任务或继续执行。</p>';main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
   bindNavigation();
@@ -589,7 +621,7 @@ async function submitAgentTaskV2(event,agentId,main){
   body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
   const node=document.querySelector('#task-status'),state=createStreamingState();state.conversationStartedAt=submittedAt;state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
   const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;
-  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId,main);}
+  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,conversationId:task.conversation_id,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId,main);}
 }
 function streamPayload(event){try{return JSON.parse(event.data||'{}');}catch{return {};}}
 function finishStreamTask(node,state,done,agentId,main,retryText){
@@ -597,11 +629,12 @@ function finishStreamTask(node,state,done,agentId,main,retryText){
   if(done.status==='cancelled'){cancelStreamingMessage(node,state,main);return;}
   if(done.status!=='completed'){applyStreamingEvent(state,'error',done);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);return;}
   state.assistantMessageId=typeof done.assistant_message_id==='string'?done.assistant_message_id:'';
+  if(agentId==='image-agent'&&state.run?.taskId&&done.generation?.task_id===state.run.taskId)state.generation=done.generation;
   if(agentId==='campaign-agent'&&rememberActivityPlanResult(state.assistantMessageId,done.structured_result)){
     state.planMode='full';
     for(const activity of state.activities)activity.label=activityDisplayLabel(activity.stage,activity.status,state.planMode);
   }
-  state.run=state.run||createConversationRunState();applyStreamingEvent(state,'complete',done);transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);updateComposerRunState(main,state);activeConversationId=done.conversation_id||activeConversationId;
+  state.run=state.run||createConversationRunState();if(agentId==='image-agent')state.run.conversationId=done.conversation_id||state.run.conversationId;applyStreamingEvent(state,'complete',done);transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);updateComposerRunState(main,state);activeConversationId=done.conversation_id||activeConversationId;
   pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');
   state.onVisualDrained=()=>{if(state.completed||state.run?.terminal==='cancelled'||state.visualPending)return;state.onVisualDrained=null;completeStreamingMessage(node,state,retryText,main);settleConversationRun(main,state,'completed');};
   if(state.visualPending){if(!state.renderPending)scheduleStreamingRender(node,state);}else state.onVisualDrained();

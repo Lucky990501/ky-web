@@ -346,8 +346,8 @@ test('mobile Drawer controls exist and sidebar has a responsive replacement',()=
 
 test('Workspace greeting uses the color block without a banner image',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(index,/workbench\.css\?v=agent-registry-v1/);
-  assert.match(index,/workbench\.js\?v=agent-registry-v1/);
+  assert.match(index,/workbench\.css\?v=image-result-ui-status-v1/);
+  assert.match(index,/workbench\.js\?v=image-result-ui-status-v1/);
   assert.ok(!source.includes('workspace-greeting-banner-v1.png'));
 });
 
@@ -363,6 +363,104 @@ test('live task state stays compact and uses customer-facing thinking copy',()=>
   assert.match(css,/\.streaming-message/);
   assert.match(css,/\.thinking-summary/);
   assert.ok(source.includes("source.addEventListener('activity'"));
+});
+
+function imageRailHarness(){
+  const h=harness('/agents/image');
+  h.document.main.dataset={page:'image',agentId:'image-agent'};
+  const badge={className:'history-status failed',textContent:'失败'};
+  const row={dataset:{selectAgentConversation:'conversation-1'},querySelector:()=>badge};
+  const rail={innerHTML:'old failed list',scrollTop:18,querySelectorAll:()=>[row]};
+  h.document.main.nodes.set('.conversation-rail',rail);
+  h.run("activeConversationId='conversation-1'");
+  return {...h,rail,badge};
+}
+const imageProject=(status,taskId='task-2',generationTaskId=taskId)=>({id:'conversation-1',agent_id:'image-agent',project:{name:'图片项目',type:'图片生成项目'},latest_status:status,latest_task:{id:taskId,status},latest_generation:generationTaskId?{task_id:generationTaskId,storage_key:'generated/tenant-test/image.png'}:null});
+
+test('image preview is bounded and keeps original-image viewer and download URLs',()=>{
+  const h=harness('/agents/image'),css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  const html=h.run("messageGenerationHtml({task_id:'task-1',storage_key:'generated/tenant-test/portrait.png'})");
+  assert.match(css,/\.chatgpt-conversation-layout \.message-generation\{width:min\(360px,100%\);/);
+  assert.match(css,/\.message-generation \.media-thumb\{width:100%;height:280px;max-height:280px;aspect-ratio:auto;/);
+  assert.match(css,/\.message-generation \.media-thumb img\{[^}]*object-fit:contain/);
+  assert.ok(!css.includes('.message-generation{width:min(820px,100%)}'));
+  assert.ok(html.includes('data-open-message-generation="/api/v1/storage/generated/tenant-test/portrait.png"'));
+  assert.ok(html.includes('href="/api/v1/storage/generated/tenant-test/portrait.png" download'));
+});
+
+test('image project labels preserve real task status and distinguish a later failure from an older image',()=>{
+  const h=harness('/agents/image');
+  for(const [project,expected] of [[imageProject('completed'),'已完成'],[imageProject('failed','failed',null),'失败'],[imageProject('failed','new-failed','old-success'),'最近一次失败'],[imageProject('failed','same-task','same-task'),'失败']]){
+    h.run(`project=${JSON.stringify(project)}`);
+    assert.equal(h.run('conversationStatusLabel(project)'),expected);
+    assert.ok(h.run("conversationRowHtml(project,'data-select-agent-conversation')").includes(`>${expected}</i>`));
+    assert.ok(h.run('historyCardHtml(project)').includes(`>${expected}</i>`));
+    const notice=h.run('imageConversationStatusHtml(project)');
+    if(project.latest_status==='completed')assert.equal(notice,'');
+    else assert.ok(notice.includes(expected==='最近一次失败'?'此前已生成的图片仍可查看和下载':'最近一次生成失败'));
+  }
+});
+
+test('authoritative completion replaces a stale failed badge and refreshes the image rail without rerendering chat',async()=>{
+  const h=imageRailHarness();h.document.main.innerHTML='conversation text must stay';
+  const pending=h.run("refreshConversationRail(document.main,'image-agent',{id:'task-2',conversation_id:'conversation-1',status:'completed'})");
+  assert.equal(h.badge.textContent,'已完成');
+  h.respond('/api/v1/conversations',[imageProject('completed'),{id:'other',agent_id:'copywriting-agent',latest_status:'failed'}]);await pending;
+  assert.ok(h.rail.innerHTML.includes('history-status completed'));
+  assert.ok(!h.rail.innerHTML.includes('history-status failed'));
+  assert.ok(!h.rail.innerHTML.includes('data-select-agent-conversation="other"'));
+  assert.equal(h.document.main.innerHTML,'conversation text must stay');assert.equal(h.rail.scrollTop,18);
+});
+
+test('SSE and polling terminal completion both refresh stale project status',async()=>{
+  for(const transport of ['sse','polling']){
+    const h=imageRailHarness();
+    h.run("imageState=createStreamingState();beginConversationRun(imageState,{taskId:'task-2',agentId:'image-agent',phase:ConversationRunPhase.RUNNING});imageNode={innerHTML:'',dataset:{},removeAttribute(){},classList:{remove(){}},querySelector(){return null}};");
+    if(transport==='sse')h.run("finishStreamTask(imageNode,imageState,{id:'task-2',status:'completed',conversation_id:'conversation-1',final_response:'图片已生成'},'image-agent',document.main,'生成需求')");
+    else{h.run("pollAgentTaskV2('task-2','image-agent',document.main,'生成需求',imageNode,imageState)");h.respond('/api/v1/tasks/task-2',{id:'task-2',status:'completed',conversation_id:'conversation-1',final_response:'图片已生成'});await flush();}
+    assert.equal(h.badge.textContent,'已完成',transport);h.respond('/api/v1/conversations',[imageProject('completed')]);await flush();
+    assert.ok(h.rail.innerHTML.includes('history-status completed'),transport);
+  }
+});
+
+test('image completion reuses the result card only for the matching real generation task',()=>{
+  for(const generationTaskId of ['image-task','unrelated-task']){
+    const h=harness('/agents/image');
+    h.run(`liveImageState=createStreamingState();beginConversationRun(liveImageState,{taskId:'image-task',agentId:'image-agent',phase:ConversationRunPhase.RUNNING});liveImageNode={innerHTML:'',dataset:{},inserted:'',insertAdjacentHTML(position,html){this.inserted+=html;},removeAttribute(){},classList:{remove(){}},querySelector(){return null}};finishStreamTask(liveImageNode,liveImageState,{status:'completed',final_response:'图片已生成',generation:{task_id:'${generationTaskId}',storage_key:'generated/tenant-test/live.png'}},'image-agent',document.main,'需求')`);
+    assert.equal(h.run('liveImageNode.inserted.includes("message-generation")'),generationTaskId==='image-task');
+    if(generationTaskId==='image-task')assert.ok(h.run('liveImageNode.inserted').includes('data-open-message-generation'));
+  }
+});
+
+test('failed and cancelled terminal states refresh from backend without promoting old images to success',async()=>{
+  for(const [terminal,status] of [['error','failed'],['cancelled','cancelled']]){
+    const h=imageRailHarness();
+    h.run(`terminalState=createStreamingState();beginConversationRun(terminalState,{taskId:'task-2',agentId:'image-agent',phase:ConversationRunPhase.RUNNING});settleConversationRun(document.main,terminalState,'${terminal}')`);
+    h.respond('/api/v1/conversations',[imageProject(status,'task-2','old-success')]);await flush();
+    assert.ok(h.rail.innerHTML.includes(`history-status ${status}`));assert.ok(!h.rail.innerHTML.includes('history-status completed'));
+  }
+});
+
+test('late rail refresh cannot overwrite a newer terminal state or another route',async()=>{
+  const h=imageRailHarness(),first=h.run("refreshConversationRail(document.main,'image-agent')"),second=h.run("refreshConversationRail(document.main,'image-agent')");
+  h.pending[1].done=true;h.pending[1].resolve([imageProject('failed','new-failed','old-success')]);await second;
+  h.pending[0].done=true;h.pending[0].resolve([imageProject('completed')]);await first;
+  assert.ok(h.rail.innerHTML.includes('最近一次失败'));assert.ok(!h.rail.innerHTML.includes('history-status completed'));
+  const original=h.rail.innerHTML,third=h.run("refreshConversationRail(document.main,'image-agent')");
+  h.document.main.dataset.page='profile';h.respond('/api/v1/conversations',[imageProject('completed')]);await third;assert.equal(h.rail.innerHTML,original);
+});
+
+test('unavailable rail refresh retains the real completion badge instead of the stale failure',async()=>{
+  const h=imageRailHarness(),pending=h.run("refreshConversationRail(document.main,'image-agent',{id:'task-2',conversation_id:'conversation-1',status:'completed'})");
+  h.respondError('/api/v1/conversations',503);await pending;assert.equal(h.badge.textContent,'已完成');
+});
+
+test('terminal image status stays associated with its task conversation after selection changes',async()=>{
+  const h=imageRailHarness(),notice={innerHTML:'current project status'};
+  h.document.main.nodes.set('[data-conversation-result-status]',notice);
+  h.run("terminalState=createStreamingState();beginConversationRun(terminalState,{taskId:'task-2',agentId:'image-agent',conversationId:'conversation-1',phase:ConversationRunPhase.RUNNING});activeConversationId='conversation-2';settleConversationRun(document.main,terminalState,'completed')");
+  assert.equal(h.badge.textContent,'已完成');assert.equal(notice.innerHTML,'current project status');
+  h.respondError('/api/v1/conversations',503);await flush();
 });
 
 test('R2 four agents share Registry-driven greeting without name matching',()=>{
