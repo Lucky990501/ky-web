@@ -21,7 +21,7 @@
     "release_id": "20260929-77e5eb0",
     "source_commit": "77e5eb0eaaa36eb3cd1f158a35f605eaa3052b71",
     "archive_sha256": "77d563bd262eb31eb3364902d63e92ef30678c2f0e2c17a6354ec41b48d44e5f",
-    "manifest_sha256": "86bbdbb259b4695c7c93d9261e035ab65b93fb1243fa09033853aff8ad2c9990",
+    "manifest_sha256": "2fbc6a4f372fefe79d5b2450ffa28ab38e588255ad2774e0e27087ec91e9f8a2",
     "schema_fingerprint": "6209531538f525109aaef1e196403190b358de5695abf8f40969f5649f350137",
     "data_contract": "member_account_status_v1"
   },
