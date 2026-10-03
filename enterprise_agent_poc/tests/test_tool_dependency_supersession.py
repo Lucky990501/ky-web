@@ -128,7 +128,7 @@ def replay(tmp_path, monkeypatch, mode="correction"):
             pass
 
         async def post(self, url, *, headers, json):
-            assert url == "https://api.n1n.ai/v1/images/generations"
+            assert url == "https://llm-api.net/v1/images/generations"
             assert json["size"] in {"1024x1024", "1024x1536"}
             assert json["model"] == "gpt-image-2.5-sunburst-c"
             assert json["provider"] == {"sort": "success_rate"}

@@ -61,7 +61,7 @@ def test_n1n_payload_decodes_and_persists_jpeg(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", ClientStub)
     result = asyncio.run(service.image_generation(token, "测试图片", [], "1:1"))
 
-    assert observed["url"] == "https://api.n1n.ai/v1/images/generations"
+    assert observed["url"] == "https://llm-api.net/v1/images/generations"
     assert observed["headers"] == {"Authorization": "Bearer isolated-test-placeholder"}
     assert observed["payload"] == {
         "prompt": "测试图片",

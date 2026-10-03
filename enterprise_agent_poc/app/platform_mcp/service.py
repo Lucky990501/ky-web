@@ -125,7 +125,7 @@ class PlatformMCPService:
         # fetched by the gateway, preventing SSRF and cross-tenant retrieval.
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
-                "https://api.n1n.ai/v1/images/generations",
+                "https://llm-api.net/v1/images/generations",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
                     "prompt": prompt,
