@@ -148,7 +148,7 @@ class Settings:
             model_base_url=os.environ.get("ENTERPRISE_POC_MODEL_BASE_URL", "https://api.deepseek.com/"),
             model_wire_api=os.environ.get("ENTERPRISE_POC_MODEL_WIRE_API", "responses"),
             image_provider_id=os.environ.get("ENTERPRISE_POC_IMAGE_PROVIDER_ID", "image-gateway"),
-            image_model_id=os.environ.get("ENTERPRISE_POC_IMAGE_MODEL_ID", "gateway-managed-gpt-image-2"),
+            image_model_id=os.environ.get("ENTERPRISE_POC_IMAGE_MODEL_ID", "gpt-image-2.5-sunburst-c"),
             image_api_key_env=os.environ.get("ENTERPRISE_POC_IMAGE_API_KEY_ENV", "GATEWAY_API_TOKEN"),
             object_storage_dir=_path_from_env("ENTERPRISE_POC_OBJECT_STORAGE_DIR", ".runtime-data/object-storage"),
             object_storage_provider=os.environ.get("ENTERPRISE_POC_OBJECT_STORAGE_PROVIDER", "local").lower(),

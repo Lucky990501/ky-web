@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import time
 from datetime import datetime, timezone
@@ -123,29 +125,44 @@ class PlatformMCPService:
         # fetched by the gateway, preventing SSRF and cross-tenant retrieval.
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
-                "https://image-api.luckio.cn/api/v1/images/generate",
+                "https://api.n1n.ai/v1/images/generations",
                 headers={"Authorization": f"Bearer {api_key}"},
-                json={"prompt": prompt, "size": size, "quality": "medium", "output_format": "png", "n": 1},
+                json={
+                    "prompt": prompt,
+                    "model": self._settings.image_model_id,
+                    "provider": {"sort": "success_rate"},
+                    "size": size,
+                    "n": 1,
+                    "output_format": "jpeg",
+                    "response_format": "b64_json",
+                },
             )
         try:
             gateway = response.json()
         except ValueError as exc:
             raise RuntimeError(f"图片网关返回非 JSON 响应（HTTP {response.status_code}）。") from exc
-        if response.status_code >= 400 or gateway.get("code") != 0:
-            request_id = gateway.get("request_id", "unknown")
+        if not isinstance(gateway, dict):
+            raise RuntimeError(f"图片网关返回无效 JSON 结构（HTTP {response.status_code}）。")
+        request_id = gateway.get("request_id") or response.headers.get("x-request-id") or "unknown"
+        if response.status_code >= 400:
             raise RuntimeError(f"图片网关调用失败（HTTP {response.status_code}，request_id={request_id}）。")
-        data = gateway.get("data") or {}
-        image_url = data.get("image_url")
-        if not image_url:
-            raise RuntimeError("图片网关未返回 image_url。")
-        asset_id = data.get("file_name") or gateway.get("request_id") or uuid4().hex
-        # Persist the provider's short-lived URL in platform-owned storage.
+        items = gateway.get("data")
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            raise RuntimeError("图片网关未返回 data[0]。")
+        data = items[0]
+        encoded = data.get("b64_json")
+        if not isinstance(encoded, str) or not encoded:
+            raise RuntimeError("图片网关未返回 b64_json。")
         try:
-            async with httpx.AsyncClient(timeout=120) as download_client:
-                image = await download_client.get(image_url)
-            image.raise_for_status()
-            storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}.png"
-            storage_provider(self._settings).put(storage_key, image.content, image.headers.get("content-type", "image/png"))
+            image = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise RuntimeError("图片网关返回无效 b64_json。") from exc
+        if not image:
+            raise RuntimeError("图片网关返回空图片。")
+        asset_id = request_id if request_id != "unknown" else uuid4().hex
+        try:
+            storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}.jpg"
+            storage_provider(self._settings).put(storage_key, image, "image/jpeg")
         except Exception as exc:
             raise RuntimeError("图片已生成但平台持久化失败。") from exc
         result = {
@@ -157,10 +174,10 @@ class PlatformMCPService:
                     "asset_id": asset_id,
                     "storage_key": storage_key,
                     "url": f"/api/v1/storage/{storage_key}",
-                    "file_name": data.get("file_name"),
-                    "format": data.get("format"),
-                    "size": data.get("size"),
-                    "request_id": gateway.get("request_id"),
+                    "file_name": None,
+                    "format": "jpeg",
+                    "size": size,
+                    "request_id": None if request_id == "unknown" else request_id,
                     "references_used": references,
                 }
             ],

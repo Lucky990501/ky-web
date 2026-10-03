@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from types import SimpleNamespace
@@ -127,19 +128,18 @@ def replay(tmp_path, monkeypatch, mode="correction"):
             pass
 
         async def post(self, url, *, headers, json):
-            assert url == "https://image-api.luckio.cn/api/v1/images/generate"
+            assert url == "https://api.n1n.ai/v1/images/generations"
             assert json["size"] in {"1024x1024", "1024x1536"}
+            assert json["model"] == "gpt-image-2.5-sunburst-c"
+            assert json["provider"] == {"sort": "success_rate"}
+            assert json["n"] == 1
+            assert json["output_format"] == "jpeg"
+            assert json["response_format"] == "b64_json"
             runtime.gateway_calls += 1
             runtime.provider_payloads.append(dict(json))
-            return httpx.Response(200, json={"code": 0, "request_id": "stub-request",
-                "data": {"image_url": "https://stub.invalid/image.png", "file_name": "stub.png"}})
-
-        async def get(self, url):
-            assert url == "https://stub.invalid/image.png"
-            runtime.downloads += 1
-            return httpx.Response(200, content=b"isolated-stored-image",
-                                  headers={"content-type": "image/png"},
-                                  request=httpx.Request("GET", url))
+            return httpx.Response(200, headers={"x-request-id": "stub-request"}, json={
+                "data": [{"b64_json": base64.b64encode(b"isolated-stored-image").decode("ascii")}],
+            })
 
     monkeypatch.setattr(httpx, "AsyncClient", GatewayStub)
     asyncio.run(service.execute(task))
@@ -405,7 +405,9 @@ def test_DS10_DS11_DS12_DS14_persistence_sse_credit_and_legacy_image(tmp_path, m
     assert "artifact" not in trace["payload"]["mcp_calls"][0]
     assert service._persist_result(saved, trace)["replayed"] is True
     asyncio.run(service.execute(saved))
-    assert runtime.turn_count == runtime.gateway_calls == runtime.downloads == 1
+    assert runtime.turn_count == runtime.gateway_calls == 1
+    assert runtime.downloads == 0
+    assert public["generation"]["mime_type"] == "image/jpeg"
     with store.connection() as c:
         for table in ["task_results", "generations", "credit_transactions"]:
             assert c.execute(f"SELECT count(*) n FROM {table} WHERE task_id=?", (saved["id"],)).fetchone()["n"] == 1

@@ -71,6 +71,10 @@ def _project_type(agent: dict) -> str:
     return _PROJECT_TYPES.get(agent["id"], "历史创作项目" if agent["name"] == "历史智能体" else f"{agent['name']}项目")
 
 
+def _image_mime_type(storage_key: str) -> str:
+    return "image/jpeg" if storage_key.lower().endswith((".jpg", ".jpeg")) else "image/png"
+
+
 def _generation_view(item: dict | None) -> dict | None:
     if not item:
         return None
@@ -643,7 +647,7 @@ class ProductStore:
                         raise ValueError("图片任务缺少已持久化 storage key。")
                     conn.execute(
                         "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (generation_id, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gateway-managed-gpt-image-2", image_storage_key, "image/png"),
+                        (generation_id, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gpt-image-2.5-sunburst-c", image_storage_key, _image_mime_type(image_storage_key)),
                     )
                     generation = conn.execute("SELECT task_id,conversation_id,storage_key FROM generations WHERE id=?", (generation_id,)).fetchone()
                     if not generation or generation["task_id"] != task_id or generation["conversation_id"] != conversation_id or generation["storage_key"] != image_storage_key:
@@ -1077,7 +1081,7 @@ class ProductStore:
     def create_generation(self, tenant_id: str, user_id: str, conversation_id: str, task_id: str, storage_key: str, provider: str, model: str) -> str:
         generation_id = f"task:{task_id}:generation"
         with self._store.connection() as conn:
-            conn.execute("INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)", (generation_id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,"image/png"))
+            conn.execute("INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)", (generation_id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,_image_mime_type(storage_key)))
         return generation_id
 
     def readable_generation(self, tenant_id: str, user_id: str, storage_key: str) -> dict | None:
