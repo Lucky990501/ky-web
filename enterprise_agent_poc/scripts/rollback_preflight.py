@@ -253,10 +253,10 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     floors = data_contract_floors(declaration, schema_lock)
     predecessor = declaration['forward_predecessor_approval']
     require(set(predecessor) == {'release_id','source_commit','archive_sha256','manifest_sha256','schema_fingerprint','data_contract'}
-            and predecessor['release_id'] == '20260929-7daaf0c'
-            and predecessor['source_commit'] == '7daaf0c276d3ff41b0d235cc352223e4343d91ff'
-            and predecessor['archive_sha256'] == 'ec4ada4968943fa925d0693add212a49ad15aa66092602bf65b3eaef45ddcbad'
-            and predecessor['manifest_sha256'] == '88bd11e76b230c242995307932a00708200b9102b44b6b39941ec79a4f88949f'
+            and predecessor['release_id'] == '20260929-77e5eb0'
+            and predecessor['source_commit'] == '77e5eb0eaaa36eb3cd1f158a35f605eaa3052b71'
+            and predecessor['archive_sha256'] == '77d563bd262eb31eb3364902d63e92ef30678c2f0e2c17a6354ec41b48d44e5f'
+            and predecessor['manifest_sha256'] == '86bbdbb259b4695c7c93d9261e035ab65b93fb1243fa09033853aff8ad2c9990'
             and predecessor['schema_fingerprint'] == digest(schema_lock)
             and predecessor['data_contract'] == 'member_account_status_v1', 'forward_predecessor_declaration')
     own_reference = {'release_id': own_manifest['release_id'], 'source_commit': own_manifest['source_commit']}
@@ -295,7 +295,7 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
         target_root, _ = release_identity(base, target_id, target_commit, predecessor)
         # This immutable predecessor contains the complete Schema 014 lock.
         target_lock = schema_lock
-        evidence = {'version': 'fixed_7daaf0c_member_status_predecessor', 'data_scope': 'productized_v1'}
+        evidence = {'version': 'fixed_77e5eb0_member_status_predecessor', 'data_scope': 'productized_v1'}
     else:
         require(self_target and bool(active_floors), 'unapproved_target')
         target_root, target_lock = own_source, schema_lock

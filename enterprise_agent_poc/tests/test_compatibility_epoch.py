@@ -52,11 +52,11 @@ HISTORICAL_RELEASE_PATHS = (
     'enterprise_agent_poc/docker-compose.yml',
     'enterprise_agent_poc/pyproject.toml',
 )
-PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260929-7daaf0c'
-PRODUCTION_PREDECESSOR_ID = '20260929-7daaf0c'
-PRODUCTION_PREDECESSOR_COMMIT = '7daaf0c276d3ff41b0d235cc352223e4343d91ff'
-PRODUCTION_PREDECESSOR_ARCHIVE_SHA = 'ec4ada4968943fa925d0693add212a49ad15aa66092602bf65b3eaef45ddcbad'
-PRODUCTION_PREDECESSOR_MANIFEST_SHA = '88bd11e76b230c242995307932a00708200b9102b44b6b39941ec79a4f88949f'
+PRODUCTION_PREDECESSOR_ROOT = TEST_RUNTIME_ROOT / 'candidate-artifacts/20260929-77e5eb0'
+PRODUCTION_PREDECESSOR_ID = '20260929-77e5eb0'
+PRODUCTION_PREDECESSOR_COMMIT = '77e5eb0eaaa36eb3cd1f158a35f605eaa3052b71'
+PRODUCTION_PREDECESSOR_ARCHIVE_SHA = '77d563bd262eb31eb3364902d63e92ef30678c2f0e2c17a6354ec41b48d44e5f'
+PRODUCTION_PREDECESSOR_MANIFEST_SHA = '86bbdbb259b4695c7c93d9261e035ab65b93fb1243fa09033853aff8ad2c9990'
 OLD_DIRECT_PREDECESSOR_ID = '20260926-cc14481'
 OLD_DIRECT_PREDECESSOR_COMMIT = 'cc14481925bf12aa5269ab2c1067fd42f328fe7a'
 INSERT = "INSERT INTO agent_templates(id,name,slug,description,icon,status,default_runtime_profile,credit_cost,skill_manifest,definition_source) VALUES ('epoch-pilot','Synthetic','epoch-pilot','Isolated','test','disabled','default',1,'{}','productized')"
@@ -378,7 +378,7 @@ def test_member_status_floor_schema014_accepts_only_exact_production_predecessor
     _set_productized_epoch(h['store'])
     result = pg_gate(h, target_id=PRODUCTION_PREDECESSOR_ID, commit=PRODUCTION_PREDECESSOR_COMMIT)
     assert result['status'] == 'rollback_preflight_passed'
-    assert result['evidence_version'] == 'fixed_7daaf0c_member_status_predecessor'
+    assert result['evidence_version'] == 'fixed_77e5eb0_member_status_predecessor'
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
         pg_gate(h, target_id=OLD_DIRECT_PREDECESSOR_ID, commit=OLD_DIRECT_PREDECESSOR_COMMIT)
     with pytest.raises(h['gate'].RollbackBlocked, match='unapproved_target'):
