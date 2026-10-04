@@ -2,19 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
+import io
 import time
 
 import httpx
 import pytest
+from PIL import Image
 
-from app.platform_mcp.service import PlatformMCPService
+from app.platform_mcp.service import PlatformMCPService, _validated_image_metadata
+from app.product_store import _image_mime_type
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.settings import Settings
 from app.storage import storage_provider
 from app.store import POCStore
 
 
-JPEG_BYTES = b"\xff\xd8\xff\xe0isolated-jpeg-fixture\xff\xd9"
+FORMATS = {
+    "JPEG": ("jpeg", ".jpg", "image/jpeg"),
+    "PNG": ("png", ".png", "image/png"),
+    "WEBP": ("webp", ".webp", "image/webp"),
+}
+
+
+def image_bytes(image_format: str) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (3, 2), (20, 90, 160)).save(output, format=image_format)
+    return output.getvalue()
 
 
 def test_default_image_model_is_sunburst(monkeypatch):
@@ -38,9 +52,8 @@ def image_service(tmp_path, monkeypatch):
     return PlatformMCPService(store, issuer, settings), settings, token
 
 
-def test_n1n_payload_decodes_and_persists_jpeg(tmp_path, monkeypatch):
-    service, settings, token = image_service(tmp_path, monkeypatch)
-    observed = {}
+async def generated(service, token, monkeypatch, content: bytes, observed: dict | None = None):
+    observed = observed if observed is not None else {}
 
     class ClientStub:
         def __init__(self, **kwargs):
@@ -55,11 +68,21 @@ def test_n1n_payload_decodes_and_persists_jpeg(tmp_path, monkeypatch):
         async def post(self, url, *, headers, json):
             observed.update(url=url, headers=headers, payload=json)
             return httpx.Response(200, headers={"x-request-id": "request-test-1"}, json={
-                "data": [{"b64_json": base64.b64encode(JPEG_BYTES).decode("ascii")}],
+                "data": [{"b64_json": base64.b64encode(content).decode("ascii")}],
             })
 
     monkeypatch.setattr(httpx, "AsyncClient", ClientStub)
-    result = asyncio.run(service.image_generation(token, "测试图片", [], "1:1"))
+    return await service.image_generation(token, "测试图片", [], "1:1")
+
+
+@pytest.mark.parametrize("provider_format", ["JPEG", "PNG", "WEBP"])
+def test_actual_format_controls_storage_extension_and_mime(tmp_path, monkeypatch, provider_format):
+    service, settings, token = image_service(tmp_path, monkeypatch)
+    content = image_bytes(provider_format)
+    expected_format, extension, mime_type = FORMATS[provider_format]
+    observed = {}
+
+    result = asyncio.run(generated(service, token, monkeypatch, content, observed))
 
     assert observed["url"] == "https://llm-api.net/v1/images/generations"
     assert observed["headers"] == {"Authorization": "Bearer isolated-test-placeholder"}
@@ -74,11 +97,17 @@ def test_n1n_payload_decodes_and_persists_jpeg(tmp_path, monkeypatch):
     }
     image = result["results"][0]
     assert result["model"] == "gpt-image-2.5-sunburst-c"
-    assert image["storage_key"].endswith(".jpg")
-    assert image["format"] == "jpeg"
+    assert image["storage_key"].endswith(extension)
+    assert image["format"] == expected_format
     assert image["size"] == "1024x1024"
     assert image["request_id"] == "request-test-1"
-    assert storage_provider(settings).get(image["storage_key"]) == JPEG_BYTES
+    assert storage_provider(settings).get(image["storage_key"]) == content
+    assert _image_mime_type(image["storage_key"]) == mime_type
+
+
+@pytest.mark.parametrize("provider_format", ["JPEG", "PNG", "WEBP"])
+def test_magic_detection_and_mapping(provider_format):
+    assert _validated_image_metadata(image_bytes(provider_format)) == FORMATS[provider_format]
 
 
 @pytest.mark.parametrize("payload, message", [
@@ -105,3 +134,20 @@ def test_n1n_invalid_image_result_fails_closed(tmp_path, monkeypatch, payload, m
     monkeypatch.setattr(httpx, "AsyncClient", ClientStub)
     with pytest.raises(RuntimeError, match=message):
         asyncio.run(service.image_generation(token, "测试图片", [], "1:1"))
+
+
+@pytest.mark.parametrize("content, error", [
+    (b"valid base64 but not an image", "provider_image_format_unsupported"),
+    (image_bytes("JPEG")[:-2], "provider_image_payload_invalid"),
+    (image_bytes("PNG")[:-12], "provider_image_payload_invalid"),
+    (b"GIF89a" + b"unsupported", "provider_image_format_unsupported"),
+])
+def test_invalid_or_unsupported_decoded_payload_fails_closed(content, error):
+    with pytest.raises(RuntimeError, match=error):
+        _validated_image_metadata(content)
+
+
+def test_old_image_url_and_legacy_gateway_paths_are_absent():
+    source = inspect.getsource(PlatformMCPService.image_generation)
+    assert "image_url" not in source
+    assert "image-api.luckio.cn" not in source

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import time
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from openai_codex.generated.v2_all import McpToolCallResult
+from PIL import Image
 
 from app.domain import RuntimeSession
 from app.platform_mcp.service import PlatformMCPService
@@ -21,6 +23,12 @@ from app.tool_dependencies import (
     attempt_observation, input_failure, now, resolve_dependencies,
 )
 from test_run_trace import FakeRuntime, product_task_fixture
+
+
+def jpeg_fixture() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (2, 2), (30, 60, 90)).save(output, format="JPEG")
+    return output.getvalue()
 
 
 def observed(arguments, *, tool="image_generation", result=None, scope="turn-1",
@@ -138,7 +146,7 @@ def replay(tmp_path, monkeypatch, mode="correction"):
             runtime.gateway_calls += 1
             runtime.provider_payloads.append(dict(json))
             return httpx.Response(200, headers={"x-request-id": "stub-request"}, json={
-                "data": [{"b64_json": base64.b64encode(b"isolated-stored-image").decode("ascii")}],
+                "data": [{"b64_json": base64.b64encode(jpeg_fixture()).decode("ascii")}],
             })
 
     monkeypatch.setattr(httpx, "AsyncClient", GatewayStub)

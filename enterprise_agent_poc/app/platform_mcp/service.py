@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import io
 import os
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from uuid import uuid4
+
+from PIL import Image, UnidentifiedImageError
 
 from app.security import RuntimeTokenIssuer, RuntimePrincipal, TokenError
 from app.store import POCStore
@@ -20,6 +23,33 @@ from app.knowledge import KnowledgeRetrievalService
 from app.settings import Settings
 from app.storage import storage_provider
 from app.store import POCStore
+
+
+def _validated_image_metadata(content: bytes) -> tuple[str, str, str]:
+    """Return actual format, extension and MIME after strict image validation."""
+    if content.startswith(b"\xff\xd8\xff"):
+        image_format, pil_format, extension, mime_type = "jpeg", "JPEG", ".jpg", "image/jpeg"
+        container_complete = content.endswith(b"\xff\xd9")
+    elif content.startswith(b"\x89PNG\r\n\x1a\n"):
+        image_format, pil_format, extension, mime_type = "png", "PNG", ".png", "image/png"
+        container_complete = content.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")
+    elif len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        image_format, pil_format, extension, mime_type = "webp", "WEBP", ".webp", "image/webp"
+        container_complete = int.from_bytes(content[4:8], "little") + 8 == len(content)
+    else:
+        raise RuntimeError("provider_image_format_unsupported")
+    if not container_complete:
+        raise RuntimeError("provider_image_payload_invalid")
+    try:
+        with Image.open(io.BytesIO(content)) as picture:
+            if picture.format != pil_format:
+                raise RuntimeError("provider_image_payload_invalid")
+            picture.verify()
+    except RuntimeError:
+        raise
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise RuntimeError("provider_image_payload_invalid") from exc
+    return image_format, extension, mime_type
 
 
 class PlatformMCPService:
@@ -159,10 +189,11 @@ class PlatformMCPService:
             raise RuntimeError("图片网关返回无效 b64_json。") from exc
         if not image:
             raise RuntimeError("图片网关返回空图片。")
+        actual_format, extension, mime_type = _validated_image_metadata(image)
         asset_id = request_id if request_id != "unknown" else uuid4().hex
         try:
-            storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}.jpg"
-            storage_provider(self._settings).put(storage_key, image, "image/jpeg")
+            storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}{extension}"
+            storage_provider(self._settings).put(storage_key, image, mime_type)
         except Exception as exc:
             raise RuntimeError("图片已生成但平台持久化失败。") from exc
         result = {
@@ -175,7 +206,7 @@ class PlatformMCPService:
                     "storage_key": storage_key,
                     "url": f"/api/v1/storage/{storage_key}",
                     "file_name": None,
-                    "format": "jpeg",
+                    "format": actual_format,
                     "size": size,
                     "request_id": None if request_id == "unknown" else request_id,
                     "references_used": references,

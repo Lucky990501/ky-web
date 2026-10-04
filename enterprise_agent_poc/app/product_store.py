@@ -72,7 +72,10 @@ def _project_type(agent: dict) -> str:
 
 
 def _image_mime_type(storage_key: str) -> str:
-    return "image/jpeg" if storage_key.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    suffix = storage_key.lower().rsplit(".", 1)[-1]
+    return {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(
+        suffix, "image/png"
+    )
 
 
 def _generation_view(item: dict | None) -> dict | None:
