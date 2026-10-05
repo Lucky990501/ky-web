@@ -91,7 +91,20 @@ def _generation_view(item: dict | None) -> dict | None:
     content_url = f"/api/v1/storage/{quote(storage_key, safe='/')}"
     result["content_url"] = content_url
     result["image_url"] = content_url
+    if result.get("width") and result.get("height"):
+        result["actual_size"] = f"{result['width']}x{result['height']}"
     return result
+
+
+def _chat_image_attachment_view(item: dict) -> dict:
+    attachment_id = str(item["id"])
+    return {
+        "type": "image", "id": attachment_id,
+        "filename": item["filename"], "mime_type": item["mime_type"],
+        "width": item["width"], "height": item["height"],
+        "size_bytes": item["size_bytes"],
+        "content_url": f"/api/v1/chat-images/{quote(attachment_id, safe='')}",
+    }
 
 
 class ProductStore:
@@ -159,7 +172,9 @@ class ProductStore:
                 CREATE TABLE IF NOT EXISTS task_results (task_id TEXT PRIMARY KEY REFERENCES tasks(id), final_response TEXT, result_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS conversation_owners (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL DEFAULT '新图片会话', deleted_at TEXT);
                 CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-                CREATE TABLE IF NOT EXISTS generations (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id), provider TEXT, model TEXT, storage_key TEXT, mime_type TEXT, width INTEGER, height INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TEXT);
+                CREATE TABLE IF NOT EXISTS generations (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id), provider TEXT, model TEXT, storage_key TEXT, mime_type TEXT, width INTEGER, height INTEGER, requested_size TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TEXT);
+                CREATE TABLE IF NOT EXISTS chat_image_attachments (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), user_id TEXT NOT NULL REFERENCES users(id), storage_key TEXT NOT NULL UNIQUE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, task_id TEXT UNIQUE REFERENCES tasks(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE INDEX IF NOT EXISTS idx_chat_image_attachments_owner ON chat_image_attachments(tenant_id,user_id,id);
                 CREATE TABLE IF NOT EXISTS knowledge_bases (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS knowledge_files (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), knowledge_base_id TEXT REFERENCES knowledge_bases(id), name TEXT NOT NULL, filename TEXT, mime_type TEXT, size_bytes INTEGER, uploaded_by TEXT, status TEXT NOT NULL, storage_key TEXT, error_message TEXT, parsed_text TEXT, chunk_count INTEGER NOT NULL DEFAULT 0, embedding_provider TEXT, embedding_model TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS knowledge_chunks (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), knowledge_base_id TEXT, file_id TEXT NOT NULL REFERENCES knowledge_files(id) ON DELETE CASCADE, content TEXT NOT NULL, title TEXT, section TEXT, page_number INTEGER, chunk_index INTEGER NOT NULL, embedding TEXT, embedding_provider TEXT, embedding_model TEXT, embedding_version TEXT, metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(file_id,chunk_index));
@@ -183,7 +198,53 @@ class ProductStore:
             for name, ddl in {"filename":"TEXT", "mime_type":"TEXT", "size_bytes":"INTEGER", "uploaded_by":"TEXT", "error_message":"TEXT", "parsed_text":"TEXT", "chunk_count":"INTEGER NOT NULL DEFAULT 0", "embedding_provider":"TEXT", "embedding_model":"TEXT"}.items():
                 if name not in file_columns:
                     conn.execute(f"ALTER TABLE knowledge_files ADD COLUMN {name} {ddl}")
+            generation_columns = {row["name"] for row in conn.execute("PRAGMA table_info(generations)").fetchall()}
+            if "requested_size" not in generation_columns:
+                conn.execute("ALTER TABLE generations ADD COLUMN requested_size TEXT")
         self._seed_agent_catalog()
+
+    def create_chat_image_attachment(self, tenant_id: str, user_id: str, storage_key: str,
+                                     filename: str, mime_type: str, size_bytes: int,
+                                     width: int, height: int) -> dict:
+        attachment_id = str(uuid.uuid4())
+        with self._store.connection() as conn:
+            conn.execute(
+                "INSERT INTO chat_image_attachments(id,tenant_id,user_id,storage_key,filename,mime_type,size_bytes,width,height) VALUES (?,?,?,?,?,?,?,?,?)",
+                (attachment_id, tenant_id, user_id, storage_key, filename[:180], mime_type, size_bytes, width, height),
+            )
+        return self.chat_image_attachment(tenant_id, user_id, attachment_id) or {}
+
+    def public_chat_image_attachment(self, tenant_id: str, user_id: str, attachment_id: str) -> dict | None:
+        record = self.chat_image_attachment(tenant_id, user_id, attachment_id)
+        return _chat_image_attachment_view(record) if record else None
+
+    def chat_image_attachment(self, tenant_id: str, user_id: str, attachment_id: str) -> dict | None:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM chat_image_attachments WHERE id=? AND tenant_id=? AND user_id=?",
+                (attachment_id, tenant_id, user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def task_chat_image_attachment(self, task_id: str, tenant_id: str) -> dict | None:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT a.* FROM chat_image_attachments a JOIN tasks t ON t.id=a.task_id "
+                "WHERE t.id=? AND t.tenant_id=? AND t.agent_id='image-agent' AND a.tenant_id=t.tenant_id AND a.user_id=t.user_id",
+                (task_id, tenant_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def remove_chat_image_attachment(self, tenant_id: str, user_id: str, attachment_id: str) -> str | None:
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT storage_key FROM chat_image_attachments WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",
+                (attachment_id, tenant_id, user_id),
+            ).fetchone()
+            if row:
+                conn.execute("DELETE FROM chat_image_attachments WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",
+                             (attachment_id, tenant_id, user_id))
+        return row["storage_key"] if row else None
 
     def _seed_agent_catalog(self) -> None:
         with self._store.connection() as conn:
@@ -375,11 +436,16 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
         if _release_operation_id and not _test_revision:
             raise PermissionError("Release ownership is only valid for controlled Runtime Test")
+        attachment_ids = attachment_ids or []
+        if len(attachment_ids) > 1 or (attachment_ids and agent_id != "image-agent"):
+            raise ValueError("当前仅图片生成智能体支持一张参考图。")
         with self._store.connection() as conn:
             context = None
+            if attachment_ids and not self._store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
             if agent_id not in CATALOG:
                 if not self.execution_resolver:
                     raise LookupError("Execution resolver unavailable")
@@ -406,6 +472,13 @@ class ProductStore:
                     raise ValueError("不能跨智能体复用会话。")
             task_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
+            if attachment_ids:
+                claimed = conn.execute(
+                    "UPDATE chat_image_attachments SET task_id=? WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",
+                    (task_id, attachment_ids[0], tenant_id, user_id),
+                )
+                if claimed.rowcount != 1:
+                    raise ValueError("参考图片不存在、无权使用或已经发送。")
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?, 'queued', '任务已进入队列')", (task_id,))
             self._insert_task_activity(conn, task_id, "queued", "started")
             if context:
@@ -552,6 +625,9 @@ class ProductStore:
         response: str,
         trace_payload: dict,
         image_storage_key: str | None = None,
+        image_width: int | None = None,
+        image_height: int | None = None,
+        image_requested_size: str | None = None,
     ) -> dict:
         """Atomically persist a successful product result and its final Trace.
 
@@ -649,8 +725,8 @@ class ProductStore:
                     ):
                         raise ValueError("图片任务缺少已持久化 storage key。")
                     conn.execute(
-                        "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (generation_id, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gpt-image-2.5-sunburst-c", image_storage_key, _image_mime_type(image_storage_key)),
+                        "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type,width,height,requested_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (generation_id, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gpt-image-2.5-sunburst-c", image_storage_key, _image_mime_type(image_storage_key), image_width, image_height, image_requested_size),
                     )
                     generation = conn.execute("SELECT task_id,conversation_id,storage_key FROM generations WHERE id=?", (generation_id,)).fetchone()
                     if not generation or generation["task_id"] != task_id or generation["conversation_id"] != conversation_id or generation["storage_key"] != image_storage_key:
@@ -770,12 +846,18 @@ class ProductStore:
             generations = [
                 _generation_view(dict(item))
                 for item in conn.execute(
-                    "SELECT id,task_id,storage_key,mime_type,width,height,created_at FROM generations "
+                    "SELECT id,task_id,storage_key,mime_type,width,height,requested_size,created_at FROM generations "
                     "WHERE tenant_id=? AND user_id=? AND conversation_id=? AND deleted_at IS NULL "
                     "AND storage_key IS NOT NULL AND TRIM(storage_key)<>'' ORDER BY created_at,id",
                     (tenant_id, user_id, conversation_id),
                 ).fetchall()
             ]
+            attachment_rows = conn.execute(
+                "SELECT a.id,a.task_id,a.filename,a.mime_type,a.size_bytes,a.width,a.height "
+                "FROM chat_image_attachments a JOIN tasks t ON t.id=a.task_id "
+                "WHERE t.conversation_id=? AND t.tenant_id=? AND t.user_id=? AND a.tenant_id=t.tenant_id AND a.user_id=t.user_id",
+                (conversation_id, tenant_id, user_id),
+            ).fetchall()
             runs = conn.execute("SELECT run_id,status,created_at,completed_at,payload FROM run_traces WHERE conversation_id=? AND tenant_id=? ORDER BY created_at", (conversation_id, tenant_id)).fetchall()
         result = dict(conversation)
         agent = self._history_agent(result["id"], tenant_id, result["agent_id"])
@@ -790,6 +872,7 @@ class ProductStore:
         result["generations"] = generations
         result["image_count"] = len(generations)
         generation_by_task = {item["task_id"]: item for item in generations}
+        attachments_by_task = {item["task_id"]: _chat_image_attachment_view(dict(item)) for item in attachment_rows}
         task_runs = {item["id"]: item.get("run_id") for item in tasks}
         trace_payloads = {
             item["run_id"]: json.loads(item["payload"])
@@ -825,6 +908,8 @@ class ProductStore:
                 task_id = message_id.removeprefix("legacy-assistant-")
             if task_id:
                 message["task_id"] = task_id
+                if message["role"] == "user" and task_id in attachments_by_task:
+                    message["attachments"] = [attachments_by_task[task_id]]
                 if message["role"] == "assistant" and task_id in generation_by_task:
                     message["generation"] = generation_by_task[task_id]
                 if message["role"] == "assistant":
@@ -920,7 +1005,7 @@ class ProductStore:
             generation = None
             if row and row["status"] in {"completed", "failed", "cancelled"}:
                 generation = conn.execute(
-                    "SELECT id,task_id,storage_key,mime_type,width,height,created_at FROM generations "
+                    "SELECT id,task_id,storage_key,mime_type,width,height,requested_size,created_at FROM generations "
                     "WHERE task_id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL "
                     "AND storage_key IS NOT NULL AND TRIM(storage_key)<>'' LIMIT 1",
                     (task_id, tenant_id, user_id),

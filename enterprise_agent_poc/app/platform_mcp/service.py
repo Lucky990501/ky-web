@@ -103,13 +103,16 @@ class PlatformMCPService:
     async def image_generation(self, bearer_token: str, prompt: str,
                                references: list[str], aspect_ratio: str,
                                *, retry_of: str | None = None,
-                               execution_scope: str = "legacy-runtime") -> dict:
+                               execution_scope: str = "legacy-runtime",
+                               reference_images: list[str] | None = None) -> dict:
         principal = self._principal(bearer_token, "image:generate")
         submitted_args = {
             "prompt": prompt,
             "references": references,
             "aspect_ratio": aspect_ratio,
         }
+        if reference_images is not None:
+            submitted_args["reference_images"] = reference_images
         retry_audit = None
         if retry_of is not None:
             effective_args, retry_audit = self._retry_receipts.reconstruct(
@@ -125,7 +128,10 @@ class PlatformMCPService:
         prompt = effective_args["prompt"]
         references = effective_args["references"]
         aspect_ratio = effective_args["aspect_ratio"]
+        reference_images = effective_args.get("reference_images") or []
         self._audit(principal.tenant_id, "image_generation", "started")
+        if len(reference_images) > 1:
+            raise ValueError("当前最多支持一张参考图片。")
         if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5"}:
             self._audit(principal.tenant_id, "image_generation", "failed")
             error = ToolInputValidationError(
@@ -147,26 +153,50 @@ class PlatformMCPService:
         if not api_key:
             raise RuntimeError(f"未配置图片服务 API Key 环境变量：{self._settings.image_api_key_env}。")
         size = {"1:1": "1024x1024", "9:16": "1024x1536", "16:9": "1536x1024", "4:5": "1024x1536"}[aspect_ratio]
+        raw_scope = execution_scope.removeprefix("runtime:") if execution_scope.startswith("runtime:") else ""
+        task_id = self._tokens.verify_task_scope(raw_scope, principal.tenant_id) if "." in raw_scope else ""
+        attachment = ProductStore(self._store).task_chat_image_attachment(task_id, principal.tenant_id) if task_id else None
+        if reference_images and (not attachment or reference_images != [attachment["id"]]):
+            raise ValueError("参考图片与当前任务不匹配。")
+        source_image = None
+        if attachment:
+            try:
+                source_image = storage_provider(self._settings).get(attachment["storage_key"])
+                _actual_format, _extension, actual_mime = _validated_image_metadata(source_image)
+                if actual_mime != attachment["mime_type"]:
+                    raise ValueError("Stored reference format changed")
+            except Exception as exc:
+                raise RuntimeError("参考图片暂时无法读取，请重新上传。") from exc
+            size = "1024x1024"
         try:
             import httpx
         except ImportError as exc:  # pragma: no cover - environment dependency
             raise RuntimeError("未安装 httpx；请重新安装 POC 依赖。") from exc
-        # References are tenant-scoped design metadata. External URLs are never
-        # fetched by the gateway, preventing SSRF and cross-tenant retrieval.
+        # References are tenant-scoped design metadata. Only this task's bound,
+        # authenticated upload bytes can select edits; no external URL is fetched.
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(
-                "https://llm-api.net/v1/images/generations",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "prompt": prompt,
-                    "model": self._settings.image_model_id,
-                    "provider": {"sort": "success_rate"},
-                    "size": size,
-                    "n": 1,
-                    "output_format": "jpeg",
-                    "response_format": "b64_json",
-                },
-            )
+            if attachment:
+                response = await client.post(
+                    "https://llm-api.net/v1/images/edits",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data={"prompt": prompt, "model": self._settings.image_model_id,
+                          "n": "1", "size": size, "output_format": "jpeg"},
+                    files={"image": (attachment["filename"], source_image, attachment["mime_type"])},
+                )
+            else:
+                response = await client.post(
+                    "https://llm-api.net/v1/images/generations",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "prompt": prompt,
+                        "model": self._settings.image_model_id,
+                        "provider": {"sort": "success_rate"},
+                        "size": size,
+                        "n": 1,
+                        "output_format": "jpeg",
+                        "response_format": "b64_json",
+                    },
+                )
         try:
             gateway = response.json()
         except ValueError as exc:
@@ -190,6 +220,8 @@ class PlatformMCPService:
         if not image:
             raise RuntimeError("图片网关返回空图片。")
         actual_format, extension, mime_type = _validated_image_metadata(image)
+        with Image.open(io.BytesIO(image)) as generated_image:
+            actual_width, actual_height = generated_image.size
         asset_id = request_id if request_id != "unknown" else uuid4().hex
         try:
             storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}{extension}"
@@ -208,8 +240,14 @@ class PlatformMCPService:
                     "file_name": None,
                     "format": actual_format,
                     "size": size,
+                    "requested_size": size,
+                    "actual_size": f"{actual_width}x{actual_height}",
+                    "width": actual_width,
+                    "height": actual_height,
+                    "mime_type": mime_type,
                     "request_id": None if request_id == "unknown" else request_id,
                     "references_used": references,
+                    "reference_images_used": [attachment["id"]] if attachment else [],
                 }
             ],
         }

@@ -256,10 +256,11 @@ class CodexRuntimeProvider(RuntimeProvider):
             and "expected" in text
         )
 
-    async def create_session(self, profile: RuntimeProfile, developer_instructions: str) -> RuntimeSession:
+    async def create_session(self, profile: RuntimeProfile, developer_instructions: str,
+                             *, task_id: str | None = None) -> RuntimeSession:
         codex = await self._manager.get(profile)
         self._manager._start_event(profile, "thread_start_requested")
-        execution_scope = uuid4().hex
+        execution_scope = self._manager._token_issuer.issue_task_scope(profile.tenant_id, task_id) if task_id else uuid4().hex
         try:
             thread = await codex.thread_start(
                 cwd=str(self._manager._paths(profile)[1]),
@@ -286,10 +287,11 @@ class CodexRuntimeProvider(RuntimeProvider):
         thread_id: str,
         developer_instructions: str | None = None,
         recovery_context: str | None = None,
+        *, task_id: str | None = None,
     ) -> RuntimeSession:
         codex = await self._manager.get(profile)
         self._manager._start_event(profile, "thread_resume_requested")
-        execution_scope = uuid4().hex
+        execution_scope = self._manager._token_issuer.issue_task_scope(profile.tenant_id, task_id) if task_id else uuid4().hex
         try:
             thread = await codex.thread_resume(
                 thread_id,
@@ -858,8 +860,8 @@ class CodexRuntimeProvider(RuntimeProvider):
         return None
 
     @classmethod
-    def _image_artifact(cls, result: object) -> dict[str, str] | None:
-        """Extract the allowlisted image key from an SDK MCP result."""
+    def _image_artifact(cls, result: object) -> dict | None:
+        """Extract only platform-owned artifact identity and size metadata."""
         structured = getattr(result, "structured_content", None)
         if structured is None and isinstance(result, dict):
             structured = result.get("structured_content", result.get("structuredContent"))
@@ -883,7 +885,11 @@ class CodexRuntimeProvider(RuntimeProvider):
                 and "\\" not in storage_key
                 and all(part not in {"", ".", ".."} for part in parts)
             ):
-                return {"storage_key": storage_key}
+                artifact = {"storage_key": storage_key}
+                requested_size = record.get("requested_size")
+                if isinstance(requested_size, str) and re.fullmatch(r"\d{1,5}x\d{1,5}", requested_size):
+                    artifact["requested_size"] = requested_size
+                return artifact
         return None
 
     @classmethod

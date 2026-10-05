@@ -388,6 +388,43 @@ test('image preview is bounded and keeps original-image viewer and download URLs
   assert.ok(html.includes('href="/api/v1/storage/generated/tenant-test/portrait.png" download'));
 });
 
+test('chat reference image composer is image-only and keeps one compact accessible attachment',()=>{
+  const h=harness('/agents/image'),css=fs.readFileSync(path.join(__dirname,'../app/static/workbench.css'),'utf8');
+  const fields=h.run('chatImageComposerFields()'),button=h.run('chatImageComposerButton()');
+  assert.ok(fields.includes('accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"'));
+  assert.ok(fields.includes('aria-live="polite"'));
+  assert.ok(button.includes('aria-label="添加参考图片"'));
+  assert.ok(h.run("agentWorkspaceV2.toString()").includes("if(agentId==='image-agent')"));
+  assert.ok(css.includes('.chatgpt-conversation-layout .chat-image-chip'));
+  assert.ok(css.includes('min-width:44px;min-height:44px'));
+});
+
+test('user history renders only the explicitly attached private image and prompt',()=>{
+  const h=harness('/agents/image');
+  const attachments=[{type:'image',id:'first',content_url:'/api/v1/chat-images/first',filename:'参考图.png'},
+    {type:'image',id:'second',content_url:'/api/v1/chat-images/second',filename:'不应展示.png'}];
+  h.run(`historyMessage=${JSON.stringify({role:'user',content:'把背景换成未来都市',attachments})}`);
+  const html=h.run('messageHtml(historyMessage)');
+  assert.ok(html.includes('/api/v1/chat-images/first'));
+  assert.ok(html.includes('把背景换成未来都市'));
+  assert.ok(!html.includes('/api/v1/chat-images/second'));
+  assert.ok(!html.includes('storage_key'));
+  const plain=h.run("messageHtml({role:'user',content:'普通文字消息'})");
+  assert.ok(plain.includes('普通文字消息'));
+  assert.ok(!plain.includes('chat-user-attachment'));
+});
+
+test('chat image send uses only a ready current attachment and never changes plain text payload',()=>{
+  const source=fs.readFileSync(path.join(__dirname,'../app/static/workbench.js'),'utf8');
+  assert.ok(source.includes("if(attachment?.record)payload.attachments=[{type:'image',id:attachment.record.id}]"));
+  assert.ok(source.includes("if(attachment?.record)attachment.consume()"));
+  assert.ok(source.includes("if(attachment?.record){attachment.locked=true;attachment.render();}"));
+  assert.ok(source.includes("attachment.status!=='idle'&&attachment.status!=='ready'"));
+  assert.ok(source.includes("attachment.consume=()=>{attachment.locked=false;clear(false);}"));
+  assert.ok(source.includes("apiForm('/api/v1/chat-images',form)"));
+  assert.ok(source.includes("api(`/api/v1/chat-images/${encodeURIComponent(record.id)}`,{method:'DELETE'})"));
+});
+
 test('image project labels preserve real task status and distinguish a later failure from an older image',()=>{
   const h=harness('/agents/image');
   for(const [project,expected] of [[imageProject('completed'),'已完成'],[imageProject('failed','failed',null),'失败'],[imageProject('failed','new-failed','old-success'),'最近一次失败'],[imageProject('failed','same-task','same-task'),'失败']]){
@@ -777,7 +814,7 @@ test('final task lifecycle releases the submit guard after streaming, polling, a
   assert.equal(h.run('failedNode.failure.id'),'');
   assert.equal(h.document.prompt.value,'重试需求');
   assert.equal(h.document.prompt.focused,true);
-  assert.ok(source.includes("if(!text||document.querySelector('#task-status'))return;"));
+  assert.ok(source.includes("document.querySelector('#task-status')||attachment&&attachment.status!=='idle'&&attachment.status!=='ready'"));
 });
 
 test('Stage 1 Agent management direct/refresh prefers pathname over old profile state',async()=>{

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -60,6 +61,23 @@ class RuntimeTokenIssuer:
         signature = hmac.new(self._secret, encoded.encode("ascii"), hashlib.sha256).digest()
         prefix = "poc2" if principal.execution_context_id else "poc1"
         return f"{prefix}.{encoded}.{_encode(signature)}"
+
+    def issue_task_scope(self, tenant_id: str, task_id: str) -> str:
+        """Bind a model-inaccessible MCP header to one tenant's product task."""
+        signature = hmac.new(self._secret, f"chat-image:{tenant_id}:{task_id}".encode(), hashlib.sha256).digest()
+        return f"{task_id}.{_encode(signature)}"
+
+    def verify_task_scope(self, value: str, tenant_id: str) -> str:
+        try:
+            task_id, signature = value.split(".", 1)
+            if not task_id or len(task_id) > 64 or _encode(_decode(signature)) != signature:
+                raise ValueError("Invalid task scope")
+            expected = self.issue_task_scope(tenant_id, task_id).split(".", 1)[1]
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError("Invalid task scope")
+            return task_id
+        except (ValueError, UnicodeError, binascii.Error) as exc:
+            raise TokenError("Runtime Task scope 无效。") from exc
 
     def verify(self, token: str, required_scope: str) -> RuntimePrincipal:
         try:

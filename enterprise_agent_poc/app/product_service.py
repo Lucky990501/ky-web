@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import re
+
+from PIL import Image, UnidentifiedImageError
 
 from app.agent_catalog import CATALOG
 from app.product_store import ProductStore, ResultPersistenceError, TaskCancellationRequested
@@ -91,6 +94,10 @@ class TaskService:
                     task["input_text"],
                     message_id=f"task:{task_id}:user",
                 )
+            if task["agent_id"] == "image-agent":
+                attachment = self._store.task_chat_image_attachment(task_id, tenant_id)
+                if attachment:
+                    execution_options.update(task_id=task_id, reference_image_attached=True)
             self._store.add_task_activity(task_id, tenant_id, "context_loading", "completed")
             self._store.set_task(task_id, tenant_id, "running", "starting_runtime", f"正在启动{agent.name}")
             result = await self._agents.run(
@@ -206,6 +213,9 @@ class TaskService:
         current = self._store.task_for_worker(task["id"])
         payload = dict(trace["payload"])
         storage_key = self._image_storage_key(trace)
+        artifact = next((call.get("artifact") for call in reversed(trace["payload"].get("mcp_calls", []))
+                         if call.get("tool") == "image_generation" and isinstance(call.get("artifact"), dict)
+                         and call["artifact"].get("storage_key") == storage_key), {})
         if self._store.task_definition(task).allows_image_generation and (not current or current["status"] != "completed"):
             # Reuse the generated object. Never invoke image_generation during
             # result recovery, even if this read or the DB transaction fails.
@@ -213,11 +223,23 @@ class TaskService:
                     or "\\" in storage_key or any(part in {"", ".", ".."} for part in storage_key.split("/"))):
                 raise ResultPersistenceError("artifact_association")
             try:
-                if not storage_provider(self._agents._settings).get(storage_key):
+                image_content = storage_provider(self._agents._settings).get(storage_key)
+                if not image_content:
                     raise ValueError("empty artifact")
+                try:
+                    with Image.open(io.BytesIO(image_content)) as picture:
+                        image_width, image_height = picture.size
+                except (UnidentifiedImageError, OSError, ValueError):
+                    # Historical artifacts predate validated-format metadata.
+                    # Do not invent their dimensions or change their recovery contract.
+                    if artifact.get("requested_size"):
+                        raise
+                    image_width = image_height = None
             except Exception as exc:
                 raise ResultPersistenceError("artifact_verification") from exc
             payload["artifact_available"] = True
+        else:
+            image_width = image_height = None
         return self._store.complete_task_success(
             task,
             run_id=trace["run_id"],
@@ -225,4 +247,7 @@ class TaskService:
             response=str(payload["final_result"]),
             trace_payload=payload,
             image_storage_key=storage_key,
+            image_width=image_width,
+            image_height=image_height,
+            image_requested_size=artifact.get("requested_size"),
         )

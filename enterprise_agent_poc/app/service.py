@@ -73,6 +73,8 @@ class AgentService:
         on_execution_activity: Callable[[str, str], None] | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
         on_run_started: Callable[[str, str], None] | None = None,
+        task_id: str | None = None,
+        reference_image_attached: bool = False,
     ) -> RunResult:
         if execution_context is None:
             profile = self.profile_for(tenant_id, agent_id)
@@ -84,6 +86,8 @@ class AgentService:
             profile = context_profile(execution_context)
             agent = definition(execution_context)
         grounding_enabled = bool(profile.grounding_policy and profile.grounding_policy.get("enabled") is True)
+        if reference_image_attached and (agent_id != "image-agent" or not task_id):
+            raise ValueError("参考图片必须绑定图片任务。")
         is_resume = bool(conversation_id)
         if conversation_id:
             existing = self._store.conversation(conversation_id, tenant_id)
@@ -163,6 +167,7 @@ class AgentService:
                     existing["runtime_thread_id"],
                     developer_instructions=agent.instructions,
                     recovery_context=recovery_context,
+                    **({"task_id": task_id} if reference_image_attached else {}),
                 )
                 if session.thread_id != existing["runtime_thread_id"]:
                     if not self._store.replace_conversation_thread(
@@ -170,7 +175,10 @@ class AgentService:
                     ):
                         raise RuntimeError("会话 Thread 绑定并发更新失败。")
             else:
-                session = await self._runtime.create_session(profile, agent.instructions)
+                session = await self._runtime.create_session(
+                    profile, agent.instructions,
+                    **({"task_id": task_id} if reference_image_attached else {}),
+                )
                 if execution_context:
                     with self._store.connection() as conn:
                         conn.execute("INSERT INTO conversations(id,tenant_id,agent_id,runtime_profile_id,runtime_thread_id,runtime_version) VALUES (?,?,?,?,?,?)", (conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version))
@@ -181,8 +189,9 @@ class AgentService:
                     )
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
+            runtime_message = (message + "\n\n本轮消息显式附有一张参考图片。请按用户文字要求调用 image_generation；平台会安全读取本任务绑定的参考图并执行图片编辑。不要沿用历史图片。") if reference_image_attached else message
             turn = await self._run_turn(
-                session, message, on_visible_delta, cancellation_requested,
+                session, runtime_message, on_visible_delta, cancellation_requested,
                 on_execution_activity,
                 grounding_enabled=grounding_enabled,
             )

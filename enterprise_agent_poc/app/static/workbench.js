@@ -145,6 +145,47 @@ function bindConversationRail(main,agentId){
   main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.selectAgentConversation;navigate(agentPage(agentId));});
   bindNavigation();
 }
+const chatImageComposerFields=()=>`<div id="chat-image-attachment" class="chat-image-attachment" aria-live="polite"></div><input id="chat-image-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" hidden>`;
+const chatImageComposerButton=()=>`<button class="chat-image-add" id="chat-image-add" type="button" aria-label="添加参考图片" title="添加参考图片">${icon('plus',18)}</button>`;
+function bindChatImageComposer(main){
+  const picker=main.querySelector('#chat-image-input'),slot=main.querySelector('#chat-image-attachment'),composer=main.querySelector('#composer');
+  if(!picker||!slot||!composer)return;
+  const attachment={status:'idle',record:null,file:null,error:'',previewUrl:null,revision:0,locked:false};main._chatImage=attachment;
+  const releasePreview=()=>{if(attachment.previewUrl)URL.revokeObjectURL(attachment.previewUrl);attachment.previewUrl=null;};
+  const removeUploaded=record=>{if(record?.id)api(`/api/v1/chat-images/${encodeURIComponent(record.id)}`,{method:'DELETE'}).catch(()=>{});};
+  const render=()=>{
+    if(main._chatImage!==attachment||main.querySelector('#chat-image-attachment')!==slot)return;
+    const {status,record,file,error,previewUrl}=attachment;
+    slot.innerHTML=status==='idle'?'':`<div class="chat-image-chip ${status==='failed'?'failed':''}">${previewUrl||record?.content_url?`<img src="${escapeHtml(previewUrl||record.content_url)}" alt="待发送的参考图片">`:icon('image',24)}<span><b>${escapeHtml(file?.name||record?.filename||'参考图片')}</b><small>${status==='uploading'?'正在上传…':status==='ready'?'已就绪':escapeHtml(error||'上传失败')}</small></span>${status==='failed'?'<button type="button" data-chat-image-retry aria-label="重试上传图片">重试</button>':''}<button type="button" data-chat-image-remove aria-label="删除参考图片">${icon('x',16)}</button></div>`;
+    const send=main.querySelector('#composer-submit');if(send&&send.type==='submit')send.disabled=status==='uploading'||status==='failed';
+    slot.querySelectorAll('button').forEach(button=>{button.disabled=attachment.locked;});
+    slot.querySelector('[data-chat-image-remove]')?.addEventListener('click',()=>clear(true));
+    slot.querySelector('[data-chat-image-retry]')?.addEventListener('click',()=>attachment.file&&selectFile(attachment.file));
+    refreshIcons();
+  };
+  const clear=deleteUpload=>{attachment.revision++;if(deleteUpload)removeUploaded(attachment.record);releasePreview();Object.assign(attachment,{status:'idle',record:null,file:null,error:''});picker.value='';render();};
+  const selectFile=async file=>{
+    if(!file||attachment.locked||main.querySelector('#task-status'))return;
+    const oldRecord=attachment.record;attachment.revision++;const revision=attachment.revision;removeUploaded(oldRecord);releasePreview();
+    Object.assign(attachment,{file,record:null,error:'',status:'uploading'});
+    if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>10*1024*1024||!file.size){attachment.status='failed';attachment.error='仅支持不超过 10MB 的 JPEG、PNG 或 WebP 图片。';render();return;}
+    attachment.previewUrl=URL.createObjectURL(file);render();
+    const form=new FormData();form.append('file',file,file.name||'参考图片');
+    try{
+      const record=await apiForm('/api/v1/chat-images',form);
+      if(revision!==attachment.revision||main._chatImage!==attachment){removeUploaded(record);return;}
+      attachment.record=record;attachment.status='ready';attachment.error='';releasePreview();render();
+    }catch(error){if(revision!==attachment.revision)return;attachment.status='failed';attachment.error=error.message||'上传失败，请重试。';render();}
+  };
+  main.querySelector('#chat-image-add').onclick=()=>picker.click();
+  picker.onchange=()=>{if(picker.files?.length)selectFile(picker.files[0]);picker.value='';};
+  composer.addEventListener('dragover',event=>{if([...event.dataTransfer?.types||[]].includes('Files'))event.preventDefault();});
+  composer.addEventListener('drop',event=>{const files=[...event.dataTransfer?.files||[]];if(!files.length)return;event.preventDefault();if(files.length>1){attachment.status='failed';attachment.error='每次最多上传一张参考图片。';render();return;}selectFile(files[0]);});
+  composer.addEventListener('paste',event=>{const files=[...event.clipboardData?.files||[]];if(!files.length)return;event.preventDefault();if(files.length>1){attachment.status='failed';attachment.error='每次最多上传一张参考图片。';render();return;}selectFile(files[0]);});
+  attachment.consume=()=>{attachment.locked=false;clear(false);};
+  attachment.render=render;
+  render();
+}
 async function refreshConversationRail(main,agentId,terminalTask={}){
   for(const path of ['/api/v1/conversations','/api/v1/generations','/api/v1/workspace'])pageCache.delete(path);
   if(!main||main.dataset?.page!==agentPage(agentId)||document.querySelector('#main')!==main)return;
@@ -174,6 +215,7 @@ const messageGenerationHtml = generation => {
   const url=escapeHtml(storageUrl(generation));
   return `<section class="message-generation"><div class="message-generation-label">${icon('image',16)}已生成图片</div>${image(generation,'本次生成图片')}<div class="message-generation-actions"><button class="button secondary" type="button" data-open-message-generation="${url}">${icon('expand',15)}查看大图</button><a class="button secondary" href="${url}" download>${icon('download',15)}下载</a></div></section>`;
 };
+const userMessageAttachmentHtml=attachments=>(attachments||[]).filter(item=>item?.type==='image'&&item.content_url).slice(0,1).map(item=>`<span class="chat-user-attachment"><img src="${escapeHtml(item.content_url)}" alt="${escapeHtml(item.filename||'参考图片')}" loading="lazy"><span>${escapeHtml(item.filename||'参考图片')}</span></span>`).join('');
 const markdownInlineHtml = value => {
   let html=escapeHtml(String(value||''));
   html=html.replace(/`([^`]+)`/g,'<code>$1</code>');
@@ -257,7 +299,7 @@ const messageActionsHtml=(content,sourcePrompt='',messageId='')=>`${button('复�
 const messageHtml = (item, sourcePrompt='',agentId='') => {
   const isUser=item.role==='user';
   if(!isUser&&agentId==='campaign-agent')rememberActivityPlanResult(item.id,item.structured_result);
-  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}" ${!isUser&&item.id?`data-assistant-message-id="${escapeHtml(item.id)}"`:''}><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?escapeHtml(item.content).replace(/\n/g,'<br>'):markdownHtml(item.content)}</div>${!isUser?`<div class="message-actions">${messageActionsHtml(item.content,sourcePrompt,agentId==='campaign-agent'?item.id:'')}</div>${agentId==='campaign-agent'?documentResultSlotHtml(item.id):''}${taskReferencesHtml(item.references)}`:''}${messageGenerationHtml(item.generation)}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
+  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}" ${!isUser&&item.id?`data-assistant-message-id="${escapeHtml(item.id)}"`:''}><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?`${userMessageAttachmentHtml(item.attachments)}${escapeHtml(item.content).replace(/\n/g,'<br>')}`:markdownHtml(item.content)}</div>${!isUser?`<div class="message-actions">${messageActionsHtml(item.content,sourcePrompt,agentId==='campaign-agent'?item.id:'')}</div>${agentId==='campaign-agent'?documentResultSlotHtml(item.id):''}${taskReferencesHtml(item.references)}`:''}${messageGenerationHtml(item.generation)}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
 };
 function syncActivityPlanAction(main,messageId){
   const article=[...(main?.querySelectorAll?.('[data-assistant-message-id]')||[])].find(node=>node.dataset.assistantMessageId===messageId);
@@ -461,7 +503,7 @@ function updateComposerRunState(main,state){
   const {input,submit,feedback}=composerRunControls(main),stopping=run.phase===ConversationRunPhase.STOPPING,running=run.phase===ConversationRunPhase.RUNNING,draining=state.networkComplete&&!state.completed;
   if(input)input.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining;
   if(submit){
-    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining;
+    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining||(!running&&['uploading','failed'].includes(main?._chatImage?.status));
     submit.type=running||stopping?'button':'submit';
     submit.classList?.toggle?.('composer-stop-button',running||stopping);
     submit.setAttribute?.('aria-label',stopping?'正在停止生成':running?'停止生成':draining?'正在显示回复':'发送消息');
@@ -469,6 +511,7 @@ function updateComposerRunState(main,state){
     submit.innerHTML=running||stopping?`<span class="stop-generation-glyph" aria-hidden="true"></span><span class="sr-only">${stopping?'正在停止生成':'停止生成'}</span>`:icon('send');
     submit.onclick=running?()=>requestStopGeneration(main,state):null;
   }
+  const imageAdd=main?.querySelector?.('#chat-image-add');if(imageAdd)imageAdd.disabled=run.phase!==ConversationRunPhase.IDLE;
   if(feedback)feedback.textContent=run.stopError||'';
   refreshIcons();
 }
@@ -609,19 +652,25 @@ async function agentWorkspaceV2(main, agentId) {
   const historicalImages=remainingImages.length?`<section class="conversation-artifacts"><h3>${icon('images',18)}本项目生成图片 <span>${remainingImages.length}</span></h3><div>${remainingImages.map(item=>image(item,detail?.project?.name||'历史生成图片')).join('')}</div></section>`:'';
   const historyMarkup=history.length?`${history.map((item,index)=>messageHtml(item,item.role==='assistant'?[...history.slice(0,index)].reverse().find(previous=>previous.role==='user')?.content||'':'',agentId)).join('')}${historicalImages}`:agentGreetingHtml(agent);
   main.innerHTML=`<div class="creation-layout chatgpt-conversation-layout"><aside class="conversation-rail">${agentConversationRailHtml(conversations,activeConversationId)}</aside><section class="creation-main"><div id="chat-body" class="chat-body" aria-live="polite">${agentId==='image-agent'?`<div class="conversation-result-status" data-conversation-result-status>${imageConversationStatusHtml(conversations.find(item=>item.id===activeConversationId))}</div>`:''}${historyMarkup}</div><form class="composer" id="composer"><textarea id="prompt" required placeholder="${escapeHtml(agentPlaceholder(agentId))}"></textarea><div><span>${detail?'继续在当前项目里提出修改，系统会保留上文。':'可按需使用企业资料与品牌素材。'}</span><p class="composer-run-feedback" id="composer-run-feedback" role="status"></p><button class="button primary" id="composer-submit" type="submit" aria-label="发送消息" title="发送">${icon('send')}</button></div></form></section><aside class="creation-right"><section class="panel"><h3>当前智能体</h3><p><b>${escapeHtml(agent.name)}</b></p><p class="muted">${escapeHtml(agent.description||'协助完成业务创作。')}</p></section><section class="panel"><h3>${detail?'当前项目':'本次执行'}</h3><p><b>${escapeHtml(detail?.project?.name||'新建项目')}</b></p><p class="muted">${detail?`最近保存：${escapeHtml(formatHistoryTime(detail.tasks?.at(-1)?.completed_at||detail.created_at))}`:'直接描述你的业务需求即可。'}</p></section></aside></div>`;
+  if(agentId==='image-agent'){
+    const composer=main.querySelector('#composer');
+    composer.insertAdjacentHTML('afterbegin',chatImageComposerFields());
+    composer.querySelector(':scope > div:last-of-type').insertAdjacentHTML('afterbegin',chatImageComposerButton());
+    bindChatImageComposer(main);
+  }
   bindConversationRail(main,agentId); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
   if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
   if(!canRun){main.querySelector('#new-chat').disabled=true;main.querySelector('#composer').innerHTML='<p role="status">智能体已停用，历史项目只读；不能创建任务或继续执行。</p>';main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
   bindNavigation();
 }
 async function submitAgentTaskV2(event,agentId,main){
-  event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim();if(!text||document.querySelector('#task-status'))return;
-  const submittedAt=Date.now();
+  event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim(),attachment=agentId==='image-agent'?main._chatImage:null;if(!text||document.querySelector('#task-status')||attachment&&attachment.status!=='idle'&&attachment.status!=='ready')return;
+  const submittedAt=Date.now();if(attachment?.record){attachment.locked=true;attachment.render();}
   input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
-  body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
+  body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${userMessageAttachmentHtml(attachment?.record?[attachment.record]:[])}${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
   const node=document.querySelector('#task-status'),state=createStreamingState();state.conversationStartedAt=submittedAt;state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
-  const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;
-  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,conversationId:task.conversation_id,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){replaceTaskFailure(node,error.message,text,error.requestId,main);}
+  const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;if(attachment?.record)payload.attachments=[{type:'image',id:attachment.record.id}];
+  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});if(attachment?.record)attachment.consume();setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,conversationId:task.conversation_id,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){if(attachment){attachment.locked=false;attachment.render();}replaceTaskFailure(node,error.message,text,error.requestId,main);}
 }
 function streamPayload(event){try{return JSON.parse(event.data||'{}');}catch{return {};}}
 function finishStreamTask(node,state,done,agentId,main,retryText){

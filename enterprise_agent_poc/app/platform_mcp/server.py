@@ -102,19 +102,23 @@ def create_mcp():
 
     @mcp.tool()
     async def image_generation(prompt: str, references: list[str], aspect_ratio: str,
-                               ctx: Context = None, retry_of: str | None = None) -> dict[str, Any]:
+                               ctx: Context = None, retry_of: str | None = None,
+                               reference_images: list[str] | None = None) -> dict[str, Any]:
         """Generate an image via the platform Tool Gateway.
 
         For the SAME requirement's input correction, copy retry_of from the
         validation error. For a new independent image, omit retry_of.
         """
         arguments = {"prompt": prompt, "references": references, "aspect_ratio": aspect_ratio}
+        if reference_images is not None:
+            arguments["reference_images"] = reference_images
         bearer = _bearer_from_context(ctx)
         execution_scope = _execution_scope_from_context(ctx, bearer)
         try:
             return await service.image_generation(
                 bearer, prompt, references, aspect_ratio,
                 retry_of=retry_of, execution_scope=execution_scope,
+                reference_images=reference_images,
             )
         except ToolInputValidationError as error:
             # The generic contract is emitted only for typed, pre-side-effect

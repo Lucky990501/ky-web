@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response, Request
@@ -28,6 +29,7 @@ from app.agent_runtime_test import AgentRuntimeTest
 from app.product_service import TaskService
 from app.product_store import ProductStore
 from app.brand_logo import BrandLogoError, BrandLogoService, MAX_LOGO_BYTES, public_brand_logo
+from app.chat_image_uploads import ChatImageUploadError, MAX_CHAT_IMAGE_BYTES, validate_chat_image
 from app.document_generator import (
     ActivityPlanDocumentRequest,
     ActivityPlanDocumentService,
@@ -69,9 +71,15 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=8, max_length=256)
 
 
+class ChatImageAttachmentRequest(BaseModel):
+    type: Literal["image"]
+    id: str = Field(min_length=36, max_length=36)
+
+
 class AgentTaskRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4_000)
     conversation_id: str | None = None
+    attachments: list[ChatImageAttachmentRequest] = Field(default_factory=list, max_length=1)
 class RenameRequest(BaseModel): title: str = Field(min_length=1,max_length=80)
 class EnterpriseConfigRequest(BaseModel): payload: dict
 class KnowledgeTextRequest(BaseModel): name: str = Field(min_length=1,max_length=180); content: str = Field(min_length=1,max_length=100_000)
@@ -568,6 +576,61 @@ async def list_agents(workbench_session: str | None = Cookie(default=None)) -> l
     return product_store.agents(principal.tenant_id)
 
 
+@app.post("/api/v1/chat-images", status_code=201)
+async def upload_chat_image(file: UploadFile = File(...), workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    content = await file.read(MAX_CHAT_IMAGE_BYTES + 1)
+    try:
+        extension, mime_type, width, height = validate_chat_image(content, file.content_type or "")
+    except ChatImageUploadError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    filename = (file.filename or "图片").replace("\\", "/").rsplit("/", 1)[-1][:180]
+    storage_key = f"chat-uploads/{principal.tenant_id}/{uuid4().hex}{extension}"
+    try:
+        storage = storage_provider(settings)
+        storage.put(storage_key, content, mime_type)
+        record = product_store.create_chat_image_attachment(
+            principal.tenant_id, principal.user_id, storage_key, filename,
+            mime_type, len(content), width, height,
+        )
+    except Exception as exc:
+        try:
+            storage_provider(settings).delete(storage_key)
+        except Exception:
+            pass
+        raise HTTPException(503, "图片上传失败，请稍后重试。") from exc
+    return product_store.public_chat_image_attachment(principal.tenant_id, principal.user_id, record["id"]) or {}
+
+
+@app.get("/api/v1/chat-images/{attachment_id}")
+async def get_chat_image(attachment_id: str, workbench_session: str | None = Cookie(default=None)) -> Response:
+    principal = current_user(workbench_session)
+    record = product_store.chat_image_attachment(principal.tenant_id, principal.user_id, attachment_id)
+    if not record:
+        raise HTTPException(404, "图片不存在。")
+    try:
+        return Response(storage_provider(settings).get(record["storage_key"]), media_type=record["mime_type"], headers={
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+        })
+    except StorageObjectNotFound as exc:
+        raise HTTPException(404, "图片文件不存在。") from exc
+    except StorageUnavailable as exc:
+        raise HTTPException(503, "图片存储暂时不可用，请稍后重试。") from exc
+
+
+@app.delete("/api/v1/chat-images/{attachment_id}")
+async def remove_chat_image(attachment_id: str, workbench_session: str | None = Cookie(default=None)) -> dict:
+    principal = current_user(workbench_session)
+    storage_key = product_store.remove_chat_image_attachment(principal.tenant_id, principal.user_id, attachment_id)
+    if not storage_key:
+        raise HTTPException(404, "图片不存在或已发送。")
+    try:
+        storage_provider(settings).delete(storage_key)
+    except Exception:
+        pass
+    return {"status": "deleted"}
+
+
 @app.post("/api/v1/agents/{agent_id}/runs", status_code=202)
 async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: Request, workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = current_user(workbench_session)
@@ -578,12 +641,15 @@ async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: R
     from app.agent_catalog import CATALOG
     if agent_id not in CATALOG and set(await request.json()) - {"message","conversation_id"}:
         raise HTTPException(422,"执行配置只能由服务端解析。")
+    if payload.attachments and agent_id != "image-agent":
+        raise HTTPException(422, "当前仅图片生成智能体支持参考图片。")
     # Historical v2 resume is checked against its pinned Context inside the
     # atomic creator, not against today's list of versions eligible for NEW runs.
     if not (agent_id not in CATALOG and payload.conversation_id) and not product_store.agent_enabled(principal.tenant_id, agent_id):
         raise HTTPException(404, "该智能体尚未为当前企业启用。")
     try:
-        task = product_store.create_task(principal.tenant_id, principal.user_id, agent_id, payload.message, payload.conversation_id)
+        task = product_store.create_task(principal.tenant_id, principal.user_id, agent_id, payload.message, payload.conversation_id,
+                                         attachment_ids=[item.id for item in payload.attachments])
     except ValueError as exc:
         if str(exc) == "insufficient_credit":
             raise HTTPException(402, "积分不足，无法提交任务。") from exc
