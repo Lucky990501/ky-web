@@ -42,6 +42,13 @@ def schema_012_store(tmp_path, monkeypatch):
         patch.setattr(migrate, "MIGRATIONS", baseline)
         assert migrate.up(store) == 0
     store.seed_demo_data()
+    # Historical V1 contract still owns exactly 001-014. New source also ships
+    # 015; don't silently turn V1 regression into an undeclared three-step plan.
+    legacy = tmp_path / 'legacy-014'
+    legacy.mkdir()
+    for path in migrate.migration_files()[:14]:
+        shutil.copy2(path, legacy / path.name)
+    monkeypatch.setattr(migrate, 'MIGRATIONS', legacy)
     return store
 
 

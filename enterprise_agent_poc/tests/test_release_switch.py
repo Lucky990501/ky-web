@@ -25,7 +25,7 @@ def test_release_switch_snapshots_dropins_before_enabling_rollback_trap():
     backup_created = source.index('backup=$(mktemp -d "$base/.release-switch.XXXXXX")')
     dropin_copied = source.index('cp "$dropin" "$backup/$service.conf"')
     trap_enabled = source.index("trap 'fail_release' ERR")
-    first_dropin_write = source.index('cat > "$dropin"')
+    first_dropin_write = source.index('configure_services "$release_root"')
     dependency_preflight = source.index('"$runtime_venv/bin/python" -c')
     migration_status = source.index('migration_result=$(')
     skill_preflight = source.index('scripts/verify_bundled_skills.py')
@@ -48,7 +48,7 @@ def test_phase_a_forward_migration_is_locked_snapshotted_and_predecessor_verifie
     assert source.index('verify_release capture capture') < source.index("trap 'fail_release' ERR")
     assert source.index("trap 'fail_release' ERR") < source.index("release_migration_transition.py apply")
     assert source.index("release_migration_transition.py apply") < source.index("release_migration_transition.py verify")
-    assert source.index("predecessor-on-schema-014 state --rollback") < source.index('ln -sfn "$release_root" "$current_link"')
+    assert source.index("predecessor-on-forward-schema state --rollback") < source.index('ln -sfn "$release_root" "$current_link"')
     assert "scripts/migrate.py up" not in source
 
 
@@ -541,6 +541,10 @@ def pg_rollback_harness(pg_rollback_catalog, tmp_path):
     old = old_dir / 'enterprise_agent_poc'
     new = releases / 'fixture-new' / 'enterprise_agent_poc'
     shutil.copytree(project, new, ignore=shutil.ignore_patterns('.venv', '.runtime-data', '__pycache__', '.pytest_cache', 'tests', 'skill_sources', '*.md', '.env*', '.DS_Store'))
+    # This is the historical 001-014 rollback-gate fixture, not the 015
+    # candidate. Keep its copied migration inventory bound to that declaration.
+    # The production/frozen SQL and new 015 contract are not changed or omitted.
+    (new / 'migrations/postgres/015_chat_image_attachments.sql').unlink(missing_ok=True)
     # *.md ignore is inappropriate for immutable bundled inputs: copy exact bundle.
     shutil.rmtree(new / 'skill_packages')
     shutil.copytree(project / 'skill_packages', new / 'skill_packages')
@@ -713,8 +717,9 @@ def test_postgres_old_runner_stays_failed_new_normal_runner_strict_and_preflight
     assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010', '011']
     # Migration-NONE release entry must now reject the pending 012 before writes.
     assert pg_entry(h, '--preflight-only').returncode == 2
-    # 013/014 are now declared; a future unknown version must still fail closed.
-    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('015','unknown.sql',?)", ('0' * 64,))
+    # The current source knows 015; genuinely future 016 must fail as UNKNOWN,
+    # rather than accidentally exercising the altered-known-checksum branch.
+    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('016','unknown.sql',?)", ('0' * 64,))
     assert migrate.status(h['store']) == 2
     with pytest.raises(RuntimeError, match='未知'):migrate.up(h['store'])
     assert not h['events'].exists()

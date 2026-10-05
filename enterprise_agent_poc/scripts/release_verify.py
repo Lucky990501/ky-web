@@ -155,6 +155,10 @@ def service_state(base):
                                               "-p", "ActiveState", "-p", "MainPID"], text=True, timeout=10)
             values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
             pid = int(values.get("MainPID", "0"))
+            if pid == 0 and values.get("ActiveState") in {"inactive", "failed"}:
+                result[role] = {"active": values["ActiveState"], "pid": 0,
+                                "cwd": None, "exe": None, "module_ok": False}
+                continue
             proc = Path("/proc") / str(pid)
             result[role] = {"active": values.get("ActiveState"), "pid": pid,
                             "cwd": str((proc / "cwd").resolve(strict=True)),
@@ -231,6 +235,12 @@ def final_preflight(base, candidate, predecessor):
 
     compatibility = gate.read_json(root / "deploy/rollback_compatibility.json")
     exact = compatibility["forward_predecessor_approval"]
+    forward015 = manifest.get("forward_migrations", {}).get("schema_version") == 2
+    if forward015:
+        from scripts.release_runtime_recovery import declared, PREDECESSOR
+        declared(root, manifest)
+        exact = {**PREDECESSOR, "data_contract": "member_account_status_v1",
+                 "schema_fingerprint": gate.digest(compatibility["epoch_contract"]["schema_migrations"])}
     prior_root, prior = gate.release_identity(base, exact["release_id"], exact["source_commit"], exact)
     require(predecessor == prior_root.parent / (prior["release_id"] + ".manifest.json")
             and (base / "release-current").is_symlink()
@@ -296,8 +306,8 @@ def final_preflight(base, candidate, predecessor):
     if forward:
         migration_plan = forward_transition.read_only_plan(registry._store, forward_transition.declaration(manifest))
         require(schema["applied_versions"] == migration_plan["applied_versions"]
-                and migration_plan["pending_versions"] == ["013", "014"], "declared_migration_plan")
-        require(gate.digest(compatibility["epoch_contract"]["schema_migrations"][:12])
+                and migration_plan["pending_versions"] == [x["version"] for x in forward["migrations"]], "declared_migration_plan")
+        require(gate.digest(compatibility["epoch_contract"]["schema_migrations"][:14 if forward015 else 12])
                 == exact["schema_fingerprint"], "preflight_predecessor_schema_fingerprint")
     else:
         require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
@@ -311,8 +321,8 @@ def final_preflight(base, candidate, predecessor):
             "release_id": manifest["release_id"], "source_commit": manifest["source_commit"],
             **pins, "exact_predecessor": prior["release_id"], "services": services,
             "bindings": active, "registry_exact_reusable": reusable, "registry_stageable": stageable,
-            "schema": schema, "pending": 2 if forward else 0,
-            "migration": ["013", "014"] if forward else "NONE",
+            "schema": schema, "pending": len(forward["migrations"]) if forward else 0,
+            "migration": [x["version"] for x in forward["migrations"]] if forward else "NONE",
             "skill_package_staging": "DECLARED_ONLY" if staging else None,
             "deferred_agent": "ABSENT" if deferred else None,
             "data_contract": exact["data_contract"], "credentials": "READY"}
@@ -701,6 +711,16 @@ def evidence(base, candidate, predecessor, snapshot):
                     "manifests": [dict(r) for r in conn.execute("SELECT id,skill_manifest FROM agent_templates").fetchall()],
                     "packages": [dict(r) for r in conn.execute("SELECT s.slug,v.version,v.status,v.checksum,p.sha256,p.size_bytes FROM skill_versions v JOIN skills s ON s.id=v.skill_id LEFT JOIN skill_packages p ON p.skill_version_id=v.id").fetchall()]}
     collect("registry", registry_rows)
+    def schema_rows():
+        from psycopg import connect
+        from psycopg.rows import dict_row
+        with connect(os.environ["ENTERPRISE_POC_DATABASE_URL"], row_factory=dict_row,
+                     options="-c default_transaction_read_only=on") as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT version,name,checksum FROM schema_migrations ORDER BY version").fetchall()]
+    collect("schema_identity", schema_rows)
+    collect("predecessor_manifest_identity", lambda: {"raw": hashlib.sha256(predecessor.read_bytes()).hexdigest(),
+             "canonical": digest(json.loads(predecessor.read_text()))})
     collect("health", health)
     # Logs contain only sanitized helper output; no auth bodies or environment.
     result["gate_logs"] = {p.name: p.read_text() for p in snapshot.parent.glob("*.log")}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "contract_id": "migration-015-exact-predecessor-recovery-v1",
+  "feature_source": "b25fc4381ce5fa2d9a35325155953a9f5cb0d2e4",
+  "feature_tree": "0e7a0e589442141af70943113e858648a1ff46b8",
+  "from_schema": "014",
+  "target_schema": "015",
+  "migration": {
+    "version": "015",
+    "filename": "015_chat_image_attachments.sql",
+    "git_blob": "96bba0ea64ade51670775cf6f69b806a2248342a",
+    "canonical_sha256": "67c4c85007d7ac1a9dc3f0e979359d6b3f9ea84206740d11b6ce05c11563f1fc"
+  },
+  "exact_predecessor": {
+    "release_id": "20261004-c2f4ec7-image-format-v1",
+    "source_commit": "c2f4ec797c3eff4fdf62665bf3e7b47cd3167608",
+    "source_tree": "544b166129bbe8042c6b5c17d40b2f6f1044b592",
+    "archive_sha256": "ac68166a3c7d04c22b1d20f27a492ae839b37302424c924699fe48ae302c30f1",
+    "raw_manifest_sha256": "ef6f34220524e5a1221a1c53bb83d3b99d382507c12a7ec5de78f5a0bcaf7307",
+    "manifest_sha256": "544b1f0b6bc2ebfe9f9cd6f6535d7a3fccbfd1f254a9022668d00e44b7b2ef7b"
+  },
+  "recovery_mode": "PREDECESSOR_ON_SCHEMA_015",
+  "forward_schema_predecessor_compatible": true,
+  "data_contract": "member_account_status_v1",
+  "compatibility_evidence": {
+    "version": "migration015-exact-predecessor-rehearsal-v1-20261005-r3",
+    "report_sha256": "70bc8a0e19559ac38e53c019fd294a18b6c19d91044570b01521d1a7647ab674",
+    "scope": "EXACT_PREDECESSOR_NATIVE_RUNTIME_ON_SCHEMA_015_PROVIDER_ZERO"
+  }
+}

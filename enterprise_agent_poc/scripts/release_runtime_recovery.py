@@ -1,0 +1,241 @@
+"""Strict Migration 015 gates for the existing release_switch rollback entry.
+
+All functions here are read-only except writing release-owned audit evidence.
+Service activation remains exclusively in release_switch.sh. No down SQL,
+Registry initialize, Provider task, Binding transition or arbitrary target.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).absolute().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts import rollback_preflight as gate
+
+CONTRACT_ID = "migration-015-exact-predecessor-recovery-v1"
+PREDECESSOR = {
+    "release_id": "20261004-c2f4ec7-image-format-v1",
+    "source_commit": "c2f4ec797c3eff4fdf62665bf3e7b47cd3167608",
+    "source_tree": "544b166129bbe8042c6b5c17d40b2f6f1044b592",
+    "archive_sha256": "ac68166a3c7d04c22b1d20f27a492ae839b37302424c924699fe48ae302c30f1",
+    "raw_manifest_sha256": "ef6f34220524e5a1221a1c53bb83d3b99d382507c12a7ec5de78f5a0bcaf7307",
+    "manifest_sha256": "544b1f0b6bc2ebfe9f9cd6f6535d7a3fccbfd1f254a9022668d00e44b7b2ef7b",
+}
+MIGRATION = {
+    "version": "015", "filename": "015_chat_image_attachments.sql",
+    "git_blob": "96bba0ea64ade51670775cf6f69b806a2248342a",
+    "canonical_sha256": "67c4c85007d7ac1a9dc3f0e979359d6b3f9ea84206740d11b6ce05c11563f1fc",
+}
+STAGES = ("PRE_COMMIT", "MIGRATION_APPLIED", "RUNTIME_SWITCHED", "POST_COMMIT_HEALTH")
+
+
+def contract(root):
+    value = gate.read_json(root / "deploy/migration_015_recovery.v1.json")
+    expected = {
+        "schema_version": 1, "contract_id": CONTRACT_ID,
+        "feature_source": "b25fc4381ce5fa2d9a35325155953a9f5cb0d2e4",
+        "feature_tree": "0e7a0e589442141af70943113e858648a1ff46b8",
+        "from_schema": "014", "target_schema": "015", "migration": MIGRATION,
+        "exact_predecessor": PREDECESSOR,
+        "recovery_mode": "PREDECESSOR_ON_SCHEMA_015",
+        "forward_schema_predecessor_compatible": True,
+        "data_contract": "member_account_status_v1",
+        "compatibility_evidence": {
+            "version": "migration015-exact-predecessor-rehearsal-v1-20261005-r3",
+            "report_sha256": "70bc8a0e19559ac38e53c019fd294a18b6c19d91044570b01521d1a7647ab674",
+            "scope": "EXACT_PREDECESSOR_NATIVE_RUNTIME_ON_SCHEMA_015_PROVIDER_ZERO",
+        },
+    }
+    gate.require(value == expected and type(value["schema_version"]) is int
+                 and value["forward_schema_predecessor_compatible"] is True,
+                 "migration_015_recovery_contract_identity")
+    content = (root / "migrations/postgres" / MIGRATION["filename"]).read_bytes().replace(b"\r\n", b"\n")
+    gate.require(hashlib.sha256(content).hexdigest() == MIGRATION["canonical_sha256"]
+                 and hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+                 == MIGRATION["git_blob"], "migration_015_blob_identity")
+    return value
+
+
+def declared(root, manifest):
+    value = contract(root)
+    plan = manifest.get("forward_migrations")
+    gate.require(plan == gate.read_json(root / "deploy/forward_migrations_015.json")
+                 and plan.get("recovery_contract") == CONTRACT_ID, "migration_015_plan_identity")
+    gate.require(not ({"binding_transition", "agent_productization_transition", "skill_package_staging",
+                       "deferred_skill"} & set(manifest)), "migration_015_code_only_scope")
+    return value
+
+
+def predecessor(base, root):
+    exact = contract(root)["exact_predecessor"]
+    source, manifest = gate.release_identity(base, exact["release_id"], exact["source_commit"], exact)
+    raw = source.parent / (exact["release_id"] + ".manifest.json")
+    gate.require(hashlib.sha256(raw.read_bytes()).hexdigest() == exact["raw_manifest_sha256"],
+                 "predecessor_raw_manifest_identity")
+    # Source -> full Git tree was attested in the pinned native rehearsal.
+    # A selected-file archive is NOT mislabeled as a complete Git tree hash.
+    gate.require(exact["source_tree"] == PREDECESSOR["source_tree"], "predecessor_source_tree")
+    return source, manifest
+
+
+def verify_schema(base, root, target_id, target_commit, *, plan=False, database_url=None):
+    own = gate.read_json(root.parent / (root.parent.name + ".manifest.json"))
+    gate.require(own["release_id"] == root.parent.name, "trusted_recovery_release_id")
+    installed, _ = gate.release_identity(base, own["release_id"], own["source_commit"])
+    gate.require(installed == root, "trusted_recovery_release_path")
+    recovery = declared(root, own)
+    self_target = (target_id, target_commit) == (own["release_id"], own["source_commit"])
+    prior_target = (target_id, target_commit) == (PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
+    gate.require(self_target or prior_target, "rollback_target_below_member_account_status_floor")
+    declaration = gate.read_json(root / "deploy/rollback_compatibility.json")
+    epoch = gate.epoch_contract(declaration)
+    lock014 = epoch["schema_migrations"]
+    gate.require([x["version"] for x in lock014] == [f"{i:03}" for i in range(1, 15)],
+                 "migration_015_schema_baseline")
+    lock015 = lock014 + [{k: MIGRATION[k] for k in ("version", "filename", "canonical_sha256")}]
+    trusted = gate.check_sources(root, lock015)
+    prior_root, _ = predecessor(base, root)
+    gate.check_sources(prior_root, lock014)
+    floors = gate.data_contract_floors(declaration, lock015)
+    if database_url is None:
+        from scripts.migrate import settings
+        database_url = settings.database_url
+    rows, state, origin, active = gate.read_history(
+        database_url, 16, plan=plan, target_id=target_id, target_commit=target_commit,
+        contract=epoch, floors=floors, trusted_items=trusted)
+    # Schema 014 is legal only for the exact pre-switch plan / pre-apply abort.
+    gate.require(len(rows) == 15 or (len(rows) == 14 and (plan or prior_target)),
+                 "migration_015_schema_state")
+    gate.require(recovery["data_contract"] in active, "migration_015_data_contract")
+    return {"status": "rollback_plan_passed" if plan else "rollback_preflight_passed", "read_only": True,
+            "target_release_id": target_id, "target_source_commit": target_commit,
+            "applied_versions": [r["version"] for r in rows], "pending": 15 - len(rows),
+            "target_known_versions": [f"{i:03}" for i in range(1, 15 if prior_target else 16)],
+            "epoch_schema_fingerprint": gate.digest(lock015), "compatibility_epoch": state["epoch"],
+            "epoch_source": origin, "active_data_contract_floors": active,
+            "old_runner_invoked": False, "recovery_mode": recovery["recovery_mode"]}
+
+
+def approval(base, root, manifest):
+    pins = {key: os.environ.get(env, "") for key, env in (
+        ("source_commit", "RELEASE_EXPECTED_SOURCE_COMMIT"),
+        ("archive_sha256", "RELEASE_EXPECTED_ARCHIVE_SHA256"),
+        ("raw_manifest_sha256", "RELEASE_EXPECTED_RAW_MANIFEST_SHA256"),
+        ("manifest_sha256", "RELEASE_EXPECTED_CANONICAL_MANIFEST_SHA256"))}
+    gate.require(gate.COMMIT.fullmatch(pins["source_commit"])
+                 and all(gate.HASH.fullmatch(v) for k, v in pins.items() if k != "source_commit"),
+                 "known_current_approval_required")
+    gate.require(manifest["source_commit"] == pins["source_commit"], "unknown_current_release")
+    gate.require(manifest["release_id"] == root.parent.name, "known_current_release_path")
+    installed, _ = gate.release_identity(base, manifest["release_id"], pins["source_commit"], pins)
+    gate.require(installed == root, "known_current_release_path")
+    gate.require(hashlib.sha256((root.parent / (manifest["release_id"] + ".manifest.json")).read_bytes()).hexdigest()
+                 == pins["raw_manifest_sha256"], "known_current_raw_manifest")
+    return pins
+
+
+def receipt_path(base, rid):
+    gate.require(gate.RELEASE.fullmatch(rid) and rid not in {".", ".."}, "release_receipt_path")
+    return base / "shared/release-state" / (rid + ".json")
+
+
+def receipt(base, root, manifest, snapshot):
+    declared(root, manifest)
+    schema = verify_schema(base, root, PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
+    gate.require(schema["applied_versions"] == [f"{i:03}" for i in range(1, 16)], "receipt_schema_015")
+    from scripts import release_verify
+    active = release_verify.binding_gate(base, root.parent / (manifest["release_id"] + ".manifest.json"),
+        base / "releases" / PREDECESSOR["release_id"] / (PREDECESSOR["release_id"] + ".manifest.json"), snapshot, "state")
+    value = {"schema_version": 1, "phase": "POST_COMMIT_HEALTH", "release_id": manifest["release_id"],
+             "source_commit": manifest["source_commit"], "manifest_sha256": gate.digest(manifest),
+             "recovery_contract_sha256": gate.digest(contract(root)), "predecessor": PREDECESSOR,
+             "bindings": active, "schema": "015", "schema_rollback": False}
+    path = receipt_path(base, manifest["release_id"])
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    gate.require(path.parent.resolve() == path.parent and not path.exists(), "commit_receipt_already_exists")
+    with path.open("x", encoding="utf-8") as f:
+        os.chmod(path, 0o600)
+        json.dump(value, f, sort_keys=True)
+    return {"status": "release_commit_receipt_written", "phase": value["phase"]}
+
+
+def preflight(base, root, manifest):
+    declared(root, manifest)
+    approval(base, root, manifest)
+    gate.require((base / "release-current").is_symlink()
+                 and (base / "release-current").resolve() == root, "unknown_current_release")
+    value = gate.read_json(receipt_path(base, manifest["release_id"]))
+    gate.require(value.get("phase") == "POST_COMMIT_HEALTH" and value.get("release_id") == manifest["release_id"]
+                 and value.get("source_commit") == manifest["source_commit"]
+                 and value.get("manifest_sha256") == gate.digest(manifest)
+                 and value.get("recovery_contract_sha256") == gate.digest(contract(root))
+                 and value.get("predecessor") == PREDECESSOR, "release_commit_receipt_identity")
+    schema = verify_schema(base, root, PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
+    gate.require(schema["applied_versions"] == [f"{i:03}" for i in range(1, 16)] and schema["pending"] == 0,
+                 "post_commit_requires_schema_015")
+    from scripts import release_verify
+    active = release_verify.bindings(release_verify.registry_for(base))
+    gate.require(active == value.get("bindings"), "UNKNOWN_BINDING_STATE")
+    for role, state in release_verify.service_state(base).items():
+        gate.require("error" not in state and type(state.get("pid")) is int
+                     and state.get("active") in {"active", "inactive", "failed"},
+                     "unknown_current_service_state_" + role)
+        # A stopped/crashed service is recoverable. A live foreign runtime is
+        # not: do not overwrite unknown service ownership under this contract.
+        if state.get("pid", 0) > 0:
+            gate.require(state.get("cwd") == str(root) and state.get("module_ok")
+                         and state.get("exe") == str((base / "venv/bin/python").resolve()),
+                         "unknown_current_service_" + role)
+        else:
+            gate.require(state["active"] in {"inactive", "failed"}, "unknown_current_service_state_" + role)
+    return {"status": "post_commit_runtime_rollback_preflight_passed", "read_only": True,
+            "exact_predecessor": PREDECESSOR["release_id"], "predecessor_source": PREDECESSOR["source_commit"],
+            "predecessor_tree": PREDECESSOR["source_tree"], "schema": schema,
+            "phase": "POST_COMMIT_HEALTH", "schema_rollback": False}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("target", "preflight", "receipt", "capture"))
+    parser.add_argument("--candidate-manifest", required=True, type=Path)
+    parser.add_argument("--snapshot", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        manifest = gate.read_json(args.candidate_manifest)
+        root = args.candidate_manifest.parent / "enterprise_agent_poc"
+        base = root.parent.parent.parent
+        gate.require(root == ROOT, "trusted_recovery_tooling_path")
+        if args.mode == "target":
+            declared(root, manifest)
+            print(PREDECESSOR["release_id"])
+            return 0
+        if args.mode == "capture":
+            preflight(base, root, manifest)
+            gate.require(args.snapshot.name == "state.json" and args.snapshot.parent.parent == base
+                         and args.snapshot.parent.name.startswith(".release-switch.")
+                         and args.snapshot.parent.resolve() == args.snapshot.parent
+                         and not args.snapshot.exists(), "recovery_snapshot_path")
+            value = gate.read_json(receipt_path(base, manifest["release_id"]))
+            # Guard against drift from the ORIGINAL commit boundary, not a
+            # freshly accepted arbitrary Binding state during this recovery.
+            with args.snapshot.open("x", encoding="utf-8") as f:
+                os.chmod(args.snapshot, 0o600)
+                json.dump(value["bindings"], f, sort_keys=True)
+            result = {"status": "committed_binding_snapshot_captured"}
+        else:
+            result = preflight(base, root, manifest) if args.mode == "preflight" else receipt(base, root, manifest, args.snapshot)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, gate.RollbackBlocked) else "runtime_recovery_input_or_io"
+        print(json.dumps({"status": "BLOCKED", "check": reason}))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

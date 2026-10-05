@@ -8,9 +8,9 @@ report_exit() {
 }
 trap report_exit EXIT
 
-release_id="${1:?usage: release_switch.sh <trusted-release-id> [--preflight-only | --rollback-preflight <target-release-id> <target-source-commit>]}"
+release_id="${1:?usage: release_switch.sh <trusted-release-id> [--preflight-only | --rollback-runtime | --rollback-preflight <target-release-id> <target-source-commit>]}"
 mode="${2:-}"
-[[ ( $# -le 2 && ( -z "$mode" || "$mode" == "--preflight-only" ) ) || ( $# -eq 4 && "$mode" == "--rollback-preflight" ) ]] || { echo "invalid release mode" >&2; exit 2; }
+[[ ( $# -le 2 && ( -z "$mode" || "$mode" == "--preflight-only" || "$mode" == "--rollback-runtime" ) ) || ( $# -eq 4 && "$mode" == "--rollback-preflight" ) ]] || { echo "invalid release mode" >&2; exit 2; }
 base=/opt/enterprise-agent-workbench
 release_root="$base/releases/$release_id/enterprise_agent_poc"
 shared_env="$base/shared/enterprise-agent.env"
@@ -70,6 +70,12 @@ previous=$(readlink -f "$current_link" 2>/dev/null || true)
 [[ -n "$previous" && -d "$previous" ]] || { echo "approved rollback target missing" >&2; exit 2; }
 rollback_target_id=$(basename "$(dirname "$previous")")
 candidate_manifest="$base/releases/$release_id/$release_id.manifest.json"
+if [[ "$mode" == "--rollback-runtime" ]]; then
+  # The active, approved NEW tooling owns recovery; never run the old migrator.
+  [[ "$previous" == "$release_root" ]] || { echo "unknown current release" >&2; exit 2; }
+  rollback_target_id=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" "$release_root/scripts/release_runtime_recovery.py" target --candidate-manifest "$candidate_manifest")
+  previous="$base/releases/$rollback_target_id/enterprise_agent_poc"
+fi
 predecessor_manifest="$base/releases/$rollback_target_id/$rollback_target_id.manifest.json"
 [[ -f "$candidate_manifest" && -f "$predecessor_manifest" ]] || { echo "release manifest missing" >&2; exit 2; }
 printf '{"data_dir_resolved":true}\n'
@@ -106,6 +112,9 @@ printf '%s\n' "$migration_result"
 config_result=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_runtime_config.py --environment-file "$shared_env")
 printf '%s\n' "$config_result"
 CONFIG_RESULT="$config_result" "$runtime_venv/bin/python" -c 'import json, os; data = json.loads(os.environ["CONFIG_RESULT"]); raise SystemExit(0 if data.get("matches") is True else 2)'
+if [[ "$mode" == "--rollback-runtime" ]]; then
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_runtime_recovery.py preflight --candidate-manifest "$candidate_manifest"
+fi
 if [[ "$mode" == "--rollback-preflight" ]]; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py --target-release-id "$3" --target-source-commit "$4"
   exit 0
@@ -123,7 +132,7 @@ if [[ "$declared_package_only" == yes ]]; then
   [[ -f "$release_root/scripts/release_predecessor_probe.py" ]] || { echo "post-staging predecessor probe missing" >&2; exit 2; }
   command -v redis-server >/dev/null 2>&1 || { echo "isolated predecessor Redis prerequisite missing" >&2; exit 2; }
 fi
-if [[ "$declared_forward" == yes ]]; then
+if [[ "$declared_forward" == yes && "$mode" != "--rollback-runtime" ]]; then
   # The plan gate reads PostgreSQL in a read-only transaction. No DDL runs in
   # either preflight-only or rollback-preflight mode.
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_migration_transition.py preflight \
@@ -133,8 +142,10 @@ else
 fi
 # The script owns FD 9 continuously: final preflight, snapshot, first mutation,
 # smoke, final state and commit/recovery. No outer lock or lock handoff exists.
-PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py preflight \
-  --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest"
+if [[ "$mode" != "--rollback-runtime" ]]; then
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_verify.py preflight \
+    --candidate-manifest "$candidate_manifest" --predecessor-manifest "$predecessor_manifest"
+fi
 if [[ "$declared_productization" == yes ]]; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_agent_productization.py preflight \
     --candidate-manifest "$candidate_manifest"
@@ -177,7 +188,38 @@ verify_release() {
   cat "$backup/$step.log"
   return "$result"
 }
-verify_release capture capture
+if [[ "$mode" == "--rollback-runtime" ]]; then
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_runtime_recovery.py capture \
+    --candidate-manifest "$candidate_manifest" --snapshot "$backup/state.json"
+else
+  verify_release capture capture
+fi
+printf 'PRE_COMMIT\n' > "$backup/release-stage.log"
+# One service configuration writer for activation and post-commit recovery.
+# Its target is always a gate-verified controlled release, never a CLI path.
+configure_services() {
+  local target_root="$1"
+  for service in "${services[@]}"; do
+    dropin="/etc/systemd/system/$service.service.d/release.conf"
+    mkdir -p "$(dirname "$dropin")" || return 1
+    cat > "$dropin" <<EOF
+[Service]
+WorkingDirectory=$target_root
+EnvironmentFile=
+EnvironmentFile=$shared_env
+Environment=PYTHONPATH=$target_root
+Environment=ENTERPRISE_POC_DATA_DIR=$runtime_data_dir
+ExecStart=
+EOF
+    if [[ "$service" == enterprise-agent-api ]]; then
+      echo "ExecStart=$runtime_venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18090" >> "$dropin" || return 1
+    elif [[ "$service" == enterprise-agent-mcp ]]; then
+      echo "ExecStart=$runtime_venv/bin/python -m app.platform_mcp.server" >> "$dropin" || return 1
+    else
+      echo "ExecStart=$runtime_venv/bin/python -m app.worker" >> "$dropin" || return 1
+    fi
+  done
+}
 rollback() {
   trap - ERR
   set +e
@@ -208,10 +250,14 @@ rollback() {
   cat "$backup/rollback-helper.log"
   [[ "$transition_status" -eq 0 ]] || return 1
   ln -sfn "$previous" "$current_link" || return 1
-  for service in "${services[@]}"; do
-    dropin="/etc/systemd/system/$service.service.d/release.conf"
-    if [[ -f "$backup/$service.conf" ]]; then install -D -m 0644 "$backup/$service.conf" "$dropin" || return 1; else rm -f "$dropin" || return 1; fi
-  done
+  if [[ "$mode" == "--rollback-runtime" ]]; then
+    configure_services "$previous" || return 1
+  else
+    for service in "${services[@]}"; do
+      dropin="/etc/systemd/system/$service.service.d/release.conf"
+      if [[ -f "$backup/$service.conf" ]]; then install -D -m 0644 "$backup/$service.conf" "$dropin" || return 1; else rm -f "$dropin" || return 1; fi
+    done
+  fi
   systemctl daemon-reload || return 1
   systemctl restart "${services[@]/%/.service}" || return 1
   for service in "${services[@]}"; do systemctl is-active --quiet "$service.service" || return 1; done
@@ -220,7 +266,11 @@ rollback() {
       | tee "$backup/rollback-health.log" \
       | "$runtime_venv/bin/python" -c 'import json, sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
       verify_release restored state --rollback || return 1
-      final_status=PRODUCTION_DEPLOYMENT_ROLLED_BACK
+      if [[ "$mode" == "--rollback-runtime" ]]; then
+        final_status=POST_COMMIT_RUNTIME_ROLLBACK_PASS
+      else
+        final_status=PRODUCTION_DEPLOYMENT_ROLLED_BACK
+      fi
       printf '{"status":"rolled_back","application_release":"%s","schema_rollback":false}\n' "$rollback_target_id"
       rm -rf "$backup"
       return 0
@@ -243,6 +293,18 @@ fail_release() {
 }
 trap 'fail_release' ERR
 final_status=PRODUCTION_DEPLOYMENT_MANUAL_RECOVERY_REQUIRED
+if [[ "$mode" == "--rollback-runtime" ]]; then
+  trap - ERR
+  final_status=POST_COMMIT_RUNTIME_ROLLBACK_FAILED
+  printf 'POST_COMMIT_HEALTH\n' > "$backup/release-stage.log"
+  # No recursive rollback, retry or code-only workaround on recovery failure.
+  if ! rollback; then
+    verify_release evidence evidence || printf '{"status":"recovery_evidence_incomplete","snapshot_retained":true}\n' >&2
+    exit 1
+  fi
+  printf '{"status":"POST_COMMIT_RUNTIME_ROLLBACK_PASS","recovery_mode":"PREDECESSOR_ON_SCHEMA_015","schema_rollback":false}\n'
+  exit 0
+fi
 
 if [[ "$declared_forward" == yes ]]; then
   printf 'declared-forward-migrations\n' > "$backup/last-step.log"
@@ -256,10 +318,11 @@ if [[ "$declared_forward" == yes ]]; then
     exit 1
   fi
   cat "$backup/migration-apply.log"
+  printf 'MIGRATION_APPLIED\n' > "$backup/release-stage.log"
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_migration_transition.py verify \
     --candidate-manifest "$candidate_manifest"
-  printf 'predecessor-on-schema-014\n' > "$backup/last-step.log"
-  verify_release predecessor-on-schema-014 state --rollback
+  printf 'predecessor-on-forward-schema\n' > "$backup/last-step.log"
+  verify_release predecessor-on-forward-schema state --rollback
 fi
 
 printf 'binding-apply\n' > "$backup/last-step.log"
@@ -290,27 +353,9 @@ if [[ "$declared_package_only" == yes ]]; then
 fi
 
 printf 'service-activation\n' > "$backup/last-step.log"
-for service in "${services[@]}"; do
-  dropin="/etc/systemd/system/$service.service.d/release.conf"
-  mkdir -p "$(dirname "$dropin")"
-  cat > "$dropin" <<EOF
-[Service]
-WorkingDirectory=$release_root
-EnvironmentFile=
-EnvironmentFile=$shared_env
-Environment=PYTHONPATH=$release_root
-Environment=ENTERPRISE_POC_DATA_DIR=$runtime_data_dir
-ExecStart=
-EOF
-  if [[ "$service" == enterprise-agent-api ]]; then
-    echo "ExecStart=$runtime_venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18090" >> "$dropin"
-  elif [[ "$service" == enterprise-agent-mcp ]]; then
-    echo "ExecStart=$runtime_venv/bin/python -m app.platform_mcp.server" >> "$dropin"
-  else
-    echo "ExecStart=$runtime_venv/bin/python -m app.worker" >> "$dropin"
-  fi
-done
+configure_services "$release_root"
 ln -sfn "$release_root" "$current_link"
+printf 'RUNTIME_SWITCHED\n' > "$backup/release-stage.log"
 systemctl daemon-reload
 systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
 for service in "${services[@]}"; do systemctl is-active --quiet "$service.service"; done
@@ -364,6 +409,11 @@ if [[ "$declared_productization" == yes ]]; then
     --candidate-manifest "$candidate_manifest"
 fi
 # RELEASE COMMIT POINT: same global lock + rollback snapshot through all gates.
+if [[ "$declared_forward" == yes ]] && "$runtime_venv/bin/python" -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1]))["forward_migrations"].get("schema_version")==2 else 1)' "$candidate_manifest"; then
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_runtime_recovery.py receipt \
+    --candidate-manifest "$candidate_manifest" --snapshot "$backup/state.json"
+fi
+printf 'POST_COMMIT_HEALTH\n' > "$backup/release-stage.log"
 trap - ERR
 rm -rf "$backup"
 final_status=PRODUCTION_DEPLOYMENT_PASS

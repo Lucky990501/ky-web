@@ -33,6 +33,10 @@ def require(condition, reason):
 def declaration(manifest: dict) -> dict:
     validate_manifest_contract(manifest)
     declared = manifest.get("forward_migrations")
+    if declared and declared.get("schema_version") == 2:
+        from scripts.release_runtime_recovery import declared as recovery_declared
+        recovery_declared(ROOT, manifest)
+        return declared
     require(declared is not None and declared == json.loads(DECLARATION_PATH.read_text(encoding="utf-8")),
             "forward_migration_declaration_mismatch")
     return declared
@@ -58,25 +62,34 @@ def _wechat_absent(conn):
 
 
 def verify_history(conn, declared: dict, *, applied_count: int) -> dict:
-    require(applied_count in {0, 1, 2}, "migration_phase_invalid")
+    is015 = declared.get("schema_version") == 2
+    if is015:
+        from scripts.release_manifest import validate_forward_migrations
+        from scripts.release_runtime_recovery import contract
+        validate_forward_migrations(declared)
+        contract(ROOT)
+    first = 14 if is015 else 12
+    total = 15 if is015 else 14
+    require(applied_count in ({0, 1} if is015 else {0, 1, 2}), "migration_phase_invalid")
     items = migrate.migration_items()
-    require([item["version"] for item in items] == [f"{v:03d}" for v in range(1, 15)],
+    require([item["version"] for item in items] == [f"{v:03d}" for v in range(1, total + 1)],
             "unexpected_candidate_migration_set")
-    for pin, item in zip(declared["migrations"], items[12:]):
+    for pin, item in zip(declared["migrations"], items[first:]):
         require(pin == {"version": item["version"], "filename": item["migration"],
                         "canonical_sha256": item["canonical_checksum"]}, "declared_migration_identity")
     history = _history(conn)
-    expected = items[:12 + applied_count]
+    expected = items[:first + applied_count]
     require([row["version"] for row in history] == [item["version"] for item in expected],
             "unexpected_pending_or_unknown_migration")
     for row, item in zip(history, expected):
         require(row["name"] == item["name"] and migrate.compatibility_status(
             row["checksum"], item) in {migrate.EXACT_MATCH, migrate.LEGACY_LINE_ENDING_COMPATIBLE},
             "migration_history_identity")
-    _wechat_absent(conn)
-    return {"schema": f"{12 + applied_count:03d}",
+    if not is015:
+        _wechat_absent(conn)
+    return {"schema": f"{first + applied_count:03d}",
             "applied_versions": [row["version"] for row in history],
-            "pending_versions": [item["version"] for item in items[12 + applied_count:]],
+            "pending_versions": [item["version"] for item in items[first + applied_count:]],
             "fingerprints": _fingerprints(conn)}
 
 
@@ -93,7 +106,7 @@ def read_only_plan(store: POCStore, declared: dict) -> dict:
 
 def apply_declared(store: POCStore, declared: dict) -> dict:
     before = read_only_plan(store, declared)
-    items = migrate.migration_items()[12:]
+    items = migrate.migration_items()[14 if declared.get("schema_version") == 2 else 12:]
     with store.connection() as conn:
         # The existing OS release lock serializes releases; this transaction
         # also excludes a separate migration runner until both DDL files commit.
@@ -112,8 +125,8 @@ def apply_declared(store: POCStore, declared: dict) -> dict:
     after = read_only_verify(store, declared)
     require(after["fingerprints"] == before["fingerprints"],
             "historical_revision_fingerprint_changed")
-    return {"status": "declared_forward_migrations_applied", "schema": "014",
-            "applied": ["013", "014"], "schema_rollback": False,
+    return {"status": "declared_forward_migrations_applied", "schema": declared["target_schema"],
+            "applied": [item["version"] for item in items], "schema_rollback": False,
             "historical_revision_fingerprints_unchanged": True}
 
 
@@ -125,7 +138,7 @@ def read_only_verify(store: POCStore, declared: dict) -> dict:
                  options="-c default_transaction_read_only=on") as conn:
         require(conn.execute("SHOW transaction_read_only").fetchone()["transaction_read_only"] == "on",
                 "read_only_required")
-        return verify_history(conn, declared, applied_count=2)
+        return verify_history(conn, declared, applied_count=len(declared["migrations"]))
 
 
 def main(argv=None):

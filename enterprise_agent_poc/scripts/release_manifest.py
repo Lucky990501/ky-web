@@ -100,6 +100,15 @@ def validate_binding_transition(value: object) -> None:
 
 def validate_forward_migrations(value: object) -> None:
     """V1 is deliberately a single exact 012 -> 014 forward-safe plan."""
+    if isinstance(value, dict) and value.get("schema_version") == 2:
+        require(type(value["schema_version"]) is int and value == {
+            "schema_version": 2, "from_schema": "014", "target_schema": "015",
+            "migrations": [{"version": "015", "filename": "015_chat_image_attachments.sql",
+                "canonical_sha256": "67c4c85007d7ac1a9dc3f0e979359d6b3f9ea84206740d11b6ce05c11563f1fc"}],
+            "rollback_strategy": "code_only_forward_safe",
+            "recovery_contract": "migration-015-exact-predecessor-recovery-v1",
+        }, "forward_migrations_015")
+        return
     require(isinstance(value, dict) and set(value) == {
         "schema_version", "from_schema", "target_schema", "migrations", "rollback_strategy"
     }, "forward_migrations")
