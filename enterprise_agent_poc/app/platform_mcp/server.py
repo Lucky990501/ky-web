@@ -17,6 +17,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations, CallToolResult, TextContent
 
 from app.platform_mcp.service import PlatformMCPService
+from app.platform_mcp.image_diagnostics import ImageProviderUnavailable
 from app.security import RuntimeTokenIssuer
 from app.settings import settings
 from app.store import POCStore
@@ -120,6 +121,12 @@ def create_mcp():
                 retry_of=retry_of, execution_scope=execution_scope,
                 reference_images=reference_images,
             )
+        except ImageProviderUnavailable:
+            # The service already logged allowlisted transport diagnostics.
+            # Return a typed tool failure instead of FastMCP logging a traceback.
+            failure = {"error_code": "image_provider_unavailable"}
+            return CallToolResult(isError=True, structuredContent=failure,
+                                  content=[TextContent(type="text", text=json.dumps(failure))])
         except ToolInputValidationError as error:
             # The generic contract is emitted only for typed, pre-side-effect
             # input failures. Provider/auth/storage errors receive no receipt.

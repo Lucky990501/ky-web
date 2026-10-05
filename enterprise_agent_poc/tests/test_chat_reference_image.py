@@ -262,7 +262,7 @@ def test_bound_reference_storage_read_failure_stops_before_provider(chat_image_e
     assert "private storage location" not in str(caught.value)
 
 
-@pytest.mark.parametrize("failure", ["http_400", "http_503", "timeout", "malformed_b64", "unsupported_actual"])
+@pytest.mark.parametrize("failure", ["http_400", "http_503", "timeout", "connect_group", "malformed_b64", "unsupported_actual"])
 def test_edit_failure_is_bounded_without_retry_or_storage_write(chat_image_env, monkeypatch, failure):
     client, store, _product, settings, _owner = chat_image_env
     uploaded = client.post("/api/v1/chat-images", files={"file": ("reference.png", picture(), "image/png")}).json()
@@ -289,6 +289,8 @@ def test_edit_failure_is_bounded_without_retry_or_storage_write(chat_image_env, 
             observed["calls"] += 1
             if failure == "timeout":
                 raise httpx.TimeoutException("isolated timeout")
+            if failure == "connect_group":
+                raise ExceptionGroup("private provider detail", [httpx.ConnectError("private provider detail")])
             if failure.startswith("http_"):
                 return httpx.Response(int(failure.split("_")[1]), json={"error": {"message": "private provider detail"}})
             content = b"GIF89a-invalid" if failure == "unsupported_actual" else picture()
@@ -300,5 +302,7 @@ def test_edit_failure_is_bounded_without_retry_or_storage_write(chat_image_env, 
     with pytest.raises((RuntimeError, httpx.TimeoutException)) as caught:
         asyncio.run(service.image_generation(token, "修改图片", [], "1:1", execution_scope=scope))
     assert "private provider detail" not in str(caught.value)
+    if failure in ("timeout", "connect_group"):
+        assert str(caught.value) == "image_provider_unavailable"
     assert observed["calls"] == 1
     assert tuple(storage_provider(settings).list_keys("generated/")) == ()

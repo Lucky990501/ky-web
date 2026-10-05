@@ -13,6 +13,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.security import RuntimeTokenIssuer, RuntimePrincipal, TokenError
 from app.store import POCStore
+from app.platform_mcp.image_diagnostics import image_transport_guard
 from app.tool_dependencies import (
     RECONSTRUCTION_CONTRACT,
     RetryReceiptLedger,
@@ -174,7 +175,7 @@ class PlatformMCPService:
             raise RuntimeError("未安装 httpx；请重新安装 POC 依赖。") from exc
         # References are tenant-scoped design metadata. Only this task's bound,
         # authenticated upload bytes can select edits; no external URL is fetched.
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with image_transport_guard("edits" if attachment else "generations"), httpx.AsyncClient(timeout=120) as client:
             if attachment:
                 response = await client.post(
                     "https://llm-api.net/v1/images/edits",
