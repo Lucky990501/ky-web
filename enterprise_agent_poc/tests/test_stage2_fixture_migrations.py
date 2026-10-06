@@ -8,6 +8,8 @@ import pytest
 
 from scripts.migrate import migration_files
 from scripts.release_test_environment import IsolatedServices, PROJECT
+from scripts.current_schema_contract import current_schema
+from scripts import rollback_preflight as gate
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Private Linux PostgreSQL fixture only")
@@ -21,6 +23,11 @@ def _connect(services):
 def _history(services):
     with _connect(services) as conn:
         return conn.execute("SELECT version,name,checksum FROM schema_migrations ORDER BY version").fetchall()
+
+
+def _current_contract():
+    declaration = gate.read_json(PROJECT / 'deploy/rollback_compatibility.json')
+    return current_schema(PROJECT, gate.epoch_contract(declaration)['schema_migrations'])
 
 
 def test_m1_fresh_private_database_starts_empty():
@@ -41,12 +48,16 @@ def test_m2_formal_migrations_001_through_014_applied(migrated):
 
 
 def test_m3_migration_count_is_current(migrated):
-    assert len(_history(migrated)) == len(migration_files()) == 14
+    expected = _current_contract()['schema_migrations']
+    assert len(_history(migrated)) == len(migration_files()) == len(expected)
 
 
 def test_m4_latest_migration_is_agent_release_provenance(migrated):
-    assert migration_files()[-1].name == "014_agent_release_provenance.sql"
-    assert _history(migrated)[-1][:2] == ("014", "agent_release_provenance.sql")
+    # Keep the historical test identifier for auditable failed-set closure;
+    # this is the CURRENT release expectation, not a historical014 fixture.
+    expected = _current_contract()['schema_migrations'][-1]
+    assert migration_files()[-1].name == expected['filename']
+    assert _history(migrated)[-1][:2] == (expected['version'], expected['filename'][4:])
 
 
 def test_m5_user_account_status_column_exists(migrated):

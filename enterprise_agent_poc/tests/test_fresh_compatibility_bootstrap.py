@@ -78,8 +78,13 @@ def test_c3_missing_012_blocks_without_epoch_change(fresh):
 
 
 def test_c4_extra_pending_or_unknown_migration_blocks(fresh):
+    from scripts.current_schema_contract import current_schema
+    declaration = gate.read_json(PROJECT / 'deploy/rollback_compatibility.json')
+    latest = current_schema(PROJECT, gate.epoch_contract(declaration)['schema_migrations'])['latest_schema']
+    unknown = f'{int(latest) + 1:03}'
     with _connect(fresh) as conn:
-        conn.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('015','unknown.sql',%s)", ('0'*64,))
+        conn.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES (%s,'synthetic_unknown.sql',%s)",
+                     (unknown, '0'*64))
     with pytest.raises(gate.RollbackBlocked):
         invoke(fresh)
     assert state(fresh) == 'legacy_v1'

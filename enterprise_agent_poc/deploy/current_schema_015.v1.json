@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "contract_id": "current-release-schema-015-v1",
+  "scope": "CURRENT_RELEASE_VALIDATION",
+  "historical_epoch_schema": "014",
+  "historical_schema_lock_sha256": "6209531538f525109aaef1e196403190b358de5695abf8f40969f5649f350137",
+  "latest_schema": "015",
+  "pending": 0,
+  "data_contract": "member_account_status_v1",
+  "additional_migration": {
+    "version": "015",
+    "filename": "015_chat_image_attachments.sql",
+    "git_blob": "96bba0ea64ade51670775cf6f69b806a2248342a",
+    "canonical_sha256": "67c4c85007d7ac1a9dc3f0e979359d6b3f9ea84206740d11b6ce05c11563f1fc"
+  },
+  "historical_epoch_semantics": "UNCHANGED_EXACT_001_014"
+}

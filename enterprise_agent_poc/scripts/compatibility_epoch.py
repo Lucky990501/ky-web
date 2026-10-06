@@ -187,11 +187,14 @@ def bootstrap_current(config_path):
     target = contract['epochs'][-1]
     require(target['epoch'] == 'productized_v1' and target['epoch_rank'] == EPOCHS['productized_v1'],
             'current_epoch_declaration')
-    schema_lock = contract['schema_migrations']
+    # Only CURRENT fresh validation reads the separately versioned015 lock.
+    # The original historical advance() / epoch declaration stay exact014.
+    historical_lock = contract['schema_migrations']
+    floors = gate.data_contract_floors(declaration, historical_lock)
+    from scripts.current_schema_contract import current_schema
+    current = current_schema(ROOT, historical_lock)
+    schema_lock = current['schema_migrations']
     source_items = gate.check_sources(ROOT, schema_lock)
-    floors = gate.data_contract_floors(declaration, schema_lock)
-    require(len(schema_lock) == 14 and schema_lock[-1]['filename'] == '014_agent_release_provenance.sql',
-            'current_migration_declaration')
     with connect(settings.database_url, row_factory=dict_row) as conn:
         state = read_state(conn, lock=True)
         rows = conn.execute('SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version').fetchall()

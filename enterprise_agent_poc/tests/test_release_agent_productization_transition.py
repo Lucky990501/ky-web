@@ -1,6 +1,7 @@
 """Isolated PostgreSQL coverage for Phase B stage and exact abort."""
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -25,9 +26,27 @@ class ClosedPolicy:
                 "policy_slug_count": 0, "runtime_test_tenant_configured": False}
 
 
+@pytest.fixture(autouse=True)
+def historical014_inventory(tmp_path, monkeypatch):
+    """This module proves frozen historical Phase B, not current015 release."""
+    from scripts import migrate
+    historical = tmp_path / 'historical-phase-b-schema014'
+    historical.mkdir()
+    files = migrate.migration_files()[:14]
+    assert len(files) == 14 and files[-1].name == '014_agent_release_provenance.sql'
+    for path in files:
+        shutil.copy2(path, historical / path.name)
+    # Autouse executes before the imported pg_catalog fixture applies migrations.
+    monkeypatch.setattr(migrate, 'MIGRATIONS', historical)
+    yield
+
+
 @pytest.fixture
 def transition(pg_catalog, approved_bundle, monkeypatch):
     c = pg_catalog
+    with c.store.connection() as conn:
+        assert conn.execute('SELECT MAX(version) AS version FROM schema_migrations').fetchone()['version'] == '014'
+        assert conn.execute("SELECT to_regclass('public.chat_image_attachments') AS name").fetchone()['name'] is None
     c.registry.grant_platform_admin(c.actor)
     declaration = json.loads((ROOT / "deploy/phase_b_agent_productization.json").read_text())
     declaration["runtime_test"]["tenant"] = "tenant-a"
