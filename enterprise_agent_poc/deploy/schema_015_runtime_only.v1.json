@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "contract_id": "SCHEMA_015_RUNTIME_ONLY_RELEASE_V1",
+  "release_mode": "RUNTIME_ONLY",
+  "current_schema": "015",
+  "target_schema": "015",
+  "migration_action": "NONE",
+  "migration015_state": "ALREADY_APPLIED",
+  "pending": 0,
+  "unknown": 0,
+  "checksum_drift": 0,
+  "migration015_blob": "96bba0ea64ade51670775cf6f69b806a2248342a",
+  "recovery_contract": "migration-015-exact-predecessor-recovery-v1",
+  "recovery_mode": "PREDECESSOR_ON_SCHEMA_015",
+  "post_commit_runtime_rollback": "ENABLED"
+}

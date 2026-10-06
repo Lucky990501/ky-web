@@ -32,6 +32,7 @@ def require(condition, reason):
 
 def declaration(manifest: dict) -> dict:
     validate_manifest_contract(manifest)
+    require("runtime_only_release" not in manifest, "runtime_only_migration_forbidden")
     declared = manifest.get("forward_migrations")
     if declared and declared.get("schema_version") == 2:
         from scripts.release_runtime_recovery import declared as recovery_declared
@@ -94,6 +95,7 @@ def verify_history(conn, declared: dict, *, applied_count: int) -> dict:
 
 
 def read_only_plan(store: POCStore, declared: dict) -> dict:
+    require(declared.get("release_mode") != "RUNTIME_ONLY", "runtime_only_migration_forbidden")
     require(store.is_postgres, "postgres_required")
     from psycopg import connect
     from psycopg.rows import dict_row
@@ -105,6 +107,7 @@ def read_only_plan(store: POCStore, declared: dict) -> dict:
 
 
 def apply_declared(store: POCStore, declared: dict) -> dict:
+    require(declared.get("release_mode") != "RUNTIME_ONLY", "runtime_only_migration_forbidden")
     before = read_only_plan(store, declared)
     items = migrate.migration_items()[14 if declared.get("schema_version") == 2 else 12:]
     with store.connection() as conn:

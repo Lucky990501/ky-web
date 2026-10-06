@@ -63,6 +63,10 @@ def contract(root):
 
 def declared(root, manifest):
     value = contract(root)
+    if "runtime_only_release" in manifest:
+        from scripts.schema_015_runtime_only import declaration
+        declaration(root, manifest)
+        return value
     plan = manifest.get("forward_migrations")
     gate.require(plan == gate.read_json(root / "deploy/forward_migrations_015.json")
                  and plan.get("recovery_contract") == CONTRACT_ID, "migration_015_plan_identity")
@@ -111,6 +115,10 @@ def verify_schema(base, root, target_id, target_commit, *, plan=False, database_
     # Schema 014 is legal only for the exact pre-switch plan / pre-apply abort.
     gate.require(len(rows) == 15 or (len(rows) == 14 and (plan or prior_target)),
                  "migration_015_schema_state")
+    if "runtime_only_release" in own:
+        gate.require(len(rows) == 15, "runtime_only_requires_exact_schema015")
+        from scripts.schema_015_runtime_only import ledger_snapshot
+        ledger_snapshot(root, database_url)
     gate.require(recovery["data_contract"] in active, "migration_015_data_contract")
     return {"status": "rollback_plan_passed" if plan else "rollback_preflight_passed", "read_only": True,
             "target_release_id": target_id, "target_source_commit": target_commit,
@@ -155,6 +163,13 @@ def receipt(base, root, manifest, snapshot):
              "source_commit": manifest["source_commit"], "manifest_sha256": gate.digest(manifest),
              "recovery_contract_sha256": gate.digest(contract(root)), "predecessor": PREDECESSOR,
              "bindings": active, "schema": "015", "schema_rollback": False}
+    if "runtime_only_release" in manifest:
+        from scripts.schema_015_runtime_only import ledger_snapshot
+        from scripts.migrate import settings
+        value.update(release_mode="RUNTIME_ONLY", current_schema="015", target_schema="015",
+                     migration_action="NONE", migration_commands_executed=0,
+                     migration_ledger_sha256=ledger_snapshot(root, settings.database_url)["ledger_sha256"],
+                     runtime_only_contract_sha256=gate.digest(manifest["runtime_only_release"]))
     path = receipt_path(base, manifest["release_id"])
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     gate.require(path.parent.resolve() == path.parent and not path.exists(), "commit_receipt_already_exists")
@@ -175,6 +190,16 @@ def preflight(base, root, manifest):
                  and value.get("manifest_sha256") == gate.digest(manifest)
                  and value.get("recovery_contract_sha256") == gate.digest(contract(root))
                  and value.get("predecessor") == PREDECESSOR, "release_commit_receipt_identity")
+    if "runtime_only_release" in manifest:
+        from scripts.schema_015_runtime_only import ledger_snapshot
+        from scripts.migrate import settings
+        gate.require(value.get("release_mode") == "RUNTIME_ONLY" and value.get("current_schema") == "015"
+                     and value.get("target_schema") == "015" and value.get("migration_action") == "NONE"
+                     and type(value.get("migration_commands_executed")) is int
+                     and value["migration_commands_executed"] == 0
+                     and value.get("migration_ledger_sha256") == ledger_snapshot(root, settings.database_url)["ledger_sha256"]
+                     and value.get("runtime_only_contract_sha256") == gate.digest(manifest["runtime_only_release"]),
+                     "runtime_only_commit_receipt_identity")
     schema = verify_schema(base, root, PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
     gate.require(schema["applied_versions"] == [f"{i:03}" for i in range(1, 16)] and schema["pending"] == 0,
                  "post_commit_requires_schema_015")

@@ -13,7 +13,7 @@ BASE_FIELDS = {
     "build_platform",
 }
 OPTIONAL_FIELDS = {"binding_transition", "forward_migrations", "deferred_skill", "skill_package_staging",
-                   "agent_productization_transition"}
+                   "agent_productization_transition", "runtime_only_release"}
 HASH = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASE = re.compile(r"[A-Za-z0-9._-]+")
@@ -21,6 +21,20 @@ RELEASE = re.compile(r"[A-Za-z0-9._-]+")
 
 class ManifestContractError(ValueError):
     pass
+
+
+def validate_runtime_only_release(value: object) -> None:
+    require(isinstance(value, dict) and type(value.get("schema_version")) is int
+            and type(value.get("pending")) is int and type(value.get("unknown")) is int
+            and type(value.get("checksum_drift")) is int and value == {
+        "schema_version": 1, "contract_id": "SCHEMA_015_RUNTIME_ONLY_RELEASE_V1",
+        "release_mode": "RUNTIME_ONLY", "current_schema": "015", "target_schema": "015",
+        "migration_action": "NONE", "migration015_state": "ALREADY_APPLIED",
+        "pending": 0, "unknown": 0, "checksum_drift": 0,
+        "migration015_blob": "96bba0ea64ade51670775cf6f69b806a2248342a",
+        "recovery_contract": "migration-015-exact-predecessor-recovery-v1",
+        "recovery_mode": "PREDECESSOR_ON_SCHEMA_015", "post_commit_runtime_rollback": "ENABLED",
+    }, "runtime_only_release_contract")
 
 
 def require(condition: bool, check: str) -> None:
@@ -208,6 +222,10 @@ def validate_manifest_contract(manifest: object) -> dict:
     )
     if "binding_transition" in manifest:
         validate_binding_transition(manifest["binding_transition"])
+    if "runtime_only_release" in manifest:
+        validate_runtime_only_release(manifest["runtime_only_release"])
+        require(not ((OPTIONAL_FIELDS - {"runtime_only_release"}) & fields),
+                "runtime_only_release_code_only_scope")
     if "forward_migrations" in manifest:
         validate_forward_migrations(manifest["forward_migrations"])
     if "deferred_skill" in manifest:

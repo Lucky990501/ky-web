@@ -120,6 +120,13 @@ if [[ "$mode" == "--rollback-preflight" ]]; then
   exit 0
 fi
 declared_forward=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "forward_migrations" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+declared_runtime_only=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "runtime_only_release" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+if [[ "$declared_runtime_only" == yes ]]; then
+  [[ "$declared_forward" == no ]] || { echo "runtime-only migration forbidden" >&2; exit 2; }
+  printf '{"release_mode":"RUNTIME_ONLY","current_schema":"015","target_schema":"015","migration_action":"NONE","migration_commands_executed":0}\n'
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/schema_015_runtime_only.py preflight \
+    --candidate-manifest "$candidate_manifest"
+fi
 declared_package_only=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "skill_package_staging" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
 declared_productization=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "agent_productization_transition" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
 if [[ "$declared_productization" == yes ]]; then
@@ -409,7 +416,7 @@ if [[ "$declared_productization" == yes ]]; then
     --candidate-manifest "$candidate_manifest"
 fi
 # RELEASE COMMIT POINT: same global lock + rollback snapshot through all gates.
-if [[ "$declared_forward" == yes ]] && "$runtime_venv/bin/python" -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1]))["forward_migrations"].get("schema_version")==2 else 1)' "$candidate_manifest"; then
+if [[ "$declared_runtime_only" == yes ]] || { [[ "$declared_forward" == yes ]] && "$runtime_venv/bin/python" -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1]))["forward_migrations"].get("schema_version")==2 else 1)' "$candidate_manifest"; }; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_runtime_recovery.py receipt \
     --candidate-manifest "$candidate_manifest" --snapshot "$backup/state.json"
 fi

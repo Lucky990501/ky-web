@@ -240,7 +240,7 @@ def verify(base, trusted_root, target_id, target_commit, *, plan=False, database
     own_manifest = read_json(trusted_root.parent / f'{trusted_root.parent.name}.manifest.json')
     own_source, _ = release_identity(base, trusted_root.parent.name, own_manifest['source_commit'])
     require(own_source == trusted_root, 'trusted_release_identity')
-    if own_manifest.get('forward_migrations', {}).get('schema_version') == 2:
+    if own_manifest.get('forward_migrations', {}).get('schema_version') == 2 or 'runtime_only_release' in own_manifest:
         from scripts.release_runtime_recovery import verify_schema
         return verify_schema(base, trusted_root, target_id, target_commit, plan=plan, database_url=database_url)
     declaration = read_json(trusted_root / 'deploy' / 'rollback_compatibility.json')

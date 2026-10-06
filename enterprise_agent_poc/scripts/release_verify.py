@@ -235,7 +235,8 @@ def final_preflight(base, candidate, predecessor):
 
     compatibility = gate.read_json(root / "deploy/rollback_compatibility.json")
     exact = compatibility["forward_predecessor_approval"]
-    forward015 = manifest.get("forward_migrations", {}).get("schema_version") == 2
+    runtime_only = "runtime_only_release" in manifest
+    forward015 = manifest.get("forward_migrations", {}).get("schema_version") == 2 or runtime_only
     if forward015:
         from scripts.release_runtime_recovery import declared, PREDECESSOR
         declared(root, manifest)
@@ -311,7 +312,11 @@ def final_preflight(base, candidate, predecessor):
                 == exact["schema_fingerprint"], "preflight_predecessor_schema_fingerprint")
     else:
         require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
-        require(schema["epoch_schema_fingerprint"] == exact["schema_fingerprint"], "preflight_schema_fingerprint")
+        if runtime_only:
+            from scripts.schema_015_runtime_only import preflight as runtime_only_preflight
+            runtime_only_preflight(base, root, manifest)
+        else:
+            require(schema["epoch_schema_fingerprint"] == exact["schema_fingerprint"], "preflight_schema_fingerprint")
     if deferred:
         phase_a_absence(registry, deferred)
     require(exact["data_contract"] in compatibility["supported_data_contracts"]
