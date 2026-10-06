@@ -897,9 +897,14 @@ def original_artifact_e2e(pg_epoch,tmp_path,*,current_b930=False):
             if current_b930:
                 def native_running_identity(source):
                     assert source==compatible
+                    discovered_lsof = shutil.which('lsof')
+                    assert discovered_lsof is not None, 'lsof executable required for real CWD verification'
+                    lsof_executable = str(Path(discovered_lsof).resolve(strict=True))
+                    assert Path(lsof_executable).is_file() and os.access(lsof_executable, os.X_OK), 'lsof must be a real executable'
+                    print('compatibility_lsof_path=' + lsof_executable, flush=True)
                     for role in ('api','mcp','worker'):
                         p=processes[role];assert p.poll() is None
-                        cwd=subprocess.run(['/usr/sbin/lsof','-a','-p',str(p.pid),'-d','cwd','-Fn'],capture_output=True,text=True,check=True)
+                        cwd=subprocess.run([lsof_executable,'-a','-p',str(p.pid),'-d','cwd','-Fn'],capture_output=True,text=True,check=True)
                         assert 'n'+str(source) in cwd.stdout.splitlines()
                 with pytest.raises(psycopg.errors.RaiseException,match='compatibility_epoch_not_advanced'),h['store'].connection() as c:
                     c.execute(INSERT)
