@@ -21,6 +21,20 @@ def test_exact_015_manifest_plan_and_blob():
     validate_forward_migrations(json.loads((ROOT / "deploy/forward_migrations_015.json").read_text()))
 
 
+def test_current_schema015_predecessor_has_one_exact_immutable_identity():
+    exact = recovery.contract(ROOT)["exact_predecessor"]
+    assert exact == {
+        "release_id": "20261006-519c649-reference-image-oss-v1",
+        "source_commit": "519c649bd61d3bf3b1a6708410b9b7102eccb7a2",
+        "source_tree": "e867a4f9922f0f73e71e818e2993666d842559f2",
+        "archive_sha256": "6d6ca0612dfc2d52e96c8775594ea90a5d697afd02c4fb229367e0c58db6ca11",
+        "raw_manifest_sha256": "bd60c630c4fd7b9b2382d13d042ae6398c19e7da6de2cd5d1916f17a6cab3d4e",
+        "manifest_sha256": "b159797b4596620f6de4df092ac6a1fc344d7921c51e331b7908d5ef87b2e271",
+    }
+    assert recovery.contract(ROOT)["compatibility_evidence"]["report_sha256"] == (
+        "0d19e8ae96f88ee06f1ab8a31495bbf9a79fb838cc84c90c8c634999f8d61ba1")
+
+
 @pytest.mark.parametrize("fault", ["predecessor", "source", "tree", "archive", "raw", "migration", "forward", "mode", "feature", "scope"])
 def test_contract_tamper_fail_closed(tmp_path, fault):
     root = tmp_path / "app"

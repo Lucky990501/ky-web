@@ -12,19 +12,19 @@
     "canonical_sha256": "67c4c85007d7ac1a9dc3f0e979359d6b3f9ea84206740d11b6ce05c11563f1fc"
   },
   "exact_predecessor": {
-    "release_id": "20261004-c2f4ec7-image-format-v1",
-    "source_commit": "c2f4ec797c3eff4fdf62665bf3e7b47cd3167608",
-    "source_tree": "544b166129bbe8042c6b5c17d40b2f6f1044b592",
-    "archive_sha256": "ac68166a3c7d04c22b1d20f27a492ae839b37302424c924699fe48ae302c30f1",
-    "raw_manifest_sha256": "ef6f34220524e5a1221a1c53bb83d3b99d382507c12a7ec5de78f5a0bcaf7307",
-    "manifest_sha256": "544b1f0b6bc2ebfe9f9cd6f6535d7a3fccbfd1f254a9022668d00e44b7b2ef7b"
+    "release_id": "20261006-519c649-reference-image-oss-v1",
+    "source_commit": "519c649bd61d3bf3b1a6708410b9b7102eccb7a2",
+    "source_tree": "e867a4f9922f0f73e71e818e2993666d842559f2",
+    "archive_sha256": "6d6ca0612dfc2d52e96c8775594ea90a5d697afd02c4fb229367e0c58db6ca11",
+    "raw_manifest_sha256": "bd60c630c4fd7b9b2382d13d042ae6398c19e7da6de2cd5d1916f17a6cab3d4e",
+    "manifest_sha256": "b159797b4596620f6de4df092ac6a1fc344d7921c51e331b7908d5ef87b2e271"
   },
   "recovery_mode": "PREDECESSOR_ON_SCHEMA_015",
   "forward_schema_predecessor_compatible": true,
   "data_contract": "member_account_status_v1",
   "compatibility_evidence": {
-    "version": "migration015-exact-predecessor-rehearsal-v1-20261005-r3",
-    "report_sha256": "70bc8a0e19559ac38e53c019fd294a18b6c19d91044570b01521d1a7647ab674",
-    "scope": "EXACT_PREDECESSOR_NATIVE_RUNTIME_ON_SCHEMA_015_PROVIDER_ZERO"
+    "version": "schema015-production-predecessor519-readonly-v1-20261007",
+    "report_sha256": "0d19e8ae96f88ee06f1ab8a31495bbf9a79fb838cc84c90c8c634999f8d61ba1",
+    "scope": "EXACT_PRODUCTION_PREDECESSOR_NATIVE_RUNTIME_ON_SCHEMA_015_PROVIDER_ZERO"
   }
 }

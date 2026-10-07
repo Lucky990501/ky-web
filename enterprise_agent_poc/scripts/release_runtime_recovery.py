@@ -19,12 +19,12 @@ from scripts import rollback_preflight as gate
 
 CONTRACT_ID = "migration-015-exact-predecessor-recovery-v1"
 PREDECESSOR = {
-    "release_id": "20261004-c2f4ec7-image-format-v1",
-    "source_commit": "c2f4ec797c3eff4fdf62665bf3e7b47cd3167608",
-    "source_tree": "544b166129bbe8042c6b5c17d40b2f6f1044b592",
-    "archive_sha256": "ac68166a3c7d04c22b1d20f27a492ae839b37302424c924699fe48ae302c30f1",
-    "raw_manifest_sha256": "ef6f34220524e5a1221a1c53bb83d3b99d382507c12a7ec5de78f5a0bcaf7307",
-    "manifest_sha256": "544b1f0b6bc2ebfe9f9cd6f6535d7a3fccbfd1f254a9022668d00e44b7b2ef7b",
+    "release_id": "20261006-519c649-reference-image-oss-v1",
+    "source_commit": "519c649bd61d3bf3b1a6708410b9b7102eccb7a2",
+    "source_tree": "e867a4f9922f0f73e71e818e2993666d842559f2",
+    "archive_sha256": "6d6ca0612dfc2d52e96c8775594ea90a5d697afd02c4fb229367e0c58db6ca11",
+    "raw_manifest_sha256": "bd60c630c4fd7b9b2382d13d042ae6398c19e7da6de2cd5d1916f17a6cab3d4e",
+    "manifest_sha256": "b159797b4596620f6de4df092ac6a1fc344d7921c51e331b7908d5ef87b2e271",
 }
 MIGRATION = {
     "version": "015", "filename": "015_chat_image_attachments.sql",
@@ -46,9 +46,9 @@ def contract(root):
         "forward_schema_predecessor_compatible": True,
         "data_contract": "member_account_status_v1",
         "compatibility_evidence": {
-            "version": "migration015-exact-predecessor-rehearsal-v1-20261005-r3",
-            "report_sha256": "70bc8a0e19559ac38e53c019fd294a18b6c19d91044570b01521d1a7647ab674",
-            "scope": "EXACT_PREDECESSOR_NATIVE_RUNTIME_ON_SCHEMA_015_PROVIDER_ZERO",
+            "version": "schema015-production-predecessor519-readonly-v1-20261007",
+            "report_sha256": "0d19e8ae96f88ee06f1ab8a31495bbf9a79fb838cc84c90c8c634999f8d61ba1",
+            "scope": "EXACT_PRODUCTION_PREDECESSOR_NATIVE_RUNTIME_ON_SCHEMA_015_PROVIDER_ZERO",
         },
     }
     gate.require(value == expected and type(value["schema_version"]) is int
@@ -81,7 +81,7 @@ def predecessor(base, root):
     raw = source.parent / (exact["release_id"] + ".manifest.json")
     gate.require(hashlib.sha256(raw.read_bytes()).hexdigest() == exact["raw_manifest_sha256"],
                  "predecessor_raw_manifest_identity")
-    # Source -> full Git tree was attested in the pinned native rehearsal.
+    # Source -> full Git tree is correlated with the pinned native attestation.
     # A selected-file archive is NOT mislabeled as a complete Git tree hash.
     gate.require(exact["source_tree"] == PREDECESSOR["source_tree"], "predecessor_source_tree")
     return source, manifest
@@ -104,7 +104,8 @@ def verify_schema(base, root, target_id, target_commit, *, plan=False, database_
     lock015 = lock014 + [{k: MIGRATION[k] for k in ("version", "filename", "canonical_sha256")}]
     trusted = gate.check_sources(root, lock015)
     prior_root, _ = predecessor(base, root)
-    gate.check_sources(prior_root, lock014)
+    # The exact new predecessor already carries all fifteen migration files.
+    gate.check_sources(prior_root, lock015)
     floors = gate.data_contract_floors(declaration, lock015)
     if database_url is None:
         from scripts.migrate import settings
@@ -123,7 +124,7 @@ def verify_schema(base, root, target_id, target_commit, *, plan=False, database_
     return {"status": "rollback_plan_passed" if plan else "rollback_preflight_passed", "read_only": True,
             "target_release_id": target_id, "target_source_commit": target_commit,
             "applied_versions": [r["version"] for r in rows], "pending": 15 - len(rows),
-            "target_known_versions": [f"{i:03}" for i in range(1, 15 if prior_target else 16)],
+            "target_known_versions": [f"{i:03}" for i in range(1, 16)],
             "epoch_schema_fingerprint": gate.digest(lock015), "compatibility_epoch": state["epoch"],
             "epoch_source": origin, "active_data_contract_floors": active,
             "old_runner_invoked": False, "recovery_mode": recovery["recovery_mode"]}
