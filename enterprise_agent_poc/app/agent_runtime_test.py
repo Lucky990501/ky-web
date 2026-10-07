@@ -19,6 +19,18 @@ class AgentRuntimeTest:
         self.resolver, self.product, self.tasks = resolver, product, tasks
         self.isolation_guard = None
         self.enqueue = None
+        self.controlled_skill_actions = None
+
+    async def run_controlled_skill_action(self, session_token, request):
+        """Internal native Test harness only; no HTTP route exposes this method.
+
+        Separate deterministic Skill acceptance from Codex Runtime quality
+        tests. Never grant publication eligibility for a zero-model execution.
+        """
+        from app.controlled_skill_action import ControlledActionError, NOT_ALLOWED
+        if self.resolver.settings.environment != 'test' or self.controlled_skill_actions is None:
+            raise ControlledActionError(NOT_ALLOWED)
+        return await self.controlled_skill_actions.run(session_token, request)
 
     async def run_release(self, *, release_operation_id, revision_id, fingerprint,
                           tenant_id, agent_slug, actor_id, release_identity,

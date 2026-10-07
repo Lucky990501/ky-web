@@ -209,3 +209,26 @@ Native SHA / 13 files / old dependency descriptor 均未改变。
 
 PRIMARY changes=0；Production changes=0；Provider/Image/WeChat=0/0/0。STOP。
 <!-- SKILL_DISPATCH_V1_FOLLOWUP_END -->
+
+<!-- TEST_CONTROLLED_SKILL_ACTION_V1_BEGIN -->
+## Controlled Skill Action V1 — no fresh PRIMARY execution
+
+The zero-Provider internal entry is implemented on
+`codex/test-controlled-skill-action-v1`, based on b0 formal dispatch. Formal
+Task/Run, exact Binding/Revision/action gates, persisted normalized result and
+receipts are exercised by isolated offline tests; no Model/Codex call occurs
+in the controlled branch. 33+31+66+29=159 unique cases PASS, zero failed/skipped.
+
+This does NOT close PRIMARY runtime acceptance or install/activate the entry.
+Fresh native Test authority must bind the new API/Worker Source, exact old b0
+MCP/e7 Runtime and registered Synthetic Admin/fixture. Lost tickets/mixed old
+workers/unknown admin fail-closed; WeChat CREATE_DRAFT remains disabled.
+
+Existing enabled/published Agent quality gates are not bypassed. A new draft
+Agent cannot use this V1 to manufacture Runtime Test PASS; any such bootstrap
+requirement needs explicit upstream contract approval. See
+`TEST_CONTROLLED_SKILL_ACTION_V1_REPORT.md` for exact entry and 06 prerequisites.
+
+No PRIMARY connection/provision/venv/Binding/PREPARE or Production mutation;
+actual Provider/Image/WeChat=0/0/0. STOP.
+<!-- TEST_CONTROLLED_SKILL_ACTION_V1_END -->

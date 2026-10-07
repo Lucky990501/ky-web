@@ -436,7 +436,11 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None, _controlled_action=False) -> dict:
+        if _controlled_action:
+            from app.controlled_skill_action import TASK_MARKER
+            if type(_controlled_action) is not bool or not text.endswith(TASK_MARKER) or conversation_id or _test_revision:
+                raise PermissionError('CONTROLLED_SKILL_ACTION_NOT_ALLOWED')
         if _release_operation_id and not _test_revision:
             raise PermissionError("Release ownership is only valid for controlled Runtime Test")
         attachment_ids = attachment_ids or []
@@ -472,6 +476,10 @@ class ProductStore:
                     raise ValueError("不能跨智能体复用会话。")
             task_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
+            if _controlled_action:
+                # Atomic reservation prevents the ordinary queue/worker from
+                # picking this zero-model Task during the creation/execute gap.
+                conn.execute("UPDATE tasks SET status='running',stage='controlled_action_reserved',started_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
             if attachment_ids:
                 claimed = conn.execute(
                     "UPDATE chat_image_attachments SET task_id=? WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",

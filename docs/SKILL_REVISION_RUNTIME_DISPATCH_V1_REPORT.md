@@ -133,3 +133,25 @@ artifact refs目前是现有 Agent workspace可消费引用，不承诺已提供
 PRIMARY changes=0。Production changes=0。Provider/Image/WeChat=0/0/0。无 wheel/venv install、live Binding activation、真实Admin/Agent provisioning、服务 restart/switch或DB/Redis mutation。
 
 **PRODUCTION_UNCHANGED**。完成后 STOP。
+
+<!-- TEST_CONTROLLED_SKILL_ACTION_V1_BEGIN -->
+## Test-only Controlled Skill Action Entry V1 follow-up
+
+`TEST_CONTROLLED_SKILL_ACTION_READY` is Source/offline readiness, not PRIMARY
+installation or acceptance. The existing AgentRuntimeTest internal entry now
+passes an authenticated native Test authority ticket through formal
+ProductStore/TaskService/AgentService -> existing sealed MCP dispatcher, without
+accessing RuntimeProvider. No public endpoint or second runner is introduced.
+
+33 new +31 dispatch +66 adapted +29 runtime =159 unique offline PASS;
+0 failures/errors/skips; actual Provider/Image/WeChat=0/0/0. Settings/HTTP/runtime
+process are explicitly isolated/mocked; no real PREPARE is executed.
+
+Original b0 dispatch and e7 runtime seals stay unchanged. The new API/Worker
+Source must be separately approved and freshly attested with the existing b0
+MCP. Ordinary eligible Agent gates remain; no deterministic Skill result is
+fake Codex quality evidence. Configured/draft bootstrap remains out of V1 scope.
+Details/06 prerequisites: `TEST_CONTROLLED_SKILL_ACTION_V1_REPORT.md`.
+
+PRIMARY/Production unchanged; no install, provisioning or activation. STOP.
+<!-- TEST_CONTROLLED_SKILL_ACTION_V1_END -->
