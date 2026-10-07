@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 
 from PIL import Image, UnidentifiedImageError
@@ -87,6 +88,8 @@ class TaskService:
                     context = self._store.execution_resolver.task_context(conn, task)
                     self._store.execution_resolver.check_context(conn, context)
                 execution_options["execution_context"] = context
+                if 'skills:execute' in json.loads(context['tool_policy_snapshot'])['scopes']:
+                    execution_options['task_id']=task_id
             if task.get("conversation_id"):
                 self._store.add_message(
                     task["conversation_id"],

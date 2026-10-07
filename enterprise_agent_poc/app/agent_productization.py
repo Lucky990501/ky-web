@@ -38,6 +38,7 @@ TOOL_CAPABILITIES = {
         ("asset_get", "assets:search", "text", False),
         ("wechat_prepare_authorize", "wechat:prepare", "text", True),
         ("wechat_create_draft_authorize", "wechat:draft:create", "text", True),
+        ("skill_action_execute", "skills:execute", "text", True),
     ]
 }
 OVERRIDE_SCHEMA = {"display_name": {"type": "string", "maxLength": 80},

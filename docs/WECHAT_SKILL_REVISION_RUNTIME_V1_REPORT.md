@@ -208,3 +208,17 @@ PRIMARY operations=0；未 SSH、install/load、服务 restart/switch、读 Secr
 本机 evidence：`.codex-wechat-revision-runtime-v1/local-validation.json`、`adapter-source-seal.json`、`wheelhouse/`、`hash-validation/`。wheelhouse 与 venv binaries 不作为 Source 提交；Native ZIP 是正式小型制品，随 Source 提交。已批准 Revision/Source/Lock 禁止任意覆盖。
 
 **PRODUCTION_UNCHANGED**。完成后 STOP。
+
+<!-- SKILL_DISPATCH_V1_FOLLOWUP_BEGIN -->
+## Skill Revision Runtime Dispatch V1 — independently sealed extension
+
+本轮为原runtime增加正式MCP/Task execution bridge，不修改原Runtime V1 approved tuple。新dispatch contract显式允许旧e7 Source/Tree、原Native13和Linux lock；e7必须保留独立clean checkpoint，不把新app files混入旧41-file目录。
+
+PREPARE链：Task → AgentService → signed Task scope → registered MCP Tool → exact Binding/Revision → revision runtime → fixed --check argv → scoped outputs → normalized result/audit → Agent reply/persistence。
+31新dispatch tests +66 adapted +29 runtime tests全部PASS。原29 fixtures显式读取e7 Git blobs而非dirty新Source，不重写旧SHA来制造PASS。Actual Model/Runtime/process边界仍为mock；下一轮06必须执行Linux native验收。
+
+通用dispatcher可复用第二mock Skill；公众号只提供input/result adapter。CREATE_DRAFT凭据gate保留且执行disabled，无自动pip、主Python fallback或shell参数拼接。Native Source可写时新binding拒绝，需06先完成只读封存。
+DISPATCH_SOURCE/TREE由新分支 `codex/skill-revision-runtime-dispatch-v1` 的post-commit seal交接，见 `SKILL_REVISION_RUNTIME_DISPATCH_V1_REPORT.md`。
+
+PRIMARY changes=0；Production changes=0；Provider/Image/WeChat=0/0/0。STOP。
+<!-- SKILL_DISPATCH_V1_FOLLOWUP_END -->

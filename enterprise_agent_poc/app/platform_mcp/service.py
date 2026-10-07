@@ -77,6 +77,19 @@ class PlatformMCPService:
         return WechatActionContract(self._store,self._tokens,self._settings.environment).resolve(
             bearer_token,task_scope,action)
 
+    def skill_action_execute(self, bearer_token: str, task_scope: str, skill_key: str,
+                             revision: str, action: str, article: dict) -> dict:
+        from app.skill_dispatch import SkillDispatchError, failure
+        from app.skill_dispatch_config import from_settings
+        try:
+            dispatcher=getattr(self,'_skill_dispatcher',None)
+            if dispatcher is None:
+                dispatcher=from_settings(self._store,self._tokens,self._settings)
+            return dispatcher.execute(bearer_token,task_scope,skill_key,revision,action,article)
+        except SkillDispatchError as error:
+            return failure(error.code,action)
+
+
     def knowledge_search(self, bearer_token: str, query: str, limit: int = 5) -> list[dict]:
         principal = self._principal(bearer_token, "knowledge:search")
         deadline = time.monotonic() + self.KNOWLEDGE_RETRY_BUDGET_SECONDS

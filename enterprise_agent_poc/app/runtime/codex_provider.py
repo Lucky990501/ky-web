@@ -375,6 +375,10 @@ class CodexRuntimeProvider(RuntimeProvider):
                 status = str(getattr(raw_tool_status, "value", raw_tool_status)).rsplit(".", 1)[-1].lower()
                 arguments = getattr(item, "arguments", None)
                 parsed_arguments = self._json_value(arguments)
+                if tool=='skill_action_execute':
+                    from app.skill_dispatch import safe_arguments
+                    parsed_arguments=safe_arguments(parsed_arguments)
+                    arguments=json.dumps(parsed_arguments,ensure_ascii=False)
                 tool_result = getattr(item, "result", None)
                 call = {
                     "server": server,

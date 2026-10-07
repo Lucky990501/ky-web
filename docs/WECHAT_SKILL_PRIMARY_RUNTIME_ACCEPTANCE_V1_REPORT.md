@@ -195,3 +195,17 @@ Native SHA / 13 files / old dependency descriptor 均未改变。
 本轮 Windows offline：17 / 66 / 29 tests全部PASS，12官方Linux/portable wheels SHA及严格offline hash download PASS。未做Linux venv install/pip check/imports，更未操作PRIMARY。上文3.11.16、missing packages和health结果仍是原轮实测，不将本轮架构准备换成fresh服务器PASS。
 
 正式 gate：Revision runtime/source artifacts可交接；**PRIMARY acceptance仍NOT_EXECUTED / NOT_READY**。旧sealed契约/managed venv snapshot不改；later Source仍需版本化批准。Provider/Image/WeChat=0/0/0，Production unchanged。
+
+<!-- SKILL_DISPATCH_V1_FOLLOWUP_BEGIN -->
+## Skill Revision Runtime Dispatch V1 — Source-level follow-up
+
+本轮补齐正式 optional MCP `skill_action_execute` bridge与Task签名scope传递，未安装或激活PRIMARY。
+已通过实际 TaskService/AgentService/FastMCP/Registry/Binding/permission/persistence路径的确定性测试，revision runtime / child / Model是明确mocks，不能冒充freshLinux/LLM smoke。
+
+31新dispatch +66原adapted +29旧runtime tests全部PASS、0 failed/errors/skips。新增通用normalized result、安全receipt及Run trace文章/base64脱敏；普通聊天不执行、CREATE_DRAFT仍经过原credential gate并执行disabled。
+
+新Dispatch Source兼容单独封存的e7 Runtime Source，不覆盖旧41-file descriptor、13-file artifact、lock或seal。06下一轮必须核对两份Source、实际revision venv、只读Skill Source、host binding和optional Tool Binding，再通过真正Agent PREPARE链路验收。
+详见 `SKILL_REVISION_RUNTIME_DISPATCH_V1_REPORT.md` 与 `.codex-skill-dispatch-v1/dispatch-source-seal.json`；本轮不返回PRIMARY TEST READY。
+
+PRIMARY changes=0；Production changes=0；Provider/Image/WeChat=0/0/0。STOP。
+<!-- SKILL_DISPATCH_V1_FOLLOWUP_END -->

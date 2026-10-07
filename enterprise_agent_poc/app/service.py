@@ -86,6 +86,7 @@ class AgentService:
             profile = context_profile(execution_context)
             agent = definition(execution_context)
         grounding_enabled = bool(profile.grounding_policy and profile.grounding_policy.get("enabled") is True)
+        session_task_options={"task_id":task_id} if task_id and (reference_image_attached or 'skills:execute' in profile.tool_scopes) else {}
         if reference_image_attached and (agent_id != "image-agent" or not task_id):
             raise ValueError("参考图片必须绑定图片任务。")
         is_resume = bool(conversation_id)
@@ -167,7 +168,7 @@ class AgentService:
                     existing["runtime_thread_id"],
                     developer_instructions=agent.instructions,
                     recovery_context=recovery_context,
-                    **({"task_id": task_id} if reference_image_attached else {}),
+                    **session_task_options,
                 )
                 if session.thread_id != existing["runtime_thread_id"]:
                     if not self._store.replace_conversation_thread(
@@ -177,7 +178,7 @@ class AgentService:
             else:
                 session = await self._runtime.create_session(
                     profile, agent.instructions,
-                    **({"task_id": task_id} if reference_image_attached else {}),
+                    **session_task_options,
                 )
                 if execution_context:
                     with self._store.connection() as conn:

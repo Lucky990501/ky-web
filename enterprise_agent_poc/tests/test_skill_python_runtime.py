@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -24,7 +25,14 @@ class RuntimeTests(unittest.TestCase):
         descriptor=rt.read_json(rt.PROJECT/rt.DESCRIPTOR)
         for name in [rt.DESCRIPTOR,*descriptor['adapter_files']]:
             path=self.project/name;path.parent.mkdir(parents=True,exist_ok=True)
-            shutil.copyfile(rt.PROJECT/name,path)
+            raw=(rt.PROJECT/name).read_bytes()
+            # The original runtime contract stays bound to its sealed e7 Source;
+            # new dispatch Source must not replace that immutable fixture data.
+            expected=descriptor['adapter_files'].get(name)
+            if expected and rt.sha(raw)!=expected:
+                raw=subprocess.check_output(['git','show','e7e96b1a959d8631dc9dcd5c24939fa483ac134a:enterprise_agent_poc/'+name],cwd=rt.PROJECT.parent)
+                self.assertEqual(rt.sha(raw),expected)
+            path.write_bytes(raw)
         self.descriptor=descriptor
         self.lock=rt.read_json(self.project/descriptor['lock_file'])
         self.packages={p['package']:p['version'] for p in self.lock['packages']}
