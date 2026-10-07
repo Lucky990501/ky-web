@@ -1,0 +1,66 @@
+{
+  "original_zip_sha256": "a2f9aae56b1ad59cf9d4532fe9310bfb2827f43465d68e0a4db3746e8b2e14c3",
+  "files": [
+    {
+      "path": "wechat-html-draft/SKILL.md",
+      "bytes": 5648,
+      "sha256": "d1e81a886a45e688254b73648999c26c564412afbc20f15146ae576b7eec36b6"
+    },
+    {
+      "path": "wechat-html-draft/agents/openai.yaml",
+      "bytes": 339,
+      "sha256": "36d40a5a5c66bcbdf903bb28be31f56952c82dea91b9106a454d9b0344b319cc"
+    },
+    {
+      "path": "wechat-html-draft/assets/article-template.html",
+      "bytes": 1975,
+      "sha256": "f0531365f88baf0bc3de8b3194d31b41f55bb60996c404a0a9b942e804e0a7c4"
+    },
+    {
+      "path": "wechat-html-draft/assets/article.example.json",
+      "bytes": 220,
+      "sha256": "8c33f2e2485438dc1d52ab922bc37369a372b76103358566e6de9b1d0d8792fa"
+    },
+    {
+      "path": "wechat-html-draft/references/account.example.json",
+      "bytes": 168,
+      "sha256": "654608d21ba152682280f0c4c325d08aab110409556ee122f1af98f32fa81244"
+    },
+    {
+      "path": "wechat-html-draft/references/reference-style.json",
+      "bytes": 2979,
+      "sha256": "52b0cb6c113d4314c74a8c06b2d071750bee11a0a6253d5ec35bcf7b5e59a6d8"
+    },
+    {
+      "path": "wechat-html-draft/references/style.md",
+      "bytes": 1646,
+      "sha256": "cf82618fe443a888104ef47f7ebb23b80d1083d0149f3d3f18e428c1fb0c67ba"
+    },
+    {
+      "path": "wechat-html-draft/references/upload.md",
+      "bytes": 7888,
+      "sha256": "0a0ed24e1685fc0d82b955cdc1a00f577a772736cfed07cb53f18c56de63d464"
+    },
+    {
+      "path": "wechat-html-draft/scripts/invoke_wechat.ps1",
+      "bytes": 2631,
+      "sha256": "55a38f196a12cf8e001ea76016a7bd74074f1d00d488eeeaff2d4c2058ab5f49"
+    },
+    {
+      "path": "wechat-html-draft/scripts/requirements.txt",
+      "bytes": 97,
+      "sha256": "e3470d90abf1c746fc484e1e821522150cba2db9a10f43748e9f54aeb838c6f9"
+    },
+    {
+      "path": "wechat-html-draft/scripts/test_workflow.py",
+      "bytes": 13021,
+      "sha256": "396f471c15ff83244c86c05cd6ae095457952944022e7878df6edf7a970fc139"
+    },
+    {
+      "path": "wechat-html-draft/scripts/wechat_draft.py",
+      "bytes": 24184,
+      "sha256": "42f65cf515e4bf88ec1245288bf9ac0d2eaf7bebf44707e714c07ce1836ccda9"
+    }
+  ],
+  "adaptation": "Original ZIP untouched; text normalized to LF in new source revision; security and Workbench contract additions explicitly recorded"
+}

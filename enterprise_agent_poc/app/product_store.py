@@ -1202,6 +1202,8 @@ class ProductStore:
         return {"id":asset_id,"name":name,"type":"poster_reference"}
 
     def update_enterprise_config(self, tenant_id: str, payload: dict) -> dict:
+        from app.wechat_action_contract import validate_enterprise_wechat_config
+        validate_enterprise_wechat_config(payload, tenant_id)
         if {"brand_logo", "brand_logo_metadata", "brand_mark_logo"} & payload.keys():
             raise ValueError("BRAND_LOGO_UPLOAD_REQUIRED")
         with self._store.connection() as conn:
