@@ -52,11 +52,13 @@ def validate_approval(value):
             "dispatch_source", "dispatch_tree", "dispatch_contract_sha256", "provider_calls",
             "image_calls", "wechat_calls"}
     try:
-        if not isinstance(value, dict) or set(value) != keys:
+        qualified = isinstance(value, dict) and 'qualification' in value
+        if not isinstance(value, dict) or set(value) != keys | ({'qualification'} if qualified else set()):
             raise ValueError()
+        dispatch = (value['source_commit'], value['source_tree'], DISPATCH_CONTRACT_SHA) if qualified else (DISPATCH_SOURCE, DISPATCH_TREE, DISPATCH_CONTRACT_SHA)
         if (value["contract"] != CONTRACT or value["environment"] != "test"
                 or (value["dispatch_source"], value["dispatch_tree"], value["dispatch_contract_sha256"])
-                != (DISPATCH_SOURCE, DISPATCH_TREE, DISPATCH_CONTRACT_SHA)
+                != dispatch
                 or any(type(value[k]) is not int or value[k] != 0
                        for k in ("provider_calls", "image_calls", "wechat_calls"))):
             raise ValueError()
@@ -74,7 +76,10 @@ def validate_approval(value):
         # allowed to reach the unchanged credential/permission gate, not execute.
         if value["actions"] != ["wechat-html-draft:PREPARE", "wechat-html-draft:CREATE_DRAFT"]:
             raise ValueError()
-    except (ValueError, TypeError, KeyError):
+        if qualified:
+            from app.skill_only_test_qualification import validate
+            validate(value)
+    except (ValueError, TypeError, KeyError, PermissionError):
         raise ControlledActionError(AUTH_BLOCKED) from None
     return value
 
@@ -151,7 +156,7 @@ class ControlledSkillActionEntry:
                 fixture_identity=approval['fixture_identity'],
                 api_source=approval['source_commit'], api_tree=approval['source_tree'],
                 worker_source=approval['source_commit'], worker_tree=approval['source_tree'],
-                mcp_source=DISPATCH_SOURCE, mcp_tree=DISPATCH_TREE)
+                mcp_source=approval['dispatch_source'], mcp_tree=approval['dispatch_tree'])
             if (not isinstance(attestation, dict) or set(attestation) != set(expected) | {'observed_at'}
                     or any(attestation[key] != value for key, value in expected.items())
                     or type(attestation['observed_at']) not in (int, float)
@@ -162,7 +167,10 @@ class ControlledSkillActionEntry:
                 user = conn.execute("SELECT * FROM users WHERE id=? AND tenant_id=? AND account_status='enabled'",
                                     (principal.user_id, tenant)).fetchone()
                 admins = conn.execute("SELECT user_id FROM platform_admins ORDER BY user_id").fetchall()
-            if (not user or len(admins) != 1 or admins[0]["user_id"] != approval["user_id"]
+            # Qualified execution is a narrow native grant, not a platform role.
+            # The provisioning admin can revoke its grant before acceptance.
+            role_ok = (len(admins) == 0 or len(admins) == 1 and admins[0]['user_id'] == approval['user_id']) if 'qualification' in approval else (len(admins) == 1 and admins[0]['user_id'] == approval['user_id'])
+            if (not user or not role_ok
                     or (principal.user_id, principal.tenant_id, principal.role)
                     != (approval["user_id"], approval["tenant_id"], "member")
                     or tenant != approval["tenant_id"] or user["email"] != approval["user_email"]
@@ -208,18 +216,29 @@ class ControlledSkillActionEntry:
             raise ControlledActionError(AUTH_BLOCKED)
         if type(self._client) is not PlatformSkillActionClient:
             raise ControlledActionError(ZERO_PROVIDER)
+        proof = None
+        if 'qualification' in approval:
+            from app.skill_only_test_qualification import authority
+            try:
+                proof = authority(approval, approval_sha, request)
+            except PermissionError:
+                raise ControlledActionError(AUTH_BLOCKED) from None
         # Ordinary published/enabled execution requirements are NOT relaxed.
         # Never invent Codex Runtime Test evidence or create a quality-test row.
         text = "请排版公众号文章" if request["action"] == "PREPARE" else "请创建公众号草稿"
         task = self.tester.product.create_task(request["tenant_id"], caller.user_id, request["agent_id"],
-                                               text + TASK_MARKER, None, _controlled_action=True)
+                                               text + TASK_MARKER, None, _controlled_action=True,
+                                               **({'_controlled_qualification': proof} if proof is not None else {}))
         audit = dict(contract=CONTRACT, environment="test", tenant_id=task["tenant_id"],
             agent_id=task["agent_id"], skill_key=request["skill_key"], revision=request["revision"],
             action=request["action"], task_id=task["id"], caller_id=caller.user_id,
             authority_id=approval["authority_id"], approval_identity=approval_sha,
             fixture_identity=approval["fixture_identity"], controlled_source=approval["source_commit"],
-            controlled_tree=approval["source_tree"], dispatch_source=DISPATCH_SOURCE,
+            controlled_tree=approval["source_tree"], dispatch_source=approval['dispatch_source'], dispatch_tree=approval['dispatch_tree'],
             CONTROLLED_TEST_ACTION=True, provider_calls=0, image_calls=0, wechat_calls=0)
+        if proof is not None:
+            audit.update(eligibility_mode=proof.receipt()['eligibility_mode'],
+                         qualification_identity=_digest(json.dumps(proof.receipt(),sort_keys=True).encode()))
         ticket = _Ticket(self, task["id"], encoded, json.dumps(audit), session_token)
         await self.tester.tasks.execute(task, _controlled_action=ticket)
         saved = self.tester.product.task_for_worker(task["id"])
@@ -238,6 +257,20 @@ class ControlledSkillActionEntry:
         if (approval_sha != audit["approval_identity"]
                 or (context["tenant_id"], context["agent_id"]) != (request["tenant_id"], request["agent_id"])):
             raise ControlledActionError(AUTH_BLOCKED)
+        from app.skill_only_test_qualification import is_qualified, authority, check_context
+        if ('qualification' in approval) != is_qualified(context):
+            raise ControlledActionError(AUTH_BLOCKED)
+        if is_qualified(context):
+            if 'qualification' not in approval:
+                raise ControlledActionError(AUTH_BLOCKED)
+            try:
+                proof = authority(approval, approval_sha, request)
+                with self.tester.resolver.store.connection() as conn:
+                    receipt = check_context(conn, context, environment=self.tester.resolver.settings.environment)
+                if receipt != proof.receipt():
+                    raise PermissionError()
+            except PermissionError:
+                raise ControlledActionError(AUTH_BLOCKED) from None
         # All later binding/artifact/runtime/secret checks are authoritative MCP
         # gates. A normal chat cannot select this path using text or Task fields.
         return request, audit
@@ -246,7 +279,7 @@ class ControlledSkillActionEntry:
         request, audit = self.check_ticket(ticket, task_id, context)
         if type(self._client) is not PlatformSkillActionClient:
             raise ControlledActionError(ZERO_PROVIDER)
-        p = profile(context)
+        p = profile(context, _controlled=True)
         bearer = self.tokens.issue(RuntimePrincipal(p.tenant_id, p.agent_id, p.id, p.tool_scopes,
             int(time.time()) + 180, p.execution_context_id, p.instance_id))
         task_scope = self.tokens.issue_task_scope(p.tenant_id, task_id)
@@ -278,7 +311,7 @@ class ControlledSkillActionEntry:
                     or receipt.get('revision', request['revision']) != request['revision']
                     or receipt.get('artifact_refs') != output['artifact_refs']
                     or output['status'] == 'completed' and not re.fullmatch('[a-f0-9]{64}', receipt.get('runtime_identity') or '')
-                    or receipt.get("dispatch_source") != {"source_commit": DISPATCH_SOURCE, "source_tree": DISPATCH_TREE}
+                    or receipt.get("dispatch_source") != {"source_commit": audit['dispatch_source'], "source_tree": audit['dispatch_tree']}
                     or output["receipt_ref"] != "skill-receipt:" + receipt["id"]):
                 raise ValueError()
             if output['status'] == 'completed':

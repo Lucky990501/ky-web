@@ -1,5 +1,17 @@
 # WECHAT_SKILL_PRIMARY_RUNTIME_ACCEPTANCE_V1_REPORT
 
+## Qualification Source Patch handoff — 2026-10-07
+
+任务`41671734-35dd-4d74-ad9c-f73109887a43`在base0bfd后继cleanbranch实现SKILL_ONLY_TEST_QUALIFIED。
+资格由root-owned/source-bound native authority提供，限定exactconfiguredTest Agent/AgentRevision/SkillRevision/PREPARE；不等同RuntimeTestPASS、不放宽普通Chat或Production。
+Source级91定向testsPASS + 本机nativeLinux93ordinaryeligibility/RuntimeTestregressionPASS，总184PASS/0failed/errors/skips；静态compile3.11/3.13PASS，2弃用warnings。额外PG release-scoped套件缺fixture未验证。
+**SKILL_ONLY_TEST_QUALIFICATION_READY**，不是PRIMARYliveREADY。最终exactSource/tree见外部seal和`SKILL_ONLY_TEST_QUALIFICATION_V1_REPORT.md`交接。
+下一轮06必须使qualifiedAPI/Worker/MCP使用同一exact新Source，而非旧b0MCP；旧e7RevisionRuntime独立identity保持。
+本轮PRIMARY操作0：未创建admin/Agent/Revision/Runtime/Binding/Task，未执行PREPARE，未改current/服务。Production未连接无操作；Provider/Image/WeChat0/0/0。
+此前PRIMARY阻断观察仍保留，不将本地CodePatch测试结果冒充PRIMARYready。下方历史原样保留。
+
+---
+
 日期：2026-10-07（Asia/Shanghai）。
 任务附件：fbe8556b-6667-4dbe-9f14-0b66c3914445。
 最终状态：**WECHAT_SKILL_RUNTIME_DEPENDENCY_BLOCKED**。

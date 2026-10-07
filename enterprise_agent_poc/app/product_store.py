@@ -436,7 +436,9 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None, _controlled_action=False) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None, _controlled_action=False, _controlled_qualification=None) -> dict:
+        if _controlled_qualification is not None and not _controlled_action:
+            raise PermissionError('CONTROLLED_SKILL_ACTION_NOT_ALLOWED')
         if _controlled_action:
             from app.controlled_skill_action import TASK_MARKER
             if type(_controlled_action) is not bool or not text.endswith(TASK_MARKER) or conversation_id or _test_revision:
@@ -455,7 +457,8 @@ class ProductStore:
                     raise LookupError("Execution resolver unavailable")
                 if not self._store.is_postgres:
                     conn.execute("BEGIN IMMEDIATE")
-                context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision)
+                context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision,
+                    **({'controlled_qualification': _controlled_qualification} if _controlled_qualification is not None else {}))
                 if _test_fingerprint is not None and context['configuration_fingerprint'] != _test_fingerprint:
                     raise ValueError('Runtime Test fingerprint changed before task creation')
                 from app.agent_execution import definition
@@ -464,7 +467,7 @@ class ProductStore:
                 agent = get_agent(agent_id)
             credit = conn.execute("SELECT balance FROM credit_accounts WHERE tenant_id=?", (tenant_id,)).fetchone()
             instance = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
-            if not instance or (instance["status"] != "enabled" and _test_revision is None):
+            if not instance or (instance["status"] != "enabled" and _test_revision is None and _controlled_qualification is None):
                 raise LookupError("该智能体尚未为当前企业启用。")
             if not credit or credit["balance"] < agent.credit_cost:
                 raise ValueError("insufficient_credit")

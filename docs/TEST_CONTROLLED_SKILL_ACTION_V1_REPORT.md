@@ -1,5 +1,17 @@
 # Test-only Controlled Skill Action Entry V1
 
+## Skill-only qualification successor — 2026-10-07
+
+任务`41671734-35dd-4d74-ad9c-f73109887a43`新增Source级资格实现：原无qualification分支保留；新的native qualification只允许exactTest Agent/Revision/Skill PREPARE及负向draftcredentialprobe。
+Configured Agent不需伪造RuntimeTestPASS，但普通Chat/model/Production继续拒绝；runtime_test=false、无runtime质量行、Audit含SKILL_ONLY_TEST_QUALIFIED。
+Qualified permission consumer需要API/Worker/MCP同一newsealedSource；原b0 MCP不能复用成compatible。原e7RuntimeSource/descriptor/Native/Lock不改。
+Native批准exactmember可在Provisionplatform_admingrant撤销后执行该窄资格；不改变普通authoring权限。
+91Windows定向casesPASS + 93nativeLinuxSQLite eligibility/RuntimeTestregression PASS，要求的总184PASS/0failed/errors/skips；另有2弃用warnings。额外PG release-scoped suite缺fixture，未验证/不计PASS。
+**SKILL_ONLY_TEST_QUALIFICATION_READY**。详见`SKILL_ONLY_TEST_QUALIFICATION_V1_REPORT.md`。
+未PRIMARY/Production连接、Provision、安装、Binding、PREPARE或Provider调用。只表示Source-levelREADY，exactSource/tree以外部seal交接为准；下方历史不改。
+
+---
+
 ## Outcome and authority boundary
 
 `TEST_CONTROLLED_SKILL_ACTION_READY` — **Source-level implementation and offline

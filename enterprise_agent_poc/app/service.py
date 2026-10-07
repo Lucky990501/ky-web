@@ -85,7 +85,10 @@ class AgentService:
             from app.agent_execution import definition, profile as context_profile
             if execution_context["tenant_id"] != tenant_id or execution_context["agent_id"] != agent_id:
                 raise PermissionError("Execution context identity mismatch")
-            profile = context_profile(execution_context)
+            if json.loads(execution_context['tool_policy_snapshot']).get('eligibility_mode') == 'SKILL_ONLY_TEST_QUALIFIED':
+                profile = context_profile(execution_context, _controlled=_controlled_action is not None)
+            else:
+                profile = context_profile(execution_context)
             agent = definition(execution_context)
         grounding_enabled = bool(profile.grounding_policy and profile.grounding_policy.get("enabled") is True)
         session_task_options={"task_id":task_id} if task_id and (reference_image_attached or 'skills:execute' in profile.tool_scopes) else {}

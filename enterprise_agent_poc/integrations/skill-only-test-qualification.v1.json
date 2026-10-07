@@ -1,0 +1,22 @@
+{
+  "contract": "CONTROLLED_SKILL_TEST_ELIGIBILITY_V1",
+  "eligibility_mode": "SKILL_ONLY_TEST_QUALIFIED",
+  "environment": "test",
+  "entry": "TEST_CONTROLLED_SKILL_ACTION_V1",
+  "qualification_source": "native root-owned controlled approval; exact post-commit Source/tree",
+  "identity": ["tenant_id", "agent_id", "agent_revision_id", "configuration_fingerprint", "skill_key", "revision", "artifact_sha256", "runtime_lock_sha256", "source_commit", "source_tree", "authority_id"],
+  "execution_action": "PREPARE",
+  "create_draft": "negative credential probe only; execution disabled by unchanged MCP registration",
+  "runtime_test_pass": false,
+  "ordinary_execution_authority": false,
+  "production_authority": false,
+  "provider_calls": 0,
+  "image_calls": 0,
+  "wechat_calls": 0,
+  "instance": "configured exact productized revision; not enabled by this authority",
+  "source_topology": "qualified API/Worker/MCP on same exact successor Source/tree; immutable e7 revision runtime remains separate",
+  "legacy_controlled_mode": "unchanged published/enabled/real Runtime Test gates when qualification absent",
+  "active_admin_required_after_provision": false,
+  "allowed_tools": ["skill_action_execute", "wechat_prepare_authorize", "wechat_create_draft_authorize"],
+  "source_files": ["app/skill_only_test_qualification.py", "app/agent_execution.py", "app/controlled_skill_action.py", "app/product_store.py", "app/service.py", "tests/test_skill_only_test_qualification.py", "scripts/verify_skill_only_test_qualification.py", "scripts/seal_skill_only_test_qualification.py"]
+}
