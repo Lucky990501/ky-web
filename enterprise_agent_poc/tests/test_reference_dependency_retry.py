@@ -27,7 +27,7 @@ from app.store import POCStore
 from app.tool_dependencies import resolve_dependencies
 
 
-def execute_sequence(tmp_path, monkeypatch, sequence=('validation','400','success'), *, attached=True, forged=False):
+def execute_sequence(tmp_path, monkeypatch, sequence=('validation','400','success'), *, attached=True, forged=False, extra_tool=None):
     monkeypatch.setenv('ENTERPRISE_POC_DATABASE_URL', f'sqlite:///{tmp_path / "retry.db"}')
     monkeypatch.setenv('ENTERPRISE_POC_DATA_DIR', str(tmp_path/'data'))
     monkeypatch.setenv('RETRY_IMAGE_TEST_KEY', 'fixture-only-key')
@@ -53,10 +53,15 @@ def execute_sequence(tmp_path, monkeypatch, sequence=('validation','400','succes
     task=product.create_task('tenant-a',user['id'],'image-agent','single reference edit',None,
                              attachment_ids=[attachment['id']] if attachment else [])
     issuer=RuntimeTokenIssuer('retry-fixture-runtime-secret-long-enough')
-    token=issuer.issue(RuntimePrincipal('tenant-a','image-agent','profile-a',('image:generate',),int(time.time())+300))
+    token=issuer.issue(RuntimePrincipal('tenant-a','image-agent','profile-a',('image:generate','assets:search'),int(time.time())+300))
     scope='runtime:'+issuer.issue_task_scope('tenant-a',task['id'])
     from app.platform_mcp import server
-    monkeypatch.setattr(server,'service',PlatformMCPService(store,issuer,settings))
+    gateway=PlatformMCPService(store,issuer,settings)
+    monkeypatch.setattr(server,'service',gateway)
+    if extra_tool=='failed':
+        def unavailable(*_args,**_kwargs):
+            raise RuntimeError('fixture asset unavailable')
+        monkeypatch.setattr(gateway,'asset_search',unavailable)
     monkeypatch.setattr(server,'_bearer_from_context',lambda _:token)
     monkeypatch.setattr(server,'_execution_scope_from_context',lambda *_:scope)
     expected=[step for step in sequence if step not in ('validation','invalid')]
@@ -107,6 +112,21 @@ def execute_sequence(tmp_path, monkeypatch, sequence=('validation','400','succes
                     receipt=(raw.structuredContent or {}).get('retry_of') or receipt
                 items.append(SimpleNamespace(id=f'call-{index}',server='platform',tool='image_generation',
                     arguments=args,result=sdk,status='failed' if failed else 'completed',error=None))
+            if extra_tool:
+                args={'query':'fixture'}
+                try:
+                    raw=await native.call_tool('asset_search',args)
+                except ToolError as error:
+                    raw=CallToolResult(isError=True,content=[TextContent(type='text',text=str(error))])
+                if isinstance(raw,(tuple,list)):
+                    content,structured=raw
+                    sdk=McpToolCallResult(content=[x.model_dump() for x in content],structured_content=structured)
+                    failed=False
+                else:
+                    failed=raw.isError
+                    sdk=McpToolCallResult.model_validate(raw.model_dump(by_alias=True))
+                items.append(SimpleNamespace(id='asset-call',server='platform',tool='asset_search',arguments=args,
+                                             result=sdk,status='failed' if failed else 'completed',error=None))
             final=SimpleNamespace(items=items,usage=None,final_response='参考图片编辑完成。',status='completed',
                                   error=None,duration_ms=1,turn_id='fixture-turn')
             return CodexRuntimeProvider(None)._runtime_turn_from_result(session,SimpleNamespace(),final)
@@ -276,3 +296,24 @@ def test_latest_valid_success_selected_and_failed_attempts_never_persist(tmp_pat
         rows=conn.execute('SELECT storage_key FROM generations WHERE task_id=?',(r.task['id'],)).fetchall()
         assert len(rows)==1 and rows[0]['storage_key']==r.puts[-1]
         assert conn.execute('SELECT count(*) n FROM messages WHERE id=?',('task:'+r.task['id']+':assistant',)).fetchone()['n']==1
+
+
+@pytest.mark.parametrize('sequence,asset_state,expected',[
+    (('validation','400','success'),'completed','completed'),
+    (('validation','400','success'),'failed','failed'),
+    (('validation',),'completed','failed'),
+])
+def test_two_required_groups_task_finalization_not_only_resolver(tmp_path,monkeypatch,sequence,asset_state,expected):
+    r=execute_sequence(tmp_path,monkeypatch,sequence,extra_tool=asset_state)
+    assert r.task['status']==r.trace['status']==expected
+    groups=r.trace['payload']['logical_tool_dependencies']
+    assert len(groups)==2
+    if expected=='completed':
+        assert all(g['satisfied'] for g in groups)
+        assert r.trace['payload']['assistant_message_saved']
+        with r.store.connection() as conn:
+            assert conn.execute('SELECT count(*) n FROM generations WHERE task_id=?',(r.task['id'],)).fetchone()['n']==1
+    else:
+        assert r.task['error_code']=='required_tool_dependency_error'
+        assert any(not g['satisfied'] for g in groups)
+        assert r.trace['payload']['assistant_message_saved'] is False
