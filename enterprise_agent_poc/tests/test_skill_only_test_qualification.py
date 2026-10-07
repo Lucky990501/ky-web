@@ -255,10 +255,23 @@ class QualificationTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         for name in ('app/agent_runtime_test.py','app/runtime/codex_provider.py',
                      'app/tenant_secret_reference.py','app/wechat_action_contract.py',
-                     'app/wechat_skill.py','app/skill_python_runtime.py',
+                     'app/skill_python_runtime.py',
                      'integrations/wechat-python311-linux.v1.lock.json'):
             base = subprocess.check_output(['git','show','0bfded6ee6837e8c0908721d8ffab1035506e133:enterprise_agent_poc/'+name],cwd=root)
             self.assertEqual(base,(root/'enterprise_agent_poc'/name).read_bytes(),name)
+        # The successor is explicitly authorized to change ONLY Revision
+        # collection/verification, not WeChat business/permission/binding logic.
+        # Preserve a full-module AST invariant outside those two functions,
+        # rather than dropping the Skill protection or reapproving all changes.
+        name = 'app/wechat_skill.py'
+        base = subprocess.check_output(['git','show','4ca21336bdd17a507d819457c2fc41c5e410846b:enterprise_agent_poc/'+name],cwd=root)
+        current = (root/'enterprise_agent_poc'/name).read_bytes()
+        def business(raw):
+            tree = ast.parse(raw)
+            tree.body = [node for node in tree.body if not (
+                isinstance(node,ast.FunctionDef) and node.name in {'source_files','verify_revision_contract'})]
+            return ast.dump(tree,include_attributes=False)
+        self.assertEqual(business(base),business(current),'Only canonical identity functions may change')
 
     def test_27_qualified_authority_cannot_use_normal_context(self):
         result = self.execute()

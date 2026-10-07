@@ -244,3 +244,28 @@ requirement needs explicit upstream contract approval. See
 No PRIMARY connection/provision/venv/Binding/PREPARE or Production mutation;
 actual Provider/Image/WeChat=0/0/0. STOP.
 <!-- TEST_CONTROLLED_SKILL_ACTION_V1_END -->
+
+<!-- SKILL_REVISION_CANONICALIZATION_V1_BEGIN -->
+## Revision Identity canonicalization — no fresh PRIMARY execution
+
+Successor of Qualification Source4ca corrects Path-dependent list ordering,
+not content drift. POSIX relative path/case/Unicode are exact, inventory is
+UTF-8 bytewise canonical, seal metadata is parsed separately. Native v1 identity
+is preserved; no old manifest/receipt rewrite or Skill ZIP repack.
+
+ZIP SHA stays `4a140c878ae7057583089a4410cd1a23c5c95664988e6dd9700f75ed51d3b18c`;
+13 file hashes match. Runtime Lock stays
+`3a5f482475c7cafe660df2d171f369a32832ac91e12e9b0ddffde5c5d6ac8abe`.
+Pinned 4ca Linux rejection and successor PASS are both regression fixtures;
+actual local Linux 91 qualification/controlled/dispatch tests now execute with
+0 setup errors. Final targeted309 unique cases PASS, 0 failed/errors/skips.
+
+This closes the local Source ordering proof, not PRIMARY live acceptance.
+`SKILL_REVISION_CANONICALIZATION_V1_REPORT.md` records canonical rules, backward
+compatibility, verifier-only harness changes and all exploratory failures.
+06 next round needs fresh attestation/versioned new Source/tree approval and
+successor evidence; e7 runtime and all action/authority rules remain unchanged.
+
+No PRIMARY connection/provision/switch/venv/Revision/PREPARE; no Production
+operation; actual Provider/Image/WeChat=0/0/0. STOP.
+<!-- SKILL_REVISION_CANONICALIZATION_V1_END -->

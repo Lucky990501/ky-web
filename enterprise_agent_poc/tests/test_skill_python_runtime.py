@@ -15,7 +15,7 @@ import uuid
 
 from app import skill_python_runtime as rt
 from app import wechat_skill
-from test_wechat_skill_integration import Scratch
+from runtime_identity_fixture import Scratch
 
 
 class RuntimeTests(unittest.TestCase):

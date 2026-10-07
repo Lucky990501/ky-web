@@ -34,20 +34,25 @@ def digest(raw: bytes) -> str:
 
 def source_files(source: Path = SOURCE) -> dict:
     from app.bundled_skills import safe_path, secret_content
+    from app.skill_revision_identity import canonical_path
     files = {}
-    for p in sorted(source.rglob('*')):
+    for p in source.rglob('*'):
         if p.is_symlink():
             raise WechatSkillError('WECHAT_SKILL_SOURCE_BLOCKED')
         if not p.is_file():
             continue
-        name = safe_path(p.relative_to(source).as_posix())
+        name = canonical_path(safe_path(p.relative_to(source).as_posix()))
+        if name in files:
+            raise WechatSkillError('WECHAT_SKILL_SOURCE_BLOCKED')
         raw = p.read_bytes()
         if b'\r' in raw or secret_content(raw):
             raise WechatSkillError('WECHAT_SKILL_SOURCE_BLOCKED')
         files[name] = (raw, '100644')
     if 'SKILL.md' not in files or 'scripts/wechat_draft.py' not in files:
         raise WechatSkillError('WECHAT_SKILL_SOURCE_BLOCKED')
-    return files
+    # Path ordering is platform-specific (Windows casefold vs Linux codepoint).
+    # Inventory authority is the normalized relative string, never Path/order.
+    return {name: files[name] for name in sorted(files, key=lambda name: name.encode('utf-8'))}
 
 
 def native_package(source: Path = SOURCE) -> bytes:
@@ -74,10 +79,13 @@ def revision_contract(source: Path = SOURCE) -> dict:
 
 
 def verify_revision_contract() -> dict:
+    from app.skill_revision_identity import parse_revision, verify_revision_identity, RevisionIdentityError
     declaration = Path(__file__).resolve().parents[1] / 'integrations/wechat-html-draft.revision.v1.json'
-    expected = json.loads(declaration.read_text(encoding='utf-8'))
-    if expected != revision_contract():
-        raise WechatSkillError('WECHAT_SKILL_REVISION_IDENTITY_BLOCKED')
+    try:
+        expected = parse_revision(declaration.read_bytes())
+        verify_revision_identity(expected, revision_contract())
+    except RevisionIdentityError:
+        raise WechatSkillError('WECHAT_SKILL_REVISION_IDENTITY_BLOCKED') from None
     return expected
 
 

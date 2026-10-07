@@ -1,0 +1,23 @@
+{
+  "fixture": "WECHAT_NATIVE_REVISION_LINUX_ORDER_V1",
+  "legacy_source": "4ca21336bdd17a507d819457c2fc41c5e410846b",
+  "legacy_module_sha256": "539fa93a3c85628803ad0d30759a9aad8c1d5f44480c04f8982acd2dd401a0c6",
+  "declaration_sha256": "0329daa05bfaff79c158807364d88003d3c1fdc88ebdf245d8bfa11a6bbfd490",
+  "artifact_sha256": "4a140c878ae7057583089a4410cd1a23c5c95664988e6dd9700f75ed51d3b18c",
+  "runtime_lock_sha256": "3a5f482475c7cafe660df2d171f369a32832ac91e12e9b0ddffde5c5d6ac8abe",
+  "linux_file_order": [
+    "SKILL.md",
+    "agents/openai.yaml",
+    "assets/article-template.html",
+    "assets/article.example.json",
+    "references/account.example.json",
+    "references/reference-style.json",
+    "references/style.md",
+    "references/upload.md",
+    "scripts/invoke_wechat.ps1",
+    "scripts/requirements.txt",
+    "scripts/test_workflow.py",
+    "scripts/wechat_draft.py",
+    "scripts/workbench_guard.py"
+  ]
+}

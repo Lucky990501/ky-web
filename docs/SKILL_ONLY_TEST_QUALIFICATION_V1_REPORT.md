@@ -76,3 +76,28 @@ Production未连接/操作；Provider/Image/WeChat=0/0/0。技术债未提升状
 下一轮qualifiedAPIMCPWorker必须安装同一newSource并生成新existingdispatchseal；e7runtime Source保持独立不变，旧b0-onlyMCP不满足qualified资格。
 Qualifiednativeapproval在旧schema中增加严格qualification对象（字段见validate/manifest），Source/Agent/UUID/fingerprint都必须实际provision后填写，不可使用占位值制造livegrant。
 **完成commit/push/外部seal后STOP，不执行PRIMARY Provision或PREPARE。**
+
+<!-- SKILL_REVISION_CANONICALIZATION_V1_BEGIN -->
+## Cross-platform Revision Identity successor
+
+`SKILL_REVISION_CANONICALIZATION_READY` — Source/local parity only.
+Based exactly on 4ca; branch `codex/skill-revision-canonicalization-v1`.
+The setup defect was `sorted(Path)` Windows case-insensitive vs Linux
+case-sensitive order followed by position-sensitive `files` list equality.
+New verifier uses exact normalized relative path + hash + mode, UTF-8 bytewise
+order and separately parsed fixed-field metadata. Persisted Native v1 identity,
+Artifact/declaration/Runtime Lock and historical receipts remain unchanged.
+
+Final Windows 30/91/66/29 and Linux 30/91/29/93 all PASS:309 unique cases,
+0 failed/errors/skips; two existing Linux lifecycle warnings. All three Linux
+Qualification/Controlled/Dispatch classes now execute 91 tests without setup
+errors. Qualification semantics/Controlled Action/eligibility/Runtime are not
+modified; corresponding static test protects the whole Skill AST except the two
+explicitly allowed identity functions. Runtime-only verifier fixture no longer
+imports unrelated Skill business dependencies, without any dependency install.
+
+No PRIMARY attestation/switch/provision/Revision/venv/PREPARE or Production
+operation. 06 must approve and verify the exact new Source/tree and fresh native
+evidence; do not reuse old 4ca identity or rewrite its seal history.
+See `SKILL_REVISION_CANONICALIZATION_V1_REPORT.md` for rules/evidence. STOP.
+<!-- SKILL_REVISION_CANONICALIZATION_V1_END -->

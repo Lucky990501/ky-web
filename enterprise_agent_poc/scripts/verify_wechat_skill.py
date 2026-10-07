@@ -34,13 +34,14 @@ def main():
         if not args.build_package.exists():args.build_package.write_bytes(raw)
         print(json.dumps(adapter.revision_contract(),ensure_ascii=False));return
     sys.path.insert(0,str(ROOT/'tests'))
-    import test_wechat_skill_integration as integration
     # The original suite is unchanged; replace only its temporary-directory
     # allocation to preserve the current Windows sandbox's inherited ACLs.
     if args.runtime_tests:
+        from runtime_identity_fixture import Scratch
         import test_skill_python_runtime
         suite=unittest.defaultTestLoader.loadTestsFromModule(test_skill_python_runtime)
     elif args.original_zip:
+        from test_wechat_skill_integration import Scratch
         raw=args.original_zip.read_bytes()
         if adapter.digest(raw)!=adapter.ORIGINAL_SHA:raise ValueError('ORIGINAL_ZIP_SHA_MISMATCH')
         with zipfile.ZipFile(args.original_zip) as archive:
@@ -48,6 +49,8 @@ def main():
             suite_module=module_from_bytes('original_tests',archive.read('wechat-html-draft/scripts/test_workflow.py'),'original/test_workflow.py')
         suite=unittest.defaultTestLoader.loadTestsFromModule(suite_module)
     else:
+        import test_wechat_skill_integration as integration
+        Scratch=integration.Scratch
         sys.path.insert(0,str(adapter.SOURCE/'scripts'))
         import test_workflow
         import test_wechat_action_contract
@@ -56,7 +59,7 @@ def main():
                                  unittest.defaultTestLoader.loadTestsFromModule(test_wechat_action_contract)])
     from unittest.mock import patch
     import tempfile
-    with patch.object(tempfile,'TemporaryDirectory',integration.Scratch):
+    with patch.object(tempfile,'TemporaryDirectory',Scratch):
         result=unittest.TextTestRunner(verbosity=1).run(suite)
     print(json.dumps(dict(tests=result.testsRun,failed=len(result.failures),errors=len(result.errors),
                          skipped=len(result.skipped),scope='OFFLINE_LOCAL_ONLY',wechat_calls=0)))
