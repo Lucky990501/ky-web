@@ -18,6 +18,9 @@ from app.tool_dependencies import (
     RECONSTRUCTION_CONTRACT,
     RetryReceiptLedger,
     ToolInputValidationError,
+    ImageToolExecutionFailure,
+    reference_image_dependency,
+    fingerprint,
 )
 from app.product_store import ProductStore
 from app.knowledge import KnowledgeRetrievalService
@@ -133,6 +136,14 @@ class PlatformMCPService:
         self._audit(principal.tenant_id, "image_generation", "started")
         if len(reference_images) > 1:
             raise ValueError("当前最多支持一张参考图片。")
+        # Only a signed current Task + its immutable attachment can attest the
+        # single reference-image result requirement. Model arguments cannot.
+        raw_scope = execution_scope.removeprefix("runtime:") if execution_scope.startswith("runtime:") else ""
+        task_id = self._tokens.verify_task_scope(raw_scope, principal.tenant_id) if "." in raw_scope else ""
+        attachment = ProductStore(self._store).task_chat_image_attachment(task_id, principal.tenant_id) if task_id else None
+        if reference_images and (not attachment or reference_images != [attachment["id"]]):
+            raise ValueError("参考图片与当前任务不匹配。")
+        image_dependency = reference_image_dependency(principal.tenant_id, task_id, attachment["id"]) if attachment else None
         if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5"}:
             self._audit(principal.tenant_id, "image_generation", "failed")
             error = ToolInputValidationError(
@@ -149,16 +160,12 @@ class PlatformMCPService:
                 original_args=effective_args,
                 error=error,
             )
+            error.image_dependency = image_dependency
             raise error
         api_key = os.environ.get(self._settings.image_api_key_env)
         if not api_key:
             raise RuntimeError(f"未配置图片服务 API Key 环境变量：{self._settings.image_api_key_env}。")
         size = {"1:1": "1024x1024", "9:16": "1024x1536", "16:9": "1536x1024", "4:5": "1024x1536"}[aspect_ratio]
-        raw_scope = execution_scope.removeprefix("runtime:") if execution_scope.startswith("runtime:") else ""
-        task_id = self._tokens.verify_task_scope(raw_scope, principal.tenant_id) if "." in raw_scope else ""
-        attachment = ProductStore(self._store).task_chat_image_attachment(task_id, principal.tenant_id) if task_id else None
-        if reference_images and (not attachment or reference_images != [attachment["id"]]):
-            raise ValueError("参考图片与当前任务不匹配。")
         source_image = None
         if attachment:
             try:
@@ -198,6 +205,17 @@ class PlatformMCPService:
                         "response_format": "b64_json",
                     },
                 )
+        audit = {"contract": RECONSTRUCTION_CONTRACT, "submitted_args": submitted_args,
+                 "effective_args": effective_args, "ignored_retry_argument_drift": [], "coupled_repairs": [],
+                 **(retry_audit or {}), "request_fingerprint": fingerprint(submitted_args)}
+        if image_dependency is not None:
+            audit["image_dependency"] = image_dependency
+        # A failed HTTP response is still an authenticated executed attempt.
+        # Preserve receipt reconstruction even when the body is not JSON. Never
+        # include provider response text, Authorization or signed URLs.
+        if response.status_code >= 400:
+            self._audit(principal.tenant_id, "image_generation", "failed")
+            raise ImageToolExecutionFailure(response.status_code, audit)
         try:
             gateway = response.json()
         except ValueError as exc:
@@ -205,8 +223,6 @@ class PlatformMCPService:
         if not isinstance(gateway, dict):
             raise RuntimeError(f"图片网关返回无效 JSON 结构（HTTP {response.status_code}）。")
         request_id = gateway.get("request_id") or response.headers.get("x-request-id") or "unknown"
-        if response.status_code >= 400:
-            raise RuntimeError(f"图片网关调用失败（HTTP {response.status_code}，request_id={request_id}）。")
         items = gateway.get("data")
         if not isinstance(items, list) or not items or not isinstance(items[0], dict):
             raise RuntimeError("图片网关未返回 data[0]。")
@@ -252,22 +268,7 @@ class PlatformMCPService:
                 }
             ],
         }
-        if retry_audit is not None:
-            result["_tool_dependency"] = {
-                **retry_audit,
-                "status": "completed",
-                "provider_invoked": True,
-            }
-        else:
-            result["_tool_dependency"] = {
-                "contract": RECONSTRUCTION_CONTRACT,
-                "status": "completed",
-                "provider_invoked": True,
-                "submitted_args": submitted_args,
-                "effective_args": effective_args,
-                "ignored_retry_argument_drift": [],
-                "coupled_repairs": [],
-            }
+        result["_tool_dependency"] = {**audit, "status": "completed", "provider_invoked": True}
         self._audit(principal.tenant_id, "image_generation", "completed")
         return result
 

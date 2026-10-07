@@ -399,6 +399,7 @@ class CodexRuntimeProvider(RuntimeProvider):
                     tool_result, scope=scope, tool_call_id=call_id,
                     created_at=times.get("created_at", observed_at),
                     completed_at=times.get("completed_at", observed_at),
+                    server=server, tool=tool,
                 ))
                 if call.get("failure_category"):
                     call["status"] = "failed"

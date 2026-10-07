@@ -23,6 +23,7 @@ from app.settings import settings
 from app.store import POCStore
 from app.tool_dependencies import (
     InvalidRetryLineage,
+    ImageToolExecutionFailure,
     ToolInputValidationError,
     input_failure,
     invalid_retry_failure,
@@ -121,6 +122,9 @@ def create_mcp():
                 retry_of=retry_of, execution_scope=execution_scope,
                 reference_images=reference_images,
             )
+        except ImageToolExecutionFailure as error:
+            return CallToolResult(isError=True, structuredContent=error.payload,
+                                  content=[TextContent(type="text", text=json.dumps(error.payload, ensure_ascii=False))])
         except ImageProviderUnavailable:
             # The service already logged allowlisted transport diagnostics.
             # Return a typed tool failure instead of FastMCP logging a traceback.

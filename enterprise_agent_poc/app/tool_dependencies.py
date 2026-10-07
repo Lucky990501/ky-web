@@ -2,7 +2,9 @@
 
 Changed-input retries require a platform-issued pre-execution validation receipt
 AND an explicit retry_of from the caller. Never infer intent from tool names,
-prose, adjacency, or a successful artifact. V1.1 reconstructs retry arguments
+prose, adjacency, or a successful artifact. A server-bound single reference
+image Task can additionally attest its one result requirement across attempts.
+V1.1 reconstructs retry arguments
 from a server-side receipt before Provider invocation. Legacy exact-request
 retries retain their existing last-attempt semantics.
 """
@@ -21,6 +23,7 @@ from uuid import uuid4
 
 CONTRACT = "required-tool-input-retry-v1"
 RECONSTRUCTION_CONTRACT = "required-tool-input-retry-v1.1"
+REFERENCE_RESULT_CONTRACT = "task-bound-reference-image-result-v1"
 RETRY_CATEGORIES = {"argument_validation_error", "recoverable_tool_input_error"}
 AUDIT_FIELDS = {
     "attempt_id", "tool_call_id", "execution_scope", "request_fingerprint",
@@ -31,6 +34,8 @@ AUDIT_FIELDS = {
     "effective_args", "effective_argument_fingerprints",
     "ignored_retry_argument_drift", "retry_receipt_validated",
     "coupled_repairs",
+    "image_dependency", "result_contract_valid", "provider_http_status",
+    "dependency_satisfied_by",
 }
 
 
@@ -59,6 +64,59 @@ class ToolInputValidationError(ValueError):
         self.allowed_values = allowed_values or {}
         self.coupled_text_fields = coupled_text_fields or {}
         self.retry_receipt = retry_receipt
+        self.image_dependency = None
+
+
+class ImageToolExecutionFailure(RuntimeError):
+    """Safe failed HTTP outcome retaining authenticated dependency evidence."""
+
+    def __init__(self, status: int, audit: dict) -> None:
+        super().__init__(f"图片网关调用失败（HTTP {status}）。")
+        self.payload = {"error_code": "image_provider_error", "message": str(self),
+                        "retryable": False,
+                        "_tool_dependency": {**audit, "status": "failed",
+                                             "failure_category": "provider_http_error",
+                                             "provider_invoked": True, "provider_http_status": status}}
+
+
+def reference_image_dependency(tenant_id: str, task_id: str, attachment_id: str) -> dict:
+    """Only the Tool Gateway calls this after verifying the signed Task scope.
+
+    Current product Task contract has one bound reference and one result row.
+    This is a result requirement, NOT a license to retry/repair arbitrary input.
+    No raw task-scope capability is exposed in this metadata.
+    """
+    identity = {"contract": REFERENCE_RESULT_CONTRACT, "tenant_id": tenant_id,
+                "task_id": task_id, "attachment_id": attachment_id,
+                "capability": "reference_image_edit", "result_count": 1}
+    return {**identity, "group_id": fingerprint(identity)}
+
+
+def _reference_dependency(call: dict, meta: dict, payload: dict) -> tuple[dict | None, bool]:
+    proof = meta.get("image_dependency")
+    if not isinstance(proof, dict) or call.get("server") != "platform" or call.get("tool") != "image_generation":
+        return None, False
+    identity = {key: proof.get(key) for key in ("contract", "tenant_id", "task_id", "attachment_id", "capability", "result_count")}
+    if (identity["contract"] != REFERENCE_RESULT_CONTRACT or identity["capability"] != "reference_image_edit"
+            or identity["result_count"] != 1
+            or any(not isinstance(identity[k], str) or not identity[k] for k in ("tenant_id", "task_id", "attachment_id"))
+            or proof.get("group_id") != fingerprint(identity)
+            or meta.get("request_fingerprint") != call.get("request_fingerprint")):
+        return None, False
+    result_valid = False
+    if meta.get("status") == "completed" and meta.get("provider_invoked") is True:
+        items = payload.get("results")
+        item = items[0] if isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict) else {}
+        key = item.get("storage_key")
+        mime_formats = {"image/png": ("png", ".png"), "image/jpeg": ("jpeg", ".jpg"), "image/webp": ("webp", ".webp")}
+        expected = mime_formats.get(item.get("mime_type")) if isinstance(item.get("mime_type"), str) else None
+        result_valid = bool(
+            isinstance(key, str) and key.startswith(f"generated/{identity['tenant_id']}/")
+            and "\\" not in key and not any(p in {"", ".", ".."} for p in key.split("/"))
+            and expected and item.get("format") == expected[0] and key.endswith(expected[1])
+            and item.get("reference_images_used") == [identity["attachment_id"]]
+            and all(type(item.get(k)) is int and item[k] > 0 for k in ("width", "height")))
+    return deepcopy(proof), result_valid
 
 
 class InvalidRetryLineage(ValueError):
@@ -229,7 +287,7 @@ def input_failure(arguments: dict, error: ToolInputValidationError,
                         "failure_category": "argument_validation_error",
                         "repairable_fields": list(error.repairable_fields),
                         "coupled_repairs": []}
-    return {
+    result = {
         "error_code": "argument_validation_error", "message": str(error),
         "retry_instruction": "Correct only the rejected fields for this same requirement and copy retry_of into the next call. Omit retry_of for an independent requirement.",
         "retryable": retry["retryable"],
@@ -248,6 +306,9 @@ def input_failure(arguments: dict, error: ToolInputValidationError,
             "completed_at": timestamp,
         },
     }
+    if error.image_dependency is not None:
+        result["_tool_dependency"]["image_dependency"] = deepcopy(error.image_dependency)
+    return result
 
 
 def invalid_retry_failure(error: InvalidRetryLineage) -> dict:
@@ -291,7 +352,8 @@ def tool_result_payload(result: object) -> dict:
 
 def attempt_observation(arguments: object, result: object, *, scope: str,
                         tool_call_id: str, created_at: str | None = None,
-                        completed_at: str | None = None) -> dict:
+                        completed_at: str | None = None,
+                        server: str | None = None, tool: str | None = None) -> dict:
     """Hash complete arguments; do not add enterprise text to durable traces."""
     value = arguments if isinstance(arguments, dict) else None
     request = request_arguments(value) if value is not None else arguments
@@ -354,6 +416,27 @@ def attempt_observation(arguments: object, result: object, *, scope: str,
         elif (accepted_contract and meta.get("status") == "completed"
               and meta.get("provider_invoked") is True):
             observed.pop("failure_category", None)
+        elif (accepted_contract and meta.get("status") == "failed"
+              and meta.get("failure_category") == "provider_http_error"
+              and meta.get("provider_invoked") is True
+              and meta.get("request_fingerprint") == observed["request_fingerprint"]):
+            observed.update(failure_category="provider_http_error", provider_invoked=True,
+                            provider_http_status=meta.get("provider_http_status"))
+            if (meta.get("retry_receipt_validated") is True
+                    and isinstance(meta.get("effective_args"), dict)
+                    and isinstance(meta.get("submitted_args"), dict)):
+                observed.update(retry_receipt_validated=True,
+                                effective_args=deepcopy(meta["effective_args"]),
+                                submitted_args=deepcopy(meta["submitted_args"]),
+                                effective_argument_fingerprints={k: fingerprint(v) for k, v in meta["effective_args"].items()},
+                                ignored_retry_argument_drift=list(meta.get("ignored_retry_argument_drift", [])),
+                                coupled_repairs=deepcopy(meta.get("coupled_repairs", [])))
+        if accepted_contract and observed.get("failure_category") != "unverified_retry_receipt":
+            proof, result_valid = _reference_dependency({**observed, "server": server, "tool": tool}, meta, payload)
+            if proof is not None:
+                observed.update(image_dependency=proof, result_contract_valid=result_valid)
+                if meta.get("status") == "completed" and not result_valid:
+                    observed["failure_category"] = "invalid_image_result_contract"
     if "effective_args" not in observed and isinstance(request, dict):
         observed["effective_args"] = deepcopy(request)
         observed["effective_argument_fingerprints"] = dict(observed["argument_fingerprints"])
@@ -368,7 +451,7 @@ def call_completed(call: dict) -> bool:
 
 
 def resolve_dependencies(observations: list[dict]) -> tuple[list[dict], list[dict], dict]:
-    """Resolve only backward, unique, scoped, explicit input-repair lineage."""
+    """Resolve explicit repair lineage and server-bound single-image results."""
     calls = [dict(item) for item in observations]
     tokens: dict[str, list[dict]] = {}
     groups: dict[tuple, dict] = {}
@@ -379,7 +462,7 @@ def resolve_dependencies(observations: list[dict]) -> tuple[list[dict], list[dic
         server_lineage_error = (call.get("lineage_error")
                                 if call.get("failure_category") == "invalid_retry_lineage"
                                 else None)
-        for field in ("retry_parent", "superseded_by", "supersession_status", "lineage_error", "logical_dependency_id"):
+        for field in ("retry_parent", "superseded_by", "supersession_status", "lineage_error", "logical_dependency_id", "dependency_satisfied_by"):
             call.pop(field, None)
         if server_lineage_error:
             call["lineage_error"] = server_lineage_error
@@ -392,6 +475,14 @@ def resolve_dependencies(observations: list[dict]) -> tuple[list[dict], list[dic
         # them. Legacy observations retain the old exact-request fallback.
         if call.get("execution_scope"):
             key = (*key, attempt_id)
+        proof = call.get("image_dependency")
+        task_image = bool(isinstance(proof, dict) and proof.get("contract") == REFERENCE_RESULT_CONTRACT
+                          and call.get("execution_scope") and call.get("server") == "platform"
+                          and call.get("tool") == "image_generation"
+                          and all(isinstance(proof.get(k), str) and proof[k] for k in ("tenant_id", "task_id", "attachment_id"))
+                          and proof == reference_image_dependency(proof.get("tenant_id"), proof.get("task_id"), proof.get("attachment_id")))
+        if task_image:
+            key = (scope, call["server"], call["tool"], REFERENCE_RESULT_CONTRACT, proof["group_id"])
         if attempt_id in seen_attempts:
             call["lineage_error"] = "duplicate_attempt_identity"
         seen_attempts.add(attempt_id)
@@ -409,7 +500,10 @@ def resolve_dependencies(observations: list[dict]) -> tuple[list[dict], list[dic
                 stable = bool(fields) and before.keys() == after.keys() and all(
                     before[field] == after[field] for field in before if field not in fields)
                 server_reconstructed = call.get("retry_receipt_validated") is True
+                same_result_requirement = (call.get("image_dependency") == candidate.get("image_dependency")
+                                           if call.get("image_dependency") or candidate.get("image_dependency") else True)
                 if (same_scope and not call.get("lineage_error")
+                        and same_result_requirement
                         and (stable or server_reconstructed) and candidate.get("provider_invoked") is False
                         and candidate.get("failure_category") in RETRY_CATEGORIES
                         and not candidate.get("superseded_by") and not candidate.get("lineage_error")):
@@ -431,9 +525,25 @@ def resolve_dependencies(observations: list[dict]) -> tuple[list[dict], list[dic
         call["_dependency_key"] = key
         call["logical_dependency_id"] = group["dependency_id"]
         group["attempt_ids"].append(attempt_id)
+        group["last_attempt_id"] = attempt_id
         group["active_attempt_id"] = attempt_id
         group["lineage_valid"] = group.get("lineage_valid", True) and not call.get("lineage_error")
-        group["satisfied"] = call_completed(call) and group["lineage_valid"]
+        if task_image:
+            group["requirement_identity"] = deepcopy(proof)
+            if call_completed(call) and call.get("result_contract_valid") is True:
+                group["successful_attempt_id"] = attempt_id
+                # Historical failures remain immutable observations; only a
+                # valid success for this same authenticated result closes them.
+                for earlier in calls[:index]:
+                    if earlier.get("logical_dependency_id") == group["dependency_id"] and not call_completed(earlier):
+                        earlier.setdefault("superseded_by", attempt_id)
+                        earlier.update(supersession_status="superseded", dependency_satisfied_by=attempt_id)
+            selected = group.get("successful_attempt_id")
+            group["satisfied"] = bool(selected) and group["lineage_valid"]
+            if group["satisfied"]:
+                group["active_attempt_id"] = selected
+        else:
+            group["satisfied"] = call_completed(call) and group["lineage_valid"]
         group["status"] = "satisfied" if group["satisfied"] else "unsatisfied"
         token = call.get("retry_token")
         if isinstance(token, str):
