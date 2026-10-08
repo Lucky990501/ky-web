@@ -1,0 +1,67 @@
+{
+  "status": "COPYWRITING_SKILL_V1_REAL_VALIDATION_BLOCKED",
+  "scope": "LOCAL_SOURCE_PREPARATION_ONLY",
+  "base_source": "0bfded6ee6837e8c0908721d8ffab1035506e133",
+  "skill": {
+    "slug": "short-video-reality-talk",
+    "version": "1.0.0",
+    "registry_revision_id": null,
+    "source_sha256": "e767db91b144993102f73ad3cf2e74848f21378b035c6345f329ed74af08180a",
+    "zip_sha256": "f8ce3e059fad090c07547906d0dfa1a4b1fabd313cf6acc8ed4a3e49eba49e6f",
+    "reference_zip_sha256": "11dc364141bf7280e926d910f1dc90c97c0b391cbc30a363586593e95c2ce484",
+    "reference_zip_usage": "CONTENT_REFERENCE_ONLY; adapted self-contained native package, not byte-identical import"
+  },
+  "agent_binding": {
+    "agent_id": "copywriting-agent",
+    "agent_slug": "copywriting",
+    "new_system_or_agent_created": false,
+    "local_catalog_and_clean_fixture": "short-video-reality-talk@1.0.0",
+    "live_binding_change": "NOT_EXECUTED",
+    "historical_marketing_social_packages": "PRESERVED"
+  },
+  "deterministic_verification": {
+    "skill_creator_quick_validate": "PASS (python -X utf8)",
+    "targeted_tests": "12 passed / 0 failed / 0 skipped",
+    "platform": "Windows Python 3.13.0; OFFLINE_ONLY",
+    "suites": ["test_copywriting_skill_v1.py", "test_runtime_profile.py", "test_skills.py"],
+    "test_mode": "--noconftest; copywriting suite owns temporary SQLite and deny-network guard",
+    "not_claimed": ["Full pytest", "PRIMARY Linux tests", "Stage 2", "real model quality", "live skills/list", "Runtime Test PASS"],
+    "initial_attempts": [
+      "Default Windows decoding rejected UTF-8 Chinese; rerun with -X utf8 passed",
+      "Default sandbox temp directory access denied; used task-owned temporary root",
+      "Shared conftest requires Linux os.getuid; no product/conftest change or fake getuid; narrower Windows-safe package suites executed"
+    ]
+  },
+  "live_preflight": {
+    "host": "115.190.56.61",
+    "user": "lucky",
+    "ssh_authentication": "PASS",
+    "api_mcp_worker": "active",
+    "current_release": "20261007-dca318d-wechat-skill-test-successor-v1",
+    "source": "dca318de578a9b9601ad036e1b176bc5ab702029",
+    "tree": "fc28a7666b5a1224fa39991aee574527f75834aa",
+    "effective_policy": "/etc/enterprise-agent-test-successor-wechat-dca-v1/policy.v1.json",
+    "effective_contract": "WECHAT_SKILL_DCA_PRIMARY_SUCCESSOR_V1",
+    "policy_model_budget": 0,
+    "policy_purpose": "WECHAT_SKILL_PRIMARY_ACCEPTANCE",
+    "policy_agent_exception": "wechat-official-account-writing; disabled draft; configured instance; no runtime quality evidence",
+    "blocker": "No approved source-bound copywriting Skill/Binding/model/Task fixture successor; protected baseline must not be mutated",
+    "legacy_revision_gate": "AgentProductization rejects legacy revisions; no controlled import or resolver bypass implemented"
+  },
+  "real_validation": {
+    "approved_text_request_budget": 5,
+    "actual_text_provider_requests": 0,
+    "actual_image_provider_requests": 0,
+    "live_native_discovery": "NOT_EXECUTED",
+    "runtime_test": "NOT_EXECUTED",
+    "agent_publish_enable": "NOT_EXECUTED",
+    "task_ids": [],
+    "run_ids": [],
+    "customer_cases": "copywriting-skill-v1.json; prepared, not live-accepted"
+  },
+  "schema": "UNCHANGED",
+  "migration": "NONE",
+  "wechat_related_code": "UNCHANGED",
+  "production": "UNCHANGED; NOT_CONNECTED",
+  "required_next_authority": "Versioned Test-only scope for existing copywriting Agent + exact native package + formal eligibility/binding + dedicated Text Provider <=5 + persisted Task/Run; preserve current sealed contracts and Production"
+}

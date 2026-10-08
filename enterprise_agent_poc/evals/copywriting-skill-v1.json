@@ -1,0 +1,37 @@
+{
+  "agent_id": "copywriting-agent",
+  "skill": {"slug": "short-video-reality-talk", "version": "1.0.0"},
+  "model": {"provider": "deepseek", "model": "deepseek-v4-pro", "reasoning_effort": "high"},
+  "budget": {"text_provider_requests": 5, "image_provider_requests": 0},
+  "live_status": "NOT_EXECUTED_PENDING_TEST_AUTHORITY",
+  "requirements": [
+    "使用客户可访问的现有文案 Agent，不创建第二个 Agent 系统",
+    "真实 Native skills/list 与 skill_read trace，不能仅凭文件存在",
+    "真实模型输出、正式 Task/Run 完成与一次 assistant message",
+    "同一 conversation 下保持主题、受众、平台、事实并改写指定版本",
+    "若 Agent 需要发布，正式 Runtime Test PASS 后才 Publish/Enable",
+    "以实际 Provider 请求计数控制预算，不将 Task 数量等同于请求数"
+  ],
+  "cases": [
+    {
+      "id": "C1", "kind": "initial", "conversation": "copywriting-customer-v1-a",
+      "input": "给上班族写一组咖啡店朋友圈文案，主题是午休放松，目标是让附近上班族想到休息时来坐坐。不要写价格、优惠、店名或具体营业时间，给专业简洁、营销传播、口语化三个不同版本，每版不超过100字。",
+      "checks": ["三个完整且不同的版本", "受众、平台和目标符合", "无虚构价格权益地址时间", "不调用图片与发布接口"]
+    },
+    {
+      "id": "C2", "kind": "followup", "conversation": "copywriting-customer-v1-a",
+      "input": "只改第二版，缩短到50字以内，更口语化一点，保留午休和附近上班族这个重点，不要改成招募活动。",
+      "checks": ["同一真实conversation", "只返回第二版改稿", "保留主题受众与平台", "长度符合", "Task/Run与历史可回读"]
+    },
+    {
+      "id": "C3", "kind": "initial", "conversation": "copywriting-customer-v1-b",
+      "input": "为企业行政负责人写产品介绍短文案，平台是商务邮件。已知信息：产品定位是团队知识管理工具，可用于整理团队资料。用专业、克制的风格给三个不同版本，每版不超过120字。不补未提供的功能、客户案例或效果数据。",
+      "checks": ["指定风格三版实质差异", "不把用途写成已有智能功能", "无客户与效果虚构"]
+    },
+    {
+      "id": "C4", "kind": "initial", "conversation": "copywriting-customer-v1-c",
+      "input": "给社区读书交流活动写社群邀约文案，面向附近居民，目标是邀请大家交流阅读心得。日期、地点和参与方式还没确定。给三个不同版本，语气自然，不编造报名渠道、人数、礼品或后续安排。",
+      "checks": ["三版可复制文本", "关键事实待确认或省略", "无自行补流程权益", "正常展示并保留Task/Run"]
+    }
+  ]
+}

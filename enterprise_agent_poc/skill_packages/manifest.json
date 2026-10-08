@@ -48,7 +48,7 @@
       "source_identity": {"path": "marketing-copywriting/1.0.0", "files": [{"path": "SKILL.md", "sha256": "02ea7a868db96a99c025d6c2f7671869adbd988274ed66ce4d728f1fb79aa674", "git_mode": "100644"}]},
       "artifact_sha256": "706b0ca1b63e9a0f6c4e4651f851777c834f4f7e82e828087647e13990a3fc7e",
       "artifact_path": "marketing-copywriting/1.0.0.zip",
-      "bootstrap_default": ["copywriting-agent"],
+      "bootstrap_default": [],
       "builder_policy": "legacy-production-zip-v1",
       "legacy_artifact": true
     },
@@ -68,9 +68,19 @@
       "source_identity": {"path": "social-copywriting/1.0.0", "files": [{"path": "SKILL.md", "sha256": "4e62a73f7cd274c41be57050b09a80dba63f2626f27e085ab1ce8d17b5aa951a", "git_mode": "100644"}]},
       "artifact_sha256": "2fd4024753bd1535c2dd6ec983d1082e2f17a6d61c987cdd25f9b06ec4137f6a",
       "artifact_path": "social-copywriting/1.0.0.zip",
-      "bootstrap_default": ["copywriting-agent"],
+      "bootstrap_default": [],
       "builder_policy": "legacy-production-zip-v1",
       "legacy_artifact": true
+    },
+    {
+      "skill_slug": "short-video-reality-talk",
+      "version": "1.0.0",
+      "source_identity": {"path": "short-video-reality-talk/1.0.0", "files": [{"path": "SKILL.md", "sha256": "e767db91b144993102f73ad3cf2e74848f21378b035c6345f329ed74af08180a", "git_mode": "100644"}]},
+      "artifact_sha256": "f8ce3e059fad090c07547906d0dfa1a4b1fabd313cf6acc8ed4a3e49eba49e6f",
+      "artifact_path": "short-video-reality-talk/1.0.0.zip",
+      "bootstrap_default": ["copywriting-agent"],
+      "builder_policy": "native-zip-stored-v1",
+      "legacy_artifact": false
     },
     {
       "skill_slug": "wechat-official-account-writing",

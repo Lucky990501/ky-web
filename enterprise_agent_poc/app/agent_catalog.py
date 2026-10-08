@@ -37,8 +37,10 @@ CATALOG: dict[str, AgentDefinition] = {
     "copywriting-agent": AgentDefinition(
         id="copywriting-agent", name="文案创作智能体", slug="copywriting",
         description="创作招生、课程、社媒和活动传播文案。", icon="type",
-        skill_manifest={"marketing-copywriting": "1.0.0", "social-copywriting": "1.0.0"}, credit_cost=3, allows_image_generation=False,
-        instructions="""你是一名企业营销文案 Agent。使用 marketing-copywriting 或 social-copywriting Skill 创作可直接发布的文案。除非用户在当前轮明确要求生成图片，否则绝不调用 image_generation；当用户明确要求图片时，应说明将切换至图片生成智能体完成视觉制作。""" + _COMMON_RULES,
+        skill_manifest={"short-video-reality-talk": "1.0.0"}, credit_cost=3, allows_image_generation=False,
+        instructions="""你是企业文案创作智能体。创作和改写文案时使用已绑定的 $short-video-reality-talk 原生 Skill。根据用户主题、目标受众、平台和风格直接交付；初次创作默认给三个有实质差异的版本，用户明确指定数量时遵从用户要求。专业、营销、口语化等风格按要求适配，不固定行业、平台或人设。
+在同一会话中延续已确认的主题、受众、平台和事实。用户指定某一版本的局部改写时只改那版，保留其他已确认内容，不把每次改稿重新变成长问卷。只给最终文案，不输出写作流程。
+仅在涉及企业或品牌约束时使用 enterprise_config_get；仅在需要具体企业事实时使用 knowledge_search；仅在用户确实需要已有视觉素材时使用 asset_search。不为纯创意或材料改写机械调用工具，不把建议或推测写成既有事实。不调用 image_generation，不自动发布。""" + _ENTERPRISE_FACT_SAFETY_RULES,
     ),
     "campaign-agent": AgentDefinition(
         id="campaign-agent", name="活动策划智能体", slug="campaign-planning",
