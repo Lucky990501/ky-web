@@ -25,24 +25,25 @@ from app.auth import hash_password
 from app.domain import RuntimeProfile
 from app.settings import settings
 from app.store import POCStore
+from scripts.receipt_row_canonicalization import VERSION as RECEIPT_VERSION, row_sha256, verify_catalog
 
 TEST_TENANT_ID = "rag-isolation-test"
 TEST_ADMIN_EMAIL = "admin@rag-isolation-test.invalid"
 
 # A separate, native-approved operational mode. The legacy Phase A path below
 # remains unchanged. No caller-selected Tenant, connection string or SQL file.
-MINIMAL_CONTRACT = "TEST_ONLY_MINIMAL_PROVISION_V1"
-MINIMAL_TENANT = "wechat-personal-center-test-v1"
+MINIMAL_CONTRACT = "TEST_ONLY_MINIMAL_PROVISION_V2"
+MINIMAL_TENANT = "wechat-personal-center-test-v2"
 MINIMAL_USER = str(uuid.uuid5(uuid.NAMESPACE_URL, MINIMAL_TENANT + ':config-admin'))
-MINIMAL_EMAIL = "config-admin@wechat-personal-center-test.invalid"
+MINIMAL_EMAIL = "config-admin-v2@wechat-personal-center-test.invalid"
 MINIMAL_PURPOSE = "WECHAT_PERSONAL_CENTER_CONFIG_V1"
 APPLICATION_SOURCE = "db8e23658baa6e4b707380e178aded561d3280f2"
 APPLICATION_TREE = "04b6774d9e7a95e87871ea9c2e360805988a8e13"
 PRIMARY_ROOT = Path('/opt/enterprise-agent-workbench-test')
-NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-v1')
-SCOPE_FILE = NATIVE_SCOPE / 'provision-scope.v1.json'
-RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-personal-db8-v1/provision-receipt.v1.json'
-CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.v1.env'
+NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-canonical-v2')
+SCOPE_FILE = NATIVE_SCOPE / 'provision-scope.v2.json'
+RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-personal-db8-canonical-v2/provision-receipt.v2.json'
+CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.v2.env'
 ALLOWED_OBJECTS = ['tenants', 'enterprise_configs', 'users']
 MINIMAL_CONFIG = {'data_classification': MINIMAL_PURPOSE, 'tenant_label': MINIMAL_TENANT}
 
@@ -87,12 +88,13 @@ def tooling_identity():
 def validate_scope(scope, environment, database_url, identity):
     fields = {'contract', 'authority_id', 'purpose', 'environment', 'application_source',
               'application_tree', 'tooling_source', 'tooling_tree', 'tenant_id', 'user_id',
-              'user_email', 'allowed_objects', 'production_deploy_authority', 'budget', 'run_id'}
+              'user_email', 'allowed_objects', 'production_deploy_authority', 'budget', 'run_id', 'receipt_version', 'cleanup_authority'}
     require(isinstance(scope, dict) and set(scope) == fields, 'SCOPE_SCHEMA_BLOCKED')
     expected = {'contract': MINIMAL_CONTRACT, 'authority_id': 'WECHAT_PERSONAL_DB8_PRIMARY_SUCCESSOR_V1',
                 'purpose': MINIMAL_PURPOSE, 'environment': 'test', 'application_source': APPLICATION_SOURCE,
                 'application_tree': APPLICATION_TREE, 'tenant_id': MINIMAL_TENANT, 'user_id': MINIMAL_USER,
-                'user_email': MINIMAL_EMAIL, 'allowed_objects': ALLOWED_OBJECTS, 'production_deploy_authority': False}
+                'user_email': MINIMAL_EMAIL, 'allowed_objects': ALLOWED_OBJECTS, 'production_deploy_authority': False,
+                'receipt_version': RECEIPT_VERSION, 'cleanup_authority': 'EXACT_RECEIPT_OWNED_OBJECTS_ONLY'}
     require(all(scope[key] == value for key, value in expected.items()), 'EXACT_SCOPE_BLOCKED')
     require(scope['production_deploy_authority'] is False and scope['budget'] == {'wechat': 0, 'provider': 0, 'image': 0}
             and all(type(value) is int for value in scope['budget'].values()), 'ZERO_BUDGET_BLOCKED')
@@ -121,6 +123,8 @@ def database_identity(store):
     require(store.is_postgres, 'WRONG_DATABASE_BLOCKED')
     with store.connection() as conn:
         row = conn.execute('SELECT current_database() AS database, current_user AS db_role').fetchone()
+        fields = conn.execute("SELECT table_name,column_name,ordinal_position,udt_name,datetime_precision,is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('tenants','users','enterprise_configs') ORDER BY table_name,ordinal_position").fetchall()
+        verify_catalog(fields)
     require(dict(row) == {'database': 'enterprise_agent_test', 'db_role': 'enterprise_agent_test'},
             'LIVE_DATABASE_IDENTITY_BLOCKED')
     return dict(row)
@@ -213,12 +217,12 @@ def provision_minimal(store, scope, execute=False):
             rows = created_rows(conn)
             no_extra_objects(conn)
             require(all(len(value) == 1 for value in rows.values()), 'CREATED_OBJECT_SET_BLOCKED')
-            receipt = {'contract': MINIMAL_CONTRACT, 'status': 'PROVISIONED', 'scope_sha256': digest(scope),
+            receipt = {'contract': MINIMAL_CONTRACT, 'receipt_version': RECEIPT_VERSION, 'status': 'PROVISIONED', 'scope_sha256': digest(scope),
                        'run_id': scope['run_id'], 'tooling_source': scope['tooling_source'], 'tooling_tree': scope['tooling_tree'],
                        'application_source': APPLICATION_SOURCE, 'application_tree': APPLICATION_TREE,
                        'tenant_id': MINIMAL_TENANT, 'user_id': MINIMAL_USER, 'database': db,
                        'created_records': {table: [{'primary_key': MINIMAL_USER if table == 'users' else MINIMAL_TENANT,
-                                                   'row_sha256': digest(value[0])}] for table, value in rows.items()},
+                                                   'row_sha256': row_sha256(table,value[0])}] for table, value in rows.items()},
                        'initially_absent_secret_paths': [str(path) for path in secret_paths()],
                        'credential_path': str(CREDENTIAL_FILE), 'workspace_create': 0, 'business_agent_enable': 0,
                        'wechat_calls': 0, 'provider_calls': 0, 'image_calls': 0}
@@ -247,7 +251,7 @@ def provision_minimal(store, scope, execute=False):
 
 
 def approved_receipt(scope):
-    approval = native_json(NATIVE_SCOPE / 'provision-receipt.approval.v1.json')
+    approval = native_json(NATIVE_SCOPE / 'provision-receipt.approval.v2.json')
     require(set(approval) == {'contract', 'scope_sha256', 'receipt_sha256'}
             and approval['contract'] == MINIMAL_CONTRACT and approval['scope_sha256'] == digest(scope),
             'RECEIPT_APPROVAL_BLOCKED')
@@ -255,6 +259,7 @@ def approved_receipt(scope):
     raw = RECEIPT_FILE.read_bytes()
     require(hashlib.sha256(raw).hexdigest() == approval['receipt_sha256'], 'RECEIPT_PIN_BLOCKED')
     receipt = json.loads(raw)
+    require(receipt.get('receipt_version') == RECEIPT_VERSION, 'RECEIPT_VERSION_REJECTED')
     require(receipt['contract'] == MINIMAL_CONTRACT and receipt['status'] == 'PROVISIONED'
             and receipt['scope_sha256'] == digest(scope) and receipt['run_id'] == scope['run_id']
             and receipt['tenant_id'] == MINIMAL_TENANT and receipt['user_id'] == MINIMAL_USER
@@ -302,7 +307,7 @@ def cleanup_minimal(store, scope, execute=False):
         absent = not any(rows.values())
         if not absent:
             require(all(len(value) == 1 for value in rows.values()), 'PARTIAL_RECEIPT_OBJECT_SET')
-            require(all(digest(value[0]) == receipt['created_records'][table][0]['row_sha256']
+            require(all(row_sha256(table,value[0]) == receipt['created_records'][table][0]['row_sha256']
                         for table, value in rows.items()), 'OWNERSHIP_OR_CONFIG_DRIFT')
         if not execute:
             return {'status': 'cleanup_dry_run', 'tenant_id': MINIMAL_TENANT, 'user_id': MINIMAL_USER,

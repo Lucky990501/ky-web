@@ -27,7 +27,8 @@ def scope():
         'application_tree':p.APPLICATION_TREE,'tooling_source':'a'*40,'tooling_tree':'b'*40,
         'tenant_id':p.MINIMAL_TENANT,'user_id':p.MINIMAL_USER,'user_email':p.MINIMAL_EMAIL,
         'allowed_objects':p.ALLOWED_OBJECTS,'production_deploy_authority':False,
-        'budget':{'wechat':0,'provider':0,'image':0},'run_id':'30e36d4b-9f30-4bc7-bf76-e8edabb7de4d'}
+        'budget':{'wechat':0,'provider':0,'image':0},'run_id':'30e36d4b-9f30-4bc7-bf76-e8edabb7de4d',
+        'receipt_version':p.RECEIPT_VERSION,'cleanup_authority':'EXACT_RECEIPT_OWNED_OBJECTS_ONLY'}
 
 
 class Connection:
@@ -43,18 +44,18 @@ class Store:
         self.db.row_factory=sqlite3.Row
         self.db.executescript('''
           PRAGMA foreign_keys=ON;
-          CREATE TABLE tenants(id TEXT PRIMARY KEY,name TEXT,poc_api_key TEXT);
-          CREATE TABLE enterprise_configs(tenant_id TEXT PRIMARY KEY REFERENCES tenants(id),payload TEXT);
+          CREATE TABLE tenants(id TEXT PRIMARY KEY,name TEXT,poc_api_key TEXT,created_at TEXT DEFAULT '2026-01-02T03:04:05.000000+00:00');
+          CREATE TABLE enterprise_configs(tenant_id TEXT PRIMARY KEY REFERENCES tenants(id),payload TEXT,updated_at TEXT DEFAULT '2026-01-02T03:04:05.000000+00:00');
           CREATE TABLE users(id TEXT PRIMARY KEY,tenant_id TEXT REFERENCES tenants(id),email TEXT UNIQUE,
-             password_hash TEXT,display_name TEXT,role TEXT,account_status TEXT DEFAULT 'enabled',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+             password_hash TEXT,display_name TEXT,role TEXT,account_status TEXT DEFAULT 'enabled',created_at TEXT DEFAULT '2026-01-02T03:04:05.000000+00:00',avatar_storage_key TEXT,avatar_mime_type TEXT);
           CREATE TABLE platform_admins(user_id TEXT PRIMARY KEY);
           CREATE TABLE credit_accounts(tenant_id TEXT PRIMARY KEY REFERENCES tenants(id),balance INTEGER);
           CREATE TABLE agent_templates(id TEXT PRIMARY KEY);
           CREATE TABLE tenant_agent_instances(tenant_id TEXT REFERENCES tenants(id),agent_id TEXT,status TEXT);
           CREATE TABLE tasks(id TEXT PRIMARY KEY,tenant_id TEXT REFERENCES tenants(id));
         ''')
-        self.db.execute("INSERT INTO tenants VALUES ('existing-tenant','Existing','unchanged-test-fixture')")
-        self.db.execute("INSERT INTO enterprise_configs VALUES ('existing-tenant','{}')")
+        self.db.execute("INSERT INTO tenants(id,name,poc_api_key) VALUES ('existing-tenant','Existing','unchanged-test-fixture')")
+        self.db.execute("INSERT INTO enterprise_configs(tenant_id,payload) VALUES ('existing-tenant','{}')")
         self.db.execute("INSERT INTO users(id,tenant_id,email,password_hash,display_name,role) VALUES ('existing-user','existing-tenant','existing@example.invalid','unused-fixture-digest','Existing','member')")
         self.db.execute("INSERT INTO credit_accounts VALUES ('existing-tenant',100)")
         self.db.executemany('INSERT INTO agent_templates VALUES (?)',[(key,) for key in p.CATALOG])
@@ -218,7 +219,7 @@ class MinimalProvisionTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()),[])
 
     def test_preexisting_tenant_rejected(self):
-        self.store.db.execute('INSERT INTO tenants VALUES (?,?,?)',(p.MINIMAL_TENANT,'Existing not owned',None))
+        self.store.db.execute('INSERT INTO tenants(id,name,poc_api_key) VALUES (?,?,?)',(p.MINIMAL_TENANT,'Existing not owned',None))
         self.store.db.commit()
         with self.assertRaisesRegex(p.MinimalProvisionBlocked,'PREEXISTING_TENANT_BLOCKED'):
             self.provision()
