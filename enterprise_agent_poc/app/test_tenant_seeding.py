@@ -17,6 +17,7 @@ REQUIRED_ENV = 'ENTERPRISE_POC_TEST_TENANT_SEEDING_POLICY_REQUIRED'
 AUTHORITY_ROOT = Path('/etc/enterprise-agent-test-tenant-seeding-v1')
 APPROVAL_PATH = AUTHORITY_ROOT / 'approval.v1.json'
 EVIDENCE_ROOT = Path('/opt/enterprise-agent-workbench-test/release-evidence')
+NATIVE_SCOPE_PARENT = Path('/etc')
 PROJECT = Path(__file__).resolve().parents[1]
 TARGET = dict(address='127.0.0.1', port=55432, database='enterprise_agent_test', db_role='enterprise_agent_test')
 MINIMAL_OBJECTS = ['tenants', 'enterprise_configs', 'users']
@@ -71,6 +72,45 @@ def check_database(conn, store):
     require(dict(row) == TARGET)
 
 
+def tenant_row_hash(scope, receipt, scope_file):
+    """Version dispatch, not a raw-hash fallback for an unrecognized receipt."""
+    if scope['contract'] == 'TEST_ONLY_MINIMAL_PROVISION_V1':
+        require(scope_file.endswith('.v1.json') and not
+                ({'receipt_version', 'cleanup_authority'} & set(scope) or
+                 {'receipt_version', 'cleanup_authority'} & set(receipt)))
+        return digest  # Immutable historical V1 row semantics only.
+    require(scope['contract'] == 'TEST_ONLY_MINIMAL_PROVISION_V2')
+    # The declared copy is versioned; its separate active native Scope binding
+    # below must still exist. Neither copy may be an archived *.approved file.
+    require(scope_file == 'provision-scope.v2.json')
+    canonical_path = PROJECT / 'scripts/receipt_row_canonicalization.py'
+    require(not canonical_path.is_symlink() and hashlib.sha256(canonical_path.read_bytes()).hexdigest()
+            == '1c62c7805b473abfb906f88642c36d4e77e0a7a6c9537f31f60e1ff0b8aff09a')
+    from scripts import receipt_row_canonicalization as canonical
+    require(Path(canonical.__file__).resolve() == canonical_path.resolve())
+    VERSION = canonical.VERSION
+    require(set(scope) == {'contract', 'authority_id', 'purpose', 'environment', 'application_source',
+        'application_tree', 'tooling_source', 'tooling_tree', 'tenant_id', 'user_id', 'user_email',
+        'allowed_objects', 'production_deploy_authority', 'budget', 'run_id', 'receipt_version', 'cleanup_authority'})
+    require(scope['receipt_version'] == receipt.get('receipt_version') == VERSION
+            and scope['cleanup_authority'] == 'EXACT_RECEIPT_OWNED_OBJECTS_ONLY')
+    require(set(receipt) == {'contract', 'receipt_version', 'status', 'scope_sha256', 'run_id',
+        'tooling_source', 'tooling_tree', 'application_source', 'application_tree', 'tenant_id', 'user_id',
+        'database', 'created_records', 'initially_absent_secret_paths', 'credential_path',
+        'workspace_create', 'business_agent_enable', 'wechat_calls', 'provider_calls', 'image_calls'})
+    require(all(isinstance(scope[k], str) and re.fullmatch('[a-f0-9]{40}', scope[k])
+                for k in ('tooling_source', 'tooling_tree')))
+    require(isinstance(scope['user_id'], str) and str(UUID(scope['user_id'])) == scope['user_id'])
+    require(isinstance(scope['user_email'], str) and bool(scope['user_email']))
+    require(set(receipt['created_records']) == set(MINIMAL_OBJECTS))
+    for table, records in receipt['created_records'].items():
+        require(isinstance(records, list) and len(records) == 1
+                and set(records[0]) == {'primary_key', 'row_sha256'}
+                and records[0]['primary_key'] == (scope['user_id'] if table == 'users' else scope['tenant_id'])
+                and isinstance(records[0]['row_sha256'], str) and re.fullmatch('[a-f0-9]{64}', records[0]['row_sha256']))
+    return lambda value: canonical.row_sha256('tenants', value, VERSION)
+
+
 def authorized_exclusions(conn, store):
     # Production/development retain the original behavior without reading Test
     # files. The flag requests stronger validation, never grants an exemption.
@@ -94,18 +134,31 @@ def authorized_exclusions(conn, store):
         require(isinstance(approval['exclusions'], list) and len(approval['exclusions']) <= 32)
         excluded = set()
         for entry in approval['exclusions']:
-            require(set(entry) == {'scope_file', 'scope_sha256', 'receipt_file', 'receipt_sha256'})
+            fields = {'scope_file', 'scope_sha256', 'receipt_file', 'receipt_sha256'}
+            require(set(entry) in (fields, fields | {'active_scope_file'}))
             require(isinstance(entry['scope_file'], str) and re.fullmatch(r'[A-Za-z0-9_-]+\.v[1-9][0-9]*\.json', entry['scope_file']))
             require(all(isinstance(entry[k], str) and re.fullmatch('[a-f0-9]{64}', entry[k])
                         for k in ('scope_sha256', 'receipt_sha256')))
             scope, sha = native_json(AUTHORITY_ROOT / entry['scope_file'])
             require(sha == entry['scope_sha256'])
+            if scope['contract'] == 'TEST_ONLY_MINIMAL_PROVISION_V2':
+                require(set(entry) == fields | {'active_scope_file'} and isinstance(entry['active_scope_file'], str))
+                active = Path(entry['active_scope_file'])
+                require(active.is_absolute() and active.parent.parent == NATIVE_SCOPE_PARENT
+                        and re.fullmatch('[A-Za-z0-9_-]+', active.parent.name)
+                        and active.parent.name.startswith('enterprise-agent-test-successor-')
+                        and active.name == 'provision-scope.v2.json')
+                current, active_sha = native_json(active)
+                require(current == scope and active_sha == entry['scope_sha256'])
+            else:
+                require(set(entry) == fields)
             receipt_path = Path(entry['receipt_file'])
             require(receipt_path.is_absolute() and receipt_path.is_relative_to(EVIDENCE_ROOT)
                     and '..' not in receipt_path.parts and receipt_path.suffix == '.json')
             receipt, sha = native_json(receipt_path, root_owned=False)
             require(sha == entry['receipt_sha256'])
-            require(scope['contract'] == 'TEST_ONLY_MINIMAL_PROVISION_V1' and scope['environment'] == 'test'
+            row_hash = tenant_row_hash(scope, receipt, entry['scope_file'])
+            require(scope['environment'] == 'test'
                 and scope['authority_id'] == approval['authority_id']
                 and scope['purpose'] == 'WECHAT_PERSONAL_CENTER_CONFIG_V1'
                 and scope['application_source'] == approval['source_commit']
@@ -129,7 +182,7 @@ def authorized_exclusions(conn, store):
             require(len(record) == 1 and record[0]['primary_key'] == tenant
                 and isinstance(record[0]['row_sha256'], str) and re.fullmatch('[a-f0-9]{64}', record[0]['row_sha256']))
             row = conn.execute('SELECT * FROM tenants WHERE id=?', (tenant,)).fetchone()
-            if row is not None: require(digest(dict(row)) == record[0]['row_sha256'])
+            if row is not None: require(row_hash(dict(row)) == record[0]['row_sha256'])
             # Absent after exact cleanup is safe. No data deletion or enablement
             # is inferred, and tenant names / editable config are never signals.
             excluded.add(tenant)
