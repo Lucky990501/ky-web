@@ -6,7 +6,7 @@ The operator stages exact Git objects through the existing Bundle workflow.
 import hashlib,json,os,stat,subprocess
 from pathlib import Path
 
-NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-d8a-transport-v1')
+NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-d8a-common-cache-v1')
 REPO=NATIVE/'source.git'
 BUNDLE=NATIVE/'application.bundle'
 SEAL=NATIVE/'source-transport-seal.v1.json'

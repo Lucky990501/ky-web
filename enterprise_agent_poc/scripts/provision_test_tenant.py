@@ -33,17 +33,17 @@ TEST_ADMIN_EMAIL = "admin@rag-isolation-test.invalid"
 # A separate, native-approved operational mode. The legacy Phase A path below
 # remains unchanged. No caller-selected Tenant, connection string or SQL file.
 MINIMAL_CONTRACT = "TEST_ONLY_MINIMAL_PROVISION_V2"
-MINIMAL_TENANT = "wechat-personal-center-test-v2"
+MINIMAL_TENANT = "wechat-personal-center-common-cache-v1"
 MINIMAL_USER = str(uuid.uuid5(uuid.NAMESPACE_URL, MINIMAL_TENANT + ':config-admin'))
-MINIMAL_EMAIL = "config-admin-v2@wechat-personal-center-test.invalid"
+MINIMAL_EMAIL = "config-admin-common-cache-v1@wechat-personal-center-test.invalid"
 MINIMAL_PURPOSE = "WECHAT_PERSONAL_CENTER_CONFIG_V1"
 APPLICATION_SOURCE = "d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7"
 APPLICATION_TREE = "6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5"
 PRIMARY_ROOT = Path('/opt/enterprise-agent-workbench-test')
-NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-personal-d8a-transport-v1')
+NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-d8a-common-cache-v1')
 SCOPE_FILE = NATIVE_SCOPE / 'provision-scope.v2.json'
-RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-personal-d8a-transport-v1/provision-receipt.v2.json'
-CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.d8a.transport.v1.env'
+RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-d8a-common-cache-v1/provision-attempt-01/receipt.v2.json'
+CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.d8a.common-cache.v1.env'
 ALLOWED_OBJECTS = ['tenants', 'enterprise_configs', 'users']
 MINIMAL_CONFIG = {'data_classification': MINIMAL_PURPOSE, 'tenant_label': MINIMAL_TENANT}
 

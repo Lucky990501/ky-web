@@ -3,7 +3,7 @@ import hashlib,json,os,stat,subprocess
 from pathlib import Path
 
 R=Path('/opt/enterprise-agent-workbench-test')
-NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-d8a-transport-v1')
+NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-d8a-common-cache-v1')
 GIT=Path('/usr/bin/git');SUDO=Path('/usr/bin/sudo');ENV=Path('/usr/bin/env')
 PY=R/'shared/runtime/python311/bin/python'
 OWNER_UID=1000
