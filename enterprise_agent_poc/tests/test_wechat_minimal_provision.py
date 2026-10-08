@@ -22,7 +22,7 @@ spec.loader.exec_module(p)
 
 
 def scope():
-    return {'contract':p.MINIMAL_CONTRACT,'authority_id':'WECHAT_PERSONAL_DB8_PRIMARY_SUCCESSOR_V1',
+    return {'contract':p.MINIMAL_CONTRACT,'authority_id':'WECHAT_PERSONAL_D8A_PRIMARY_SUCCESSOR_V1',
         'purpose':p.MINIMAL_PURPOSE,'environment':'test','application_source':p.APPLICATION_SOURCE,
         'application_tree':p.APPLICATION_TREE,'tooling_source':'a'*40,'tooling_tree':'b'*40,
         'tenant_id':p.MINIMAL_TENANT,'user_id':p.MINIMAL_USER,'user_email':p.MINIMAL_EMAIL,

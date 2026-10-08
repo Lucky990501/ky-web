@@ -37,13 +37,13 @@ MINIMAL_TENANT = "wechat-personal-center-test-v2"
 MINIMAL_USER = str(uuid.uuid5(uuid.NAMESPACE_URL, MINIMAL_TENANT + ':config-admin'))
 MINIMAL_EMAIL = "config-admin-v2@wechat-personal-center-test.invalid"
 MINIMAL_PURPOSE = "WECHAT_PERSONAL_CENTER_CONFIG_V1"
-APPLICATION_SOURCE = "db8e23658baa6e4b707380e178aded561d3280f2"
-APPLICATION_TREE = "04b6774d9e7a95e87871ea9c2e360805988a8e13"
+APPLICATION_SOURCE = "d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7"
+APPLICATION_TREE = "6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5"
 PRIMARY_ROOT = Path('/opt/enterprise-agent-workbench-test')
-NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-canonical-v2')
+NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-personal-d8a-v1')
 SCOPE_FILE = NATIVE_SCOPE / 'provision-scope.v2.json'
-RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-personal-db8-canonical-v2/provision-receipt.v2.json'
-CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.v2.env'
+RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-personal-d8a-v1/provision-receipt.v2.json'
+CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.d8a.v1.env'
 ALLOWED_OBJECTS = ['tenants', 'enterprise_configs', 'users']
 MINIMAL_CONFIG = {'data_classification': MINIMAL_PURPOSE, 'tenant_label': MINIMAL_TENANT}
 
@@ -90,7 +90,7 @@ def validate_scope(scope, environment, database_url, identity):
               'application_tree', 'tooling_source', 'tooling_tree', 'tenant_id', 'user_id',
               'user_email', 'allowed_objects', 'production_deploy_authority', 'budget', 'run_id', 'receipt_version', 'cleanup_authority'}
     require(isinstance(scope, dict) and set(scope) == fields, 'SCOPE_SCHEMA_BLOCKED')
-    expected = {'contract': MINIMAL_CONTRACT, 'authority_id': 'WECHAT_PERSONAL_DB8_PRIMARY_SUCCESSOR_V1',
+    expected = {'contract': MINIMAL_CONTRACT, 'authority_id': 'WECHAT_PERSONAL_D8A_PRIMARY_SUCCESSOR_V1',
                 'purpose': MINIMAL_PURPOSE, 'environment': 'test', 'application_source': APPLICATION_SOURCE,
                 'application_tree': APPLICATION_TREE, 'tenant_id': MINIMAL_TENANT, 'user_id': MINIMAL_USER,
                 'user_email': MINIMAL_EMAIL, 'allowed_objects': ALLOWED_OBJECTS, 'production_deploy_authority': False,

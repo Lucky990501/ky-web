@@ -3,12 +3,12 @@ import hashlib,json,os,stat,subprocess
 from pathlib import Path
 
 R=Path('/opt/enterprise-agent-workbench-test')
-NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-owner-context-v3')
+NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-d8a-v1')
 GIT=Path('/usr/bin/git');SUDO=Path('/usr/bin/sudo');ENV=Path('/usr/bin/env')
 PY=R/'shared/runtime/python311/bin/python'
 OWNER_UID=1000
 REPOS={
- 'application':(R/'releases/20261008-db8e236-wechat-personal-canonical-v2','db8e23658baa6e4b707380e178aded561d3280f2','04b6774d9e7a95e87871ea9c2e360805988a8e13'),
+ 'application':(R/'releases/20261008-d8a7814-wechat-personal-v1','d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7','6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5'),
  'runtime':(R/'shared/source/wechat-revision-e7e96b1-v1','e7e96b1a959d8631dc9dcd5c24939fa483ac134a','a86b9e4d2f4785f1cbef5ae5e654c54cf20a5f75')}
 
 class OwnerContextBlocked(PermissionError):pass
