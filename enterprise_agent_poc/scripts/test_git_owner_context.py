@@ -67,6 +67,8 @@ def final_application_files():
  return hashlib.sha256(json.dumps(actual,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 def runtime_probe():
  seal=authorize();application=identity('application');runtime=identity('runtime')
+ receipt_dir=R/'shared/runtime/skills/wechat-html-draft'/seal['revision']['id']/'receipt'
+ require({n:sha(receipt_dir/n) for n in ('runtime.json','binding.json')}==seal['runtime_receipt_sha256'],'RUNTIME_RECEIPT_PIN_REJECTED')
  files_before=final_application_files()
  helper=NATIVE/'runtime-owner-probe.py';trusted(helper)
  require(sha(helper)==seal['probe_sha256'],'OWNER_PROBE_CODE_DRIFT')
@@ -77,6 +79,7 @@ def runtime_probe():
  require(value['python']==str(R/'shared/runtime/skills/wechat-html-draft'/seal['revision']['id']/'venv/bin/python')
          and value['venv_identity']==seal['venv_identity'],'OWNER_PROBE_RUNTIME_REJECTED')
  require(stamps=={k:repo_stamp(k) for k in REPOS} and files_before==final_application_files(),'VALIDATION_REPLACEMENT_REJECTED')
+ require({n:sha(receipt_dir/n) for n in ('runtime.json','binding.json')}==seal['runtime_receipt_sha256'],'RUNTIME_RECEIPT_REPLACED')
  identity('application');identity('runtime')
  return dict(value,status='GIT_OWNER_CONTEXT_PASS',root_final_content_sha256=files_before,
              root_install_authority='UNCHANGED',sudo_uid_required=False)
