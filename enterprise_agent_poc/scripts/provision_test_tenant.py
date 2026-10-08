@@ -40,10 +40,10 @@ MINIMAL_PURPOSE = "WECHAT_PERSONAL_CENTER_CONFIG_V1"
 APPLICATION_SOURCE = "d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7"
 APPLICATION_TREE = "6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5"
 PRIMARY_ROOT = Path('/opt/enterprise-agent-workbench-test')
-NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-personal-d8a-v1')
+NATIVE_SCOPE = Path('/etc/enterprise-agent-test-successor-wechat-personal-d8a-transport-v1')
 SCOPE_FILE = NATIVE_SCOPE / 'provision-scope.v2.json'
-RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-personal-d8a-v1/provision-receipt.v2.json'
-CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.d8a.v1.env'
+RECEIPT_FILE = PRIMARY_ROOT / 'release-evidence/wechat-personal-d8a-transport-v1/provision-receipt.v2.json'
+CREDENTIAL_FILE = PRIMARY_ROOT / 'shared/credentials/wechat-personal-center-user.d8a.transport.v1.env'
 ALLOWED_OBJECTS = ['tenants', 'enterprise_configs', 'users']
 MINIMAL_CONFIG = {'data_classification': MINIMAL_PURPOSE, 'tenant_label': MINIMAL_TENANT}
 
