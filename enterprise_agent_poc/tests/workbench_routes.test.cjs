@@ -8,6 +8,27 @@ const {test} = require('node:test');
 // boundary double. No renderer or routing function is replaced in route tests.
 const source = fs.readFileSync(process.env.WORKBENCH_JS_SOURCE || path.join(__dirname, '../app/static/workbench.js'), 'utf8').replace(/boot\(\);\s*$/, '');
 
+test('Wechat personal card exposes required fields and only masked persisted credentials',()=>{
+  const h=harness();const first=h.run('wechatAccountCardHtml({},true)');
+  assert.ok(first.includes('type="password" required'));assert.ok(first.includes('AppID'));assert.ok(first.includes('未配置'));
+  h.run("wechatState={wechat_app_id:'wx1234567890123456',account_display_name:'<img onerror=alert(1)>',app_secret_configured:true,verification_status:'connected',app_secret:'MUST_NOT_RENDER'}");
+  const saved=h.run('wechatAccountCardHtml(wechatState,true)');
+  assert.ok(saved.includes('连接正常'));assert.ok(saved.includes('********'));assert.ok(!saved.includes('MUST_NOT_RENDER'));
+  assert.ok(!saved.includes('type="password"'));assert.ok(!saved.includes('<img onerror'));
+  const editor=h.run('wechatAccountCardHtml(wechatState,true,true)');
+  assert.ok(editor.includes('留空保留现有凭据'));assert.ok(editor.includes('type="password"'));assert.ok(!editor.includes('MUST_NOT_RENDER'));
+});
+test('Wechat read-only members have no management controls and failure labels are safe',()=>{
+  const h=harness();h.run("wechatState={app_secret_configured:true,verification_status:'failed',verification_error_code:'WECHAT_IP_NOT_ALLOWED'}");
+  const html=h.run('wechatAccountCardHtml(wechatState,false)');
+  assert.ok(html.includes('验证失败'));assert.ok(html.includes('IP白名单'));assert.ok(!html.includes('data-wechat-test'));assert.ok(!html.includes('data-wechat-unlink'));
+  assert.equal(h.run("wechatSafeMessages.WECHAT_CONNECTION_TIMEOUT"),'连接微信公众号超时');
+});
+test('Wechat agent setup hint follows stable slug and keeps existing task execution',()=>{
+  assert.ok(source.includes("agent?.slug!=='wechat-official-account-writing'"));
+  assert.ok(source.includes('请先在个人中心配置微信公众号，然后再创建草稿。'));
+  assert.ok(source.includes('data-go="profile"'));assert.ok(source.includes('renderWechatAgentSetupHint(main,agent);'));
+});
 test('generic agent pathname wins over stale agent and page history state',()=>{
   const h=harness('/agents/social-content-agent',{page:'campaign',activeAgentId:'campaign-agent'});
   assert.equal(h.run('pageFromNavigation()'),'agent:social-content-agent');

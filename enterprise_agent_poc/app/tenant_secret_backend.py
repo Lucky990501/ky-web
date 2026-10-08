@@ -13,6 +13,7 @@ import re
 import stat
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from app.tenant_secret_reference import SecretReferenceError, validate_reference
 
@@ -111,10 +112,11 @@ class ProtectedTenantSecretBackend:
         if os.name == 'posix' and (stat.S_IMODE(path.stat().st_mode) != 0o600
                 or path.stat().st_uid not in (0,os.getuid())): raise blocked()
         value = json.loads(codec.decrypt(path.read_bytes()))
-        if (set(value) != {'scope','version','state','app_id','verification_status','secret'}
+        if (not {'scope','version','state','app_id','verification_status','secret'} <= set(value)
+                or set(value)-{'scope','version','state','app_id','verification_status','secret','verified_at','verification_error_code'}
                 or value['scope'] != self._scope(tenant) or type(value['version']) is not int
                 or value['version'] < 1 or value['state'] not in ('active','revoked')
-                or value['verification_status'] not in ('unverified','connected','revoked')): raise blocked()
+                or value['verification_status'] not in ('unverified','connected','failed','revoked')): raise blocked()
         return value
 
     def _write(self, path, codec, value):
@@ -181,11 +183,21 @@ class ProtectedTenantSecretBackend:
 
     def status(self, tenant, reference, app_id):
         value = self._current(tenant, reference, app_id)
-        return dict(configured=True, verification_status=value['verification_status'], version=value['version'])
+        return dict(configured=True, verification_status=value['verification_status'], version=value['version'],
+                    verified_at=value.get('verified_at'), verification_error_code=value.get('verification_error_code'))
 
-    # There is intentionally NO connected=true write API in V1. A future trusted
-    # server connection-test adapter must add its authenticated success receipt
-    # transition. Frontends and ordinary config cannot certify a connection.
+    def record_verification(self, tenant, reference, app_id, *, error_code=None):
+        """Trusted server test result; version-CAS, never a public boolean setter."""
+        from app.wechat_connection import ERRORS
+        if error_code is not None and error_code not in ERRORS: raise blocked()
+        validate_reference(reference, tenant, environment=self.environment)
+        with self._locked(tenant) as (path, codec):
+            value = self._read(path, codec, tenant)
+            if (not value or value['state'] != 'active' or reference != self._reference(value)
+                    or value['app_id'] != app_id): raise blocked('WECHAT_SECRET_VERSION_CONFLICT')
+            value.update(verification_status='failed' if error_code else 'connected',
+                         verified_at=datetime.now(timezone.utc).isoformat(), verification_error_code=error_code)
+            self._write(path, codec, value)
 
 
 def backend_from_settings(settings):
