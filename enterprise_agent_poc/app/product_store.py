@@ -248,6 +248,8 @@ class ProductStore:
 
     def _seed_agent_catalog(self) -> None:
         with self._store.connection() as conn:
+            from app.test_tenant_seeding import authorized_exclusions
+            excluded = authorized_exclusions(conn, self._store)
             # Pre-008 adapters remain compatible. Never overwrite a productized
             # definition; converting the three legacy identities is NOT Stage 1.
             if self._store.is_postgres:
@@ -263,6 +265,8 @@ class ProductStore:
             tenants = conn.execute("SELECT id FROM tenants").fetchall()
             seedable_ids = {r["id"] for r in conn.execute("SELECT id FROM agent_templates WHERE definition_source='legacy'")} if has_source else set(CATALOG)
             for tenant in tenants:
+                if tenant['id'] in excluded:
+                    continue
                 for agent in CATALOG.values():
                     if agent.id not in seedable_ids:
                         continue

@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # shell environment accidentally overriding the release environment file.
 RUNTIME_CONFIG_ENV_NAMES = (
     "APP_ENV",
+    "ENTERPRISE_POC_TEST_TENANT_SEEDING_POLICY_REQUIRED",
     "ENTERPRISE_POC_DATABASE_URL",
     "ENTERPRISE_POC_MCP_URL",
     "REDIS_URL",
