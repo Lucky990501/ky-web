@@ -1,0 +1,41 @@
+{
+  "contract": "PRIMARY_TEST_READ_ONLY_SNAPSHOT_APPROVED",
+  "source": "d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7",
+  "tree": "6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5",
+  "observed_at": "2026-10-09T01:01:08+08:00",
+  "enterprise_configs": [
+    {"name": "tenant_id", "udt": "text", "nullable": "NO"},
+    {"name": "payload", "udt": "text", "nullable": "NO"},
+    {"name": "updated_at", "udt": "timestamptz", "nullable": "NO"}
+  ],
+  "user_triggers": [],
+  "guard_common_sha256": "a40e35dc184746e7ba2f31a32e49054169c113645175aa98a455b26cdca72b09",
+  "guard_policy_sha256": "f0cafe7bc1e85407da355febf1a855eb87c97036b5c0e094a250881381a9a028",
+  "guard_approval_sha256": "6c3f1d239011399f4784f0215d1ec49f7b3aed247cd00aee0e05555ea376a460",
+  "historical_fixture_sha256": "90814d071f11d484491b028a8d95b676c7a95dbda89b2dc639cded8de64943f5",
+  "protected_tables": {
+    "tenants": ["id"],
+    "users": ["id"],
+    "enterprise_configs": ["tenant_id"],
+    "agent_templates": ["id"],
+    "agent_template_versions": ["id"],
+    "agent_template_version_skills": ["agent_template_version_id", "skill_id"],
+    "agent_template_version_tools": ["agent_template_version_id", "tool_capability_id"],
+    "skills": ["id"],
+    "skill_versions": ["id"],
+    "skill_packages": ["id"],
+    "tenant_agent_instances": ["tenant_id", "agent_id"],
+    "platform_admins": ["user_id"]
+  },
+  "config_account_fields": ["account_display_name", "wechat_app_id", "wechat_app_secret_ref"],
+  "reference_fields": ["environment", "name", "provider", "tenant_id", "version"],
+  "provision_event_fields": ["actor_id", "contract", "environment", "provider", "tenant_id", "version"],
+  "verification_event_fields": ["actor_id", "environment", "error_code", "status", "tenant_id", "version"],
+  "audit_secret_version": 1,
+  "audit_verification_status": "connected",
+  "config_transition_digest_present": false,
+  "formal_guard_result": "EXISTING_FIXTURE_MUTATION:enterprise_configs",
+  "existing_service_pids_unchanged": true,
+  "mutations": 0,
+  "restarts": 0
+}

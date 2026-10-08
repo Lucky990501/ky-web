@@ -212,6 +212,30 @@ class LifecycleTests(unittest.TestCase):
             value=json.loads(self.row()['payload']);value['wechat_account']['app_secret']='SYNTHETIC_NOT_A_REAL_SECRET'
             conn.execute('UPDATE enterprise_configs SET payload=? WHERE tenant_id=?',(json.dumps(value),'tenant-a'))
         with self.assertRaises(Exception):self.check()
+    def test_40_06_actual_schema_and_field_names_match_expected_contract(self):
+        snapshot=json.loads((Path(__file__).parent/'fixtures/wechat_guard_readonly_snapshot_v1.json').read_bytes())
+        self.assertEqual((snapshot['source'],snapshot['tree']),(g.SOURCE,g.TREE))
+        self.assertEqual(tuple(c['name'] for c in snapshot['enterprise_configs']),g.canon.COLUMNS['enterprise_configs'])
+        self.assertEqual([(c['udt'],c['nullable']) for c in snapshot['enterprise_configs']],[('text','NO'),('text','NO'),('timestamptz','NO')])
+        self.assertEqual(snapshot['user_triggers'],[]);self.assertEqual(len(snapshot['protected_tables']),12)
+        self.assertEqual(snapshot['protected_tables']['enterprise_configs'],['tenant_id'])
+        self.save()
+        record=json.loads(self.rows('execution_events')[-1]['payload'])
+        self.assertEqual(sorted(record),snapshot['provision_event_fields'])
+        self.assertEqual(sorted(self.row_account()),snapshot['config_account_fields'])
+        self.assertEqual(sorted(self.row_account()['wechat_app_secret_ref']),snapshot['reference_fields'])
+    def test_41_actual_d8a_no_trigger_save_does_not_change_timestamp(self):
+        before=self.row()['updated_at'];self.save();self.assertEqual(self.row()['updated_at'],before);self.check()
+    def test_42_06_sparse_connected_audit_cannot_be_upgraded_to_config_proof(self):
+        snapshot=json.loads((Path(__file__).parent/'fixtures/wechat_guard_readonly_snapshot_v1.json').read_bytes())
+        self.assertFalse(snapshot['config_transition_digest_present'])
+        self.assertEqual(snapshot['formal_guard_result'],'EXISTING_FIXTURE_MUTATION:enterprise_configs')
+        f.SecretTests.save(self);self.service.network_allowed=True;self.service.connection_tester=f.SimpleNamespace(verify=lambda *_:None)
+        self.service.test_connection(self.principal)
+        record=json.loads(self.rows('execution_events')[-1]['payload'])
+        self.assertEqual(sorted(record),snapshot['verification_event_fields'])
+        self.assertEqual((record['version'],record['status']),(snapshot['audit_secret_version'],snapshot['audit_verification_status']))
+        self.reject('PERSISTENT_LEGACY_EVIDENCE_GAP')
 
 
 def old_native_graph_proof(source):
