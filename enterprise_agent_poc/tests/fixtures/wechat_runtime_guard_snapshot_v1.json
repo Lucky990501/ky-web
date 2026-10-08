@@ -1,0 +1,27 @@
+{
+  "snapshot_sha256": "0e778a2279f4973cd519711e9b69bf4c6f2c281194e55fabf783e04bdf5a7465",
+  "source": "d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7",
+  "tree": "6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5",
+  "contract": "WECHAT_PERSISTENT_CONFIG_PRIMARY_GUARD_V1",
+  "observed_at_as_reported": "2026-10-09 01:55 CST",
+  "guard_files": {
+    "primary_guard.py": "5ba582e45b55e35aaeae83d5de995db00853ae83df45f0dab58d7d361c0c2c47",
+    "policy.v1.json": "a06046de3ee1f2cdcc202d4785889ccadebcb417dd16d92ae266359111078604",
+    "approval.v1.json": "4f6a0d5bcc5919d53508602bb7f0203d742d39e60d797314855144da233fd1c7",
+    "current-state-witness.v1.json": "97f8334553be8a05fc07fb48b43ee0fa72ce36a1ff779b8ea85dc74dac20eee0",
+    "terminal-task-witness.v1.json": "2558297098dddb39eebeefc9e7f0fd4707f42e9f3affe9b5494c752e2b818bb2"
+  },
+  "dca_import_sha256": "0e079b0fd87db36be8efadff63ce129e90e1a5e20dfa27cf4228a83fd1e90d6b",
+  "seeding_import_sha256": "a40e35dc184746e7ba2f31a32e49054169c113645175aa98a455b26cdca72b09",
+  "runtime_test_columns": ["id", "agent_template_version_id", "configuration_fingerprint", "test_type", "task_id", "status", "result_json", "created_at"],
+  "runtime_test_statuses": ["queued", "running", "passed", "failed", "invalidated"],
+  "actual_run_table": "run_traces",
+  "runtime_row_rejection": "NO_RUNTIME_QUALITY_EVIDENCE",
+  "publish_rejection": "PERSISTENT_BASELINE_DRIFT:agent_template_versions",
+  "enable_rejection": "PERSISTENT_BASELINE_DRIFT:tenant_agent_instances",
+  "admin_rejection": "PERSISTENT_BASELINE_DRIFT:platform_admins",
+  "fresh_full_preflight_rejection": "PERSISTENT_INSTALLED_SOURCE_HASH",
+  "approved_files_missing": 0,
+  "approved_file_hash_mismatches": 0,
+  "extra_cache_modules": ["__init__", "agent_productization", "security", "store", "tenant_secret_reference", "wechat_action_contract", "wechat_skill"]
+}
