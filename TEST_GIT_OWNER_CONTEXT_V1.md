@@ -16,6 +16,9 @@ ownership changes, permission relaxation, network, install, Registry mutation
 or Task/Provider execution is introduced.
 
 Root verifies native seal, executable/module SHA, fixed repo owner/path, exact
+UID/GID1000 and no world-write. Existing group-write is allowed only when the
+lucky group has no additional explicit or primary-group users. Native v2
+directory preserves the immutable initial pre-Scope attempt; no chmod/chown.
 commit/tree, before/after inode identity, and the complete sealed installed
 file map. It rechecks identity/content after the child proof and again before
 formal activation. The child is Root-owned and read-only, runs only as lucky,

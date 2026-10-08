@@ -3,7 +3,7 @@ import hashlib,json,os,stat,subprocess
 from pathlib import Path
 
 R=Path('/opt/enterprise-agent-workbench-test')
-NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-owner-context-v1')
+NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-owner-context-v2')
 GIT=Path('/usr/bin/git');SUDO=Path('/usr/bin/sudo')
 PY=R/'shared/runtime/python311/bin/python'
 OWNER_UID=1000
@@ -36,7 +36,13 @@ def repo_stamp(key):
  require(key in REPOS,'NON_AUTHORIZED_REPOSITORY_REJECTED')
  path=REPOS[key][0]
  require(path.is_dir() and not any(p.is_symlink() for p in (path,*path.parents)),'REPOSITORY_PATH_REJECTED')
- s=path.stat();require(s.st_uid==OWNER_UID and not s.st_mode&0o022,'REPOSITORY_OWNER_REJECTED')
+ s=path.stat();require(s.st_uid==OWNER_UID and s.st_gid==OWNER_UID and not s.st_mode&0o002,'REPOSITORY_OWNER_REJECTED')
+ if s.st_mode&0o020:
+  import grp,pwd
+  group=grp.getgrgid(OWNER_UID)
+  require(group.gr_name=='lucky' and set(group.gr_mem)<= {'lucky'}
+          and all(u.pw_uid==OWNER_UID for u in pwd.getpwall() if u.pw_gid==OWNER_UID),
+          'UNEXPECTED_REPOSITORY_GROUP_WRITER_REJECTED')
  return (s.st_dev,s.st_ino,s.st_uid,path.resolve())
 def execute(args):
  # Fixed argv; sudo drops privilege before Git/Python starts. No shell,

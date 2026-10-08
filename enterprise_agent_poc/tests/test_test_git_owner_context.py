@@ -54,4 +54,14 @@ class OwnerTests(unittest.TestCase):
   with patch.object(p,'execute',side_effect=self.result):p.identity('runtime')
   self.assertTrue(all(call[0]==str(p.GIT) for call in self.calls))
   self.assertFalse(any('safe.directory' in arg for call in self.calls for arg in call))
+ def test_world_writable_repo_reject(self):
+  self.stamp.stop()
+  with patch.object(Path,'is_dir',return_value=True),patch.object(Path,'is_symlink',return_value=False),patch.object(Path,'stat',return_value=SimpleNamespace(st_uid=1000,st_gid=1000,st_mode=0o777)),self.assertRaisesRegex(p.OwnerContextBlocked,'OWNER'):p.repo_stamp('runtime')
+  self.stamp.start()
+ @unittest.skipUnless(os.name=='posix','POSIX group database only')
+ def test_other_group_writer_reject(self):
+  import grp,pwd
+  self.stamp.stop()
+  with patch.object(Path,'is_dir',return_value=True),patch.object(Path,'is_symlink',return_value=False),patch.object(Path,'stat',return_value=SimpleNamespace(st_uid=1000,st_gid=1000,st_mode=0o775)),patch.object(grp,'getgrgid',return_value=SimpleNamespace(gr_name='lucky',gr_mem=['other'])),patch.object(pwd,'getpwall',return_value=[]),self.assertRaisesRegex(p.OwnerContextBlocked,'GROUP_WRITER'):p.repo_stamp('runtime')
+  self.stamp.start()
 if __name__=='__main__':unittest.main()
