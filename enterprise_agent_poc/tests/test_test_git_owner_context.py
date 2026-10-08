@@ -44,7 +44,7 @@ class OwnerTests(unittest.TestCase):
  def test_argv_fixed_executable_and_no_sudo_uid(self):
   with patch.object(p.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='safe')) as call:
    p.execute([p.GIT,'--version']);args,kw=call.call_args
-   self.assertEqual(args[0],[str(p.SUDO),'-n','-u','lucky','--',str(p.GIT),'--version'])
+   self.assertEqual(args[0],[str(p.SUDO),'-n','-u','lucky','--',str(p.ENV),'-i','PATH=/usr/bin:/bin','APP_ENV=test','PYTHONDONTWRITEBYTECODE=1',str(p.GIT),'--version'])
    self.assertNotIn('SUDO_UID',kw['env']);self.assertNotIn('shell',kw)
  def test_replacement_reject(self):
   with patch.object(p,'repo_stamp',side_effect=[('before',),('after',)]),patch.object(p,'execute',side_effect=self.result),self.assertRaisesRegex(p.OwnerContextBlocked,'REPLACED'):p.identity('runtime')

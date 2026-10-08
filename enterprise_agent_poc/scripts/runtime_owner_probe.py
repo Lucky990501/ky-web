@@ -2,7 +2,7 @@
 import json,os,shutil,sys
 from pathlib import Path
 R=Path('/opt/enterprise-agent-workbench-test')
-P=Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-owner-context-v2')
+P=Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-owner-context-v3')
 APP=R/'releases/20261008-db8e236-wechat-personal-canonical-v2/enterprise_agent_poc'
 PROJECT=R/'shared/source/wechat-revision-e7e96b1-v1/enterprise_agent_poc'
 assert os.geteuid()==1000 and os.environ.get('APP_ENV')=='test'

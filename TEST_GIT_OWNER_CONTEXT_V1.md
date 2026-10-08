@@ -25,3 +25,7 @@ formal activation. The child is Root-owned and read-only, runs only as lucky,
 uses -I/-B and a fixed minimal environment, and imports only the frozen target
 for its unchanged existing runtime resolver. Final installation and atomic
 switch stay in the existing protected formal Test entry.
+The native v3 call passes the fixed Test environment after privilege drop
+through /usr/bin/env -i argv (sudo otherwise scrubs APP_ENV). No secrets,
+caller environment or SUDO_UID are forwarded. Prior pre-Scope attempts remain
+immutable; no Scope or Synthetic data was created by those failed probes.

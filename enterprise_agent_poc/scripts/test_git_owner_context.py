@@ -3,8 +3,8 @@ import hashlib,json,os,stat,subprocess
 from pathlib import Path
 
 R=Path('/opt/enterprise-agent-workbench-test')
-NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-owner-context-v2')
-GIT=Path('/usr/bin/git');SUDO=Path('/usr/bin/sudo')
+NATIVE=Path('/etc/enterprise-agent-test-successor-wechat-personal-db8-owner-context-v3')
+GIT=Path('/usr/bin/git');SUDO=Path('/usr/bin/sudo');ENV=Path('/usr/bin/env')
 PY=R/'shared/runtime/python311/bin/python'
 OWNER_UID=1000
 REPOS={
@@ -25,7 +25,7 @@ def native_module():
 def authorize():
  require(os.environ.get('APP_ENV')=='test','PRODUCTION_OWNER_CONTEXT_REJECTED')
  require(os.geteuid()==0,'ROOT_CALLER_REQUIRED');native_module()
- for binary in (GIT,SUDO):trusted(binary,readonly=False)
+ for binary in (GIT,SUDO,ENV):trusted(binary,readonly=False)
  seal_path=NATIVE/'owner-context-seal.v1.json';trusted(seal_path)
  seal=json.loads(seal_path.read_bytes())
  require(seal['contract']=='TEST_ONLY_GIT_OWNER_CONTEXT_V1' and seal['environment']=='test' and seal['production_deploy_authority'] is False,'OWNER_SEAL_REJECTED')
@@ -47,7 +47,7 @@ def repo_stamp(key):
 def execute(args):
  # Fixed argv; sudo drops privilege before Git/Python starts. No shell,
  # SUDO_UID spoofing, arbitrary script/repo input, credentials or parent env.
- p=subprocess.run([str(SUDO),'-n','-u','lucky','--',*map(str,args)],
+ p=subprocess.run([str(SUDO),'-n','-u','lucky','--',str(ENV),'-i','PATH=/usr/bin:/bin','APP_ENV=test','PYTHONDONTWRITEBYTECODE=1',*map(str,args)],
                   env={'PATH':'/usr/bin:/bin','APP_ENV':'test','PYTHONDONTWRITEBYTECODE':'1'},
                   capture_output=True,text=True,timeout=60)
  require(p.returncode==0,'OWNER_READ_COMMAND_REJECTED')
