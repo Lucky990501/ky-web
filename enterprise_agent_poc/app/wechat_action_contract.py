@@ -47,20 +47,22 @@ def account_config(value: dict, tenant_id: str) -> dict:
 
 def validate_enterprise_wechat_config(payload: dict, tenant_id: str):
     """Reject WeChat plaintext aliases anywhere before ordinary config persistence."""
-    def check(value):
+    def check(value, in_account=False):
         if isinstance(value,dict):
             for key,item in value.items():
                 normalized=re.sub('[^a-z]','',str(key).lower())
                 if normalized in RAW_CREDENTIAL_FIELDS:
                     raise ValueError('WECHAT_PLAINTEXT_CREDENTIAL_BLOCKED')
+                if in_account and normalized in {'connected','verificationstatus','verificationbinding'}:
+                    raise ValueError('WECHAT_SERVER_VERIFICATION_REQUIRED')
                 if normalized in {'wechatappsecretref','wechataccesstokenref'} and item is not None:
                     try:
                         validate_reference(item,tenant_id)
                     except SecretReferenceError:
                         raise ValueError('WECHAT_ACCOUNT_CONFIG_BLOCKED') from None
-                check(item)
+                check(item,in_account or normalized=='wechataccount')
         elif isinstance(value,list):
-            for item in value:check(item)
+            for item in value:check(item,in_account)
     check(payload)
     if payload.get('wechat_account') is not None:
         try:
@@ -95,9 +97,10 @@ def trigger(text: str):
 
 
 class WechatActionContract:
-    def __init__(self, store, tokens, environment: str, secret_references=None):
+    def __init__(self, store, tokens, environment: str, secret_references=None, *, network_allowed=False):
         self.store,self.tokens,self.environment=store,tokens,environment
         self.secrets=secret_references or TenantSecretReferences(environment)
+        self.network_allowed=network_allowed is True
         if self.secrets.environment != environment:
             raise SecretReferenceError('TENANT_SECRET_REFERENCE_BLOCKED')
 
@@ -140,6 +143,9 @@ class WechatActionContract:
                 value=self.store.enterprise_config(principal.tenant_id).get('wechat_account')
                 account=account_config(value,principal.tenant_id)
                 account_identity=identity(account)
+                self.secrets.require_connected(principal.tenant_id,account)
+                if not self.network_allowed:
+                    raise WechatActionError('WECHAT_NETWORK_OPERATION_NOT_ALLOWED')
                 lease=self.secrets.resolve_wechat(principal.tenant_id,account)
                 # Permission resolution is not execution: immediately drop the lease.
                 lease.close()
@@ -167,4 +173,16 @@ class WechatActionContract:
         task_id=self.tokens.verify_task_scope(task_scope,principal.tenant_id)
         self._task(principal,task_id,'CREATE_DRAFT')
         account=account_config(self.store.enterprise_config(principal.tenant_id).get('wechat_account'),principal.tenant_id)
-        return self.secrets.resolve_wechat(principal.tenant_id,account)
+        self.secrets.require_connected(principal.tenant_id,account)
+        if not self.network_allowed: raise WechatActionError('WECHAT_NETWORK_OPERATION_NOT_ALLOWED')
+        lease=self.secrets.resolve_wechat(principal.tenant_id,account)
+        def current_check():
+            current=self.tokens.verify(bearer,ACTIONS['CREATE_DRAFT'][1])
+            self.tokens.verify_task_scope(task_scope,current.tenant_id)
+            self._task(current,task_id,'CREATE_DRAFT')
+            latest=account_config(self.store.enterprise_config(current.tenant_id).get('wechat_account'),current.tenant_id)
+            if latest != account or not self.network_allowed:
+                raise WechatActionError('WECHAT_ACCOUNT_CONFIG_BLOCKED')
+            self.secrets.require_connected(current.tenant_id,latest)
+        lease._current_check=current_check
+        return lease

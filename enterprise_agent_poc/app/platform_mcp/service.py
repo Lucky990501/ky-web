@@ -74,7 +74,11 @@ class PlatformMCPService:
 
     def wechat_action_permission(self, bearer_token: str, task_scope: str, action: str) -> dict:
         from app.wechat_action_contract import WechatActionContract
-        return WechatActionContract(self._store,self._tokens,self._settings.environment).resolve(
+        from app.tenant_secret_backend import backend_from_settings
+        from app.tenant_secret_reference import TenantSecretReferences
+        return WechatActionContract(self._store,self._tokens,self._settings.environment,
+            TenantSecretReferences(self._settings.environment,backend=backend_from_settings(self._settings)),
+            network_allowed=getattr(self._settings,'wechat_network_allowed',False)).resolve(
             bearer_token,task_scope,action)
 
     def skill_action_execute(self, bearer_token: str, task_scope: str, skill_key: str,

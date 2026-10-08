@@ -61,7 +61,11 @@ def from_settings(store,tokens,settings):
             raise SkillDispatchError('SKILL_RUNTIME_NOT_READY')
         runtime=SkillPythonRuntime(Path(config['runtime_root']),config['runtime_approval'],project=Path(config['runtime_project']))
         binding=PythonRevisionBinding(runtime)
-        permission=WechatActionContract(store,tokens,settings.environment).resolve
+        from app.tenant_secret_backend import backend_from_settings
+        from app.tenant_secret_reference import TenantSecretReferences
+        permission=WechatActionContract(store,tokens,settings.environment,
+            TenantSecretReferences(settings.environment,backend=backend_from_settings(settings)),
+            network_allowed=getattr(settings,'wechat_network_allowed',False)).resolve
         registrations=[ActionRegistration('wechat-html-draft','1.0.0',contract['runtime_compatibility']['artifact_sha256'],
             action,scope,'scripts/wechat_draft.py',('--check',),WechatPrepareAdapter(),binding,permission,enabled)
             for action,scope,enabled in (('PREPARE','wechat:prepare',True),('CREATE_DRAFT','wechat:draft:create',False))]

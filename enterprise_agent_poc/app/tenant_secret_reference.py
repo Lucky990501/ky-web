@@ -1,7 +1,7 @@
-"""Scoped references to Workbench's existing process-environment secret backend.
+"""Existing tenant-scoped secret boundary with a protected persistent adapter.
 
-No vault, credential database, provisioning endpoint or .env loading. References
-cannot select arbitrary environment names. Values remain server-process local.
+Legacy process-environment references remain read-only. Versioned WeChat refs
+use the injected backend, never ambient environment values or a second registry.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import hashlib
 import os
 import re
+import time
 from typing import Mapping
 
 ENVIRONMENTS = {'test', 'development', 'production'}
@@ -21,6 +22,13 @@ class SecretReferenceError(PermissionError):
 
 
 def validate_reference(value: dict, tenant_id: str, *, environment: str | None = None) -> dict:
+    if isinstance(value,dict) and value.get('provider') == 'wechat':
+        if (set(value) != {'provider','tenant_id','environment','name','version'}
+                or value['tenant_id'] != tenant_id or not isinstance(value['environment'],str) or value['environment'] not in ENVIRONMENTS
+                or environment is not None and value['environment'] != environment
+                or value['name'] != 'wechat-account' or type(value['version']) is not int or value['version'] < 1):
+            raise SecretReferenceError('TENANT_SECRET_REFERENCE_BLOCKED')
+        return dict(value)
     if (not isinstance(value,dict) or set(value) != {'provider','tenant_id','environment','name'}
             or value['provider'] != PROVIDER or value['tenant_id'] != tenant_id
             or not isinstance(value['environment'],str)
@@ -34,7 +42,7 @@ def validate_reference(value: dict, tenant_id: str, *, environment: str | None =
 
 def environment_key(reference: dict, tenant_id: str, environment: str, purpose: str) -> str:
     validate_reference(reference,tenant_id,environment=environment)
-    if purpose not in ('wechat_app_secret','wechat_access_token'):
+    if reference['provider'] != PROVIDER or purpose not in ('wechat_app_secret','wechat_access_token'):
         raise SecretReferenceError('TENANT_SECRET_REFERENCE_BLOCKED')
     tenant_hash=hashlib.sha256(tenant_id.encode('utf-8')).hexdigest().upper()
     ref_hash=hashlib.sha256(reference['name'].encode('ascii')).hexdigest().upper()
@@ -45,6 +53,8 @@ def environment_key(reference: dict, tenant_id: str, environment: str, purpose: 
 class SecretLease:
     """Only server execution code may consume this lease; never an API result."""
     _values: dict[str,str] = field(repr=False)
+    _current_check: object = field(default=None, repr=False)
+    _expires_at: float = field(default_factory=lambda: time.monotonic()+60, repr=False)
 
     def __repr__(self):
         return '<SecretLease redacted>'
@@ -53,6 +63,12 @@ class SecretLease:
     def child_environment(self, base: Mapping[str,str] | None = None):
         if not self._values:
             raise SecretReferenceError('SECRET_LEASE_CLOSED')
+        try:
+            if time.monotonic() >= self._expires_at: raise ValueError()
+            if self._current_check: self._current_check()
+        except Exception:
+            self.close()
+            raise SecretReferenceError('SECRET_LEASE_REVOKED') from None
         # Whitelist OS essentials. Never inherit unrelated provider/tenant secrets.
         env={k:v for k,v in (base or {}).items() if k.upper() in {'PATH','SYSTEMROOT','WINDIR','TEMP','TMP'}}
         env.update(self._values)
@@ -78,13 +94,24 @@ class SecretLease:
 
 
 class TenantSecretReferences:
-    def __init__(self, environment: str, source: Mapping[str,str] | None = None):
+    def __init__(self, environment: str, source: Mapping[str,str] | None = None, *, backend=None):
         if environment not in ENVIRONMENTS:
             raise SecretReferenceError('TENANT_SECRET_REFERENCE_BLOCKED')
         self.environment=environment
         self._source=os.environ if source is None else source
+        self.backend=backend
 
     def resolve_wechat(self, tenant_id: str, account: dict) -> SecretLease:
+        reference=account.get('wechat_app_secret_ref')
+        if isinstance(reference,dict) and reference.get('provider') == 'wechat':
+            validate_reference(reference, tenant_id, environment=self.environment)
+            if self.backend is None or self.backend.environment != self.environment:
+                raise SecretReferenceError('WECHAT_CREDENTIAL_REFERENCE_UNAVAILABLE')
+            try: value=self.backend.resolve(tenant_id, reference, account['wechat_app_id'])
+            except SecretReferenceError: raise
+            except Exception: raise SecretReferenceError('WECHAT_CREDENTIAL_REFERENCE_UNAVAILABLE') from None
+            return SecretLease({'WECHAT_APP_ID':account['wechat_app_id'],'WECHAT_APP_SECRET':value},
+                _current_check=lambda:self.backend.status(tenant_id,reference,account['wechat_app_id']))
         values={'WECHAT_APP_ID':account['wechat_app_id']}
         found=False
         try:
@@ -110,3 +137,12 @@ class TenantSecretReferences:
             values.clear()
             raise SecretReferenceError('WECHAT_CREDENTIAL_REFERENCE_UNAVAILABLE') from None
         return SecretLease(values)
+
+    def require_connected(self, tenant_id: str, account: dict):
+        reference=account.get('wechat_app_secret_ref')
+        validate_reference(reference,tenant_id,environment=self.environment)
+        if reference['provider'] != 'wechat' or self.backend is None:
+            raise SecretReferenceError('WECHAT_ACCOUNT_NOT_CONNECTED')
+        try: self.backend.resolve(tenant_id,reference,account['wechat_app_id'],connected=True)
+        except SecretReferenceError: raise
+        except Exception: raise SecretReferenceError('WECHAT_CREDENTIAL_REFERENCE_UNAVAILABLE') from None

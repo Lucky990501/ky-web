@@ -324,6 +324,11 @@ def require_platform_admin(workbench_session: str | None) -> UserPrincipal:
 
 
 app.include_router(catalog_router(agent_catalog_control, require_platform_admin))
+from app.tenant_secret_backend import backend_from_settings
+from app.wechat_account import WechatAccountService
+from app.wechat_account_api import wechat_account_router
+app.include_router(wechat_account_router(
+    WechatAccountService(product_store,settings.environment,backend_from_settings(settings)),current_user))
 
 
 @app.exception_handler(AgentCatalogError)

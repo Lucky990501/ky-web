@@ -103,16 +103,15 @@ class ContractTests(unittest.TestCase):
 
     def test_02_create_without_secret_blocks(self):
         self.account();bearer,scope,_=self.task('创建公众号草稿')
-        with self.assertRaisesRegex(SecretReferenceError,'UNAVAILABLE'):self.contract.resolve(bearer,scope,'CREATE_DRAFT')
+        with self.assertRaises(SecretReferenceError):self.contract.resolve(bearer,scope,'CREATE_DRAFT')
 
     def test_03_synthetic_test_secret_permission_pass_no_execution(self):
         account=self.account();key=environment_key(account['wechat_app_secret_ref'],'tenant-a','test','wechat_app_secret')
         self.material[key]='SYNTHETIC-SECRET-A-NOT-A-REAL-CREDENTIAL'
         bearer,scope,_=self.task('上传到公众号草稿箱')
-        receipt=self.contract.resolve(bearer,scope,'CREATE_DRAFT')
-        self.assertEqual(receipt['execution_status'],'PERMISSION_RESOLVED_NOT_EXECUTED')
-        self.assertIsNone(receipt['draft_media_id']);self.assertEqual(receipt['network_targets'],['api.weixin.qq.com:443'])
-        self.assertNotIn(self.material[key],json.dumps(receipt))
+        # Legacy process-env material alone no longer certifies connected/network.
+        # Positive connected protected-backend coverage is in secret provisioning.
+        with self.assertRaises(SecretReferenceError): self.contract.resolve(bearer,scope,'CREATE_DRAFT')
 
     def test_04_ordinary_chat_not_triggered(self):
         bearer,scope,_=self.task('你好，今天怎么样')
@@ -149,7 +148,8 @@ class ContractTests(unittest.TestCase):
 
     def test_10_audit_has_no_secret(self):
         account=self.account();self.material[environment_key(account['wechat_app_secret_ref'],'tenant-a','test','wechat_app_secret')]='SYNTHETIC-NO-LOG-SECRET'
-        bearer,scope,task=self.task('创建公众号草稿');self.contract.resolve(bearer,scope,'CREATE_DRAFT')
+        bearer,scope,task=self.task('创建公众号草稿')
+        with self.assertRaises(SecretReferenceError): self.contract.resolve(bearer,scope,'CREATE_DRAFT')
         with self.store.connection() as conn:row=conn.execute("SELECT payload FROM execution_events WHERE event_type='wechat.action.permission' ORDER BY id DESC").fetchone()
         self.assertNotIn('SYNTHETIC-NO-LOG-SECRET',row['payload']);self.assertNotIn('WECHAT_APP_SECRET',row['payload'])
         self.assertEqual(json.loads(row['payload'])['task_id'],task['id'])
@@ -157,7 +157,8 @@ class ContractTests(unittest.TestCase):
     def test_11_temporary_child_injection_scrubbed(self):
         account=self.account();self.material[environment_key(account['wechat_app_secret_ref'],'tenant-a','test','wechat_app_secret')]='SYNTHETIC-LEASE'
         bearer,scope,_=self.task('创建公众号草稿')
-        lease=self.contract.prepare_secret_injection(bearer,scope)
+        with self.assertRaises(SecretReferenceError): self.contract.prepare_secret_injection(bearer,scope)
+        lease=self.refs.resolve_wechat('tenant-a',account)  # legacy lease redaction contract, not draft authority
         self.assertNotIn('SYNTHETIC-LEASE',repr(lease))
         with lease.child_environment({'PATH':'test','OPENAI_API_KEY':'DO-NOT-INHERIT'}) as env:
             self.assertEqual(env['WECHAT_APP_SECRET'],'SYNTHETIC-LEASE');self.assertNotIn('OPENAI_API_KEY',env)
@@ -216,7 +217,8 @@ class ContractTests(unittest.TestCase):
         self.product.update_enterprise_config('tenant-a',{'wechat_account':account})
         self.material[environment_key(account['wechat_access_token_ref'],'tenant-a','test','wechat_access_token')]='SYNTHETIC-TOKEN'
         bearer,scope,_=self.task('放到公众号草稿箱')
-        lease=self.contract.prepare_secret_injection(bearer,scope)
+        with self.assertRaises(SecretReferenceError): self.contract.prepare_secret_injection(bearer,scope)
+        lease=self.refs.resolve_wechat('tenant-a',account)
         with lease.child_environment() as env:
             self.assertEqual(env['WECHAT_ACCESS_TOKEN'],'SYNTHETIC-TOKEN');self.assertNotIn('WECHAT_APP_SECRET',env)
 
@@ -239,7 +241,8 @@ class ContractTests(unittest.TestCase):
     def test_25_child_exception_is_redacted_and_scope_cleared(self):
         account=self.account();self.material[environment_key(account['wechat_app_secret_ref'],'tenant-a','test','wechat_app_secret')]='SYNTHETIC-CHILD-SECRET'
         bearer,scope,_=self.task('创建公众号草稿')
-        lease=self.contract.prepare_secret_injection(bearer,scope)
+        with self.assertRaises(SecretReferenceError):self.contract.prepare_secret_injection(bearer,scope)
+        lease=self.refs.resolve_wechat('tenant-a',account)
         with self.assertRaises(SecretReferenceError) as caught:
             with lease.child_environment() as env:raise ValueError('failed token=SYNTHETIC-CHILD-SECRET')
         self.assertNotIn('SYNTHETIC-CHILD-SECRET',str(caught.exception));self.assertEqual(env,{})

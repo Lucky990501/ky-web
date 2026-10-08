@@ -22,6 +22,8 @@ RUNTIME_CONFIG_ENV_NAMES = (
     "ENTERPRISE_POC_TASK_QUEUE",
     "ENTERPRISE_POC_TASK_QUEUE_NAMESPACE",
     "ENTERPRISE_POC_SKILL_DISPATCH_CONFIG",
+    "ENTERPRISE_POC_TENANT_SECRET_KEY_FILE",
+    "ENTERPRISE_POC_WECHAT_NETWORK_ALLOWED",
     "ENTERPRISE_POC_AGENT_RUNTIME_TEST_PRODUCTION_ENABLED",
     "ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TENANT_IDS",
     "ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TEMPLATE_SLUGS",
@@ -121,6 +123,8 @@ class Settings:
     agent_runtime_test_tenant_id: str | None = None
     task_queue_namespace: str = "enterprise-agent"
     skill_dispatch_config: Path | None = None
+    tenant_secret_key_file: Path | None = None
+    wechat_network_allowed: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -133,6 +137,8 @@ class Settings:
             database_raw_path = Path(database_url.removeprefix("sqlite:///"))
             database_path = database_raw_path if database_raw_path.is_absolute() else PROJECT_ROOT / database_raw_path
         return cls(
+            tenant_secret_key_file=Path(os.environ['ENTERPRISE_POC_TENANT_SECRET_KEY_FILE']) if os.environ.get('ENTERPRISE_POC_TENANT_SECRET_KEY_FILE') else None,
+            wechat_network_allowed=os.environ.get('ENTERPRISE_POC_WECHAT_NETWORK_ALLOWED','false').lower() == 'true',
             skill_dispatch_config=Path(os.environ['ENTERPRISE_POC_SKILL_DISPATCH_CONFIG']) if os.environ.get('ENTERPRISE_POC_SKILL_DISPATCH_CONFIG') else None,
             agent_runtime_test_production_enabled=os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_PRODUCTION_ENABLED", "false").lower() == "true",
             agent_runtime_test_allowed_tenant_ids=tuple(x.strip() for x in os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TENANT_IDS", "").split(",") if x.strip()),

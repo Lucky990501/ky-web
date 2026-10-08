@@ -251,16 +251,19 @@ class QualificationTests(unittest.TestCase):
             return ast.dump(node,include_attributes=False)
         self.assertEqual(predicate(base),predicate(current))
 
-    def test_26_runtime_provider_secret_and_skill_files_unchanged(self):
+    def test_26_runtime_control_and_skill_files_unchanged(self):
         root = Path(__file__).resolve().parents[2]
         for name in ('app/agent_runtime_test.py','app/runtime/codex_provider.py',
-                     'app/tenant_secret_reference.py','app/wechat_action_contract.py',
+                     'app/controlled_skill_action.py','app/skill_only_test_qualification.py',
                      'app/skill_python_runtime.py',
                      'integrations/wechat-python311-linux.v1.lock.json'):
-            base = subprocess.check_output(['git','show','0bfded6ee6837e8c0908721d8ffab1035506e133:enterprise_agent_poc/'+name],cwd=root)
+            # Current successor explicitly extends Secret + connected gates;
+            # qualification/runtime/control and the immutable Skill remain frozen.
+            base = subprocess.check_output(['git','show','dca318de578a9b9601ad036e1b176bc5ab702029:enterprise_agent_poc/'+name],cwd=root)
             self.assertEqual(base,(root/'enterprise_agent_poc'/name).read_bytes(),name)
-        # The successor is explicitly authorized to change ONLY Revision
-        # collection/verification, not WeChat business/permission/binding logic.
+        # Within wechat_skill.py the earlier successor was authorized to change
+        # ONLY Revision collection/verification. This Secret successor must not
+        # alter its business/permission/binding logic either.
         # Preserve a full-module AST invariant outside those two functions,
         # rather than dropping the Skill protection or reapproving all changes.
         name = 'app/wechat_skill.py'
