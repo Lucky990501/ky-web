@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -440,7 +442,13 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None, _controlled_action=False, _controlled_qualification=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None, _controlled_action=False, _controlled_qualification=None, _test_connection=None) -> dict:
+        # Internal Runtime Test repository composition only. The caller owns
+        # commit/rollback of Instance + Context + Task + Test; no network work
+        # may run in that transaction. Ordinary task creation is unchanged.
+        if _test_connection is not None and (not all((_test_revision, _test_id, _test_fingerprint))
+                or conversation_id or attachment_ids or _controlled_action or _controlled_qualification):
+            raise PermissionError('Atomic Runtime Test association required')
         if _controlled_qualification is not None and not _controlled_action:
             raise PermissionError('CONTROLLED_SKILL_ACTION_NOT_ALLOWED')
         if _controlled_action:
@@ -452,14 +460,14 @@ class ProductStore:
         attachment_ids = attachment_ids or []
         if len(attachment_ids) > 1 or (attachment_ids and agent_id != "image-agent"):
             raise ValueError("当前仅图片生成智能体支持一张参考图。")
-        with self._store.connection() as conn:
+        with (nullcontext(_test_connection) if _test_connection is not None else self._store.connection()) as conn:
             context = None
             if attachment_ids and not self._store.is_postgres:
                 conn.execute("BEGIN IMMEDIATE")
             if agent_id not in CATALOG:
                 if not self.execution_resolver:
                     raise LookupError("Execution resolver unavailable")
-                if not self._store.is_postgres:
+                if not self._store.is_postgres and _test_connection is None:
                     conn.execute("BEGIN IMMEDIATE")
                 context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision,
                     **({'controlled_qualification': _controlled_qualification} if _controlled_qualification is not None else {}))
@@ -517,6 +525,9 @@ class ProductStore:
                         "tenant_id": tenant_id, "instance_id": context["instance_id"],
                     })
                     release._event(conn, _release_operation_id, "runtime_validation_created", json.dumps({"task_id": task_id, "test_id": _test_id}))
+        # Do not open a second connection to read an uncommitted reservation.
+        if _test_connection is not None:
+            return {'id': task_id}
         return self.task(task_id, tenant_id, user_id) or {}
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:

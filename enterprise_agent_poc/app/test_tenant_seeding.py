@@ -119,6 +119,16 @@ def authorized_exclusions(conn, store):
     require(mode in ('false', 'true'))
     if mode == 'false': return frozenset()
     try:
+        from app.test_runtime_tooling import authority_root, ISOLATED_AUTHORITY, tooling_module
+        if authority_root() == ISOLATED_AUTHORITY:
+            parent = tooling_module('native_parent_contract')
+            context = parent.load_context()
+            parent.check_database(conn, store, context)
+            state = context['state']
+            rows = conn.execute('SELECT to_jsonb(t) AS row FROM tenants t').fetchall()
+            require(len(rows) == 1 and rows[0]['row']['id'] == state['tenant_id']
+                    and [parent.digest(rows[0]['row'])] == state['row_pins']['tenants'])
+            return frozenset((state['tenant_id'],))
         check_database(conn, store)
         approval, _ = native_json(APPROVAL_PATH)
         require(set(approval) == {'contract', 'authority_id', 'environment', 'source_commit', 'source_tree',

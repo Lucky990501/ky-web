@@ -12,6 +12,10 @@ from app.service import AgentRunError, AgentService, GenerationCancelled
 from app.storage import storage_provider
 
 
+class TaskExecutionNotAuthorized(RuntimeError):
+    """No execution has started. Keep the durable queue reservation for recovery."""
+
+
 class TaskService:
     """Async product orchestration around the Gate 2 AgentService."""
 
@@ -19,9 +23,12 @@ class TaskService:
         self._store = store
         self._agents = agents
         self.pre_execute_guard = None
+        self.execution_permission_guard = None
         self.runtime_test_lifecycle = None
 
     async def execute(self, task: dict, *, _controlled_action=None) -> None:
+        if self.execution_permission_guard:
+            self.execution_permission_guard(task)
         if self.pre_execute_guard:
             self.pre_execute_guard()
         if self.runtime_test_lifecycle:

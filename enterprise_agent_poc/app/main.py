@@ -334,6 +334,9 @@ def require_platform_admin(workbench_session: str | None) -> UserPrincipal:
 
 
 app.include_router(catalog_router(agent_catalog_control, require_platform_admin))
+from app.test_exact_admin_gate import install_exact_admin_gate
+install_exact_admin_gate(app, environment=settings.environment, store=product_store, sessions=sessions,
+    catalog=agent_catalog_control, task_service=task_service)
 from app.tenant_secret_backend import backend_from_settings
 from app.wechat_account import WechatAccountService
 from app.wechat_account_api import wechat_account_router
