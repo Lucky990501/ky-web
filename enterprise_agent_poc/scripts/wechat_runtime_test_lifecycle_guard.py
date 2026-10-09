@@ -252,13 +252,13 @@ def publication_eligibility(data, scope, *, resolver, connection):
 
 
 def require_formal_admin_adapter(adapter):
-    """d8a exposes Grant, but no formal audited Revoke/lease API.
-
-    Never compensate with SQL or pretend an in-memory lease is a formal
-    permission operation. A reviewed successor is needed for that gap.
-    """
+    """Only the sealed exact permission service plus request-gated successor."""
+    from scripts.exact_test_admin_lifecycle import ExactTestAdmin
     need(adapter is not None, 'FORMAL_ADMIN_GRANT_REVOKE_ADAPTER_UNAVAILABLE')
-    raise Blocked('FORMAL_ADMIN_ADAPTER_NOT_QUALIFIED_FOR_D8A')
+    need(type(adapter) is ExactTestAdmin, 'FORMAL_ADMIN_ADAPTER_NOT_QUALIFIED_FOR_D8A')
+    scope = adapter.authority()
+    return {'contract': scope['contract'], 'run_id': scope['run_id'],
+        'application_source': scope['application_source'], 'application_tree': scope['application_tree']}
 
 
 def live_preflight(native_adapter, *, expected_adapter_sha256):
@@ -271,4 +271,10 @@ def live_preflight(native_adapter, *, expected_adapter_sha256):
     """
     need(native_adapter is not None and expected_adapter_sha256 is not None,
         'APPROVED_DYNAMIC_GUARD_BASELINE_NOT_ATTESTED')
-    raise Blocked('CURRENT_NATIVE_LIFECYCLE_ADAPTER_NOT_QUALIFIED')
+    from scripts.wechat_runtime_native_successor import NativeSuccessor
+    from pathlib import Path
+    import inspect
+    need(type(native_adapter) is NativeSuccessor, 'CURRENT_NATIVE_LIFECYCLE_ADAPTER_NOT_QUALIFIED')
+    actual = hashlib.sha256(Path(inspect.getfile(NativeSuccessor)).read_bytes()).hexdigest()
+    need(actual == expected_adapter_sha256, 'CURRENT_NATIVE_LIFECYCLE_ADAPTER_CODE_PIN')
+    return native_adapter.verify()

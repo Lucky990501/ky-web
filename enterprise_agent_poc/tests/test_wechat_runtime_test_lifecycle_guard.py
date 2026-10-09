@@ -58,6 +58,7 @@ class RuntimeDouble(f.RuntimeProvider):
 
 
 class LifecycleTests(unittest.TestCase):
+    legacy_grant_fixture = True
     setUpClass = classmethod(f.DispatchTests.setUpClass.__func__)
     tearDownClass = classmethod(f.DispatchTests.tearDownClass.__func__)
 
@@ -82,7 +83,8 @@ class LifecycleTests(unittest.TestCase):
         self.catalog.runtime_tester = self.tasks.runtime_test_lifecycle = self.tester
         # Existing formal registry Grant is used ONLY to set up the local API
         # fixture. It has no audit/Revoke API and is NOT a qualified live lease.
-        self.registry.grant_platform_admin(self.actor)
+        if self.legacy_grant_fixture:
+            self.registry.grant_platform_admin(self.actor)
         user = next(r for r in self.rows('users') if r['id'] == self.actor)
         revision = next(r for r in self.rows('agent_template_versions') if r['id'] == self.agent_revision)
         self.scope = dict(contract=g.VERSION, environment='test', source=g.SOURCE, tree=g.TREE,
@@ -101,7 +103,8 @@ class LifecycleTests(unittest.TestCase):
             AuthenticationError=AuthenticationError, sessions=self.sessions,
             product_store=self.product, skill_registry=self.registry)
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(main), 'exec'), namespace)
-        app = FastAPI(); app.include_router(catalog_router(self.catalog, namespace['require_platform_admin']))
+        app = FastAPI(); self.app = app
+        app.include_router(catalog_router(self.catalog, namespace['require_platform_admin']))
         @app.exception_handler(AgentCatalogError)
         async def error(request, exception):
             return JSONResponse({'detail': str(exception)}, status_code=exception.status_code)
