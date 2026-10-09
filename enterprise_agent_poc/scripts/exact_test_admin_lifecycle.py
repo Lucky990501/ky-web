@@ -19,6 +19,7 @@ from uuid import UUID
 from scripts.wechat_runtime_test_lifecycle_guard import Blocked, digest, need
 
 CONTRACT = 'EXACT_TEST_ADMIN_GRANT_REVOKE_V1'
+APPROVAL_CONTRACT = 'EXACT_TEST_ADMIN_SEPARATE_RELEASE_APPROVAL_V2'
 ROOT = Path('/etc/enterprise-agent-test-exact-admin-v1')
 PROJECT = Path(__file__).resolve().parents[1]
 BASE_SOURCE = 'd8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7'
@@ -85,32 +86,45 @@ def validate_scope(scope):
     return scope
 
 
+def validate_release_pair(scope, pair, pair_sha, approved_sha):
+    need(pair_sha == approved_sha, 'EXACT_ADMIN_RELEASE_PAIR_PIN')
+    for role in ('application', 'tooling'):
+        need((scope[role+'_source'], scope[role+'_tree']) ==
+             (pair[role]['source'], pair[role]['tree']), 'EXACT_ADMIN_RELEASE_PAIR_BINDING')
+    need(Path(pair['tooling']['path']) / 'enterprise_agent_poc' == PROJECT,
+         'EXACT_ADMIN_LOADED_TOOLING_MISMATCH')
+
+
 def load_authority():
     """Root files are the only registration input; never request/env identity."""
     from app.test_tenant_seeding import native_json
-    from app.skill_python_runtime import git_identity
-    approval, _ = native_json(ROOT/'approval.v1.json')
-    need(set(approval) == {'contract', 'scope_sha256', 'code_sha256', 'independent_approval'},
+    from app.test_runtime_tooling import authority_root, ISOLATED_AUTHORITY
+    root = authority_root()
+    isolated = root == ISOLATED_AUTHORITY
+    approval, _ = native_json(root/'approval.v2.json')
+    need(set(approval) == {'contract', 'scope_sha256', 'code_sha256', 'independent_approval', 'pair_sha256'},
         'EXACT_ADMIN_APPROVAL_SHAPE')
-    need(approval['contract'] == CONTRACT and approval['independent_approval'] == {
-        'authority': 'PRIMARY_TEST_RELEASE_CONTROL',
-        'authorization': 'TEST_ONLY_EXACT_ADMIN_LIFECYCLE_FIX_APPROVED',
+    need(approval['contract'] == APPROVAL_CONTRACT and approval['independent_approval'] == {
+        'authority': 'ISOLATED_NATIVE_RELEASE_CONTROL' if isolated else 'PRIMARY_TEST_RELEASE_CONTROL',
+        'authorization': 'NATIVE_PARENT_CHAIN_ISOLATION_REFACTOR_APPROVED' if isolated else 'TEST_ONLY_EXACT_ADMIN_LIFECYCLE_FIX_APPROVED',
         'production_authority': False}, 'EXACT_ADMIN_INDEPENDENT_APPROVAL_REQUIRED')
-    scope, scope_sha = native_json(ROOT/'scope.v1.json')
+    scope, scope_sha = native_json(root/'scope.v1.json')
     need(scope_sha == approval['scope_sha256'], 'EXACT_ADMIN_SCOPE_PIN')
     validate_scope(scope)
-    identity = git_identity(PROJECT)
-    need(identity == {'source_commit': scope['application_source'], 'source_tree': scope['application_tree']}
-        and (scope['tooling_source'], scope['tooling_tree'])
-        == (scope['application_source'], scope['application_tree']), 'EXACT_ADMIN_SOURCE_TREE_BINDING')
-    dirty = subprocess.run(['git', '--no-optional-locks', '-C', str(PROJECT.parent), 'status',
+    from app.test_runtime_tooling import load_pair, APPLICATION, checkout_identity
+    pair, pair_sha = load_pair()
+    validate_release_pair(scope, pair, pair_sha, approval['pair_sha256'])
+    identity = checkout_identity(PROJECT.parent)
+    need(identity == {'source_commit': scope['tooling_source'], 'source_tree': scope['tooling_tree']},
+        'EXACT_ADMIN_SOURCE_TREE_BINDING')
+    dirty = subprocess.run(['git', '--no-optional-locks', '-c', 'safe.directory='+str(PROJECT.parent), '-C', str(PROJECT.parent), 'status',
         '--porcelain', '--untracked-files=no'], check=True, capture_output=True, timeout=10).stdout
     need(not dirty, 'EXACT_ADMIN_DIRTY_SOURCE_REJECTED')
     files = {'scripts/exact_test_admin_lifecycle.py', 'scripts/run_exact_test_admin_lifecycle.py',
-        'app/test_exact_admin_gate.py', 'app/main.py'}
+        'app/test_exact_admin_gate.py', 'app/test_runtime_tooling.py', 'app/product_service.py', 'app/worker.py', 'app/main.py'}
     need(set(approval['code_sha256']) == files, 'EXACT_ADMIN_CODE_SET')
     for relative, expected in approval['code_sha256'].items():
-        path = PROJECT/relative
+        path = (APPLICATION if relative.startswith('app/') else PROJECT)/relative
         need(not path.is_symlink() and hashlib.sha256(path.read_bytes()).hexdigest() == expected,
             'EXACT_ADMIN_CODE_PIN')
     return scope
@@ -154,7 +168,12 @@ class ExactTestAdmin:
 
     def _database(self, conn):
         from app.test_tenant_seeding import check_database
-        check_database(conn, self.store)
+        from app.test_runtime_tooling import authority_root, ISOLATED_AUTHORITY
+        if authority_root() == ISOLATED_AUTHORITY:
+            from scripts.native_parent_contract import load_context, check_database as check_parent_database
+            check_parent_database(conn, self.store, load_context())
+        else:
+            check_database(conn, self.store)
 
     @contextmanager
     def _transaction(self):
@@ -300,16 +319,28 @@ class ExactTestAdmin:
                         need((evidence['runtime_test_id'], evidence['task_id']) == (tests[0]['id'], tests[0]['task_id']),
                             'EXACT_ADMIN_RUNTIME_RESPONSE_ASSOCIATION')
                     evidence = {'runtime_test_id': tests[0]['id'], 'task_id': tests[0]['task_id']}
+                elif evidence:
+                    # Idempotent API replay observes an ALREADY admitted exact
+                    # record. Never append a duplicate Admission or new lease.
+                    prior = [(p.get('evidence') or p.get('recovered_admission') or {})
+                        for _, p in history if p['action'] in {'operation_finished','operation_abandoned'}]
+                    need(evidence.get('runtime_test_id') in start['pre_test_ids'] and any(
+                        (p.get('runtime_test_id'),p.get('task_id')) ==
+                        (evidence.get('runtime_test_id'),evidence.get('task_id')) for p in prior),
+                        'EXACT_ADMIN_RUNTIME_REPLAY_NOT_ADMITTED')
+                    evidence = {}
             effects = {}
             for table, key, identity in (('agent_templates', 'id', scope['agent_id']),
                 ('agent_template_versions', 'id', scope['revision_id'])):
-                row = conn.execute('SELECT * FROM '+table+' WHERE '+key+'=?', (identity,)).fetchone()
+                projection = 'to_jsonb(t) AS row' if self.store.is_postgres else '*'
+                row = conn.execute('SELECT '+projection+' FROM '+table+' t WHERE '+key+'=?', (identity,)).fetchone()
                 need(row is not None, 'EXACT_ADMIN_OPERATION_EFFECT_IDENTITY')
-                effects[table] = digest(dict(row))
-            rows = conn.execute('SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?',
+                effects[table] = digest(row['row'] if self.store.is_postgres else dict(row))
+            rows = conn.execute('SELECT '+projection+' FROM tenant_agent_instances t WHERE tenant_id=? AND agent_id=?',
                 (scope['tenant_id'], scope['agent_id'])).fetchall()
-            need(len(rows) == 1, 'EXACT_ADMIN_OPERATION_INSTANCE_IDENTITY')
-            effects['tenant_agent_instances'] = digest(dict(rows[0]))
+            need(len(rows) <= 1, 'EXACT_ADMIN_OPERATION_INSTANCE_IDENTITY')
+            effects['tenant_agent_instances'] = (digest(rows[0]['row'] if self.store.is_postgres else dict(rows[0]))
+                if rows else None)
             self._audit(conn, scope, 'operation_finished', history, ticket=ticket,
                 operation=start['operation'], status_code=status_code, evidence=evidence, effects=effects)
 
@@ -425,7 +456,9 @@ def load_dead_operation_proof(scope, history):
     No proof is created by the permission service or an ordinary API request.
     """
     from app.test_tenant_seeding import native_json
-    proof, _ = native_json(ROOT/'dead-operation-proof.v1.json')
+    from app.test_runtime_tooling import authority_root, ISOLATED_AUTHORITY
+    root = authority_root()
+    proof, _ = native_json(root/'dead-operation-proof.v1.json')
     need(set(proof) == {'contract', 'run_id', 'application_source', 'application_tree',
         'last_audit_sha256', 'tickets', 'quiesced_process_ids', 'observed_at', 'independent_approval'},
         'EXACT_ADMIN_RECOVERY_PROOF_SHAPE')
@@ -437,7 +470,9 @@ def load_dead_operation_proof(scope, history):
         == (scope['application_source'], scope['application_tree'])
         and proof['last_audit_sha256'] == event_hash(history[-1][0])
         and set(proof['tickets']) == tickets and set(proof['quiesced_process_ids']) == process_ids
-        and 0 <= age <= 60 and proof['independent_approval'] == 'EXACT_API_PROCESS_QUIESCENCE_ATTESTED_BY_06',
+        and 0 <= age <= 60 and proof['independent_approval'] ==
+        ('ISOLATED_NATIVE_ROOT_QUIESCENCE_ATTESTATION_V1' if root == ISOLATED_AUTHORITY
+         else 'EXACT_API_PROCESS_QUIESCENCE_ATTESTED_BY_06'),
         'EXACT_ADMIN_RECOVERY_PROOF_REJECTED')
     return tickets
 
@@ -449,7 +484,9 @@ class FixedLoopbackCapabilityProbe:
 
     def _request(self, scope):
         import urllib.request
-        request = urllib.request.Request('http://127.0.0.1:18100/api/v1/internal/test/exact-admin-capability',
+        from app.test_runtime_tooling import authority_root, ISOLATED_AUTHORITY
+        port = 28100 if authority_root() == ISOLATED_AUTHORITY else 18100
+        request = urllib.request.Request(f'http://127.0.0.1:{port}/api/v1/internal/test/exact-admin-capability',
             headers={'Cookie': 'workbench_session='+self._session, 'X-Exact-Test-Admin-Run-Id': scope['run_id']})
         # No proxy/env/redirect fallback; never send the session to another host.
         class RejectRedirect(urllib.request.HTTPRedirectHandler):

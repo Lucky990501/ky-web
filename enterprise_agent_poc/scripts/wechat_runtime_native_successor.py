@@ -19,7 +19,7 @@ import sys
 from scripts import exact_test_admin_lifecycle as a
 from scripts import wechat_runtime_test_lifecycle_guard as g
 
-VERSION = 'WECHAT_RUNTIME_TEST_NATIVE_SUCCESSOR_V1'
+VERSION = 'WECHAT_RUNTIME_TEST_NATIVE_SUCCESSOR_V2'
 PARENT_OVERLAY_SHA = '5ba582e45b55e35aaeae83d5de995db00853ae83df45f0dab58d7d361c0c2c47'
 
 
@@ -121,19 +121,30 @@ def validate_ledger(data, scope, *, recovery=False, for_execution=False):
     return history, admissions, operations, state
 
 
-def validate_productization(data, scope, runtime_scope, anchors, operations, quality):
+def validate_productization(data, scope, runtime_scope, anchors, operations, quality, *, admissions=None):
     g.need(set(anchors) == {'agent_templates', 'agent_template_versions', 'tenant_agent_instances'}, 'NATIVE_ANCHOR_SET')
     template = g.one(data, 'agent_templates', 'id', scope['agent_id'])
     revision = g.one(data, 'agent_template_versions', 'id', scope['revision_id'])
     instances = [r for r in data['tenant_agent_instances'] if
         (r['tenant_id'], r['agent_id']) == (scope['tenant_id'], scope['agent_id'])]
-    g.need(len(instances) == 1, 'NATIVE_INSTANCE_IDENTITY')
-    current = {'agent_templates': template, 'agent_template_versions': revision, 'tenant_agent_instances': instances[0]}
+    absent = anchors.get('tenant_agent_instances', 'missing') is None
+    g.need(len(instances) <= 1 if absent else len(instances) == 1, 'NATIVE_INSTANCE_IDENTITY')
+    instance = instances[0] if instances else None
+    if absent and instance is not None:
+        # The formal Runtime Test writer creates the first configured instance.
+        # An absent initial state must not be fabricated into a historical pin.
+        g.need(bool(admissions) and instance['status'] == 'configured'
+            and instance['agent_template_version_id'] == scope['revision_id']
+            and g.obj(instance['overrides_json']) == {},
+            'NATIVE_FIRST_INSTANCE_FORMAL_TEST_REQUIRED')
+    current = {'agent_templates': template, 'agent_template_versions': revision, 'tenant_agent_instances': instance}
     mutable = {'agent_templates': {'current_published_version_id', 'lifecycle_status', 'published_at', 'updated_at', 'updated_by'},
         'agent_template_versions': {'status', 'publication_scope', 'published_at', 'updated_by'},
         'tenant_agent_instances': {'status', 'updated_at', 'overrides_json'}}
     for table, row in current.items():
         before = anchors[table]
+        if table == 'tenant_agent_instances' and absent:
+            continue
         g.need(set(row) == set(before) and all(row[k] == before[k] for k in row if k not in mutable[table]),
             'NATIVE_NON_LIFECYCLE_MUTATION:'+table)
         if g.digest(row) == g.digest(before): continue
@@ -151,9 +162,9 @@ def validate_productization(data, scope, runtime_scope, anchors, operations, qua
             'NATIVE_PUBLISHED_REVISION_RELATION')
     else: g.need(revision['status'] == 'draft' and template['current_published_version_id'] is None,
         'NATIVE_UNAPPROVED_PUBLISH_STATE')
-    g.need(instances[0]['status'] in {'configured', 'enabled'} and g.obj(instances[0]['overrides_json']) == {},
+    g.need(instance is None or instance['status'] in {'configured', 'enabled'} and g.obj(instance['overrides_json']) == {},
         'NATIVE_INSTANCE_LIFECYCLE_STATE')
-    if instances[0]['status'] == 'enabled':
+    if instance is not None and instance['status'] == 'enabled':
         g.need(revision['status'] == 'published' and any(quality.values()), 'NATIVE_ENABLE_QUALITY_REQUIRED')
     return current
 
@@ -176,15 +187,19 @@ def validate_snapshot(data, *, scope, runtime_scope, anchors, parent_pins, prede
     records = [r for r in data['agent_template_tests'] if r['test_type'] == 'runtime']
     g.need({r['id']: r['task_id'] for r in records} == admissions, 'NATIVE_FORMAL_RUNTIME_AUTHORIZATION_REQUIRED')
     for table, row in anchors.items():
+        if row is None and table == 'tenant_agent_instances':
+            g.need(not parent_pins[table], 'NATIVE_ABSENT_INSTANCE_PARENT_NOT_EMPTY')
+            continue
         g.need(g.digest(row) in parent_pins[table], 'NATIVE_EXISTING_BASELINE_ANCHOR_REQUIRED:'+table)
-    current = validate_productization(data, scope, runtime_scope, anchors, operations, quality)
+    current = validate_productization(data, scope, runtime_scope, anchors, operations, quality, admissions=admissions)
     cut = copy.deepcopy(data)
     cut['platform_admins'] = []  # ONLY after exact lease/zero-admin validation.
     accepted = {r['id'] for r, _ in history}
     cut['execution_events'] = [r for r in cut['execution_events'] if r['id'] not in accepted]
     cut['agent_template_tests'] = [r for r in cut['agent_template_tests'] if r['id'] not in admissions]
     for table, row in current.items():
-        cut[table] = [copy.deepcopy(anchors[table]) if r == row else r for r in cut[table]]
+        cut[table] = [copy.deepcopy(anchors[table]) if r == row else r for r in cut[table]
+                      if not (anchors[table] is None and r == row)]
     contexts = set(); historical = []
     for ctx in data['agent_execution_contexts']:
         if ctx['agent_id'] != scope['agent_id'] or g.digest(ctx) in parent_pins.get('agent_execution_contexts', []): continue
@@ -210,7 +225,7 @@ def validate_snapshot(data, *, scope, runtime_scope, anchors, parent_pins, prede
                 historical.append(historical_prepare.verify(data, ctx, task))
                 is_historical = True
             else:
-                g.need(current['tenant_agent_instances']['status'] == 'enabled' and any(quality.values())
+                g.need(current['tenant_agent_instances'] is not None and current['tenant_agent_instances']['status'] == 'enabled' and any(quality.values())
                     and task['user_id'] in ordinary_principals and policy.get('eligibility_mode') is None,
                     'NATIVE_ORDINARY_CHAT_AUTHORIZATION')
         # Historical context/maps remain unchanged in the predecessor's view.
@@ -248,23 +263,40 @@ class NativeSuccessor:
     native-policy approval. Never accepted from a web request or env JSON.
     """
     VERSION = VERSION
-    def verify(self, *, recovery=False, for_execution=False):
+    def verify_task_execution(self, task):
+        from app.product_service import TaskExecutionNotAuthorized
+        try:
+            return self.verify(for_execution=True, execution_task=task)
+        except g.Blocked:
+            # Do not mutate/ACK a queued reservation or expose raw DB details.
+            raise TaskExecutionNotAuthorized('CURRENT_EXECUTION_AUTHORIZATION_REQUIRED') from None
+
+    def verify(self, *, recovery=False, for_execution=False, execution_task=None):
         from app.test_tenant_seeding import native_json, check_database
-        from app.skill_python_runtime import git_identity
         from app.store import POCStore
         g.need(os.environ.get('APP_ENV') == 'test' and os.environ.get(a.REGISTRATION) == 'true'
             and sys.dont_write_bytecode and os.environ.get('PYTHONDONTWRITEBYTECODE') == '1',
             'NATIVE_SUCCESSOR_REQUIRED_ENVIRONMENT')
         scope = a.load_authority()
-        approval, _ = native_json(a.ROOT/'native-approval.v1.json')
-        g.need(set(approval) == {'contract', 'policy_sha256', 'code_sha256', 'independent_approval'}
+        from app.test_runtime_tooling import authority_root, ISOLATED_AUTHORITY
+        root = authority_root()
+        isolated = root == ISOLATED_AUTHORITY
+        approval, _ = native_json(root/'native-approval.v2.json')
+        approval_fields = {'contract', 'policy_sha256', 'code_sha256', 'independent_approval'}
+        if isolated:
+            approval_fields.add('parent_context_sha256')
+        g.need(set(approval) == approval_fields
             and approval['contract'] == VERSION and approval['independent_approval']
-            == 'TEST_ONLY_EXACT_ADMIN_LIFECYCLE_FIX_APPROVED', 'NATIVE_SUCCESSOR_APPROVAL')
-        policy, policy_sha = native_json(a.ROOT/'native-policy.v1.json')
+            == ('NATIVE_PARENT_CHAIN_ISOLATION_REFACTOR_APPROVED' if isolated else
+                'TEST_ONLY_EXACT_ADMIN_LIFECYCLE_FIX_APPROVED'), 'NATIVE_SUCCESSOR_APPROVAL')
+        policy, policy_sha = native_json(root/'native-policy.v2.json')
         g.need(policy_sha == approval['policy_sha256'], 'NATIVE_SUCCESSOR_POLICY_PIN')
         code = {'scripts/wechat_runtime_native_successor.py', 'scripts/wechat_runtime_test_lifecycle_guard.py',
             'scripts/receipt_row_canonicalization.py', 'scripts/wechat_historical_prepare.py',
             'scripts/wechat_historical_actions.py'}
+        if isolated:
+            code |= {'scripts/native_parent_contract.py', 'scripts/prepare_exact_admin_authority.py',
+                     'scripts/runtime_recovery_operator.py'}
         g.need(set(approval['code_sha256']) == code, 'NATIVE_SUCCESSOR_CODE_SET')
         for relative, expected in approval['code_sha256'].items():
             path = a.PROJECT/relative
@@ -277,19 +309,41 @@ class NativeSuccessor:
             and (policy['application_source'], policy['application_tree'])
             == (scope['application_source'], scope['application_tree'])
             and policy['scope_sha256'] == g.digest(scope), 'NATIVE_SUCCESSOR_POLICY_SCOPE')
-        g.need(git_identity(a.PROJECT) == {'source_commit': scope['application_source'], 'source_tree': scope['application_tree']},
+        from app.test_runtime_tooling import load_pair, APPLICATION, checkout_identity
+        pair, _ = load_pair()
+        g.need(checkout_identity(a.PROJECT.parent) == {'source_commit': scope['tooling_source'], 'source_tree': scope['tooling_tree']},
             'NATIVE_SUCCESSOR_ACTUAL_SOURCE_TREE')
         actual = {}
-        for path in a.PROJECT.parent.rglob('*'):
-            if '.git' in path.relative_to(a.PROJECT.parent).parts: continue
+        for path in APPLICATION.parent.rglob('*'):
+            if '.git' in path.relative_to(APPLICATION.parent).parts: continue
             g.need(not path.is_symlink(), 'NATIVE_SUCCESSOR_INSTALLED_SYMLINK_REJECTED')
             if path.is_file():
-                actual[path.relative_to(a.PROJECT.parent).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+                actual[path.relative_to(APPLICATION.parent).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
         # Exact map, not PYC filters or a new cache policy. 06 already cleaned
         # the predecessor caches; every new service/probe must retain -B/env=1.
         g.need(actual == policy['files'], 'PERSISTENT_INSTALLED_SOURCE_HASH')
         from scripts.receipt_row_canonicalization import VERSION as codec_version
         g.need(codec_version == 'RECEIPT_ROW_CANONICALIZATION_V2', 'NATIVE_SHARED_RECEIPT_CODEC')
+        if isolated:
+            from scripts import native_parent_contract as parent
+            context = parent.load_context()
+            g.need(not policy['parent_files'] and not policy['import_files']
+                and context['state']['row_pins'] == policy['parent_pins']
+                and all(context['state'][k] == scope[k] for k in
+                        ('tenant_id', 'principal_id', 'agent_id', 'revision_id')),
+                'NATIVE_ENVIRONMENT_PARENT_BINDING')
+            store = POCStore(os.environ['ENTERPRISE_POC_DATABASE_URL'])
+            schema, data = parent.snapshot(store, context)
+            g.need(g.digest(schema) == policy['schema_fingerprint'] == context['security']['schema_sha256']
+                and set(data) == set(policy['table_set']), 'NATIVE_SUCCESSOR_ACTUAL_SCHEMA')
+            _, admissions, _, _ = validate_ledger(data, scope, recovery=recovery, for_execution=for_execution)
+            result = validate_snapshot(data, scope=scope, runtime_scope=policy['runtime_scope'],
+                anchors=policy['anchors'], parent_pins=policy['parent_pins'],
+                ordinary_principals=policy['ordinary_principals'], recovery=recovery, for_execution=for_execution,
+                predecessor_validate=lambda view: parent.validate_state(view, context, set(admissions.values())))
+            if execution_task is not None:
+                validate_execution_permission(data, scope, execution_task)
+            return result
         g.need(policy['parent_files'].get('primary_guard.py') == PARENT_OVERLAY_SHA,
             'NATIVE_CURRENT_PARENT_NOT_TERMINAL_ONLY')
         for name, sha in policy['parent_files'].items():
@@ -320,8 +374,34 @@ class NativeSuccessor:
         original = parent.read(parent.BASE/'predecessor-live-protected.v1.json')['row_hashes']
         g.need(all(policy['parent_pins'].get(t) == values for t, values in original.items()),
             'NATIVE_SUCCESSOR_ORIGINAL_SEAL_NOT_REPINNED')
-        return validate_snapshot(data, scope=scope, runtime_scope=policy['runtime_scope'], anchors=policy['anchors'],
+        result = validate_snapshot(data, scope=scope, runtime_scope=policy['runtime_scope'], anchors=policy['anchors'],
             parent_pins=policy['parent_pins'], ordinary_principals=policy['ordinary_principals'], recovery=recovery,
             for_execution=for_execution,
             predecessor_validate=lambda view: parent.validate_snapshot(view, old_policy, witness, terminal,
                 environment='test', source=a.BASE_SOURCE, tree=a.BASE_TREE))
+        if execution_task is not None:
+            validate_execution_permission(data, scope, execution_task)
+        return result
+
+
+def validate_execution_permission(data, scope, task):
+    """A durable admission is not a present lease. Called before tester.started.
+
+    Snapshot integrity/productization checks MUST run first. Terminal duplicate
+    delivery is handled by the existing TaskService without starting a model.
+    """
+    actual = g.one(data, 'tasks', 'id', task['id'])
+    g.need(all(actual[k] == task[k] for k in ('tenant_id', 'user_id', 'agent_id')),
+           'NATIVE_EXECUTION_TASK_IDENTITY')
+    tests = [r for r in data['agent_template_tests'] if r.get('task_id') == task['id']
+             and r.get('test_type') == 'runtime']
+    if not tests:
+        return  # Existing ordinary-chat resolver/quality checks remain mandatory.
+    g.need(len(tests) == 1 and (actual['tenant_id'], actual['user_id'], actual['agent_id']) ==
+           (scope['tenant_id'], scope['principal_id'], scope['agent_id']), 'NATIVE_EXECUTION_TEST_SCOPE')
+    if actual['status'] in {'failed', 'completed', 'cancelled'}:
+        return
+    _, admissions, _, state = validate_ledger(data, scope, for_execution=True)
+    now = datetime.now(timezone.utc)
+    g.need(state == 'granted' and a.utc(scope['issued_at']) <= now < a.utc(scope['expires_at'])
+           and admissions.get(tests[0]['id']) == actual['id'], 'NATIVE_CURRENT_RUNTIME_PERMISSION_REQUIRED')

@@ -1,7 +1,11 @@
 """Formal sealed Test operator entry. No default grant, model call or deploy."""
 from pathlib import Path
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# The formal launcher supplies the separately sealed Application on PYTHONPATH.
+# Do not shadow it with the historical app copy in the Tooling checkout.
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+import scripts
+scripts.__path__ = [str(Path(__file__).resolve().parent), *scripts.__path__]
 
 
 def main():
@@ -29,7 +33,9 @@ def main():
         service = ExactTestAdmin(store, environment='test')
         call = {k: scope[k] for k in ('principal_id', 'tenant_id', 'run_id')}
         if args.action == 'prepare':
-            token_file = Path('/run/enterprise-agent-test-exact-admin-v1/session.token')
+            from app.test_runtime_tooling import authority_root, ISOLATED_AUTHORITY
+            token_file = Path('/run/enterprise-agent-native-isolated-v1/session.token' if
+                authority_root() == ISOLATED_AUTHORITY else '/run/enterprise-agent-test-exact-admin-v1/session.token')
             for item in (token_file, *token_file.parents):
                 info = item.lstat()
                 need(not stat.S_ISLNK(info.st_mode) and info.st_uid in (0, 1000)
