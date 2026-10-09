@@ -133,6 +133,68 @@ def check_transition(before, after):
         need(before['result_json'] == after['result_json'], 'RUNTIME_TERMINAL_EVIDENCE_MUTATION')
 
 
+def pre_thread_failure(data, scope, test, task, context, trace):
+    """d8a's pre-process startup FAIL, never a Conversation or quality grant.
+
+    Called only after exact formal-test/context/instance/Run joins. Native ledger
+    admission remains mandatory in the caller; this cannot authorize execution.
+    Intentionally exclude cancellation, thread-start/resume and post-process
+    failures: they have different evidence and still use the normal graph.
+    """
+    from datetime import datetime, timezone
+    from uuid import UUID
+    payload = obj(trace['payload'])
+    need(test['status'] == task['status'] == trace['status'] == payload.get('status') == 'failed'
+        and task.get('stage') == 'failed' and task.get('error_code') == 'runtime_start_error'
+        and payload.get('failure_stage') == 'runtime_start', 'RUNTIME_PRE_THREAD_FAILURE_STATE')
+    need(trace.get('codex_thread_id') == 'pending' and payload.get('codex_thread_id') is None
+        and all(payload.get(k) == value for k, value in {
+            'run_id': task['run_id'], 'conversation_id': task['conversation_id'],
+            'tenant_id': scope['tenant_id'], 'agent_id': scope['agent_id'],
+            'execution_context_id': context['id'], 'configuration_fingerprint': scope['fingerprint'],
+            'profile_hash_version': 'v2', 'model_provider': 'deepseek',
+            'model': 'deepseek-v4-pro', 'reasoning_effort': 'high'}.items()),
+        'RUNTIME_PRE_THREAD_FAILURE_IDENTITY')
+    try:
+        need(str(UUID(task['conversation_id'])) == task['conversation_id'], 'RUNTIME_PRE_THREAD_INTENDED_ID')
+        def stamp(value):
+            value = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace('Z', '+00:00'))
+            need(value.tzinfo is not None, 'RUNTIME_PRE_THREAD_TIMEZONE')
+            return value.astimezone(timezone.utc)
+        need(stamp(test['created_at']) <= stamp(task['started_at']) <= stamp(trace['created_at'])
+            <= stamp(trace['completed_at']) <= stamp(task['completed_at']), 'RUNTIME_PRE_THREAD_CHRONOLOGY')
+    except (ValueError, TypeError, AttributeError, KeyError):
+        raise Blocked('RUNTIME_PRE_THREAD_CHRONOLOGY') from None
+    events = payload.get('lifecycle_events')
+    need(events in ([{'event': 'runtime_start_requested'},
+                    {'event': 'runtime_start_failed', 'stage': stage}]
+                   for stage in ('runtime_profile', 'provider_initialization')),
+        'RUNTIME_PRE_THREAD_STARTUP_EVIDENCE')
+    need(all(payload.get(k) is False for k in ('runtime_completed', 'required_tool_calls_completed',
+        'tool_calls_completed', 'final_response_received', 'final_response_persisted',
+        'assistant_message_saved', 'partial_output'))
+        and payload.get('runtime_status') is None and payload.get('final_result') is None
+        and payload.get('assistant_message_id') is None and payload.get('final_response_length') == 0
+        and payload.get('artifact_completed') in (None, False)
+        and all(payload.get(k) == [] for k in ('mcp_calls', 'knowledge_calls', 'knowledge_retrievals',
+            'asset_calls', 'tool_calls', 'logical_tool_dependencies'))
+        and payload.get('required_tool_calls') == {}, 'RUNTIME_PRE_THREAD_NO_EXECUTION')
+    cid = task['conversation_id']
+    transitions = sorted((r for r in data['task_events'] if r['task_id'] == task['id']), key=lambda r: r['id'])
+    stages = [r['stage'] for r in transitions if r['stage'] != 'activity']
+    need(stages and stages[0] == 'queued' and stages[-1] == 'failed'
+        and 'worker_started' in stages and not set(stages) & {'delta', 'completed', 'cancelled', 'persisting'},
+        'RUNTIME_PRE_THREAD_TASK_TRANSITIONS')
+    need(not any(r['id'] == cid for r in data['conversations'])
+        and not any(r['conversation_id'] == cid for name in ('conversation_owners',
+            'conversation_agent_contexts', 'messages', 'execution_events') for r in data[name])
+        and not any(r['task_id'] == task['id'] for name in ('task_results', 'credit_transactions', 'generations') for r in data[name])
+        and not any(r['id'] != task['id'] and (r['conversation_id'] == cid or r['run_id'] == task['run_id'])
+            for r in data['tasks'])
+        and not any(r['run_id'] != task['run_id'] and r['conversation_id'] == cid for r in data['run_traces']),
+        'RUNTIME_PRE_THREAD_NO_PERSISTED_SIDE_EFFECTS')
+
+
 def persisted_record(data, scope, test):
     """B: exact joins and formal executor evidence, including legal failures."""
     from app.agent_execution import completion_evidence
@@ -163,18 +225,21 @@ def persisted_record(data, scope, test):
         trace = one(data, 'run_traces', 'run_id', task['run_id'])
         need((trace['tenant_id'], trace['agent_id'], trace['conversation_id'])
             == (task['tenant_id'], task['agent_id'], task['conversation_id']), 'RUNTIME_RUN_OWNERSHIP')
-        conversation = one(data, 'conversations', 'id', task['conversation_id'])
+        conversations = [r for r in data['conversations'] if r['id'] == task['conversation_id']]
+        if not conversations:
+            pre_thread_failure(data, scope, test, task, context, trace)
+        else:
+            conversation = one(data, 'conversations', 'id', task['conversation_id'])
+            association = one(data, 'conversation_agent_contexts', 'conversation_id', task['conversation_id'])
+            need((conversation['tenant_id'], conversation['agent_id'], conversation['runtime_profile_id'])
+                == (scope['tenant_id'], scope['agent_id'], context['runtime_profile_id'])
+                and association['context_id'] == context['id'], 'RUNTIME_CONVERSATION_OWNERSHIP')
         owners = [r for r in data['conversation_owners'] if r['conversation_id'] == task['conversation_id']]
         # d8a creates ownership during successful final-result persistence.
         # A failed new Run can legitimately have no owner yet; a conflicting
         # existing owner is still forbidden, and successful Runs require one.
         need(len(owners) <= 1 and all(r['user_id'] == scope['actor_id'] for r in owners)
             and (task['status'] != 'completed' or len(owners) == 1), 'RUNTIME_CONVERSATION_OWNERSHIP')
-        association = one(data, 'conversation_agent_contexts', 'conversation_id', task['conversation_id'])
-        need((conversation['tenant_id'], conversation['agent_id'], conversation['runtime_profile_id'])
-            == (scope['tenant_id'], scope['agent_id'], context['runtime_profile_id'])
-            and association['context_id'] == context['id'],
-            'RUNTIME_CONVERSATION_OWNERSHIP')
     if test['status'] == 'queued':
         need(task['status'] == 'queued' and task['run_id'] is None
             and result == {'runtime_test_status': 'queued'}, 'RUNTIME_QUEUED_STATE')

@@ -4,7 +4,7 @@ Not a release/PRIMARY installer. Linux UID1000, separate user+net namespace,
 synthetic marked PGDATA only. Uses formal runtime reservation APIs, real
 transactions, actual child exits and PG stop/start; no Runtime Double/SQLite.
 Authority/root-proof inputs are isolated emulation, NOT PRIMARY qualification.
---draft explicitly denotes b34 plus the two byte-pinned local tooling edits.
+--draft explicitly denotes adb plus the byte-pinned local tooling edits.
 """
 from pathlib import Path
 import argparse
@@ -18,15 +18,16 @@ import sys
 import tempfile
 
 PROBE_SHA = '45b6b4762ce6796d552ee9b9feb4308fd044fcb433091eac1b5565020c138ebe'
-BASE = 'b34e62cfb1a8567db89f823e9191fad360fb4088'
-BASE_TREE = 'dcecf7e53023e054707e0e7142325025b129a206'
-EDITS = ('scripts/exact_test_admin_lifecycle.py', 'scripts/wechat_runtime_native_successor.py')
+BASE = 'adb99fbdfec50170de42cf118db6d5e588349770'
+BASE_TREE = 'a49a0415b48603b1034bc8ddc52b1bc26239a6e6'
+EDITS = ('scripts/exact_test_admin_lifecycle.py', 'scripts/wechat_runtime_test_lifecycle_guard.py',
+    'scripts/verify_wechat_recovery_admission_postgres.py')
 CASES = ('no_reservation', 'queued', 'failed_enqueue', 'normal_finish', 'ambiguous',
     'wrong_tenant', 'wrong_agent', 'wrong_revision', 'wrong_actor', 'wrong_scope',
     'wrong_source', 'no_proof', 'stale_proof', 'reservation_outside_lease',
     'start_outside_lease', 'expired_new_operation', 'crash_after_admission',
     'crash_after_delete', 'forged_admission', 'wrong_ticket', 'wrong_pre_test_ids',
-    'failed_runtime', 'early_failure')
+    'failed_runtime', 'early_failure', 'profile_failure', 'early_failure_negatives', 'manager_startup')
 
 BODY = '''        def rows_now(): return snapshot(store)
         anchors={name:copy.deepcopy(next(r for r in baseline[name] if
@@ -38,7 +39,7 @@ BODY = '''        def rows_now(): return snapshot(store)
             # Synthetic predecessor emulator, NOT the PRIMARY Root wrapper.
             # No permissive/no-op callback: all protected original rows stay
             # pinned, and only independently joined runtime tasks may appear.
-            dynamic={'tasks','run_traces','conversations','conversation_owners',
+            dynamic={'tasks','task_events','run_traces','conversations','conversation_owners',
                 'task_results','messages','credit_transactions'}
             for table in set(baseline)-dynamic:
                 assert sorted(guard.digest(r) for r in view[table])==sorted(pins[table]),table
@@ -79,13 +80,26 @@ BODY = '''        def rows_now(): return snapshot(store)
             'wrong_scope':'CALLER_SCOPE_MISMATCH','wrong_source':'AUDIT_CHAIN_REJECTED',
             'no_proof':'RECOVERY_PROOF_REQUIRED','stale_proof':'RECOVERY_PROOF_REJECTED',
             'reservation_outside_lease':'RESERVATION_OUTSIDE_LEASE','start_outside_lease':'START_OUTSIDE_LEASE',
-            'wrong_ticket':'RECOVERY_PROOF_REJECTED','wrong_pre_test_ids':'RECOVERY_PRE_TEST_IDS',
-            'failed_runtime':'RUNTIME_LIFECYCLE_RELATION:conversations'}
-        if args.case in {'normal_finish','early_failure'}:
+            'wrong_ticket':'RECOVERY_PROOF_REJECTED','wrong_pre_test_ids':'RECOVERY_PRE_TEST_IDS'}
+        if args.case in {'normal_finish','early_failure','profile_failure','early_failure_negatives','manager_startup'}:
             response = client.post(endpoint,json={'configuration_fingerprint':runtime_scope['fingerprint']})
             assert response.status_code == 202
             created = response.json()
-            if args.case == 'early_failure':
+            if args.case=='manager_startup':
+                from app.agent_execution import profile as context_profile
+                context=next(r for r in rows_now()['agent_execution_contexts'])
+                profile=context_profile(context)
+                # Isolated local SDK startup ONLY. No turn/model request, no
+                # real credential, no egress interface in this namespace.
+                os.environ[settings.codex_api_key_env]='synthetic-invalid-no-provider-authority'
+                async def startup_only():
+                    try:
+                        await asyncio.wait_for(manager.get(profile),30)
+                        assert {'runtime_process_created','app_server_ready'} <= {e['event'] for e in manager.startup_events(profile)}
+                    finally: await manager.close()
+                asyncio.run(startup_only())
+                os.environ.pop(settings.codex_api_key_env)
+            if args.case in {'early_failure','profile_failure','early_failure_negatives'}:
                 asyncio.run(tasks.execute(product.task_for_worker(created['task_id'])))
             assert admin.revoke(**call)['active_test_platform_admin'] == 0
         elif args.case == 'expired_new_operation':
@@ -161,8 +175,7 @@ BODY = '''        def rows_now(): return snapshot(store)
                 except admin_code.Blocked as error: assert negative[args.case] in str(error),str(error)
                 else: raise AssertionError('UNPROVEN_RECOVERY_ACCEPTED')
                 assert hashes(rows_now())==hashes(before)  # Rejection is atomic; owned admin stays for controlled cleanup.
-                results=dict(expected_reject=negative[args.case],db_unchanged=True,
-                    recovery_qualified=False if args.case=='failed_runtime' else None)
+                results=dict(expected_reject=negative[args.case],db_unchanged=True)
                 print(json.dumps(dict(case=args.case,result='PASS',postgres='16.6',primary_changes=0,
                     production_changes=0,provider_calls=0,wechat_calls=0,image_calls=0,results=results)))
                 return 0
@@ -198,22 +211,70 @@ BODY = '''        def rows_now(): return snapshot(store)
                 try: native.validate_ledger(corrupt,scope)
                 except guard.Blocked as error: assert str(error)=='NATIVE_RECOVERED_ADMISSION_ASSOCIATION'
                 else: raise AssertionError('FORGED_ADMISSION_ACCEPTED')
-        if args.case=='early_failure':
+        if args.case in {'early_failure','profile_failure','early_failure_negatives'}:
             data=rows_now(); row=next(r for r in data['tasks'] if r['id']==created['task_id'])
             trace=next(r for r in data['run_traces'] if r['run_id']==row['run_id'])
             assert row['status']==trace['status']=='failed'
             assert not any(r['id']==row['conversation_id'] for r in data['conversations'])
             payload=guard.obj(trace['payload'])
             startup=[e['stage'] for e in payload['lifecycle_events'] if e['event']=='runtime_start_failed']
-            assert startup==['provider_initialization'],startup
+            assert startup==(['runtime_profile'] if args.case=='profile_failure' else ['provider_initialization']),startup
             assert not any(e['event']=='runtime_process_created' for e in payload['lifecycle_events'])
-            quality_error='RUNTIME_LIFECYCLE_RELATION:conversations'
-            try: check_now()
-            except guard.Blocked as error: assert str(error)==quality_error
-            else: raise AssertionError('EARLY_FAILURE_GAP_NOT_REPRODUCED')
+            quality_error=None
+            check_now()
             results=dict(task_status=row['status'],run_status=trace['status'],conversation_exists=False,
                 guard_error=quality_error,runtime_test_id=created['runtime_test_id'],task_id=row['id'],run_id=row['run_id'],
                 startup_failure_stage=startup,provider_process_created=False)
+            if args.case=='early_failure_negatives':
+                rejected=[]
+                def reject(label,change,expected):
+                    altered=copy.deepcopy(data)
+                    change(altered)
+                    try: guard.validate_records(altered,runtime_scope,environment='test',source=guard.SOURCE,tree=guard.TREE)
+                    except guard.Blocked as error: assert expected in str(error),(label,str(error))
+                    else: raise AssertionError('UNSAFE_FAILURE_ACCEPTED:'+label)
+                    rejected.append(label)
+                def task_change(d,**kw): d['tasks'][0].update(kw)
+                def payload_change(d,**kw):
+                    p=guard.obj(d['run_traces'][0]['payload']);p.update(kw);d['run_traces'][0]['payload']=json.dumps(p)
+                reject('normal_running_missing_conversation',lambda d:task_change(d,status='running'),'PRE_THREAD_FAILURE_STATE')
+                reject('completed_missing_conversation',lambda d:task_change(d,status='completed'),'PRE_THREAD_FAILURE_STATE')
+                reject('forged_failure_code',lambda d:task_change(d,error_code='runtime_error'),'PRE_THREAD_FAILURE_STATE')
+                reject('wrong_tenant',lambda d:task_change(d,tenant_id='tenant-b'),'TASK_OWNERSHIP')
+                reject('wrong_actor',lambda d:task_change(d,user_id='other'),'TASK_OWNERSHIP')
+                reject('wrong_revision',lambda d:d['agent_template_tests'][-1].update(agent_template_version_id='other'),'REVISION_SCOPE')
+                reject('wrong_trace_context',lambda d:payload_change(d,execution_context_id='other'),'PRE_THREAD_FAILURE_IDENTITY')
+                reject('missing_startup_evidence',lambda d:payload_change(d,lifecycle_events=[]),'PRE_THREAD_STARTUP_EVIDENCE')
+                reject('post_thread_failure',lambda d:payload_change(d,lifecycle_events=[{'event':'thread_started'}]),'PRE_THREAD_STARTUP_EVIDENCE')
+                reject('fake_runtime_pass',lambda d:payload_change(d,runtime_completed=True),'PRE_THREAD_NO_EXECUTION')
+                reject('real_tool_side_effect',lambda d:payload_change(d,tool_calls=[{'name':'x'}]),'PRE_THREAD_NO_EXECUTION')
+                reject('missing_terminal_timestamp',lambda d:task_change(d,completed_at=None),'PRE_THREAD_CHRONOLOGY')
+                reject('missing_transition_evidence',lambda d:d.update(task_events=[]),'PRE_THREAD_TASK_TRANSITIONS')
+                reject('persisted_result',lambda d:d['task_results'].append({'task_id':row['id']}),'PRE_THREAD_NO_PERSISTED_SIDE_EFFECTS')
+                reject('persisted_image',lambda d:d['generations'].append({'task_id':row['id']}),'PRE_THREAD_NO_PERSISTED_SIDE_EFFECTS')
+                reject('conflicting_owner',lambda d:d['conversation_owners'].append({'conversation_id':row['conversation_id'],'user_id':'other'}),'PRE_THREAD_NO_PERSISTED_SIDE_EFFECTS')
+                def cross_conversation(d):
+                    d['conversations'].append({'id':row['conversation_id'],'tenant_id':'tenant-b','agent_id':agent,'runtime_profile_id':context_id_profile[1]})
+                    d['conversation_agent_contexts'].append({'conversation_id':row['conversation_id'],'context_id':context_id_profile[0]})
+                context_id_profile=(data['agent_execution_contexts'][0]['id'],data['agent_execution_contexts'][0]['runtime_profile_id'])
+                reject('cross_tenant_conversation',cross_conversation,'CONVERSATION_OWNERSHIP')
+                corrupt=copy.deepcopy(data)
+                corrupt['execution_events']=[r for r in corrupt['execution_events'] if r['event_type']!=admin_code.EVENT]
+                try: native.validate_snapshot(corrupt,scope=scope,runtime_scope=runtime_scope,
+                    anchors=anchors,parent_pins=pins,ordinary_principals=[actor],predecessor_validate=predecessor)
+                except guard.Blocked: rejected.append('unauthorized_failure_no_admission')
+                else: raise AssertionError('UNAUTHORIZED_FAILURE_ACCEPTED')
+                for label,publish_data in [('failed_cannot_publish',data),('no_evidence_cannot_publish',dict(data,agent_template_tests=[r for r in data['agent_template_tests'] if r['test_type']!='runtime'],task_agent_contexts=[]))]:
+                    try: guard.publication_eligibility(publish_data,dict(runtime_scope,publication_allowed=True),resolver=resolver,connection=None)
+                    except guard.Blocked as error: assert str(error)=='RUNTIME_REAL_PASS_REQUIRED_FOR_PUBLISH'
+                    else: raise AssertionError('FALSE_PUBLISH_ELIGIBILITY')
+                    rejected.append(label)
+                try: f.wechat_skill.execute('CREATE_DRAFT',root,root/'unused.json',upload_requested=True)
+                except f.wechat_skill.WechatSkillError as error: assert str(error)=='WECHAT_SECRET_AND_EGRESS_CONTRACT_REQUIRED'
+                else: raise AssertionError('CREATE_DRAFT_ENABLED')
+                rejected.append('create_draft_still_disabled')
+                results['negative_checks']=rejected
+                assert len(rejected)==21
         else:
             quality_error=None
             ledger=check_now()
@@ -223,6 +284,9 @@ BODY = '''        def rows_now(): return snapshot(store)
             assert client.get('/api/v1/platform/agents/'+agent).status_code==403
             results=dict(admissions=ledger[1],admin_state=ledger[3],admins=0,repeat_recover_idempotent=True,
                 post_revoke_permission='REJECT',passed_runtime_tests=0)
+            if args.case=='manager_startup':
+                results['real_manager_startup']='APP_SERVER_READY_SKILL_DISCOVERED'
+                results['model_turns']=0
 '''
 
 
@@ -265,8 +329,10 @@ def main():
         text=text.replace('    assert candidate == Path("/opt/enterprise-agent-workbench-test/shared/source-qualifications/wechat-b34-original-status-v1")\n','')
         text=text.replace('    assert args.isolation_root.resolve() == Path("/opt/enterprise-agent-workbench-test/tmp/b34-recovery-isolated-v1")\n','')
         text=text.replace('choices=("normal", "interrupted")','choices='+repr(CASES))
-        text=text.replace('CANDIDATE = "'+BASE+'"','CANDIDATE = "'+identity[0]+'"')
-        text=text.replace('TREE = "'+BASE_TREE+'"','TREE = "'+identity[1]+'"')
+        text=text.replace('CANDIDATE = "b34e62cfb1a8567db89f823e9191fad360fb4088"','CANDIDATE = "'+identity[0]+'"')
+        text=text.replace('TREE = "dcecf7e53023e054707e0e7142325025b129a206"','TREE = "'+identity[1]+'"')
+        text=text.replace('"credit_transactions", "execution_events", "enterprise_configs",',
+            '"credit_transactions", "execution_events", "enterprise_configs", "task_events", "generations",')
         old='        runtime = CodexRuntimeProvider(None)  # No manager: controlled local startup failure, never Provider or Runtime Double.'
         new='''        from app.runtime.codex_provider import CodexRuntimeManager
         from app.security import RuntimeTokenIssuer
@@ -277,7 +343,11 @@ def main():
         settings.model_wire_api='responses'
         settings.platform_mcp_url='http://127.0.0.1:9/disabled'
         manager=CodexRuntimeManager(settings,SkillDeployment(registry.published_root),RuntimeTokenIssuer('synthetic-isolated-runtime-key'))
-        runtime=CodexRuntimeProvider(manager)'''
+        runtime=CodexRuntimeProvider(manager)
+        if args.case=='profile_failure':
+            # Real filesystem precondition failure before any process/credential.
+            settings.data_dir.mkdir(parents=True,exist_ok=True)
+            (settings.data_dir/'runtime').write_text('synthetic non-directory')'''
         assert old in text
         text=text.replace(old,new)
         text=text.replace('        assert admin.prepare(**call)["status"] == "REVOKE_PROVEN_BEFORE_GRANT"',
@@ -288,10 +358,8 @@ def main():
         begin=text.index('        if args.case == "normal":\n',text.index('        before_restart = snapshot(store)\n'))
         end=text.index('        print(json.dumps(',begin)
         text=text[:begin]+'''        assert restart_record_error==quality_error
-        if args.case!='early_failure':
-            check_now()
-            results['guard_before_and_after_pg_restart']='PASS'
-        else: results['guard_before_and_after_pg_restart']='REJECT_CONVERSATION_GAP'
+        check_now()
+        results['guard_before_and_after_pg_restart']='PASS'
 '''+text[end:]
         namespace={'__name__':'__main__'}
         sys.argv=[str(args.probe),'--candidate',str(candidate),'--case',args.case,

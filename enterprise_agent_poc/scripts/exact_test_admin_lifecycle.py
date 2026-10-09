@@ -373,7 +373,7 @@ def outstanding(history):
 RESERVATION_TABLES = ('agent_template_tests', 'tasks', 'task_agent_contexts',
     'agent_execution_contexts', 'tenant_agent_instances', 'run_traces', 'conversations',
     'conversation_agent_contexts', 'conversation_owners', 'task_results', 'messages',
-    'credit_transactions')
+    'credit_transactions', 'execution_events', 'task_events', 'generations')
 
 
 def recovery_reservation(data, scope, start_row, start):
