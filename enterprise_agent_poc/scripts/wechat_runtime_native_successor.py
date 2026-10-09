@@ -149,7 +149,7 @@ def validate_productization(data, scope, runtime_scope, anchors, operations, qua
 
 
 def validate_snapshot(data, *, scope, runtime_scope, anchors, parent_pins, predecessor_validate,
-                      ordinary_principals, recovery=False, for_execution=False):
+                      ordinary_principals, recovery=False, for_execution=False, historical_prepare=None):
     """Pure read-only adapter; caller MUST first validate all native identities.
 
     anchors must hash to the EXISTING protected pins, never newly sealed current
@@ -175,24 +175,33 @@ def validate_snapshot(data, *, scope, runtime_scope, anchors, parent_pins, prede
     cut['agent_template_tests'] = [r for r in cut['agent_template_tests'] if r['id'] not in admissions]
     for table, row in current.items():
         cut[table] = [copy.deepcopy(anchors[table]) if r == row else r for r in cut[table]]
-    contexts = set()
+    contexts = set(); historical = []
     for ctx in data['agent_execution_contexts']:
         if ctx['agent_id'] != scope['agent_id'] or g.digest(ctx) in parent_pins.get('agent_execution_contexts', []): continue
         g.need((ctx['tenant_id'], ctx['agent_template_version_id'], ctx['configuration_fingerprint'])
             == (scope['tenant_id'], scope['revision_id'], scope['fingerprint']), 'NATIVE_DYNAMIC_CONTEXT_SCOPE')
         mappings = [r for r in data['task_agent_contexts'] if r['context_id'] == ctx['id']]
         g.need(bool(mappings), 'NATIVE_ORPHAN_CONTEXT')
+        is_historical = False
         for mapping in mappings:
             task = g.one(data, 'tasks', 'id', mapping['task_id'])
             g.need((task['tenant_id'], task['agent_id']) == (scope['tenant_id'], scope['agent_id']), 'NATIVE_CONTEXT_TASK_SCOPE')
             policy = g.obj(ctx['tool_policy_snapshot'])
             if policy.get('runtime_test') is True:
                 g.need(task['id'] in admissions.values(), 'NATIVE_RUNTIME_CONTEXT_ADMISSION')
+            elif policy.get('eligibility_mode') == 'SKILL_ONLY_TEST_QUALIFIED':
+                from scripts.wechat_historical_prepare import HistoricalPrepare
+                historical_prepare = historical_prepare or HistoricalPrepare.load()
+                g.need(type(historical_prepare) is HistoricalPrepare, 'NATIVE_HISTORICAL_PREPARE_VERIFIER')
+                historical.append(historical_prepare.verify(data, ctx, task))
+                is_historical = True
             else:
                 g.need(current['tenant_agent_instances']['status'] == 'enabled' and any(quality.values())
                     and task['user_id'] in ordinary_principals and policy.get('eligibility_mode') is None,
                     'NATIVE_ORDINARY_CHAT_AUTHORIZATION')
-        contexts.add(ctx['id'])
+        # Historical context/maps remain unchanged in the predecessor's view.
+        # Recognition is neither an active action grant nor a quality result.
+        if not is_historical: contexts.add(ctx['id'])
     # Only proven new scoped contexts/maps are projected out of immutable
     # pre-runtime table pins; unrelated and original historical rows remain.
     cut['agent_execution_contexts'] = [r for r in cut['agent_execution_contexts'] if r['id'] not in contexts]
@@ -201,7 +210,8 @@ def validate_snapshot(data, *, scope, runtime_scope, anchors, parent_pins, prede
     result = predecessor_validate(cut)  # Mandatory full current Config/Terminal/V2/seeding checks.
     return {'status': 'PASS', 'contract': VERSION, 'admin_state': state,
         'active_test_platform_admin': len(data['platform_admins']), 'runtime_tests': len(records),
-        'passed_runtime_tests': sum(quality.values()), 'predecessor': result, 'db_mutations': 0}
+        'passed_runtime_tests': sum(quality.values()), 'predecessor': result, 'db_mutations': 0,
+        'historical_prepares': historical}
 
 
 PARENT_ROOT = Path('/etc/enterprise-agent-test-wechat-persistent-config-v1')
@@ -238,7 +248,7 @@ class NativeSuccessor:
         policy, policy_sha = native_json(a.ROOT/'native-policy.v1.json')
         g.need(policy_sha == approval['policy_sha256'], 'NATIVE_SUCCESSOR_POLICY_PIN')
         code = {'scripts/wechat_runtime_native_successor.py', 'scripts/wechat_runtime_test_lifecycle_guard.py',
-            'scripts/receipt_row_canonicalization.py'}
+            'scripts/receipt_row_canonicalization.py', 'scripts/wechat_historical_prepare.py'}
         g.need(set(approval['code_sha256']) == code, 'NATIVE_SUCCESSOR_CODE_SET')
         for relative, expected in approval['code_sha256'].items():
             path = a.PROJECT/relative
