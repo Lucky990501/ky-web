@@ -60,7 +60,7 @@ def stage(role, source, tree):
     run(['git', '-C', destination, 'checkout', '--detach', source])
     identity = run(['git', '-C', destination, 'rev-parse', 'HEAD', 'HEAD^{tree}', 'HEAD^']).stdout.splitlines()
     parent = ('d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7' if role == 'application'
-              else '1e11e1a4835a465963ec5bd88a5ed40d4b300086')
+              else 'bb3129d9c429f2430ebbbb394239c343e408f700')
     assert identity == [source, tree, parent], 'EXACT_SOURCE_TREE_PARENT_REQUIRED'
     assert not run(['git','-C',destination,'status','--porcelain']).stdout
     for p in destination.rglob('*'):
@@ -184,6 +184,7 @@ def finish_setup(application, tooling, cluster):
     env_sha = digest(AUTH/'service.env') if (AUTH/'service.env').exists() else write(AUTH/'service.env', env_text, 0o400)
     tool_scripts = Path(tooling['path'])/'enterprise_agent_poc/scripts'
     cli = tool_scripts/'run_exact_test_admin_lifecycle.py'
+    operator = tool_scripts/'runtime_recovery_operator.py'
     entries = dict(api=f'{PY} -B -m uvicorn app.main:app --host 127.0.0.1 --port 28100',
                    mcp=f'{PY} -B -m app.platform_mcp.server', worker=f'{PY} -B -m app.worker')
     units = {}
@@ -191,10 +192,22 @@ def finish_setup(application, tooling, cluster):
     for role, entry in entries.items():
         units[role] = write(Path('/etc/systemd/system')/f'enterprise-agent-native-isolated-{role}.service',
             unit_base+f'WorkingDirectory={application["path"]}/enterprise_agent_poc\nEnvironmentFile={AUTH}/service.env\n'
-            f'ExecStartPre={PY} -B {cli} status --run-id {run_id}\nExecStart={entry}\n')
-    write(AUTH/'startup-policy.v1.json', dict(contract='NATIVE_PROTECTED_FORWARD_RECOVERY_V1',
-        pair_sha256=digest(AUTH/'runtime-pair.v1.json'), units=units, environment_sha256=env_sha,
-        recovery_code_sha256=digest(tool_scripts/'runtime_recovery_operator.py')))
+            f'ExecStartPre={PY} -B {operator} pre {role}\nExecStart={entry}\n'
+            f'ExecStartPost={PY} -B {operator} post {role}\n')
+    # Versioned release-control binding of existing issued Native authority.
+    # Only this independent root fixture is issued here; never PRIMARY approval.
+    contract = 'FORMAL_RUNTIME_FORWARD_RECOVERY_BINDING_V1'
+    policy = dict(contract=contract, realm='ISOLATED_NATIVE_TEST_CONTEXT', environment='test',
+        production_authority=False, pair_sha256=digest(AUTH/'runtime-pair.v1.json'),
+        native_pins={n:digest(AUTH/n) for n in ('runtime-pair.v1.json','approval.v2.json','scope.v1.json',
+                                              'native-policy.v2.json','native-approval.v2.json')},
+        services={r:dict(fragment_sha256=sha,dropins={},environment_files=[dict(path=str(AUTH/'service.env'),
+            sha256=env_sha,uid=0,gid=0,mode=0o400)]) for r,sha in units.items()}, python=str(PY),
+        post_write_recovery='EXACT_CURRENT_PAIR_ONLY', predecessor_rollback=False)
+    policy_sha=write(AUTH/'forward-recovery-policy.v1.json',policy)
+    write(AUTH/'forward-recovery-approval.v1.json',dict(contract=contract,policy_sha256=policy_sha,
+        authorization='FORMAL_PRIMARY_FORWARD_RECOVERY_SOURCE_FIX_APPROVED',production_authority=False,
+        code_sha256={n:digest(tool_scripts/n) for n in ('runtime_recovery_operator.py','runtime_recovery_binding.py')}))
     run(['systemctl','daemon-reload'])
     result = ns([PY,'-B',cli,'status','--run-id',run_id], env={'PATH':os.environ['PATH'], **environment}, check=False)
     print(result.stdout, flush=True)

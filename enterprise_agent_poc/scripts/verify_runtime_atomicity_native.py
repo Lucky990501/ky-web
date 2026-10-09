@@ -139,6 +139,10 @@ def main():
             # the post-revoke consumer check below as well.
         if thread:assert not thread.is_alive(),'REQUEST_STILL_ALIVE'
         evidence['before_recovery']=rows()
+        # Same formal recovery entry must admit inactive services/new writes
+        # without granting execution or changing any persisted rows.
+        evidence['recovery_preflight']=json.loads(command(operator+['preflight']))
+        assert rows()==evidence['before_recovery']
         if case=='G':
             hold=lock('platform_admins');locks.append(hold)
             process=subprocess.Popen(operator+['recover'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -153,6 +157,8 @@ def main():
                 hold.rollback()
         evidence['recovery']=recover()
         assert evidence['recovery']['guard']['active_test_platform_admin']==0
+        assert evidence['recovery']['config_unchanged'] is True
+        assert evidence['recovery']['source_switch'] is False
         assert rows()==evidence['before_recovery']
         evidence['guard']=native()
         assert evidence['guard']['status']=='PASS'

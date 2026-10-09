@@ -14,7 +14,7 @@ git --git-dir="$repository" archive d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7 | t
 for name in main.py product_service.py worker.py test_exact_admin_gate.py test_runtime_tooling.py test_tenant_seeding.py agent_runtime_test.py product_store.py agent_catalog_api.py; do
     cp "$application/enterprise_agent_poc/app/$name" "$taskroot/app/enterprise_agent_poc/app/$name"
 done
-for name in exact_test_admin_lifecycle.py wechat_runtime_native_successor.py run_exact_test_admin_lifecycle.py verify_runtime_release_integration.py native_parent_contract.py prepare_exact_admin_authority.py runtime_recovery_operator.py verify_native_parent_contract.py; do
+for name in exact_test_admin_lifecycle.py wechat_runtime_native_successor.py run_exact_test_admin_lifecycle.py verify_runtime_release_integration.py native_parent_contract.py prepare_exact_admin_authority.py runtime_recovery_operator.py runtime_recovery_binding.py verify_native_parent_contract.py verify_runtime_recovery_binding.py; do
     cp "$tooling/enterprise_agent_poc/scripts/$name" "$taskroot/tooling/enterprise_agent_poc/scripts/$name"
 done
 # Inherited 1e11 tests use its historical application adapters. Only the new
@@ -24,6 +24,7 @@ export PYTHONDONTWRITEBYTECODE=1
 cp "$application/enterprise_agent_poc/tests/test_runtime_test_atomicity.py" "$taskroot/app/enterprise_agent_poc/tests/test_runtime_test_atomicity.py"
 "$testpython" -B "$tooling/enterprise_agent_poc/scripts/verify_runtime_atomicity_components.py" --project "$taskroot/app/enterprise_agent_poc" --pg-bin /home/lucky/.cache/enterprise-agent-test-runtime/postgresql-16.6/bin
 scripts="$taskroot/tooling/enterprise_agent_poc/scripts"
+"$testpython" -B "$scripts/verify_runtime_recovery_binding.py"
 "$testpython" -B "$scripts/verify_runtime_release_integration.py" --application-project "$taskroot/app/enterprise_agent_poc"
 "$testpython" -B "$scripts/verify_native_parent_contract.py"
 "$testpython" -B "$scripts/verify_exact_test_admin_lifecycle.py" --current-dca-source "$inputs/.wechat-dca-successor-v1/common.py"
