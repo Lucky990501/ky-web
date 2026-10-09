@@ -73,6 +73,7 @@ def validate_ledger(data, scope, *, recovery=False, for_execution=False):
             if p['operation'] in {'publish', 'configure', 'enable'}:
                 g.need(scope['publication_authorized'], 'NATIVE_INDEPENDENT_PUBLISH_AUTHORITY')
             ticket = p
+            ticket_row = row
         elif action == 'operation_finished':
             g.need(state == 'granted' and ticket is not None and p['ticket'] == ticket['ticket']
                 and p['operation'] == ticket['operation'], 'NATIVE_ADMIN_OPERATION_COMPLETION')
@@ -86,6 +87,15 @@ def validate_ledger(data, scope, *, recovery=False, for_execution=False):
         elif action == 'operation_abandoned':
             g.need(state == 'granted' and ticket is not None and p['tickets'] == [ticket['ticket']],
                 'NATIVE_ADMIN_ABANDONED_STATE')
+            if 'recovered_admission' in p:
+                g.need(ticket['operation'] == 'runtime_test', 'NATIVE_RECOVERY_NON_RUNTIME_ADMISSION')
+                expected = a.recovery_reservation(data, scope, ticket_row, ticket)
+                g.need(p['recovered_admission'] == expected, 'NATIVE_RECOVERED_ADMISSION_ASSOCIATION')
+                if expected:
+                    g.need(expected['runtime_test_id'] not in admissions, 'NATIVE_RUNTIME_ADMISSION_DUPLICATE')
+                    admissions[expected['runtime_test_id']] = expected['task_id']
+                # Deliberately NOT operations.append: abandoning an operation
+                # grants no Publish/Enable evidence or new execution authority.
             ticket = None
         elif action == 'revoked':
             g.need(state in {'prepared', 'granted'} and ticket is None and p['restored_original_admin_count'] == 0,

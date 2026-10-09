@@ -327,7 +327,24 @@ class ExactTestAdmin:
                 if tickets:
                     need(dead_operation_proof is load_dead_operation_proof and dead_operation_proof(scope, history) == tickets,
                         'EXACT_ADMIN_OPERATION_IN_FLIGHT_RECOVERY_PROOF_REQUIRED')
-                    self._audit(conn, scope, 'operation_abandoned', history, tickets=sorted(tickets))
+                    starts = [(row, p) for row, p in history if p['action'] == 'operation_started'
+                        and p['ticket'] in tickets]
+                    need(len(tickets) == len(starts) == 1, 'EXACT_ADMIN_RECOVERY_OPERATION_AMBIGUOUS')
+                    start_row, start = starts[0]
+                    details = {}
+                    if start['operation'] == 'runtime_test':
+                        self._subject(conn, scope); self._binding(conn, scope)
+                        if self.store.is_postgres:
+                            # Stable facts across the existing revoke transaction;
+                            # the dead API cannot race a late reservation commit.
+                            conn.execute('LOCK TABLE '+','.join(RESERVATION_TABLES)+' IN SHARE MODE')
+                        data = {table: [dict(r) for r in conn.execute('SELECT * FROM '+table)]
+                            for table in RESERVATION_TABLES}
+                        details['recovered_admission'] = recovery_reservation(data, scope, start_row, start)
+                    # Fact admission, abandonment, owned membership DELETE and
+                    # revoked remain one transaction. No finish/HTTP status/PASS
+                    # is fabricated, and this adds no execution permission.
+                    self._audit(conn, scope, 'operation_abandoned', history, tickets=sorted(tickets), **details)
                     history = self._history(conn, scope)
                 removed = conn.execute('DELETE FROM platform_admins WHERE user_id=?', (scope['principal_id'],))
                 need(removed.rowcount == 1, 'EXACT_ADMIN_REVOKE_CAS_FAILED')
@@ -351,6 +368,54 @@ def outstanding(history):
         elif payload['action'] == 'operation_finished': active.discard(payload['ticket'])
         elif payload['action'] == 'operation_abandoned': active.difference_update(payload['tickets'])
     return active
+
+
+RESERVATION_TABLES = ('agent_template_tests', 'tasks', 'task_agent_contexts',
+    'agent_execution_contexts', 'tenant_agent_instances', 'run_traces', 'conversations',
+    'conversation_agent_contexts', 'conversation_owners', 'task_results', 'messages',
+    'credit_transactions')
+
+
+def recovery_reservation(data, scope, start_row, start):
+    """Existing committed reservation fact, never a quality/execution grant.
+
+    Shared by the protected writer and independent read-only ledger replay.
+    The caller has already checked source/scope/hash chain and dead proof.
+    Do not filter out foreign rows to make an ambiguous reservation look unique.
+    """
+    from scripts import wechat_runtime_test_lifecycle_guard as g
+    need(start['operation'] == operation(scope, start['method'], start['path'],
+        {'configuration_fingerprint': scope['fingerprint']}) == 'runtime_test',
+        'EXACT_ADMIN_RECOVERY_RUNTIME_OPERATION')
+    need(start['body_sha256'] == digest({'configuration_fingerprint': scope['fingerprint']}),
+        'EXACT_ADMIN_RECOVERY_RUNTIME_OPERATION')
+    pre = start.get('pre_test_ids')
+    need(type(pre) is list and all(type(value) is str for value in pre)
+        and len(set(pre)) == len(pre), 'EXACT_ADMIN_RECOVERY_PRE_TEST_IDS')
+    tests = [r for r in data['agent_template_tests'] if r['test_type'] == 'runtime']
+    need(all(sum(r['id'] == identity and r['agent_template_version_id'] == scope['revision_id']
+        for r in tests) == 1 for identity in pre), 'EXACT_ADMIN_RECOVERY_PRE_TEST_IDS')
+    extra = [r for r in tests if r['id'] not in pre]
+    need(len(extra) <= 1, 'EXACT_ADMIN_RUNTIME_RESERVATION_COUNT')
+    started = utc(timestamp(start_row['created_at']))
+    need(utc(scope['issued_at']) <= started < utc(scope['expires_at']),
+        'EXACT_ADMIN_RECOVERY_START_OUTSIDE_LEASE')
+    if not extra:
+        return {}  # No committed write to admit; revoke still restores authority.
+    test = extra[0]
+    created = utc(timestamp(test['created_at']))
+    need(started <= created < utc(scope['expires_at']) and created <= datetime.now(timezone.utc),
+        'EXACT_ADMIN_RECOVERY_RESERVATION_OUTSIDE_LEASE')
+    # Reuse the existing formal Task/Run/context/status/result validator. In
+    # particular a failed row is not accepted merely because status=failed.
+    g.persisted_record(data, dict(tenant_id=scope['tenant_id'], actor_id=scope['principal_id'],
+        agent_id=scope['agent_id'], revision_id=scope['revision_id'], fingerprint=scope['fingerprint'],
+        model_config_id='codex-deepseek-v4-pro-high'), test)
+    task = g.one(data, 'tasks', 'id', test['task_id'])
+    mapping = g.one(data, 'task_agent_contexts', 'task_id', task['id'])
+    return {'runtime_test_id': test['id'], 'task_id': task['id'], 'task_run_id': task['run_id'],
+        'context_id': mapping['context_id'], 'reservation_created_at': timestamp(test['created_at']),
+        'operation_ticket': start['ticket'], 'pre_test_ids_sha256': digest(pre)}
 
 
 def load_dead_operation_proof(scope, history):
