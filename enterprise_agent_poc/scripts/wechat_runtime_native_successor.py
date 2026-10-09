@@ -191,8 +191,12 @@ def validate_snapshot(data, *, scope, runtime_scope, anchors, parent_pins, prede
                 g.need(task['id'] in admissions.values(), 'NATIVE_RUNTIME_CONTEXT_ADMISSION')
             elif policy.get('eligibility_mode') == 'SKILL_ONLY_TEST_QUALIFIED':
                 from scripts.wechat_historical_prepare import HistoricalPrepare
-                historical_prepare = historical_prepare or HistoricalPrepare.load()
-                g.need(type(historical_prepare) is HistoricalPrepare, 'NATIVE_HISTORICAL_PREPARE_VERIFIER')
+                from scripts.wechat_historical_actions import HistoricalActions
+                # Native entry always loads the bounded aggregate-provenance
+                # inventory. The explicit old adapter remains for inherited
+                # isolated replay only; no operator/request selects it.
+                historical_prepare = historical_prepare or HistoricalActions.load()
+                g.need(type(historical_prepare) in (HistoricalActions, HistoricalPrepare), 'NATIVE_HISTORICAL_PREPARE_VERIFIER')
                 historical.append(historical_prepare.verify(data, ctx, task))
                 is_historical = True
             else:
@@ -211,7 +215,8 @@ def validate_snapshot(data, *, scope, runtime_scope, anchors, parent_pins, prede
     return {'status': 'PASS', 'contract': VERSION, 'admin_state': state,
         'active_test_platform_admin': len(data['platform_admins']), 'runtime_tests': len(records),
         'passed_runtime_tests': sum(quality.values()), 'predecessor': result, 'db_mutations': 0,
-        'historical_prepares': historical}
+        'historical_prepares': [r for r in historical if 'PREPARE' in r['classification']],
+        'historical_actions': historical}
 
 
 PARENT_ROOT = Path('/etc/enterprise-agent-test-wechat-persistent-config-v1')
@@ -248,7 +253,8 @@ class NativeSuccessor:
         policy, policy_sha = native_json(a.ROOT/'native-policy.v1.json')
         g.need(policy_sha == approval['policy_sha256'], 'NATIVE_SUCCESSOR_POLICY_PIN')
         code = {'scripts/wechat_runtime_native_successor.py', 'scripts/wechat_runtime_test_lifecycle_guard.py',
-            'scripts/receipt_row_canonicalization.py', 'scripts/wechat_historical_prepare.py'}
+            'scripts/receipt_row_canonicalization.py', 'scripts/wechat_historical_prepare.py',
+            'scripts/wechat_historical_actions.py'}
         g.need(set(approval['code_sha256']) == code, 'NATIVE_SUCCESSOR_CODE_SET')
         for relative, expected in approval['code_sha256'].items():
             path = a.PROJECT/relative
