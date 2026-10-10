@@ -15,7 +15,7 @@ import tempfile
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.bundled_skills import forbidden_path, secret_content, validate_git_bundle
+from app.bundled_skills import deterministic_zip, forbidden_path, safe_path, secret_content, validate_git_bundle
 from scripts.release_manifest import validate_manifest_contract
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +25,8 @@ ALLOWED = (
     "enterprise_agent_poc/migrations/",
     "enterprise_agent_poc/scripts/",
     "enterprise_agent_poc/skill_packages/",
+    "enterprise_agent_poc/integrations/",
+    "enterprise_agent_poc/skill_sources/",
     "enterprise_agent_poc/deploy/",
     "enterprise_agent_poc/Dockerfile",
     "enterprise_agent_poc/docker-compose.yml",
@@ -41,6 +43,13 @@ STATIC_VERSION_PLACEHOLDERS = {
     "stylesheet": b"__CSS_SHA256_V1_",
 }
 STATIC_VERSION_LENGTH = 16
+WECHAT_INTEGRATIONS = (
+    "artifacts/wechat-html-draft-1.0.0.zip", "controlled-skill-action.v1.json",
+    "skill-dispatch.v1.json", "skill-only-test-qualification.v1.json",
+    "wechat-html-draft.dependencies.v1.json", "wechat-html-draft.original.v1.json",
+    "wechat-html-draft.revision.v1.json", "wechat-python-runtime.v1.json",
+    "wechat-python311-linux.v1.lock.json", "wechat-python311-linux.v1.requirements.txt",
+)
 
 
 def git(*args: str) -> str:
@@ -58,7 +67,69 @@ def _git_blob(commit: str, path: str) -> bytes:
     try:
         return subprocess.check_output(["git", "-C", str(REPO), "show", f"{commit}:{path}"])
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"发布静态文件缺失：{path}") from exc
+        raise RuntimeError(f"发布文件缺失：{path}") from exc
+
+
+def _wechat_resource_contract(commit: str, selected: list[str]) -> dict:
+    """Package inputs only; this does not authorize/install/enable Skill runtime."""
+    prefix = "enterprise_agent_poc/"
+    if not any(name.startswith((prefix + "integrations/", prefix + "skill_sources/"))
+               or name == prefix + "app/wechat_skill.py" for name in selected):
+        return {}  # Historical releases without this integration stay buildable.
+    required = {prefix + "integrations/" + name for name in WECHAT_INTEGRATIONS}
+    required.update(prefix + "scripts/" + name for name in (
+        "verify_wechat_skill.py", "lock_wechat_python_runtime.py", "wechat_revision_python_runtime.py"))
+    if required - set(selected):
+        raise RuntimeError(f"微信 Skill 发布资源缺失：{sorted(required - set(selected))}")
+    blob = lambda path: _git_blob(commit, prefix + path)
+    digest = lambda raw: hashlib.sha256(raw).hexdigest()
+    revision = json.loads(blob("integrations/wechat-html-draft.revision.v1.json"))
+    source_root = "skill_sources/wechat-html-draft/1.0.0"
+    if (revision["slug"], revision["version"], revision["source_root"]) != ("wechat-html-draft", "1.0.0", source_root):
+        raise RuntimeError("微信 Skill 发布 Revision 不匹配。")
+    files = {}
+    for entry in revision["files"]:
+        name = safe_path(entry["path"])
+        path = source_root + "/" + name
+        if name in files or prefix + path not in selected:
+            raise RuntimeError("微信 Skill 发布 Source 清单不完整。")
+        raw = blob(path)
+        if (digest(raw) != entry["sha256"] or entry["git_mode"] != "100644" or b"\r" in raw
+                or git("ls-tree", commit, "--", prefix + path).split()[0] != entry["git_mode"]):
+            raise RuntimeError(f"微信 Skill 发布 Source 身份不匹配：{path}")
+        files[name] = (raw, entry["git_mode"])
+    expected = {prefix + source_root + "/" + name for name in files}
+    actual = {name for name in selected if name.startswith(prefix + source_root + "/")}
+    if expected != actual or not {"SKILL.md", "scripts/wechat_draft.py", "scripts/requirements.txt"} <= files.keys():
+        raise RuntimeError("微信 Skill 发布 Source 清单不匹配。")
+    artifact = blob("integrations/artifacts/wechat-html-draft-1.0.0.zip")
+    if digest(artifact) != revision["artifact_sha256"] or artifact != deterministic_zip("wechat-html-draft", "1.0.0", files):
+        raise RuntimeError("微信 Skill 发布 ZIP 身份不匹配。")
+    dependencies_raw = blob("integrations/wechat-html-draft.dependencies.v1.json")
+    if digest(dependencies_raw) != revision["dependencies_sha256"]:
+        raise RuntimeError("微信 Skill 发布依赖定义身份不匹配。")
+    dependencies = json.loads(dependencies_raw)
+    runtime = json.loads(blob("integrations/wechat-python-runtime.v1.json"))
+    lock_raw = blob("integrations/wechat-python311-linux.v1.lock.json")
+    lock = json.loads(lock_raw)
+    requirements = blob("integrations/wechat-python311-linux.v1.requirements.txt")
+    if (runtime["artifact_file"] != "integrations/artifacts/wechat-html-draft-1.0.0.zip"
+            or runtime["artifact_sha256"] != digest(artifact)
+            or runtime["lock_file"] != "integrations/wechat-python311-linux.v1.lock.json"
+            or runtime["lock_sha256"] != digest(lock_raw)
+            or lock["requirements_file"] != "wechat-python311-linux.v1.requirements.txt"
+            or lock["requirements_sha256"] != digest(requirements)
+            or lock["input_requirements_sha256"] != digest(files["scripts/requirements.txt"][0])
+            or runtime["target"] != lock["target"]):
+        raise RuntimeError("微信 Skill 发布 Python 依赖锁身份不匹配。")
+    normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+    packages = {normalize(item["package"]): item["version"] for item in lock["packages"]}
+    if len(packages) != len(lock["packages"]) or packages != {normalize(k): v for k, v in dependencies["packages"].items()}:
+        raise RuntimeError("微信 Skill 发布 Python 依赖闭包不匹配。")
+    identities = {name: digest(_git_blob(commit, name)) for name in sorted(required | expected)}
+    return {"resource_sha256": identities, "source_file_count": len(files),
+            "artifact_sha256": digest(artifact), "lock_sha256": digest(lock_raw),
+            "dependency_package_count": len(packages), "runtime_activation": "NOT_AUTHORIZED"}
 
 
 def _static_asset_contract(commit: str) -> dict:
@@ -148,6 +219,7 @@ def preflight(commit: str) -> list[str]:
         if secret_content(subprocess.check_output(["git", "-C", str(REPO), "cat-file", "blob", tree[name][2]])):
             raise RuntimeError(f"发布文件含禁止的秘密材料：{name}")
     _static_asset_contract(commit)
+    _wechat_resource_contract(commit, selected)
     return selected
 
 
@@ -173,6 +245,7 @@ def build(commit: str, output: Path) -> dict:
         "selected_files": selected,
         "build_platform": f"{platform.system()}-{platform.machine()}",
         "static_assets": static_contract["identities"],
+        "skill_resources": _wechat_resource_contract(commit, selected),
     }
 
 

@@ -1,0 +1,155 @@
+{
+  "test_mode": "ISOLATED_BROWSER_AND_ADAPTER_FIXTURES",
+  "base_source": "28e061a114118a27609330125c756e193d3248a6",
+  "checks": [
+    {
+      "name": "UI-05 Escape closes and restores trigger",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:35.524Z"
+    },
+    {
+      "name": "UI-05 Tab/Shift-Tab trap and inert background",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:35.786Z"
+    },
+    {
+      "name": "UI-05 mask closes without click-through and preserves prior inert state",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:35.813Z"
+    },
+    {
+      "name": "adjacent password/help dialog Escape and focus unchanged",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:35.888Z"
+    },
+    {
+      "name": "profile 375px and normal form save use original API",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:35.991Z"
+    },
+    {
+      "name": "WX-05 persisted reply preview entry and backend-pending button",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:36.220Z"
+    },
+    {
+      "name": "WX-05 HTML XSS stripped and sandbox cannot access host",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:36.359Z"
+    },
+    {
+      "name": "WX-05 malformed/namespace/CSS/URL XSS corpus",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:36.362Z"
+    },
+    {
+      "name": "WX-05 preview and fixed layout 1440x1000",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:36.470Z"
+    },
+    {
+      "name": "WX-05 preview and fixed layout 1920x1080",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:36.597Z"
+    },
+    {
+      "name": "WX-05 preview and fixed layout 375x812",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:36.749Z"
+    },
+    {
+      "name": "WX-05 preview and fixed layout 812x375",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:36.852Z"
+    },
+    {
+      "name": "long article scrolls inside sandbox without growing modal",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:37.106Z"
+    },
+    {
+      "name": "metadata 404 does not fake publication or run controls",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:37.116Z"
+    },
+    {
+      "name": "missing config and unverified connection are explicit",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:37.634Z"
+    },
+    {
+      "name": "mock permission denied does not expose submit capability",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:37.649Z"
+    },
+    {
+      "name": "mock confirmation cancel and Escape cause zero draft requests",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:37.762Z"
+    },
+    {
+      "name": "mock duplicate submit locked; confirmed receipt only succeeds once",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:37.843Z"
+    },
+    {
+      "name": "mock failure is sanitized and manual retry requires confirmation",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:37.982Z"
+    },
+    {
+      "name": "mock unconfirmed receipt cannot show success",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:38.056Z"
+    },
+    {
+      "name": "mock wrong-message receipt cannot show success",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:38.122Z"
+    },
+    {
+      "name": "mock unsafe-id receipt cannot show success",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:38.200Z"
+    },
+    {
+      "name": "mock API403 locks action and refreshed metadata404 prevents submit",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:38.303Z"
+    },
+    {
+      "name": "late mock draft callback cannot mutate another view",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:38.490Z"
+    },
+    {
+      "name": "completed SSE reply mounts real-content entry without extra action request",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:38.761Z"
+    },
+    {
+      "name": "all transport is isolated; no credentials, permissions writes or real calls",
+      "status": "PASS",
+      "observed_at": "2026-10-10T04:20:38.764Z"
+    }
+  ],
+  "external_calls": 0,
+  "provider_calls": 0,
+  "wechat_calls": 0,
+  "real_create_draft": false,
+  "completed_at": "2026-10-10T04:20:38.764Z",
+  "total": 26,
+  "failed": 0,
+  "fixture_mutations": [
+    {
+      "method": "PUT",
+      "path": "/api/v1/me"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/agents/wechat-official-account-writing/runs"
+    }
+  ],
+  "blocked_font_requests": 7,
+  "result": "PASS_AUTOMATED_ONLY"
+}

@@ -70,7 +70,7 @@ function shell(initialPage = 'workspace') {
   document.querySelectorAll('[data-page]').forEach(x => x.onclick = () => {if(x.closest('.mobile-drawer'))setDrawer(false);navigate(x.dataset.page);});
   document.querySelector('#top-help').onclick = showHelpDialog;
   bindAccountMenu();
-  syncAvatarViews(); render(initialPage); refreshIcons();
+  syncAvatarViews(); const rendered=render(initialPage); refreshIcons(); return rendered;
 }
 
 const header = (title, description, iconName, className = '') => `<header class="page-header ${className}"><div class="title-row">${icon(iconName,32)}<div><h1>${title === '企业配置' ? '企业设置' : title}</h1><p>${description}</p></div></div></header>`;
@@ -610,6 +610,7 @@ function completeStreamingMessage(node,state,sourcePrompt,main){
     const result=node.querySelector?.('[data-stream-document-result]');if(result)result.innerHTML=documentResultSlotHtml(state.assistantMessageId);
   }else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
   if(state.assistantMessageId&&node.dataset)node.dataset.assistantMessageId=state.assistantMessageId;
+  mountWechatArticle(main,node,finalResponse,state.assistantMessageId);
   if(state.generation&&!node.querySelector?.('.message-generation'))node.insertAdjacentHTML?.('beforeend',messageGenerationHtml(state.generation));
   node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);state.completedAt??=Date.now();renderThinkingSummary(node,state);stopWatchingStreamingFollow(state);
 }
@@ -657,6 +658,12 @@ async function agentWorkspaceV2(main, agentId) {
     composer.insertAdjacentHTML('afterbegin',chatImageComposerFields());
     composer.querySelector(':scope > div:last-of-type').insertAdjacentHTML('afterbegin',chatImageComposerButton());
     bindChatImageComposer(main);
+  }
+  main._wechatArticleContext={agent,route:agentId};
+  if(agent.slug==='wechat-official-account-writing')for(const item of history){
+    if(item.role!=='assistant')continue;
+    const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===item.id);
+    if(article)mountWechatArticle(main,article,item.content,item.id);
   }
   renderWechatAgentSetupHint(main,agent);bindConversationRail(main,agentId); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
   if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
@@ -875,19 +882,65 @@ async function renderWechatAccountSettings(main){
 async function renderWechatAgentSetupHint(main,agent){
   if(agent?.slug!=='wechat-official-account-writing')return;
   const composer=main.querySelector('#composer');if(!composer?.insertAdjacentHTML)return;
-  try{const state=await api(wechatAccountPath);if(document.querySelector('#main')!==main||main.querySelector('#composer')!==composer||state.app_secret_configured)return;
-    composer.insertAdjacentHTML('beforeend','<p class="wechat-config-hint" role="status">请先在个人中心配置微信公众号，然后再创建草稿。<button class="button secondary" type="button" data-go="profile">去配置</button></p>');bindNavigation();
+  try{const state=await api(wechatAccountPath);if(document.querySelector('#main')!==main||main.querySelector('#composer')!==composer||state.app_secret_configured&&state.verification_status==='connected')return;
+    const hint=state.app_secret_configured?'公众号尚未通过真实连接验证，请先到个人中心测试连接。':'请先在个人中心配置微信公众号，然后再创建草稿。';
+    composer.insertAdjacentHTML('beforeend',`<p class="wechat-config-hint" role="status">${hint}<button class="button secondary" type="button" data-go="profile">去配置</button></p>`);bindNavigation();
   }catch{}
+}
+function mountWechatArticle(main,article,content,messageId){
+  const context=main?._wechatArticleContext;
+  if(!context||context.agent.slug!=='wechat-official-account-writing'||!article)return;
+  window.WorkbenchWechatArticle?.mount({main,article,content,messageId,...context,request:api,markdown:markdownHtml,modal:bindModalDialog,
+    readAccount:()=>main._wechatArticleAccountPromise ||= api(wechatAccountPath)});
 }
 function openPasswordEditor(main){
   app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="password-editor" role="presentation"><form class="profile-editor" aria-labelledby="password-editor-title"><button type="button" class="dialog-close" aria-label="关闭修改密码">${icon('x')}</button><h2 id="password-editor-title">修改密码</h2><p>修改后，下次登录请使用新密码。</p><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required minlength="8"></label><label>新密码<input name="new_password" type="password" autocomplete="new-password" required minlength="8"></label><label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" required minlength="8"></label><p class="form-error" role="alert"></p><div class="editor-actions"><button type="button" class="button secondary" data-close-editor>取消</button><button class="button primary" type="submit">保存新密码</button></div></form></div>`);
   const dialog=document.querySelector('#password-editor'),form=dialog.querySelector('form'),close=bindModalDialog(dialog);dialog.querySelector('[data-close-editor]').onclick=close;
   form.onsubmit=async event=>{event.preventDefault();const data=Object.fromEntries(new FormData(form)),error=form.querySelector('.form-error'),submit=form.querySelector('[type="submit"]');error.textContent='';if(data.new_password!==data.confirm_password){error.textContent='两次输入的新密码不一致。';return;}submit.disabled=true;try{const result=await api('/api/v1/me/password',{method:'PUT',body:JSON.stringify({current_password:data.current_password,new_password:data.new_password})});close();alert(result.user_message);me=null;activeConversationId=null;login();}catch(err){error.textContent=err.message;submit.disabled=false;}};refreshIcons();
 }
-function openProfileEditor(){app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="profile-editor" role="presentation"><form class="profile-editor" id="profile-form" aria-labelledby="profile-editor-title"><button type="button" class="dialog-close" aria-label="关闭编辑资料">${icon('x')}</button><h2 id="profile-editor-title">编辑资料</h2><p>可更新头像、姓名和邮箱；所属企业与角色保持只读。</p><label class="avatar-field"><span id="avatar-preview">${avatarMarkup('editor-avatar','头像预览')}</span><span><b>头像</b><small>PNG、JPG、WebP，最大 2MB</small><input id="avatar-input" type="file" accept="image/png,image/jpeg,image/webp"></span></label><label>姓名<input name="display_name" required maxlength="80" value="${escapeHtml(me.display_name)}"></label><label>邮箱<input name="email" type="email" required maxlength="254" value="${escapeHtml(me.email)}"></label><p class="form-error" role="alert"></p><div class="editor-actions"><button type="button" class="button secondary" data-close-editor>取消</button><button class="button primary" type="submit">${icon('save')}保存资料</button></div></form></div>`);const dialog=document.querySelector('#profile-editor'),form=dialog.querySelector('#profile-form'),input=dialog.querySelector('#avatar-input');let avatarDataUrl=null;const close=()=>dialog.remove();dialog.onclick=e=>{if(e.target===dialog)close();};dialog.querySelector('.dialog-close').onclick=close;dialog.querySelector('[data-close-editor]').onclick=close;input.onchange=()=>{const file=input.files?.[0],error=form.querySelector('.form-error');if(!file)return;if(file.size>2*1024*1024||!['image/png','image/jpeg','image/webp'].includes(file.type)){error.textContent='请选择不超过 2MB 的 PNG、JPG 或 WebP 图片。';input.value='';return;}const reader=new FileReader();reader.onload=()=>{avatarDataUrl=String(reader.result);dialog.querySelector('#avatar-preview').innerHTML=`<img class="editor-avatar avatar-image" src="${avatarDataUrl}" alt="新头像预览">`;};reader.readAsDataURL(file);};form.onsubmit=async event=>{event.preventDefault();const submit=form.querySelector('[type="submit"]'),error=form.querySelector('.form-error');submit.disabled=true;error.textContent='';try{const data=Object.fromEntries(new FormData(form));if(avatarDataUrl)data.avatar_data_url=avatarDataUrl;me=await api('/api/v1/me',{method:'PUT',body:JSON.stringify(data)});close();shell('profile');}catch(err){error.textContent=err.message||'保存失败，请稍后重试。';submit.disabled=false;}};refreshIcons();}
+function openProfileEditor(){
+  if(document.querySelector('#profile-editor'))return;
+  app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="profile-editor" role="presentation"><form class="profile-editor" id="profile-form" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title"><button type="button" class="dialog-close" aria-label="关闭编辑资料">${icon('x')}</button><h2 id="profile-editor-title">编辑资料</h2><p>可更新头像、姓名和邮箱；所属企业与角色保持只读。</p><label class="avatar-field"><span id="avatar-preview">${avatarMarkup('editor-avatar','头像预览')}</span><span><b>头像</b><small>PNG、JPG、WebP，最大 2MB</small><input id="avatar-input" type="file" accept="image/png,image/jpeg,image/webp"></span></label><label>姓名<input name="display_name" required maxlength="80" value="${escapeHtml(me.display_name)}"></label><label>邮箱<input name="email" type="email" required maxlength="254" value="${escapeHtml(me.email)}"></label><p class="form-error" role="alert"></p><div class="editor-actions"><button type="button" class="button secondary" data-close-editor>取消</button><button class="button primary" type="submit">${icon('save')}保存资料</button></div></form></div>`);
+  const dialog=document.querySelector('#profile-editor'),form=dialog.querySelector('#profile-form'),input=dialog.querySelector('#avatar-input'),close=bindModalDialog(dialog);
+  let avatarDataUrl=null;
+  dialog.querySelector('[data-close-editor]').onclick=close;
+  input.onchange=()=>{const file=input.files?.[0],error=form.querySelector('.form-error');if(!file)return;if(file.size>2*1024*1024||!['image/png','image/jpeg','image/webp'].includes(file.type)){error.textContent='请选择不超过 2MB 的 PNG、JPG 或 WebP 图片。';input.value='';return;}const reader=new FileReader();reader.onload=()=>{if(!dialog.isConnected)return;avatarDataUrl=String(reader.result);dialog.querySelector('#avatar-preview').innerHTML=`<img class="editor-avatar avatar-image" src="${avatarDataUrl}" alt="新头像预览">`;};reader.readAsDataURL(file);};
+  form.onsubmit=async event=>{event.preventDefault();const submit=form.querySelector('[type="submit"]'),error=form.querySelector('.form-error');submit.disabled=true;error.textContent='';try{const data=Object.fromEntries(new FormData(form));if(avatarDataUrl)data.avatar_data_url=avatarDataUrl;me=await api('/api/v1/me',{method:'PUT',body:JSON.stringify(data)});if(!dialog.isConnected)return;close();await shell('profile');const currentMain=document.querySelector('#main');if(currentMain?.dataset.page==='profile')currentMain.querySelector('#edit-profile')?.focus();}catch(err){if(!dialog.isConnected)return;error.textContent=err.message||'保存失败，请稍后重试。';submit.disabled=false;}};refreshIcons();
+}
 function sideCredit(balance){const el=document.querySelector('#side-credit');if(!el)return;el.innerHTML=`<div class="side-billing">${icon('badge-cent')}<span>积分余额</span></div><div class="side-meter"><i style="--p:${Math.min(balance/10,100)}%"></i><span>${balance} / 1,000 <small>积分</small></span></div>`;refreshIcons();}
 function bindAccountMenu(){const wrap=document.querySelector('#account-menu-wrap'),trigger=document.querySelector('#account-trigger'),menu=document.querySelector('#account-dropdown');let pinned=false,closeTimer;const open=()=>{clearTimeout(closeTimer);menu.hidden=false;trigger.setAttribute('aria-expanded','true');};const close=()=>{if(pinned)return;menu.hidden=true;trigger.setAttribute('aria-expanded','false');};const scheduleClose=()=>{clearTimeout(closeTimer);closeTimer=setTimeout(close,180);};wrap.onmouseenter=open;wrap.onmouseleave=scheduleClose;trigger.onclick=()=>{pinned=!pinned;if(pinned)open();else {menu.hidden=true;trigger.setAttribute('aria-expanded','false');}};document.addEventListener('click',event=>{if(!wrap.contains(event.target)){pinned=false;menu.hidden=true;trigger.setAttribute('aria-expanded','false');}});document.querySelectorAll('[data-account-action]').forEach(item=>item.onclick=async()=>{const action=item.dataset.accountAction;pinned=false;menu.hidden=true;trigger.setAttribute('aria-expanded','false');if(action==='profile')return navigate('profile');if(action==='security'){await navigate('profile');document.querySelector('#security')?.scrollIntoView({behavior:'smooth',block:'start'});return;}if(action==='help')return showHelpDialog();if(action==='logout')return logout();});}
-function bindModalDialog(container,trigger=document.activeElement){const requestedOrigin=trigger instanceof HTMLElement?trigger:document.activeElement,hiddenParent=requestedOrigin instanceof HTMLElement?requestedOrigin.closest('[hidden]'):null,origin=hiddenParent?.previousElementSibling instanceof HTMLElement?hiddenParent.previousElementSibling:requestedOrigin;const focusableSelector='a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';const close=()=>{if(!container.isConnected)return;document.removeEventListener('keydown',onKeydown);container.remove();if(!document.querySelector('.dialog-backdrop,.generation-viewer'))document.body.classList.remove('dialog-open');if(origin instanceof HTMLElement&&origin.isConnected&&!origin.closest('[hidden]'))origin.focus();};const onKeydown=event=>{if(event.key==='Escape'){event.preventDefault();close();return;}if(event.key!=='Tab')return;const focusable=[...container.querySelectorAll(focusableSelector)].filter(node=>!node.hidden&&node.getClientRects().length);if(!focusable.length){event.preventDefault();return;}const first=focusable[0],last=focusable.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}};container.onclick=event=>{if(event.target===container)close();};container.querySelector('.dialog-close')?.addEventListener('click',close);document.addEventListener('keydown',onKeydown);document.body.classList.add('dialog-open');container.querySelector('.dialog-close')?.focus();return close;}
+function bindModalDialog(container,trigger=document.activeElement){
+  const requestedOrigin=trigger instanceof HTMLElement?trigger:document.activeElement,hiddenParent=requestedOrigin instanceof HTMLElement?requestedOrigin.closest('[hidden]'):null,origin=hiddenParent?.previousElementSibling instanceof HTMLElement?hiddenParent.previousElementSibling:requestedOrigin;
+  const focusableSelector='a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),iframe,summary,[tabindex]:not([tabindex="-1"])';
+  const inerted=[];let closed=false;
+  for(let branch=container;branch.parentElement;branch=branch.parentElement){
+    for(const sibling of branch.parentElement.children){if(sibling!==branch&&sibling instanceof HTMLElement){inerted.push([sibling,sibling.inert]);sibling.inert=true;}}
+    if(branch.parentElement===document.body)break;
+  }
+  const focusables=()=>[...container.querySelectorAll(focusableSelector)].filter(node=>!node.hidden&&!node.closest('[inert]')&&node.getClientRects().length);
+  const topmost=()=>[...document.querySelectorAll('.dialog-backdrop,.generation-viewer')].at(-1)===container;
+  const close=()=>{
+    if(closed)return;closed=true;
+    document.removeEventListener('keydown',onKeydown);document.removeEventListener('focusin',onFocus);
+    container.remove();for(const [node,wasInert]of inerted)node.inert=wasInert;
+    if(!document.querySelector('.dialog-backdrop,.generation-viewer'))document.body.classList.remove('dialog-open');
+    if(origin instanceof HTMLElement&&origin.isConnected&&!origin.closest('[hidden],[inert]'))origin.focus();
+  };
+  const onKeydown=event=>{
+    if(!container.isConnected||!topmost())return;
+    if(event.key==='Escape'){event.preventDefault();close();return;}
+    if(event.key!=='Tab')return;
+    const focusable=focusables(),first=focusable[0],last=focusable.at(-1);
+    if(!first){event.preventDefault();return;}
+    if(!container.contains(document.activeElement)){event.preventDefault();(event.shiftKey?last:first).focus();}
+    else if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
+    else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
+  };
+  const onFocus=event=>{if(container.isConnected&&topmost()&&!container.contains(event.target))focusables()[0]?.focus();};
+  container.onclick=event=>{if(event.target===container&&topmost())close();};
+  container.querySelector('.dialog-close')?.addEventListener('click',close);
+  document.addEventListener('keydown',onKeydown);document.addEventListener('focusin',onFocus);document.body.classList.add('dialog-open');focusables()[0]?.focus();return close;
+}
 function showHelpDialog(){const current=document.querySelector('#help-dialog');if(current){current.querySelector('.dialog-close')?.focus();return;}app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="help-dialog" role="presentation"><section class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title"><button type="button" class="dialog-close" aria-label="关闭帮助弹窗">${icon('x')}</button>${icon('circle-help',30)}<h2 id="help-title">帮助与反馈</h2><p>如在使用过程中遇到问题，请联系企业管理员或平台服务人员。</p></section></div>`);const dialog=document.querySelector('#help-dialog');bindModalDialog(dialog);refreshIcons();}
 function bindGenerationViewers(){document.querySelectorAll('[data-generation-link]:not([data-viewer-bound])').forEach(link=>{link.dataset.viewerBound='true';link.addEventListener('click',event=>{event.preventDefault();if(link.classList.contains('media-failed'))return;openGenerationViewer(link.href,link.querySelector('img')?.alt||'生成图片',link);});});document.querySelectorAll('.generation-result [onclick]:not([data-viewer-bound])').forEach(button=>{button.dataset.viewerBound='true';button.addEventListener('click',event=>{event.preventDefault();event.stopImmediatePropagation();const result=button.closest('.generation-result'),link=result?.querySelector('.media-thumb');if(link&&!link.classList.contains('media-failed'))openGenerationViewer(link.href,link.querySelector('img')?.alt||'生成图片',button);},{capture:true});});}
 function openGenerationViewer(source,alt,trigger=null){if(document.querySelector('#generation-viewer'))return;const origin=trigger||document.activeElement;app.insertAdjacentHTML('beforeend',`<div class="generation-viewer" id="generation-viewer" role="presentation"><section class="generation-viewer-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(alt)}大图预览"><header><b>${icon('image',18)}生成图片</b><div><a href="${escapeHtml(source)}" download class="viewer-download">${icon('download',18)}下载</a><button type="button" class="dialog-close" aria-label="关闭大图预览">${icon('x')}</button></div></header><div class="viewer-canvas"><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}"></div></section></div>`);const viewer=document.querySelector('#generation-viewer');bindModalDialog(viewer,origin);refreshIcons();}
