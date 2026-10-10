@@ -343,6 +343,9 @@ from app.wechat_account_api import wechat_account_router
 app.include_router(wechat_account_router(
     WechatAccountService(product_store,settings.environment,backend_from_settings(settings),
                          network_allowed=settings.wechat_network_allowed),current_user))
+from app.wechat_prepare_reader import WechatPrepareReader
+from app.wechat_draft_api import wechat_draft_router
+app.include_router(wechat_draft_router(WechatPrepareReader(store, settings.data_dir), current_user))
 
 
 @app.exception_handler(AgentCatalogError)
