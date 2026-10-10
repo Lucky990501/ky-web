@@ -68,7 +68,12 @@ class Selector:
         s = self.b.state()
         if s is None:
             return None
-        need(set(s) == {'contract', 'policy_sha256', 'operation_id', 'events'}, 'SELECTOR_STATE_SHAPE')
+        fields = {'contract', 'policy_sha256', 'operation_id', 'events'}
+        trial = 'trial_approval_sha256' in s
+        need(set(s) == fields | ({'trial_approval_sha256'} if trial else set()), 'SELECTOR_STATE_SHAPE')
+        if trial:
+            need(isinstance(s['trial_approval_sha256'], str) and re.fullmatch('[a-f0-9]{64}',s['trial_approval_sha256']),
+                 'SELECTOR_TRIAL_STATE_BINDING')
         need(s['contract'] == VERSION and s['policy_sha256'] == self.b.policy_sha
              and s['operation_id'] == self.b.policy['operation_id'], 'SELECTOR_STATE_BINDING')
         need(isinstance(s['events'], list) and 0 < len(s['events']) < 512, 'SELECTOR_STATE_HISTORY')
@@ -78,12 +83,20 @@ class Selector:
         edges = {None: {'PREPARED'}, 'PREPARED': {'QUIESCING'},
             'QUIESCING': {'QUIESCED','RECOVERING'}, 'QUIESCED': {'SWITCHING','RECOVERING'},
             'SWITCHING': {'SELECTED','RECOVERING'}, 'SELECTED': {'COMPLETE','RECOVERING'},
-            'COMPLETE': {'RECOVERING'}, 'RECOVERING': {'RECOVERING','RECOVERED'}, 'RECOVERED': set()}
+            'COMPLETE': {'RECOVERING','TRIAL_CLOSED'}, 'RECOVERING': {'RECOVERING','RECOVERED'},
+            'RECOVERED': {'TRIAL_CLOSED'}, 'TRIAL_CLOSED': {'FINAL_AUTHORIZED'},
+            'FINAL_AUTHORIZED': {'SWITCHING','RECOVERING'}}
+        stage = 'trial' if trial else 'activation'
         for i, event in enumerate(s['events']):
-            need(set(event) == {'sequence', 'previous', 'phase', 'direction', 'baseline', 'at'}
+            need(set(event) == {'sequence', 'previous', 'phase', 'direction', 'baseline', 'at'} | ({'stage'} if trial else set())
                  and type(event['sequence']) is int and event['sequence'] == i and event['previous'] == previous
                  and event['phase'] in edges.get(last, set())
                  and event['direction'] in {'d8a','28e'}, 'SELECTOR_STATE_EVENT')
+            if event['phase'] == 'FINAL_AUTHORIZED':
+                need(trial and stage == 'trial', 'SELECTOR_STAGE_TRANSITION')
+                stage = 'activation'
+            if trial: need(event['stage'] == stage, 'SELECTOR_STAGE_TRANSITION')
+            if event['phase'] == 'TRIAL_CLOSED': need(trial and stage == 'trial', 'SELECTOR_STAGE_TRANSITION')
             if event['phase'] in {'PREPARED','QUIESCING'}:
                 need(event['baseline'] is None and event['direction']=='d8a', 'SELECTOR_STATE_BASELINE')
             else:
@@ -102,12 +115,20 @@ class Selector:
         if s is None:
             s = dict(contract=VERSION, policy_sha256=self.b.policy_sha,
                      operation_id=self.b.policy['operation_id'], events=[])
+            if getattr(self.b,'stage','activation') == 'trial':
+                s['trial_approval_sha256'] = self.b.trial_sha
         events = list(s['events'])
         events.append(dict(sequence=len(events), previous=sha(canonical(events[-1])) if events else None,
             phase=phase, direction=direction, baseline=baseline, at=datetime.now(timezone.utc).isoformat()))
+        if 'trial_approval_sha256' in s: events[-1]['stage'] = self.b.stage
         s = dict(s, events=events)
         self.b.save(s)
         return s
+
+    def authorize(self, action, state):
+        # Native backend revalidates time/scope/fence at EACH boundary. Explicit
+        # component doubles implement the same hook without granting authority.
+        self.b.authorize(action, state)
 
     def versions(self):
         old = self.b.version('d8a')
@@ -122,6 +143,7 @@ class Selector:
         with self.b.lock():
             self.b.validate()
             s = self.load()
+            self.authorize('prepare', s)
             if s is not None:
                 self.versions()
                 return s
@@ -131,6 +153,7 @@ class Selector:
             need(old_value['authority_id'] != self.b.policy['target_authority_id'], 'SELECTOR_NEW_AUTHORITY_REQUIRED')
             need(sha(old) == self.b.policy['predecessor_approval_sha256'], 'SELECTOR_OLD_APPROVAL_PIN')
             self.b.predecessor()  # existing full data/schema/config compatibility, no topology demand
+            if getattr(self.b,'stage','activation')=='trial': self.b.loader('d8a')
             # Exclusive/idempotent creation. A crash between these writes only
             # leaves immutable preparations, never changes the selected file.
             self.b.archive('d8a', old)
@@ -155,8 +178,20 @@ class Selector:
             self.b.validate()
             s = self.load()
             need(s is not None, 'SELECTOR_PREPARE_REQUIRED')
+            self.authorize('activate', s)
             versions = self.versions(); self.ensure_known(versions)
             event = s['events'][-1]
+            if event['phase'] == 'TRIAL_CLOSED':
+                need(self.b.stage=='activation','SELECTOR_FINAL_ACTIVATION_REQUIRED')
+                # Final authority approves the immutable closure, not a guessed
+                # success. Resume safely even when Trial left post-write 28e.
+                s = self.checkpoint(s, 'FINAL_AUTHORIZED', event['direction'], event['baseline'])
+                self.b.quiesce()
+                s = self.checkpoint(s, 'SWITCHING', '28e', event['baseline'])
+                self.select('28e', versions)
+                s = self.checkpoint(s, 'SELECTED', '28e', event['baseline'])
+                self.b.start('28e'); self.b.verify_running('28e', versions['28e'])
+                return self.checkpoint(s, 'COMPLETE', '28e', event['baseline'])
             if event['phase'] == 'COMPLETE':
                 self.b.verify_running('28e', versions['28e'])
                 return s
@@ -178,8 +213,10 @@ class Selector:
             self.b.validate()
             s = self.load()
             need(s is not None, 'SELECTOR_PREPARE_REQUIRED')
+            self.authorize('recover', s)
             versions = self.versions(); self.ensure_known(versions)
             event = s['events'][-1]
+            need(event['phase'] != 'TRIAL_CLOSED', 'SELECTOR_TRIAL_ALREADY_CLOSED')
             if event['phase'] == 'PREPARED':
                 need(self.b.current() == 'd8a' and self.b.active() == versions['d8a'], 'SELECTOR_PREPARED_DRIFT')
                 return s  # no switch was started
@@ -218,12 +255,30 @@ class Selector:
         with self.b.lock():
             self.b.validate()
             s = self.load()
+            self.authorize('status', s)
             if s:
                 versions = self.versions()
                 self.ensure_known(versions)
                 event = s['events'][-1]
-                if event['phase'] in {'PREPARED','SELECTED','COMPLETE','RECOVERED'}:
+                if event['phase'] in {'PREPARED','SELECTED','COMPLETE','RECOVERED','TRIAL_CLOSED'}:
                     version = event['direction']
                     need(self.b.current() == version and self.b.active() == versions[version],
                          'SELECTOR_STATUS_PAIR_MISMATCH')
             return s
+
+    def close(self):
+        """Seal observed Trial state only, NEVER six-check acceptance or a PASS."""
+        with self.b.lock():
+            self.b.validate(); state = self.load()
+            need(state is not None, 'SELECTOR_PREPARE_REQUIRED')
+            self.authorize('close', state)
+            event = state['events'][-1]
+            need(event['phase'] in {'COMPLETE','RECOVERED','TRIAL_CLOSED'}, 'SELECTOR_TRIAL_INCOMPLETE')
+            versions = self.versions(); self.ensure_known(versions)
+            if event['phase'] != 'TRIAL_CLOSED':
+                self.b.verify_running(event['direction'], versions[event['direction']])
+                self.b.quiesce()
+                state = self.checkpoint(state, 'TRIAL_CLOSED', event['direction'], event['baseline'])
+            self.b.assert_quiesced()
+            self.b.close_trial(state)  # immutable fsync; replay after crash is safe
+            return state

@@ -1,0 +1,242 @@
+Workbench Selector Native Acceptance Circular Dependency Fix V1
+Date: 2026-10-10
+Status: WORKBENCH_SELECTOR_STAGED_TRIAL_CODE_READY (publication recorded in final handoff)
+
+BOUNDARY
+This is a Tooling-only code candidate. No real Native Trial/Acceptance was issued
+or executed. PRIMARY Changes=0; Production Changes=0; Provider/WeChat/Image=0/0/0.
+No PRIMARY connection, real approval modification, service restart, business task,
+Admin Grant, Runtime Test, Publish or CREATE_DRAFT. INSTALL_READY remains FALSE.
+
+1. Identities and exact scope
+
+Application unchanged: 28e061a114118a27609330125c756e193d3248a6
+Application tree: 8ff5e4a8ed26c32ba040b4fa27cf1d380f3c7541
+Tooling direct parent: 15eb070abbec55c2f492b03be17e7e2b15ade891
+Parent tree: 8dbd2c1e9c0b010452e59788c438893787bd3ddc
+Branch: codex/workbench-selector-staged-trial-v1
+Final delivery records this commit's Source/Tree and fresh remote Parent match.
+No Application, Skill, runtime transaction, Secret backend, migration or Production
+tooling changes. Existing dirty/untracked content remains excluded.
+
+2. Root cause and changes
+
+15eb dispatch(), quiesce() and assert_selected() all required final Native
+Acceptance before the operations producing that Acceptance. This was a genuine
+bootstrap cycle, not a missing Loader mock or a reason to weaken its checks.
+
+seeding_approval_selector.py:
+  same durable state machine/global lock; explicit authorization at each public
+  operation; trial_approval_sha256 and per-event stage; TRIAL_CLOSED and
+  FINAL_AUTHORIZED transitions; immutable Trial closure receipt. Original chain
+  events are not rewritten. Closed Trial cannot reopen itself or promote itself.
+seeding_release_binding.py:
+  exact Test-only Trial approval/status/time/scope; independent final Acceptance;
+  shared lock-FD validation; actual ingress fence/backlog/deadline checks; real
+  systemd startup context; existing Recovery dispatch. Parent pin advances to15eb.
+runtime_recovery_operator.py:
+  internal trial-startup / trial-forward-recover / trial-status paths share the
+  existing operator, exact pair, Native Guard, Admin and Admission logic.
+  Ordinary startup/recover never automatically inherit Trial from disk or env.
+verify_seeding_approval_selector.py:
+  inherited tests updated for stronger final evidence provenance; 3 actual Linux
+  inherited-lock ownership negative/positive tests added.
+verify_selector_staged_trial.py:
+  explicit authority/service/DB/network doubles exercise the real validators,
+  dispatch, state transitions, failures, final promotion and recovery interfaces.
+This report. No second Authority/Runtime/Recovery framework or per-row Witness.
+
+3. Two separate authorities
+
+A. Controlled Trial, contract SEEDING_SELECTOR_CONTROLLED_NATIVE_TRIAL_V1
+  Uses independently approved root-owned trial-approval.v1.json and
+  trial-status.v1.json under the existing selector.v1 protected authority root.
+  Trial consumes original policy and issuance approval, NOT final Acceptance.
+  It authorizes only the bounded Selector operations listed below, never a
+  Runtime Test write, Admin Grant, Publish, ordinary business access or Provider.
+
+B. Final Activation
+  Keeps all15eb policy/code/source checks and independent activation approval.
+  All six final checks remain exactly PASS: d8a_loader,28e_loader,switch_recovery,
+  post_write_forward_recovery,api_mcp_worker,secret_preservation.
+  Additionally requires trial_receipt_sha256 in native-acceptance.v1.json.
+  The receipt must be the actual immutable TRIAL_CLOSED state, exact same policy,
+  operation and original Trial approval hash, with valid complete event chain.
+  Final state must retain that exact receipt event prefix, followed by the explicit
+  FINAL_AUTHORIZED transition. No code here signs or writes final Acceptance.
+  A test double's PASS, a Trial COMPLETE or a connected=true field cannot promote.
+
+4. Exact Trial approval schema for independent formal Authority
+
+Existing protected root:
+/etc/enterprise-agent-test-tenant-seeding-v1/selector.v1
+Existing root read-only regular file / no symlink / no untrusted parents apply.
+Do not copy an old real Approval and edit its Source. Fresh authorization is needed.
+
+trial-approval.v1.json fields (all exact, unknown fields rejected):
+  contract = SEEDING_SELECTOR_CONTROLLED_NATIVE_TRIAL_V1
+  authorization = SEEDING_SELECTOR_CONTROLLED_NATIVE_TRIAL_APPROVED
+  environment = test; production_authority = false
+  policy_sha256; issuance_approval_sha256
+  applications; tooling; predecessor_approval_sha256; tenant_ids; operation_id
+    These exactly equal independently approved Selector policy fields. Thus they
+    bind App/Tool source+tree+paths+file maps, exact predecessor and Tenant scope.
+  database = {address:127.0.0.1,port:55432,database:enterprise_agent_test,
+              db_role:enterprise_agent_test}
+  code_sha256 = exact same four code pins as Selector issuance approval
+  recovery_pins = SHA256 of all seven existing formal authority files:
+    forward-recovery-policy.v1.json, forward-recovery-approval.v1.json,
+    runtime-pair.v1.json, scope.v1.json, approval.v2.json,
+    native-policy.v2.json, native-approval.v2.json
+    at /etc/enterprise-agent-test-exact-admin-v1. All checked, none rewritten.
+  not_before,execute_until,recover_until = explicit UTC ISO8601 ending +00:00
+    execution window >0 and <=4 hours; recovery window <=24 hours from start;
+    execution <= recovery deadline. No automatic renewal or wildcard run.
+  operations = [prepare,activate,recover,close,status,startup,health]
+  business_authority = false; test_write_authority = false
+  network_fence = ROOT_API_LOCAL_MCP_ONLY_V1
+  budget = {wechat:0,provider:0,image:0}, integer zero
+
+trial-status.v1.json exact fields:
+  contract; trial_approval_sha256; state=ACTIVE|RECOVERY_ONLY|REVOKED
+ACTIVE permits execution during execution window, and recovery/close in recovery
+window. RECOVERY_ONLY cannot start a new Trial, but can recover/close the exact
+existing operation. REVOKED or expired recovery window fails closed.
+Authority updates status through the existing separately approved protected root
+process; Selector never grants/renews its own lease or overwrites Trial approval.
+After expiry/revocation do not replace approval bytes to bypass durable hash binding.
+
+5. No ordinary-customer exposure
+
+Trial checks BOTH IPv4 and IPv6 actual kernel rules using readonly iptables -S /
+ip6tables -S. It does not install/delete firewall rules. Establishing the fence
+requires separate real maintenance authorization; no such action occurred here.
+Exact parser contract is verify_trial_fence() in seeding_release_binding.py:
+  INPUT/OUTPUT first append rule for TCP18100,18101 jumps to WB_SELECTOR_TRIAL_IN/OUT,
+  BEFORE general accepts/conntrack accepts.
+  IN accepts loopback then rejects other TCP.
+  OUT allows root clients, permits lucky UID1000 only to internal MCP18101,
+  then rejects other TCP. All rules and ordering must match exactly; no return,
+  extra accept or unknown prefix. Ordinary reverse-proxy users cannot reach API.
+Root remains the trusted administration boundary:06 must verify no root-run
+customer proxy/routing path exists. Never expose root test clients to customers.
+Host firewall management must preserve these exact fences through the Trial.
+
+All Trial service hooks must execute as root in their actual exact systemd cgroup
+(e.g. approved privileged pre/post hook), while application processes retain lucky
+and existing binding checks. A CLI role/env claim cannot imitate that context.
+Existing unit profiles and final effective drop-in hashes must be separately
+approved with these hook permissions. Do not hand-edit active unit files.
+
+Trial28e service RuntimeMaxUSec must be finite, positive and within the remaining
+execution/recovery authorization window. Unknown time format/infinity rejects.
+Automatic restart still executes the same authorization hooks and cannot renew
+an expired Trial. Final Activation does not silently change approved unit profiles
+or remove the network fence; ordinary business release/unfencing is separate.
+
+Knowledge queues must be empty; pending/processing task queues <=1000 entries
+and contain only persisted formal runtime-test task IDs. Existing Native Guard
+then verifies exact admissions and the Worker independently enforces current
+execution eligibility. Merely being in this queue whitelist grants NO execution.
+Trial creates no test record and no grant. Data-write scenarios need separately
+approved existing exact-admin/controlled Runtime Test authority and budget.
+Missing authority: do not fabricate writes to obtain post-write acceptance.
+
+6. Entry and end-to-end control flow for06 (NOT executed here)
+
+Use exact NEW Tooling checkout with exact28e Application, original source pair and
+all fresh code pins/recovery pins approved. Do not install15eb as the fix.
+Use existing approved test environment, APP_ENV=test, PYTHONDONTWRITEBYTECODE=1,
+python -B, root Selector; Application-first PYTHONPATH and existing protected env.
+No secret values in argv, printed output, report or Git.
+
+Existing entry: <TOOL>/enterprise_agent_poc/scripts/runtime_recovery_operator.py
+Commands:
+  seeding-trial-prepare
+  seeding-trial-activate
+  seeding-trial-status
+  seeding-trial-recover
+  seeding-trial-close
+Final separately authorized command: seeding-activate
+
+Trial prepare -> full original predecessor Guard -> actual d8a Loader -> immutable
+approval versions -> TRIAL PREPARED. No final Acceptance required or created.
+Trial activate -> persist QUIESCING -> stop services -> data baseline -> select
+exact28e approval/source/profiles -> actual28e Loader -> SELECTED -> existing
+trial-startup child -> real startup hooks + compatible Guard + health -> COMPLETE.
+Child receives inherited release flock FD; inode AND ownership of the flock's
+open-file description must match. Concurrent or unrelated FD cannot bypass lock.
+Do not call internal trial-* recovery commands directly or spoof its env flag.
+
+Collect real evidence; execute only separately approved controlled-write cases.
+Trial recover reuses the existing Recovery operator for post-write state. Trial
+close verifies running pair, quiesces services, persists TRIAL_CLOSED then writes
+immutable trial-receipt.v1.json. Crash replay is idempotent; no six-check verdict
+is synthesized. Receipt creation alone is NOT Acceptance. Closed Trial cannot
+be reused. Services remain quiesced/fenced pending independent final decision.
+
+Independent Authority must review real six-check evidence and exact Trial receipt,
+then issue native-acceptance.v1.json + activation-approval.v1.json per existing
+formal root process. Neither file is issued by this candidate or by component tests.
+Final activate validates that approval and receipt prefix -> FINAL_AUTHORIZED ->
+protected quiescence/selection -> normal strict startup/Guard/health -> COMPLETE.
+Final activation is supported whether Trial safely recovered d8a or retained28e
+after writes. It does not depend on rerunning Trial under a nonexistent Acceptance.
+
+7. Recovery boundaries
+
+No persisted change: exact baseline AND predecessor Guard/source/data compatibility
+must all pass before original immutable d8a Approval/source/profile are restored.
+Any persisted change: only exact28e compatible Forward Recovery. Preserve Task,
+Run, Test, Admission, audits and Secret. Unknown/invalid data continues to reject.
+Recover direction survives crash and cannot be reversed into unsafe downgrade.
+Original Admin revoke/dead-operation proof, actual Native Guard and config checks
+remain; no deleting records, no fabricated PASS, no new per-record Witness.
+If Trial execution expires, the preapproved recovery-only window remains usable.
+If recovery authorization is revoked/expired or identity is uncertain: STOP,
+keep fence and services quiesced/stopped; obtain independent formal recovery
+direction. Never renew by mutating bound original approval or bypass final gates.
+
+8. Fresh automated results (component evidence only)
+
+verify_selector_staged_trial.py: 70 passed /0 failed/errors/skipped
+verify_seeding_approval_selector.py: 87 passed /0 failed/errors/skipped
+verify_runtime_recovery_binding.py: 34 passed /0 failed/errors/skipped
+verify_native_parent_contract.py: 21 passed /0 failed/errors/skipped
+verify_runtime_release_integration.py: 21 passed /0 failed/errors/skipped
+TOTAL: 233 passed /0 failed /0 errors /0 skipped.
+
+Local Linux targeted disaster/recovery component tests only, no Full pytest,
+Stage2, Candidate Build, real service startup or PG/Runtime Test. Real Linux
+filesystem/flock primitives were used in disposable /run temporary directories.
+Application integration used exact28e Git archive plus existing SQLite/queue
+doubles; no Windows line-ending substitution or Skill/lock changes.
+The two-stage suite explicitly labels Authority, network, DB and service fixtures
+as doubles. It creates no real approval, firewall rule or Native PASS artifact.
+
+Covered: valid/invalid Trial/final authorities; exact sources/tenant/database/code/
+recovery pins; revocation/windows; old bytes immutable; twelve Trial interruptions;
+recover repetition and forward-only direction; final promotion interruption;
+closed-Trial reentry denial; ordinary startup strict gate; fake cgroup rejection;
+real flock inherited/wrong-owner/unlocked-FD cases; no business/write grant;
+fence ordering/both IP families; queue boundary; finite service deadline.
+An initial new negative test exposed closed-Trial reentry; code fixed in BOTH
+authorization and transition checks, then both complete suites passed.
+WSL proxy/user-session and Starlette deprecation warnings are not Native evidence.
+
+9. Pending genuine acceptance / stop conditions
+
+Not performed: true d8a/28e Loader parity, kernel fence on approved host, real
+systemd privileged hooks/deadlines, switch/recovery, PostgreSQL post-write replay,
+API/MCP/Worker health, live Secret preservation, independent final issuance.
+The known ISOLATED_AUTHORITY early return is still rejected for true Loader proof;
+this patch does not modify Application or impersonate PRIMARY identity.
+Missing legal Loader context, root approvals, actual fence, bounded profiles,
+queue compatibility, exact source/code/DB/tenant identity or recovery pins -> STOP.
+Do not claim INSTALL_READY or real Native PASS from these component results.
+
+PRIMARY_INSTALL=NOT_EXECUTED
+REAL_NATIVE_TRIAL=NOT_EXECUTED
+FINAL_NATIVE_ACCEPTANCE=NOT_ISSUED
+APPLICATION_CHANGED=NO
+PRODUCTION=UNCHANGED

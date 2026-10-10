@@ -44,6 +44,7 @@ class ReleaseDouble:
             raise Interrupted(name)
     def validate(self):
         if not self.known: raise Blocked('SELECTOR_AUTHORITY_CHANGED')
+    def authorize(self,action,state): pass  # legacy component double, not Native authority
     def state(self):
         path=self.root/'state.json'
         return json.loads(path.read_bytes()) if path.exists() else None
@@ -288,13 +289,23 @@ class BindingTests(unittest.TestCase):
         backend=object.__new__(b.NativeRelease);backend.policy=self.policy
         backend.policy_sha=s.sha(s.canonical(self.policy))
         self.approval['policy_sha256']=backend.policy_sha;backend.approval=self.approval
+        trial_raw=b'COMPONENT_ONLY_TRIAL_APPROVAL'
+        with tempfile.TemporaryDirectory() as root:
+            double=ReleaseDouble(root);double.policy=self.policy;double.policy_sha=backend.policy_sha
+            double.stage='trial';double.trial_sha=s.sha(trial_raw)
+            selector=s.Selector(double);receipt=None
+            for phase in ('PREPARED','QUIESCING','QUIESCED','SWITCHING','SELECTED','COMPLETE','TRIAL_CLOSED'):
+                receipt=selector.checkpoint(receipt,phase,'d8a' if phase in ('PREPARED','QUIESCING','QUIESCED') else '28e',
+                    None if phase in ('PREPARED','QUIESCING') else 'a'*64)
         evidence=dict(contract=s.VERSION,policy_sha256=backend.policy_sha,status='NATIVE_RELEASE_ACCEPTED',
+            trial_receipt_sha256=s.sha(s.canonical(receipt)),
             checks=dict.fromkeys(('d8a_loader','28e_loader','switch_recovery',
                 'post_write_forward_recovery','api_mcp_worker','secret_preservation'),'PASS'))
         activation=dict(contract=s.VERSION,policy_sha256=backend.policy_sha,
             issuance_approval_sha256=s.sha(s.canonical(self.approval)),native_acceptance_sha256=s.sha(s.canonical(evidence)),
             authorization='SEEDING_SELECTOR_NATIVE_RELEASE_ACCEPTED_V1',production_authority=False)
         files={b.ROOT/'policy.v1.json':s.canonical(self.policy),b.ROOT/'approval.v1.json':s.canonical(self.approval),
+               b.ROOT/'trial-receipt.v1.json':s.canonical(receipt),b.ROOT/'trial-approval.v1.json':trial_raw,
                b.ROOT/'native-acceptance.v1.json':s.canonical(evidence),
                b.ROOT/'activation-approval.v1.json':s.canonical(activation)}
         return backend,files
@@ -318,10 +329,10 @@ class BindingTests(unittest.TestCase):
         backend,files=self.gate_fixture()
         with tempfile.TemporaryDirectory() as root:
             double=ReleaseDouble(root);double.policy=self.policy;double.policy_sha=backend.policy_sha
-            x=s.Selector(double);state=None
-            for phase in ('PREPARED','QUIESCING','QUIESCED','SWITCHING','SELECTED'):
-                state=x.checkpoint(state,phase,'28e' if phase in ('SWITCHING','SELECTED') else 'd8a',
-                                   None if phase in ('PREPARED','QUIESCING') else 'a'*64)
+            double.stage='activation';x=s.Selector(double)
+            state=json.loads(files[b.ROOT/'trial-receipt.v1.json'])
+            for phase in ('FINAL_AUTHORIZED','SWITCHING','SELECTED'):
+                state=x.checkpoint(state,phase,'28e','a'*64)
         files[b.ROOT/'state.v1.json']=s.canonical(state)
         files[b.ACTIVE]=files[b.ROOT/'28e.approval.v1.json']=s.issue_target(self.policy)
         pair=dict(application=self.policy['applications']['28e'],tooling=self.policy['tooling'])
@@ -355,7 +366,7 @@ class BindingTests(unittest.TestCase):
             backend.start('28e');call.assert_called_once_with('startup')
     def test_formal_entry_reused(self):
         source=(Path(__file__).parent/'runtime_recovery_operator.py').read_text(encoding='utf-8')
-        self.assertIn("startswith('seeding-')",source);self.assertIn('assert_selected(pair)',source)
+        self.assertIn("startswith('seeding-')",source);self.assertIn('assert_selected(pair,',source)
 
 
 # POSIX filesystem primitives need their real platform. Windows runs only the
@@ -403,6 +414,26 @@ if os.name=='posix':
                     with self.assertRaisesRegex(Blocked,'CONCURRENT_OPERATION'):
                         with two.lock():pass
                 with two.lock():pass
+        def test_trial_real_inherited_flock(self):
+            one=object.__new__(b.NativeRelease)
+            with patch.object(b,'LOCK',self.root/'lock'):
+                with one.lock(),patch.dict(os.environ,{'SELECTOR_TRIAL_LOCK_FD':str(one.lock_fd)}):
+                    b.verify_inherited_lock()
+        def test_trial_wrong_open_description_rejected(self):
+            one=object.__new__(b.NativeRelease)
+            with patch.object(b,'LOCK',self.root/'lock'):
+                with one.lock():
+                    other=os.open(b.LOCK,os.O_RDWR)
+                    try:
+                        with patch.dict(os.environ,{'SELECTOR_TRIAL_LOCK_FD':str(other)}):
+                            with self.assertRaisesRegex(Blocked,'LOCK_NOT_OWNED'):b.verify_inherited_lock()
+                    finally:os.close(other)
+        def test_trial_unlocked_descriptor_rejected(self):
+            path=self.root/'lock';path.touch(mode=0o600);fd=os.open(path,os.O_RDWR)
+            try:
+                with patch.object(b,'LOCK',path),patch.dict(os.environ,{'SELECTOR_TRIAL_LOCK_FD':str(fd)}):
+                    with self.assertRaisesRegex(Blocked,'LOCK_NOT_HELD'):b.verify_inherited_lock()
+            finally:os.close(fd)
 
 
 if __name__=='__main__':

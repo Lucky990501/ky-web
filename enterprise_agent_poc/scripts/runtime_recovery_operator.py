@@ -38,18 +38,19 @@ def systemctl(*args):
                           text=True, timeout=60).stdout.strip()
 
 
-def preflight(*, service_hook=False):
+def preflight(*, service_hook=False, trial=False, service_role=None, recovery=False):
     from app.test_tenant_seeding import native_json
     from app.test_runtime_tooling import load_pair, authority_root
     need((os.geteuid() in (0, 1000) if service_hook else os.geteuid() == 0)
         and os.environ.get('APP_ENV') == 'test', 'RECOVERY_TEST_OPERATOR_REQUIRED')
     root = authority_root()
+    need(not trial or root==binding.PRIMARY, 'RECOVERY_TRIAL_FORMAL_REALM_REQUIRED')
     pair, pair_sha = load_pair()
     if root == binding.PRIMARY or (root/'forward-recovery-policy.v1.json').exists():
         p, policy = binding.load(pair, pair_sha, root, systemctl, verify_environment=not service_hook)
         if root == binding.PRIMARY:
             from scripts.seeding_release_binding import assert_selected
-            assert_selected(pair)
+            assert_selected(pair, trial=trial, service_role=service_role if service_hook else None, recovery=recovery)
         return p, policy
     # Immutable earlier isolated fixtures retain their original V1 contract.
     # PRIMARY can never use this fallback, even when its V2 approval is absent.
@@ -117,13 +118,14 @@ def protected_state(store, service, scope):
     return history, config_sha
 
 
-def recover(action, role=None):
+def recover(action, role=None, *, trial=False, trial_recovery=False):
     from app.test_runtime_tooling import load_pair
     from app.store import POCStore
     from scripts.prepare_exact_admin_authority import write_json
     if action in ('pre', 'post'):
         need(role in binding.ROLES, 'RECOVERY_SERVICE_ROLE')
-        p, _ = preflight(service_hook=True)
+        need(not trial, 'RECOVERY_TRIAL_SERVICE_CGROUP_REQUIRED')
+        p, _ = preflight(service_hook=True, service_role=role)
         pair, _ = load_pair()
         result = native.NativeSuccessor().verify()
         if action == 'post':
@@ -135,7 +137,7 @@ def recover(action, role=None):
                     time.sleep(.25)
         return dict(status='PASS', phase=action, role=role, guard=result)
     need(role is None and action in {'preflight','status','recover','startup'}, 'RECOVERY_ACTION')
-    p, _ = preflight()
+    p, _ = preflight(trial=trial, recovery=action=='recover' or trial_recovery)
     pair, _ = load_pair()
     if action == 'status':
         result = native.NativeSuccessor().verify()
@@ -182,7 +184,7 @@ def recover(action, role=None):
     result = native.NativeSuccessor().verify()
     need(result['active_test_platform_admin'] == 0, 'RECOVERY_ADMIN_NOT_ZERO')
     # Units/env must still be the approved exact pair after any prior failure.
-    preflight()
+    preflight(trial=trial, recovery=action=='recover')
     for role in ('mcp', 'api', 'worker'):
         systemctl('restart', p['units'][role])
     deadline = time.monotonic()+30
@@ -206,6 +208,13 @@ if __name__ == '__main__':
             need(len(sys.argv) == 2, 'SELECTOR_ONE_ACTION_REQUIRED')
             from scripts.seeding_release_binding import dispatch
             result = dispatch(sys.argv[1].removeprefix('seeding-'))
+        elif sys.argv[1] in {'trial-startup','trial-forward-recover','trial-status','trial-recovery-status'}:
+            need(len(sys.argv)==2,'SELECTOR_ONE_ACTION_REQUIRED')
+            from scripts.seeding_release_binding import verify_inherited_lock
+            verify_inherited_lock()
+            result = recover({'trial-startup':'startup','trial-forward-recover':'recover','trial-status':'status',
+                              'trial-recovery-status':'status'}[sys.argv[1]], trial=True,
+                             trial_recovery=sys.argv[1]=='trial-recovery-status')
         else:
             result = recover(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None)
         print(json.dumps(result, sort_keys=True))

@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import ast
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -30,7 +32,10 @@ LOCK = Path('/run/lock/enterprise-agent-test-successor-v1.lock')
 GUARD = Path('/etc/enterprise-agent-test-wechat-persistent-config-v1/primary_guard.py')
 FORMAL = Path('/etc/enterprise-agent-test-successor-chat-reference-v1/entry.py')
 FORMAL_SHA = '5f91603551e38119a294de7ecdce457ef19d557e902c1af0cfc2726f49af6b9e'
-BASE_TOOL = '796a5851068354b102e562a49ea8638ba3f7e944'
+BASE_TOOL = '15eb070abbec55c2f492b03be17e7e2b15ade891'
+TRIAL = 'SEEDING_SELECTOR_CONTROLLED_NATIVE_TRIAL_V1'
+RECOVERY_AUTH = Path('/etc/enterprise-agent-test-exact-admin-v1')
+TRIAL_ACTIONS = ['prepare','activate','recover','close','status','startup','health']
 CODE = ('seeding_approval_selector.py','seeding_release_binding.py',
         'runtime_recovery_operator.py','runtime_recovery_binding.py')
 ROLES = ('api','mcp','worker')
@@ -128,7 +133,91 @@ def shape(policy, approval, policy_sha):
     need(all(re.fullmatch('[a-f0-9]{64}',x) for x in approval['code_sha256'].values()), 'SELECTOR_CODE_PINS')
 
 
-def assert_selected(pair):
+def trial_time(value):
+    need(isinstance(value,str) and value.endswith('+00:00'),'SELECTOR_TRIAL_UTC_REQUIRED')
+    return datetime.fromisoformat(value)
+
+
+def trial_shape(value, policy, issuance, policy_sha):
+    fields={'contract','authorization','environment','production_authority','policy_sha256','issuance_approval_sha256',
+        'applications','tooling','predecessor_approval_sha256','tenant_ids','database','code_sha256','recovery_pins',
+        'operation_id','not_before','execute_until','recover_until','operations','business_authority',
+        'test_write_authority','network_fence','budget'}
+    need(set(value)==fields and value['contract']==TRIAL
+         and value['authorization']=='SEEDING_SELECTOR_CONTROLLED_NATIVE_TRIAL_APPROVED'
+         and value['environment']=='test' and value['production_authority'] is False
+         and value['business_authority'] is False and value['test_write_authority'] is False
+         and value['budget']==s.ZERO and all(type(v) is int for v in value['budget'].values()),'SELECTOR_TRIAL_DOMAIN')
+    need(value['policy_sha256']==policy_sha and value['issuance_approval_sha256']==s.sha(read(ROOT/'approval.v1.json'))
+         and all(value[k]==policy[k] for k in ('applications','tooling','predecessor_approval_sha256','tenant_ids','operation_id'))
+         and value['database']==s.DATABASE and value['code_sha256']==issuance['code_sha256'], 'SELECTOR_TRIAL_EXACT_IDENTITY')
+    need(value['operations']==TRIAL_ACTIONS and value['network_fence']=='ROOT_API_LOCAL_MCP_ONLY_V1',
+         'SELECTOR_TRIAL_SCOPE')
+    need(set(value['recovery_pins'])=={'forward-recovery-policy.v1.json','forward-recovery-approval.v1.json',
+         'runtime-pair.v1.json','scope.v1.json','approval.v2.json','native-policy.v2.json','native-approval.v2.json'}
+         and all(isinstance(v,str) and re.fullmatch('[a-f0-9]{64}',v) for v in value['recovery_pins'].values()),
+         'SELECTOR_TRIAL_RECOVERY_PINS')
+    start,execute,end=(trial_time(value[k]) for k in ('not_before','execute_until','recover_until'))
+    need(0 < (execute-start).total_seconds() <= 14400 and execute <= end
+         and (end-start).total_seconds() <= 86400,'SELECTOR_TRIAL_BOUNDED_WINDOW')
+
+
+def verify_trial_fence(observed):
+    """Read-only kernel fence attestation, not a new network controller.
+
+    Rules must be installed separately under formal maintenance authority. Both
+    IP families are checked, with jumps before any general ACCEPT/conntrack rule.
+    Public reverse proxies cannot reach API/MCP; only root test executor reaches
+    API and existing lucky service processes reach internal MCP.
+    """
+    for hook,suffix in (('INPUT','IN'),('OUTPUT','OUT')):
+        rules=[r for r in observed[hook] if r[:2]==['-A',hook]]
+        need(rules and rules[0]==shlex.split(f'-A {hook} -p tcp -m multiport --dports 18100,18101 -j WB_SELECTOR_TRIAL_{suffix}'),
+             'SELECTOR_TRIAL_INGRESS_UNFENCED')
+    expected={
+        'WB_SELECTOR_TRIAL_IN':[
+            '-N WB_SELECTOR_TRIAL_IN',
+            '-A WB_SELECTOR_TRIAL_IN -i lo -j ACCEPT',
+            '-A WB_SELECTOR_TRIAL_IN -p tcp -j REJECT --reject-with tcp-reset'],
+        'WB_SELECTOR_TRIAL_OUT':[
+            '-N WB_SELECTOR_TRIAL_OUT',
+            '-A WB_SELECTOR_TRIAL_OUT -m owner --uid-owner 0 -j ACCEPT',
+            '-A WB_SELECTOR_TRIAL_OUT -p tcp -m tcp --dport 18101 -m owner --uid-owner 1000 -j ACCEPT',
+            '-A WB_SELECTOR_TRIAL_OUT -p tcp -j REJECT --reject-with tcp-reset']}
+    for chain,lines in expected.items():
+        need(observed[chain]==[shlex.split(line) for line in lines],'SELECTOR_TRIAL_INGRESS_UNFENCED')
+
+
+def verify_inherited_lock():
+    """Internal Trial recovery child shares the existing Selector flock FD."""
+    import fcntl
+    need(os.geteuid()==0,'SELECTOR_TRIAL_LOCK_REQUIRED')
+    value=os.environ.get('SELECTOR_TRIAL_LOCK_FD','')
+    need(value.isdigit(),'SELECTOR_TRIAL_LOCK_REQUIRED')
+    fd=int(value); info=os.fstat(fd); actual=LOCK.lstat()
+    need((info.st_dev,info.st_ino)==(actual.st_dev,actual.st_ino) and stat.S_ISREG(info.st_mode)
+         and info.st_uid==info.st_gid==0 and not info.st_mode & 0o022,'SELECTOR_TRIAL_LOCK_REQUIRED')
+    probe=os.open(LOCK,os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        try: fcntl.flock(probe,fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: pass
+        else: need(False,'SELECTOR_TRIAL_LOCK_NOT_HELD')
+        # The inherited open-file description itself must own the lock, not
+        # merely name a file currently locked by a different operator.
+        try: fcntl.flock(fd,fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: need(False,'SELECTOR_TRIAL_LOCK_NOT_OWNED')
+    finally: os.close(probe)
+
+
+def validate_trial_queue(client, queue, tests):
+    for key in (queue.knowledge_pending,queue.knowledge_processing):
+        need(client.llen(key)==0,'SELECTOR_TRIAL_BUSINESS_BACKLOG')
+    for key in (queue.pending,queue.processing):
+        need(client.llen(key)<=1000,'SELECTOR_TRIAL_QUEUE_BOUND')
+        need(set(client.lrange(key,0,-1))<=tests,'SELECTOR_TRIAL_BUSINESS_BACKLOG')
+
+
+def assert_selected(pair, *, trial=False, service_role=None, recovery=False):
     """Additional fixed-approval check for existing PRIMARY startup/recovery.
 
     Old deployments without this versioned install retain 796a behavior. Once
@@ -142,10 +231,31 @@ def assert_selected(pair):
          and all(pair['tooling'][k] == policy['tooling'][k] for k in ('source','tree','path')), 'SELECTOR_STARTUP_PAIR')
     backend = object.__new__(NativeRelease)
     backend.policy, backend.policy_sha, backend.approval = policy, s.sha(policy_raw), approval
-    backend.require_native_acceptance()
     state = s.Selector(backend).load()
     need(state is not None, 'SELECTOR_STARTUP_STATE')
     event = state['events'][-1]
+    # An ordinary CLI startup never inherits Trial from the environment or disk.
+    # Service hooks may use Trial only inside the exact real systemd cgroup.
+    is_trial = event.get('stage') == 'trial'
+    if service_role is not None and is_trial:
+        need(service_role in ROLES and os.geteuid()==0, 'SELECTOR_TRIAL_ROOT_SERVICE_HOOK')
+        unit = 'enterprise-agent-test-'+service_role+'.service'
+        need(any(line.split(':',2)[-1].rstrip().endswith('/'+unit)
+             for line in Path('/proc/self/cgroup').read_text().splitlines()), 'SELECTOR_TRIAL_SERVICE_CONTEXT')
+        trial = True
+    if trial:
+        need(is_trial, 'SELECTOR_TRIAL_STATE_REQUIRED')
+        if service_role is None: verify_inherited_lock()
+        backend.stage='trial'
+        # Recovery-started service hooks use only the durable recovery direction.
+        purpose='recover' if recovery or event['phase'] in {'RECOVERING','RECOVERED'} else 'startup'
+        backend.require_trial(purpose,state)
+        backend.trial_runtime_bounds(purpose)
+        backend.trial_queue_boundary()
+    else:
+        backend.stage='activation'; backend.require_native_acceptance()
+        need(not is_trial, 'SELECTOR_FINAL_ACTIVATION_REQUIRED')
+        backend.require_final_state(state)
     need(event['direction'] == '28e' and event['phase'] in {'SELECTED','COMPLETE','RECOVERING','RECOVERED'},
          'SELECTOR_STARTUP_PENDING')
     need(read(ACTIVE) == read(ROOT/'28e.approval.v1.json') == s.issue_target(policy), 'SELECTOR_STARTUP_APPROVAL')
@@ -153,12 +263,14 @@ def assert_selected(pair):
 
 
 class NativeRelease:
-    def __init__(self):
+    def __init__(self, *, stage='activation'):
         need(os.name == 'posix' and os.geteuid() == 0 and os.environ.get('APP_ENV') == 'test'
              and sys.dont_write_bytecode and os.environ.get('PYTHONDONTWRITEBYTECODE') == '1', 'SELECTOR_ROOT_TEST_ONLY')
         raw = read(ROOT/'policy.v1.json'); self.policy = json.loads(raw); self.policy_sha = s.sha(raw)
         self.approval = json.loads(read(ROOT/'approval.v1.json'))
         shape(self.policy,self.approval,self.policy_sha)
+        need(stage in {'trial','activation'}, 'SELECTOR_STAGE')
+        self.stage=stage; self.purpose='status'
 
     @contextmanager
     def lock(self):
@@ -178,8 +290,11 @@ class NativeRelease:
                      'SELECTOR_LOCK_PARENT')
             try: fcntl.flock(fd,fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError: need(False,'SELECTOR_CONCURRENT_OPERATION')
+            self.lock_fd=fd
             yield
-        finally: os.close(fd)
+        finally:
+            self.lock_fd=None
+            os.close(fd)
 
     def command(self, args, **kwargs):
         result = subprocess.run([str(x) for x in args],capture_output=True,text=True,timeout=120,**kwargs)
@@ -223,12 +338,103 @@ class NativeRelease:
         pin = approval['native_acceptance_sha256']
         need(isinstance(pin,str) and re.fullmatch('[a-f0-9]{64}',pin), 'SELECTOR_NATIVE_RELEASE_GATE_REQUIRED')
         raw = read(ROOT/'native-acceptance.v1.json'); value = json.loads(raw)
-        need(s.sha(raw) == pin and set(value) == {'contract','policy_sha256','status','checks'}
+        need(s.sha(raw) == pin and set(value) == {'contract','policy_sha256','status','checks','trial_receipt_sha256'}
              and value['contract'] == s.VERSION and value['policy_sha256'] == self.policy_sha
              and value['status'] == 'NATIVE_RELEASE_ACCEPTED'
              and value['checks'] == dict.fromkeys(('d8a_loader','28e_loader','switch_recovery',
                  'post_write_forward_recovery','api_mcp_worker','secret_preservation'),'PASS'),
              'SELECTOR_NATIVE_RELEASE_GATE_REQUIRED')
+        receipt_raw=read(ROOT/'trial-receipt.v1.json'); receipt=json.loads(receipt_raw)
+        need(value['trial_receipt_sha256']==s.sha(receipt_raw)
+             and receipt['policy_sha256']==self.policy_sha
+             and receipt['operation_id']==self.policy['operation_id']
+             and receipt['events'][-1]['phase']=='TRIAL_CLOSED'
+             and receipt['events'][-1]['stage']=='trial'
+             and receipt['trial_approval_sha256']==s.sha(read(ROOT/'trial-approval.v1.json')),
+             'SELECTOR_REAL_TRIAL_RECEIPT_REQUIRED')
+        # Validate the original chain without requiring a now-expired execution
+        # lease. Final approval is independently issued over immutable evidence.
+        reader=SimpleNamespace(state=lambda:receipt,policy=self.policy,policy_sha=self.policy_sha)
+        s.Selector(reader).load()
+        self.final_receipt=receipt
+
+    def require_final_state(self,state):
+        receipt=self.final_receipt
+        need(state.get('trial_approval_sha256')==receipt['trial_approval_sha256']
+             and state['events'][:len(receipt['events'])]==receipt['events']
+             and len(state['events'])>len(receipt['events'])
+             and state['events'][len(receipt['events'])]['phase']=='FINAL_AUTHORIZED',
+             'SELECTOR_FINAL_TRIAL_PROVENANCE')
+
+    def authorize(self, action, state):
+        self.purpose=action
+        if self.stage=='trial':
+            self.require_trial(action,state)
+            need(state is None or state['events'][-1].get('stage')=='trial','SELECTOR_TRIAL_STAGE_REUSE')
+            need(not state or state['events'][-1]['phase']!='TRIAL_CLOSED' or action in {'status','close'},
+                 'SELECTOR_TRIAL_ALREADY_CLOSED')
+        elif action in {'activate','recover','close'} or (state and 'trial_approval_sha256' in state):
+            need(action!='close','SELECTOR_CLOSE_TRIAL_ONLY')
+            self.require_native_acceptance()
+            if state and state['events'][-1].get('stage')=='trial':
+                need(action=='activate' and state['events'][-1]['phase']=='TRIAL_CLOSED'
+                     and s.canonical(state)==read(ROOT/'trial-receipt.v1.json'), 'SELECTOR_TRIAL_NOT_CLOSED')
+            elif state: self.require_final_state(state)
+
+    def require_trial(self, action, state):
+        need(action in TRIAL_ACTIONS and os.geteuid()==0 and os.environ.get('APP_ENV')=='test',
+             'SELECTOR_TRIAL_TEST_ROOT_ONLY')
+        raw=read(ROOT/'trial-approval.v1.json'); value=json.loads(raw)
+        need(s.sha(read(ROOT/'policy.v1.json'))==self.policy_sha,'SELECTOR_TRIAL_POLICY_CHANGED')
+        trial_shape(value,self.policy,self.approval,self.policy_sha)
+        self.trial_sha=s.sha(raw)
+        need(state is None or state.get('trial_approval_sha256')==self.trial_sha,'SELECTOR_TRIAL_STATE_BINDING')
+        status=json.loads(read(ROOT/'trial-status.v1.json'))
+        need(set(status)=={'contract','trial_approval_sha256','state'} and status['contract']==TRIAL
+             and status['trial_approval_sha256']==self.trial_sha,'SELECTOR_TRIAL_REVOCATION_IDENTITY')
+        recovery=action in {'recover','close'}
+        need(status['state'] in ({'ACTIVE','RECOVERY_ONLY'} if recovery else {'ACTIVE'}),'SELECTOR_TRIAL_REVOKED')
+        now=datetime.now(timezone.utc)
+        start,execute,end=(trial_time(value[k]) for k in ('not_before','execute_until','recover_until'))
+        need(start<=now<(end if recovery else execute),'SELECTOR_TRIAL_EXPIRED')
+        for name,pin in value['recovery_pins'].items():
+            need(s.sha(read(RECOVERY_AUTH/name))==pin,'SELECTOR_TRIAL_RECOVERY_PIN')
+        # No approval Boolean substitutes for kernel isolation. These are read-
+        # only checks; separately approved operators establish the fence.
+        self.trial_fence()
+        self.trial=value
+
+    def trial_fence(self):
+        for binary in ('/usr/sbin/iptables','/usr/sbin/ip6tables'):
+            observed={chain:[shlex.split(line) for line in self.command([binary,'-S',chain]).splitlines()]
+                      for chain in ('INPUT','OUTPUT','WB_SELECTOR_TRIAL_IN','WB_SELECTOR_TRIAL_OUT')}
+            verify_trial_fence(observed)
+
+    def trial_runtime_bounds(self, purpose):
+        deadline=trial_time(self.trial['recover_until' if purpose=='recover' else 'execute_until'])
+        remaining=(deadline-datetime.now(timezone.utc)).total_seconds()
+        for role in ROLES:
+            value=self.ctl('show','enterprise-agent-test-'+role+'.service','-p','RuntimeMaxUSec','--value')
+            tokens=re.findall(r'(\d+(?:\.\d+)?)(us|ms|min|s|h|d)',value)
+            need(tokens and ''.join(n+u for n,u in tokens)==value.replace(' ',''),'SELECTOR_TRIAL_SERVICE_DEADLINE')
+            duration=sum(float(n)*{'us':.000001,'ms':.001,'s':1,'min':60,'h':3600,'d':86400}[u] for n,u in tokens)
+            need(0<duration<=remaining,'SELECTOR_TRIAL_SERVICE_DEADLINE')
+
+    def trial_queue_boundary(self):
+        # This never grants a test write/lease. Existing Native Guard and Worker
+        # recheck exact formal test authorization; non-test backlog cannot run.
+        from app.settings import Settings
+        from app.task_queue import RedisTaskQueue
+        _,_,data=self.snapshot()
+        tests={r['task_id'] for r in data['agent_template_tests'] if r['test_type']=='runtime'}
+        queue=RedisTaskQueue.from_settings(Settings.from_env())
+        try:
+            validate_trial_queue(queue._client,queue,tests)
+        finally: queue._client.close()
+
+    def close_trial(self,state):
+        need(state['events'][-1]['phase']=='TRIAL_CLOSED' and self.stage=='trial','SELECTOR_TRIAL_INCOMPLETE')
+        atomic(ROOT/'trial-receipt.v1.json',s.canonical(state),immutable=True)
 
     def state(self): return json.loads(read(ROOT/'state.v1.json')) if (ROOT/'state.v1.json').exists() else None
     def save(self,value): atomic(ROOT/'state.v1.json',s.canonical(value))
@@ -283,7 +489,7 @@ class NativeRelease:
 
     def ctl(self,*args): return self.command(['/usr/bin/systemctl',*args])
     def quiesce(self):
-        self.require_native_acceptance()
+        self.authorize(self.purpose, self.state())
         for role in ('worker','api','mcp'): self.ctl('stop','enterprise-agent-test-'+role+'.service')
         self.assert_quiesced()
     def assert_quiesced(self):
@@ -348,8 +554,15 @@ print(json.dumps({'status':'PASS','identity':p.source_identity()}))
 
     def recovery(self,action):
         script=Path(self.policy['tooling']['path'])/'enterprise_agent_poc/scripts/runtime_recovery_operator.py'
-        result=json.loads(self.command([PYTHON,'-B',script,action],env=self.environment('28e'),
-            cwd=self.policy['applications']['28e']['path']+'/enterprise_agent_poc'))
+        env=self.environment('28e'); kwargs={}
+        if self.stage=='trial':
+            self.require_trial('recover' if self.purpose in {'recover','close'} else 'startup', self.state())
+            need(isinstance(self.lock_fd,int),'SELECTOR_TRIAL_LOCK_REQUIRED')
+            env['SELECTOR_TRIAL_LOCK_FD']=str(self.lock_fd); kwargs['pass_fds']=(self.lock_fd,)
+            action={'recover':'trial-forward-recover','startup':'trial-startup','status':'trial-status'}[action]
+            if action=='trial-status' and self.purpose in {'recover','close'}: action='trial-recovery-status'
+        result=json.loads(self.command([PYTHON,'-B',script,action],env=env,
+            cwd=self.policy['applications']['28e']['path']+'/enterprise_agent_poc',**kwargs))
         need(result.get('status')=='PASS','SELECTOR_FORWARD_RECOVERY_FAILED')
     def forward(self): self.recovery('recover')
     def start(self,version):
@@ -364,9 +577,12 @@ print(json.dumps({'status':'PASS','identity':p.source_identity()}))
 
 
 def dispatch(action):
-    need(action in {'prepare','activate','recover','status'},'SELECTOR_ACTION')
-    backend=NativeRelease()
-    if action in {'activate','recover'}: backend.require_native_acceptance()
+    trial=action.startswith('trial-')
+    if trial: action=action.removeprefix('trial-')
+    need(action in ({'prepare','activate','recover','status','close'} if trial else {'prepare','activate','recover','status'}),
+         'SELECTOR_ACTION')
+    backend=NativeRelease(stage='trial' if trial else 'activation')
     result=getattr(s.Selector(backend),action)()
     return dict(status='PASS',contract=s.VERSION,operation=action,
-                state=result,install_authority='SEPARATE_NATIVE_RELEASE_GATE')
+                stage=backend.stage,state=result,install_authority='SEPARATE_NATIVE_RELEASE_GATE',
+                business_authority=False,test_write_authority=False)
