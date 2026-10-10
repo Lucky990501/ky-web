@@ -1,0 +1,325 @@
+Workbench Seeding Approval Selector - Minimal Tooling Implementation V1
+Date: 2026-10-10
+
+DELIVERY CLASSIFICATION
+CODE_IMPLEMENTATION = READY
+COMPONENT_REGRESSION = PASS
+NATIVE_LOADER_PARITY = NOT_VERIFIED
+NATIVE_RELEASE_ACCEPTANCE = NOT_GRANTED
+INSTALL_READY = FALSE
+PRIMARY/Production changes = 0
+Provider/WeChat/Image calls = 0/0/0
+No PRIMARY connection, approval issuance, selection, database operation or service restart.
+No real Runtime Test, Admin Grant, Agent Publish/Enable or CREATE_DRAFT.
+
+1. Frozen source boundaries
+
+Application remains 28e061a114118a27609330125c756e193d3248a6
+Application tree 8ff5e4a8ed26c32ba040b4fa27cf1d380f3c7541
+Exact predecessor d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7
+Predecessor tree 6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5
+Tooling direct parent 796a5851068354b102e562a49ea8638ba3f7e944
+Parent tree 4bdc0c3b85758e811373f228ed0642af2d173e47
+Branch codex/workbench-seeding-approval-selector-v1
+The commit containing this report is the Tooling candidate. Final delivery must
+record git rev-parse HEAD, HEAD^{tree}, HEAD^ and fresh origin branch identities.
+This is NOT an Application release. Do not install this checkout as Application.
+
+2. Changes and architecture
+
+enterprise_agent_poc/scripts/seeding_approval_selector.py
+  Versioned bounded d8a/28e selection state machine and issuer extension for the
+  existing TEST_TENANT_AUTO_SEEDING_EXCLUSIONS_V1 nine-field declaration.
+enterprise_agent_poc/scripts/seeding_release_binding.py
+  Protected filesystem, authority/source/code binding, exact predecessor data
+  check, actual Loader invocation, existing formal switch and Recovery adapters.
+enterprise_agent_poc/scripts/runtime_recovery_operator.py
+  Existing entry gains seeding-{prepare,activate,recover,status}; ordinary PRIMARY
+  startup/recovery additionally checks selected approval when Selector is installed.
+enterprise_agent_poc/scripts/verify_seeding_approval_selector.py
+  Explicit component doubles plus actual Linux atomic-file/flock tests.
+enterprise_agent_poc/scripts/run_native_parent_regression.sh
+  Copy the two additional Tooling modules into the existing regression overlay.
+This report.
+
+No Application, Skill, Secret Backend, schema, Runtime transaction, quality rule,
+Admission or Admin lifecycle code was changed. No parent Guard exemption added.
+No second Runtime/Authority/Recovery service or per-record Witness was added.
+Release metadata below belongs to the existing protected root approval model.
+
+3. Existing contracts reused, without repeating Loader parity investigation
+
+The existing one-shot issuer install_seeding_approval_base.py declares the same
+root-owned fixed regular approval file; it cannot replace an existing approval.
+The new issuer extension creates a fresh target declaration ONLY from separately
+approved release intent. It does not copy/modify the historical approval object.
+Old bytes are archived verbatim and their SHA remains independently pinned.
+The fixed active file is selected transactionally; immutable version files never
+change. This is version selection, not rewriting the old signed-off declaration.
+
+Fixed active path:
+/etc/enterprise-agent-test-tenant-seeding-v1/approval.v1.json
+No symlink substitution: regular root:root read-only file, atomic replacement.
+Parents must be root-owned and not group/world-writable, with no symlink ancestors.
+File bytes are fsynced before rename; containing directory fsynced afterward.
+Immutable archives use exclusive link/no-replace semantics and content equality
+for retries. Crash-left unique .selector-*.tmp files are inert, not approvals.
+
+Pinned formal atomic switch:
+/etc/enterprise-agent-test-successor-chat-reference-v1/entry.py
+SHA256 5f91603551e38119a294de7ecdce457ef19d557e902c1af0cfc2726f49af6b9e
+The unchanged switch_pointer function body is loaded from this pinned source.
+Its c.RELEASE and c.OLD_RELEASE are supplied only from exact approved 28e/d8a
+identities. Existing .current-successor-pending is recoverable only when it is a
+root-owned symlink to one of those two exact targets; foreign targets reject.
+The existing /run/lock/enterprise-agent-test-successor-v1.lock serializes Selector
+operations and formal release access. No lock deletion or stale-lock bypass.
+
+Selector version: VERSIONED_SEEDING_APPROVAL_SELECTOR_V1
+Loader contract: TEST_TENANT_AUTO_SEEDING_EXCLUSIONS_V1 (UNCHANGED)
+Forward recovery contract/operator: existing 796a implementation (UNCHANGED
+semantics), with the successor's exact code hashes and source pair reapproved.
+
+4. Narrow issuance scope
+
+Only test, Production authority false, budgets all integer zero, database
+127.0.0.1:55432 / enterprise_agent_test / role enterprise_agent_test.
+Only exact d8a and 28e Application source/tree identities are accepted.
+Only zero-exclusion release after receipt-owned Synthetic cleanup is supported.
+If any active Synthetic exclusion is still required: STOP with
+SELECTOR_ZERO_EXCLUSION_RELEASE_REQUIRED. Do not drop it to obtain a pass.
+Existing provision-scope/Receipt V2 and Seeding Loader rules are unchanged.
+
+Nine Loader declaration fields:
+contract, authority_id, environment, source_commit, source_tree, database,
+production_deploy_authority, budget, exclusions.
+The Tooling binding is external versioned release metadata, not an extra field
+inserted into the immutable Application Loader schema.
+
+5. Authority and file contracts for 06 (NOT issued/installed this round)
+
+Protected root: /etc/enterprise-agent-test-tenant-seeding-v1/selector.v1
+All authority JSON/profile/map files are root:root read-only regular files.
+Use the existing formal root installation/approval process, not a user API,
+ordinary service account, copied PRIMARY approval or ad-hoc overwrite command.
+This candidate cannot mint its own root installation or activation authorization.
+
+policy.v1.json exact fields:
+  contract = VERSIONED_SEEDING_APPROVAL_SELECTOR_V1
+  environment = test; production_authority = false
+  operation_id = exact UUID, one release selection transaction
+  applications = {d8a,28e}, each {source,tree,path,files_sha256}
+  tooling = {source,tree,path,files_sha256}, exact NEW candidate
+  predecessor_approval_sha256 = fresh-verified original byte SHA
+  target_authority_id = independently approved bounded target identifier
+  tenant_ids = exact complete current Tenant set, no wildcard
+  guard_sha256 = approved actual predecessor primary_guard.py
+  formal_switch_sha256 = pinned formal entry SHA above
+  profiles = {d8a:{api,mcp,worker},28e:{api,mcp,worker}}, exact file SHA256s
+
+Application paths are immediate children of /opt/enterprise-agent-workbench-test/releases.
+d8a path is exactly releases/20261008-d8a7814-wechat-personal-v1.
+Tooling path is an immediate child of shared/source-qualifications.
+NEW Tooling must have 796a as its direct Git parent.
+
+approval.v1.json exact fields:
+  contract, policy_sha256, authorization, production_authority, code_sha256
+  authorization = FORMAL_SEEDING_APPROVAL_VERSIONED_SELECTION_FIX_APPROVED
+  production_authority = false
+  code_sha256 keys exactly seeding_approval_selector.py,
+  seeding_release_binding.py, runtime_recovery_operator.py,
+  runtime_recovery_binding.py; values exact installed-file SHA256s.
+
+d8a-files.v1.json, 28e-files.v1.json, tooling-files.v1.json:
+  file maps consumed unchanged by app.test_runtime_tooling.verify_checkout.
+  Each entire file SHA is pinned by the policy. Source/tree and full installed
+  file identity must pass, including existing ownership and dirty-source checks.
+
+profiles/{d8a,28e}/{api,mcp,worker}.conf:
+  independently reviewed exact unit drop-in bytes, pinned by policy.
+  Installed ONLY as zz-seeding-selector.v1.conf under each existing service.d.
+  Parent directories must already be trusted. Existing same-name foreign bytes
+  reject. Never remove other drop-ins. Profiles must restore the approved old
+  command/env/Guard for d8a and use the new exact pair + compatible Guard/Recovery
+  pre/post hooks for 28e. The existing forward-recovery policy must approve the
+  FINAL fragment/drop-in set and hashes; obsolete fixed hashes cannot be reused.
+
+Separate immutable activation-approval.v1.json exact fields:
+  contract, policy_sha256, issuance_approval_sha256, native_acceptance_sha256,
+  authorization, production_authority
+  authorization = SEEDING_SELECTOR_NATIVE_RELEASE_ACCEPTED_V1
+  production_authority = false
+  issuance_approval_sha256 pins original Selector approval bytes (not rewritten).
+
+native-acceptance.v1.json exact fields:
+  contract, policy_sha256, status, checks
+  status = NATIVE_RELEASE_ACCEPTED
+  checks exactly {d8a_loader,28e_loader,switch_recovery,
+    post_write_forward_recovery,api_mcp_worker,secret_preservation}: all PASS.
+These are future independently reviewed acceptance evidence, NOT the component
+test outputs. No such real approval/evidence is generated by this candidate.
+Without it activate/recover reject before stopping or writing anything.
+
+Selector-owned outputs, created via durable filesystem primitives:
+  d8a.approval.v1.json (original immutable bytes)
+  28e.approval.v1.json (independent immutable target issuance)
+  state.v1.json (mutable operation receipt with immutable authority binding)
+State fields: contract,policy_sha256,operation_id,events.
+Each event: sequence,previous,phase,direction,baseline,at.
+Hash chain, legal transition edges, baseline continuity and fixed recovery
+direction are checked on every entry and on PRIMARY compatible startup.
+
+6. Actual command contract (future authorized 06 maintenance ONLY)
+
+Run the installed exact Tooling entry using the approved existing test service
+environment. Do not paste secrets into commands, reports or output.
+UID 0 for Selector and Recovery operator; real Loader child runs as lucky.
+Required APP_ENV=test, PYTHONDONTWRITEBYTECODE=1, python -B.
+PYTHONPATH must put exact Application28e/enterprise_agent_poc before exact
+Tooling/enterprise_agent_poc; Loader probes select the corresponding Application.
+Existing protected DB/env, source-pair, Native authority and forward-recovery
+policies must already load. Do not use the isolated authority to impersonate PRIMARY.
+
+Let TOOL be the exact approved Tooling path (not a mutable current symlink):
+  /opt/enterprise-agent-workbench-test/shared/runtime/python311/bin/python -B \
+    "$TOOL/enterprise_agent_poc/scripts/runtime_recovery_operator.py" seeding-prepare
+  .../python -B "$TOOL/enterprise_agent_poc/scripts/runtime_recovery_operator.py" seeding-status
+  .../python -B "$TOOL/enterprise_agent_poc/scripts/runtime_recovery_operator.py" seeding-activate
+  .../python -B "$TOOL/enterprise_agent_poc/scripts/runtime_recovery_operator.py" seeding-recover
+
+These are NOT executed in this delivery. prepare itself writes protected version
+artifacts and a receipt; it also requires separate real issuance authorization.
+Do not run standalone cp/mv/ln commands on active approval/current as a substitute.
+Selector must be the owner of the bounded switch, not called inside an already
+held formal flock. Do not run competing root recovery/release commands in parallel.
+Selector itself rejects concurrent Selector or formal-lock holders.
+
+7. Operation and recovery semantics
+
+PREPARED -> QUIESCING (durable BEFORE stopping) -> QUIESCED
+ -> SWITCHING -> SELECTED -> COMPLETE.
+Recovery records RECOVERING -> RECOVERED, with durable retries.
+Source pointer + approval + three profiles are not one filesystem atomic rename.
+Safety is quiescence, serialized durable intent, restart gating and deterministic
+recovery. No service starts until actual selected Loader passes. Unknown approval,
+pointer, authority or history rejects. Repeated terminal calls reverify exact pair.
+
+prepare: full predecessor identity/data compatibility; old byte SHA; independent
+target issuance and immutable archives; no active approval change.
+activate: quiesce all three services, predecessor guard, readonly full schema/data
+fingerprint, durable switching intent, select approval + source + profiles,
+real Loader, compatible startup through existing operator, health and pair check.
+
+Recovery branch A (no new persisted changes):
+  exact baseline equality AND original predecessor Guard predicates must pass.
+  Only then select original d8a bytes/source/profile; real Loader; old Guard/health.
+  Missing/invalid predecessor compatibility never becomes a permissive fallback.
+Recovery branch B (ANY persisted schema/row change):
+  never downgrade. Select exact28e + its approval/profile; call the existing
+  runtime_recovery_operator.py recover. It preserves Admission, reconciles Admin,
+  verifies compatible Native Guard and checks config unchanged. Then recheck
+  Loader, source/approval, compatible Native status and health.
+  Unknown/invalid data still rejects in the existing Guard. Forward is not a pass.
+  A recorded forward direction cannot later downgrade; conflicting old-direction
+  retry data rejects. No database restore/delete or quality PASS fabrication.
+
+The operation fingerprint is a conservative temporary equality check of existing
+readonly collector schema + all rows, not a new fixture pin/witness authorization.
+No secret value is stored in the receipt or command output. Collector identity,
+base Guard/policy pins and exact DB target are checked before snapshot access.
+Persisted changes unrelated to Runtime Tests also force forward (conservative).
+
+8. This round's fresh component evidence
+
+Linux Ubuntu-22.04, isolated local root, Python3.11 venv, -B/no bytecode.
+No business services or PostgreSQL started. This is targeted component validation,
+NOT Full pytest/Stage2/Candidate Build, Native Loader parity or PRIMARY attestation.
+
+verify_seeding_approval_selector.py: 84 passed, 0 failed/errors/skipped
+  Source/tree/env/DB/approval rejection, original bytes immutable, independent
+  declaration, version selection, durable hash-chain state, twelve activation
+  interruption points, retry/recover, data-direction constraints, concurrency,
+  startup pair guard and independent Native acceptance gate.
+  Eight tests use actual Linux filesystem primitives: root ownership/mode,
+  no-replace immutable archive, rename/fsync faults, symlink/unsafe-parent rejection,
+  and flock contention. Guard/Loader/services/data remain explicit doubles.
+verify_runtime_recovery_binding.py: 34 passed, 0 failed/errors/skipped
+verify_native_parent_contract.py: 21 passed, 0 failed/errors/skipped
+verify_runtime_release_integration.py: 21 passed, 0 failed/errors/skipped
+  Application from exact28e git archive (canonical Git bytes); existing SQLite,
+  queue double and root-authority emulation. Includes revoked Worker execution
+  eligibility versus retained reservation, and exact Application/Tooling identities.
+FINAL TOTAL: 160 passed, 0 failed, 0 errors, 0 skipped.
+
+Test commands: run each named scripts/verify_*.py with the isolated Python -B.
+Integration takes --application-project <exact28e-export>/enterprise_agent_poc.
+The Selector POSIX filesystem suite requires root in LOCAL disposable environment;
+do not run its test doubles against formal authority paths.
+
+Earlier diagnostic attempts, not hidden/claimed PASS:
+  Windows sandbox temp path permission failure: rerun portable cases outside that
+  sandbox; do not use this as Native evidence.
+  Existing Recovery tests have four Windows/POSIX path incompatibilities: all34
+  passed on Linux without changing assertions.
+  Integration reading Windows checkout hit bundled SKILL.md source-lock mismatch
+  (line-ending identity); exact28e git archive passed all21 without modifying Skill,
+  Application checkout or lock rules. WSL proxy/systemd user-session warnings and
+  Starlette/httpx deprecation are not service-health proof.
+Historical PG/Native counts are NOT re-reported as freshly executed here.
+
+9. Independent Native Release Gate for 06
+
+Before any install/activation, obtain separate authorization and fresh readonly
+live attestation. The code candidate alone does not satisfy this gate.
+Required legal Loader context: test environment; actual approved DB tuple;
+root-approved fixed regular seeding file; exact running Source/Tree; tenant scope
+and receipt-owned cleanup; correct service identity/permissions; no Production key.
+For28e, normal startup preconditions and source-pair must load, and authority_root
+must NOT be ISOLATED_AUTHORITY. The already-known line131 early return is NOT Loader
+validation. Do not change it, mock it, or forge PRIMARY DB identity to pass.
+For d8a, use lawful formal identity or clearly label existing readonly PRIMARY
+evidence as reused; never call it an isolated cross-version switch.
+
+06 must independently verify actual d8a and28e authorized_exclusions paths,
+fixed-file type/mode/ownership, real source check and database check, plus full
+formal startup hooks. The Selector Loader probe sets READ ONLY and invokes the
+real function with POCStore without calling initialize or creating business data.
+Returned PASS must include the expected exact source_commit/source_tree.
+
+Separately rehearse/approve (with appropriate authorized legal environment):
+  exact dual-source install and approved final unit fragments/drop-ins;
+  pre-switch failure, mixed-file/pointer/profile interruption and durable resume;
+ 28e startup failure without writes -> full exact d8a compatibility before rollback;
+ post-write recovery -> only new compatible Guard/28e approval, retained Task/Test/
+ Run/Admission/audits, Admin0, config and encrypted Secret version unchanged;
+ actual API/MCP/Worker health and single MCP process; source/tenant/approval rejects.
+Root must review/code-pin the successor operator and issue separate immutable
+acceptance approval. No acceptance artifact may be generated from component doubles.
+
+STOP, no activation or claimed readiness, if any of these holds:
+  lawful environment cannot reach actual Loader (including isolated early return);
+  Native acceptance/independent root authorization absent;
+  pinned formal switch or predecessor Guard interface/hash differs;
+  nonempty Synthetic exclusions or tenant set mismatch;
+  unknown/mismatched Source/tree/file map/approval/pointer/drop-in/history;
+  predecessor compatibility uncertain; nonquiescent services; lock conflict;
+  compatible forward recovery/actual startup health fails.
+Keep services quiesced after a half-switch until authorized Selector recovery.
+Do not rerun the old one-shot approval issuer, modify old seals, delete Test rows,
+blindly launch d8a on new data, or use this candidate as Installation approval.
+
+10. Remaining real risks and delivery
+
+Not verified: two real Loaders, formal switching on real services, native recovery
+after real DB writes, real service health, and current Secret preservation on host.
+Current isolated Realm cannot prove these. No new Native test architecture added.
+The old formal current-switch file and old Guards/approvals are preserved; final
+profiles and compatible forward-recovery policy/code pins require06 acceptance.
+If its guard exposes a different approved interface than the collected contract,
+fail closed and return the actual interface mismatch, not a relaxed adapter.
+
+No guarantee of 2026-10-12 production acceptance is implied by component readiness.
+Unrelated worktree dirty/untracked content is excluded from this commit. The
+Application28e worktree and main Windows workspace remain unmodified by this task.
+Final status: WORKBENCH_APPROVAL_SELECTOR_CODE_READY_PENDING_NATIVE, contingent
+on normal commit/push and fresh remote Source/Tree matching the final delivery.

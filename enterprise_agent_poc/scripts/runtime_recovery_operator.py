@@ -3,8 +3,10 @@
 The old PRIMARY operator/seals remain immutable. Before-write checks bind the
 exact installed pair, DB and unit files, but do not require failed services to
 be active. After recovery, the same compatible Guard and health checks run.
-This entry cannot switch Source, restore an old DB or publish. PRIMARY requires
-a separately approved exact forward-recovery binding; old seals are not edited.
+Ordinary recovery cannot switch Source, restore an old DB or publish. The
+separate seeding-* actions only select the approved d8a/28e pair through the
+pinned formal switch, behind an additional Native release acceptance gate.
+PRIMARY requires an exact forward-recovery binding; old seals are not edited.
 """
 from __future__ import annotations
 
@@ -45,6 +47,9 @@ def preflight(*, service_hook=False):
     pair, pair_sha = load_pair()
     if root == binding.PRIMARY or (root/'forward-recovery-policy.v1.json').exists():
         p, policy = binding.load(pair, pair_sha, root, systemctl, verify_environment=not service_hook)
+        if root == binding.PRIMARY:
+            from scripts.seeding_release_binding import assert_selected
+            assert_selected(pair)
         return p, policy
     # Immutable earlier isolated fixtures retain their original V1 contract.
     # PRIMARY can never use this fallback, even when its V2 approval is absent.
@@ -197,7 +202,13 @@ def recover(action, role=None):
 if __name__ == '__main__':
     try:
         need(len(sys.argv) in (2, 3), 'RECOVERY_ONE_ACTION_REQUIRED')
-        print(json.dumps(recover(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None), sort_keys=True))
+        if sys.argv[1].startswith('seeding-'):
+            need(len(sys.argv) == 2, 'SELECTOR_ONE_ACTION_REQUIRED')
+            from scripts.seeding_release_binding import dispatch
+            result = dispatch(sys.argv[1].removeprefix('seeding-'))
+        else:
+            result = recover(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None)
+        print(json.dumps(result, sort_keys=True))
     except Exception as exc:
         print(json.dumps({'status': 'BLOCKED', 'code': str(exc) if isinstance(exc, Blocked)
                           else 'NATIVE_FORWARD_RECOVERY_FAILED'}))
