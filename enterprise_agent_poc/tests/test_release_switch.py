@@ -96,7 +96,7 @@ def switch_harness(tmp_path):
     shutil.copytree(project / "app", candidate / "app", ignore=shutil.ignore_patterns("__pycache__", "static"))
     shutil.copytree(project / "skill_packages", candidate / "skill_packages")
     (candidate / "scripts").mkdir()
-    for name in ("verify_bundled_skills.py", "verify_runtime_config.py", "release_binding_transition.py", "release_migration_transition.py", "release_verify.py", "rollback_preflight.py", "release_manifest.py", "migrate.py"):
+    for name in ("verify_bundled_skills.py", "verify_runtime_config.py", "release_binding_transition.py", "release_migration_transition.py", "release_verify.py", "rollback_preflight.py", "release_manifest.py", "migrate.py", "release_dual_source.py", "release_schema016.py"):
         shutil.copyfile(project / "scripts" / name, candidate / "scripts" / name)
     (candidate / "pyproject.toml").write_text("# fixture\n")
     data = base / "shared/runtime-data"
@@ -545,6 +545,7 @@ def pg_rollback_harness(pg_rollback_catalog, tmp_path):
     # candidate. Keep its copied migration inventory bound to that declaration.
     # The production/frozen SQL and new 015 contract are not changed or omitted.
     (new / 'migrations/postgres/015_chat_image_attachments.sql').unlink(missing_ok=True)
+    (new / 'migrations/postgres/016_wechat_draft_operations.sql').unlink(missing_ok=True)
     # *.md ignore is inappropriate for immutable bundled inputs: copy exact bundle.
     shutil.rmtree(new / 'skill_packages')
     shutil.copytree(project / 'skill_packages', new / 'skill_packages')
@@ -717,12 +718,60 @@ def test_postgres_old_runner_stays_failed_new_normal_runner_strict_and_preflight
     assert json.loads(old.stdout)['unknown_history_versions'] == ['008', '009', '010', '011']
     # Migration-NONE release entry must now reject the pending 012 before writes.
     assert pg_entry(h, '--preflight-only').returncode == 2
-    # The current source knows 015; genuinely future 016 must fail as UNKNOWN,
+    # The frozen source knows 016; genuinely future 017 must fail as UNKNOWN,
     # rather than accidentally exercising the altered-known-checksum branch.
-    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('016','unknown.sql',?)", ('0' * 64,))
+    assert [p.name[:3] for p in migrate.migration_files()] == [f'{i:03}' for i in range(1, 17)]
+    with h['store'].connection() as c:c.execute("INSERT INTO schema_migrations(version,name,checksum) VALUES ('017','unknown.sql',?)", ('0' * 64,))
     assert migrate.status(h['store']) == 2
     with pytest.raises(RuntimeError, match='未知'):migrate.up(h['store'])
     assert not h['events'].exists()
+
+
+def test_declared016_recognized_and_015_predecessor_history_preserved(pg_rollback_catalog):
+    from scripts import migrate, release_migration_transition as transition, release_schema016 as schema
+    store = pg_rollback_catalog.fresh_database(count=15)
+    with store.connection() as c:
+        before = [dict(row) for row in c.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        assert [row['version'] for row in before] == [f'{i:03}' for i in range(1, 16)]
+        assert c.execute("SELECT to_regclass('public.wechat_draft_operations') AS table_name").fetchone()['table_name'] is None
+        pending = transition.verify_history(c, schema.PLAN, applied_count=0)
+        assert pending['schema'] == '015' and pending['pending_versions'] == ['016']
+        assert [dict(row) for row in c.execute('SELECT * FROM schema_migrations ORDER BY version')] == before
+    path = migrate.migration_files()[-1]
+    raw = migrate.canonical_lf_bytes(path.read_bytes())
+    assert path.name == schema.MIGRATION['filename']
+    assert migrate.checksum(path) == schema.MIGRATION['canonical_sha256']
+    assert hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == schema.MIGRATION['git_blob']
+    # Actual isolated PostgreSQL DDL via the existing runner, not Native apply authority.
+    assert migrate.up(store) == 0
+    with store.connection() as c:
+        after = [dict(row) for row in c.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        assert after[:15] == before and len(after) == 16
+        assert after[-1]['checksum'] == schema.MIGRATION['canonical_sha256']
+        assert c.execute("SELECT to_regclass('public.wechat_draft_operations') AS table_name").fetchone()['table_name'] == 'wechat_draft_operations'
+        ready = transition.verify_history(c, schema.PLAN, applied_count=1)
+        assert ready['schema'] == '016' and ready['pending_versions'] == []
+        with pytest.raises(transition.MigrationTransitionBlocked, match='schema016_pending_exactly_016'):
+            transition.verify_history(c, schema.PLAN, applied_count=0)
+        assert [dict(row) for row in c.execute('SELECT * FROM schema_migrations ORDER BY version')] == after
+
+
+def test_wrong016_checksum_refused_without_history_mutation(pg_rollback_catalog, capsys):
+    from scripts import migrate, release_schema016 as schema
+    from scripts.release_dual_source import BindingBlocked
+    store = pg_rollback_catalog.fresh_database(count=16, fault='checksum016')
+    with store.connection() as c:
+        before = [dict(row) for row in c.execute('SELECT * FROM schema_migrations ORDER BY version')]
+    assert migrate.status(store) == 2
+    status = json.loads(capsys.readouterr().out)
+    assert status['unknown_history_versions'] == [] and status['checksum_mismatch'] == 1
+    assert [m['version'] for m in status['migrations'] if m['compatibility_status'] == migrate.CHECKSUM_MISMATCH] == ['016']
+    with pytest.raises(RuntimeError, match='checksum'):
+        migrate.up(store)
+    with store.connection() as c:
+        with pytest.raises(BindingBlocked, match='schema016_history_checksum'):
+            schema.ledger(c, SCRIPT.parents[1])
+        assert [dict(row) for row in c.execute('SELECT * FROM schema_migrations ORDER BY version')] == before
 
 
 def test_postgres_pre_switch_plan_allows_only_an_applied_prefix_not_full_rollback(pg_rollback_harness):

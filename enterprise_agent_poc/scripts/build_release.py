@@ -253,7 +253,7 @@ def write_manifest(result: dict, release_id: str, output: Path, binding_transiti
                    *, forward_migrations: dict | None = None, deferred_skill: dict | None = None,
                    skill_package_staging: dict | None = None,
                    agent_productization_transition: dict | None = None,
-                   runtime_only_release: dict | None = None) -> dict:
+                   runtime_only_release: dict | None = None, dual_source_release: dict | None = None) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", release_id):
         raise ValueError("Release ID 只能包含字母、数字、点、下划线和连字符。")
     manifest = {
@@ -276,6 +276,16 @@ def write_manifest(result: dict, release_id: str, output: Path, binding_transiti
         manifest["agent_productization_transition"] = agent_productization_transition
     if runtime_only_release is not None:
         manifest["runtime_only_release"] = runtime_only_release
+    if dual_source_release is not None:
+        from scripts.release_dual_source import APP_SOURCE, APP_TREE
+        if result['source_commit']!=APP_SOURCE or git('rev-parse',APP_SOURCE+'^{tree}')!=APP_TREE:
+            raise ValueError('dual_source_build_application_identity')
+        if (git('rev-parse','HEAD'),git('rev-parse','HEAD^{tree}')) != (
+                dual_source_release.get('tooling_source'),dual_source_release.get('tooling_tree')):
+            raise ValueError('dual_source_build_tooling_identity')
+        if git('status','--porcelain','--untracked-files=no'):
+            raise ValueError('dual_source_build_dirty_tooling')
+        manifest['dual_source_release']=dual_source_release
     validate_manifest_contract(manifest)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -294,11 +304,19 @@ def main() -> int:
     parser.add_argument("--skill-package-staging", type=Path)
     parser.add_argument("--agent-productization-transition", type=Path)
     parser.add_argument("--runtime-only-release", type=Path)
+    parser.add_argument("--dual-source-schema016", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if bool(args.release_id) != bool(args.manifest_output) or ((args.binding_transition or args.forward_migrations or args.deferred_skill or args.skill_package_staging or args.agent_productization_transition or args.runtime_only_release) and not args.manifest_output):
+    if bool(args.release_id) != bool(args.manifest_output) or ((args.binding_transition or args.forward_migrations or args.deferred_skill or args.skill_package_staging or args.agent_productization_transition or args.runtime_only_release or args.dual_source_schema016) and not args.manifest_output):
         parser.error("--release-id 与 --manifest-output 必须同时提供。")
     commit = validate_commit(args.commit)
+    if args.dual_source_schema016:
+        from scripts.release_dual_source import APP_SOURCE,APP_TREE
+        if commit!=APP_SOURCE or git('rev-parse',commit+'^{tree}')!=APP_TREE:
+            parser.error('dual_source_build_application_identity')
+        if any((args.binding_transition,args.forward_migrations,args.deferred_skill,args.skill_package_staging,
+                args.agent_productization_transition,args.runtime_only_release)):
+            parser.error('schema016_code_only_release')
     if args.dry_run:
         selected = preflight(commit)
         print(json.dumps({"status": "dry_run", "commit": commit, "allowed_paths": ALLOWED, "selected_files": selected}, ensure_ascii=False))
@@ -314,10 +332,14 @@ def main() -> int:
             runtime_only = json.loads(args.runtime_only_release.read_text(encoding="utf-8")) if args.runtime_only_release else None
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("Binding transition declaration is unreadable.") from exc
+        pair=None
+        if args.dual_source_schema016:
+            from scripts.release_schema016 import PLAN,declaration
+            pair=declaration(git('rev-parse','HEAD'),git('rev-parse','HEAD^{tree}')); migrations=PLAN
         write_manifest(result, args.release_id, args.manifest_output, transition,
                        forward_migrations=migrations, deferred_skill=deferred,
                        skill_package_staging=staging,
-                       agent_productization_transition=productization, runtime_only_release=runtime_only)
+                       agent_productization_transition=productization, runtime_only_release=runtime_only,dual_source_release=pair)
         result["manifest"] = str(args.manifest_output)
     print(json.dumps({"status": "built", **result}, ensure_ascii=False))
     return 0

@@ -17,6 +17,28 @@ shared_env="$base/shared/enterprise-agent.env"
 runtime_venv="$base/venv"
 runtime_data_dir="$base/shared/runtime-data"
 services=(enterprise-agent-api enterprise-agent-mcp enterprise-agent-worker)
+helper_root="$release_root"
+dual_tooling=no
+api_health_url=http://127.0.0.1:18090/api/health
+health_environment=production
+api_service_port=18090
+tooling_checkout=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+case "$tooling_checkout" in
+  /opt/enterprise-agent-workbench/shared/release-tooling/*|/opt/enterprise-agent-schema016-isolated/shared/release-tooling/*)
+    # Same entry/transaction, independently approved immutable Tooling only.
+    # Isolated Python bootstrap ignores caller PYTHONPATH/PYTHONHOME.
+    context_output=$(/usr/bin/python3 -I -B "$tooling_checkout/enterprise_agent_poc/scripts/release_dual_source.py" shell-context "$release_id") || exit 2
+    mapfile -t context <<< "$context_output"
+    [[ "${#context[@]}" == 6 ]] || { echo "dual Source context missing" >&2; exit 2; }
+    base="${context[0]}"; release_root="${context[1]}"; helper_root="${context[2]}"
+    services=("${context[3]}api" "${context[3]}mcp" "${context[3]}worker")
+    api_health_url="http://127.0.0.1:${context[4]}/api/health"; health_environment="${context[5]}"
+    api_service_port="${context[4]}"
+    shared_env="$base/shared/enterprise-agent.env"; runtime_venv="$base/venv"
+    runtime_data_dir="$base/shared/runtime-data"; dual_tooling=yes
+    unset PYTHONPATH PYTHONHOME
+    ;;
+esac
 # The production API lifespan includes a bounded 45-second embedding probe.
 # Keep a finite allowance above that probe for process startup; never weaken
 # the required healthy-production JSON or the exact-predecessor rollback gate.
@@ -29,6 +51,10 @@ esac
 # rollback.  The descriptor remains open until this shell exits, so the kernel
 # releases it even if the process is interrupted.
 release_lock_file="${RELEASE_LOCK_FILE:-/run/lock/enterprise-agent-workbench-release.lock}"
+if [[ "$dual_tooling" == yes ]]; then
+  release_lock_file=/run/lock/enterprise-agent-workbench-release.lock
+  [[ "$base" != /opt/enterprise-agent-schema016-isolated ]] || release_lock_file=/run/lock/enterprise-agent-schema016-isolated-release.lock
+fi
 if ! command -v flock >/dev/null 2>&1; then
   printf '{"status":"BLOCKED","check":"RELEASE_SWITCH_LOCK_UNAVAILABLE"}\n' >&2
   exit 2
@@ -70,16 +96,23 @@ previous=$(readlink -f "$current_link" 2>/dev/null || true)
 [[ -n "$previous" && -d "$previous" ]] || { echo "approved rollback target missing" >&2; exit 2; }
 rollback_target_id=$(basename "$(dirname "$previous")")
 candidate_manifest="$base/releases/$release_id/$release_id.manifest.json"
+if [[ "$dual_tooling" == yes ]]; then
+  rollback_target_commit_self=$("$runtime_venv/bin/python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$candidate_manifest")
+fi
 if [[ "$mode" == "--rollback-runtime" ]]; then
   # The active, approved NEW tooling owns recovery; never run the old migrator.
   [[ "$previous" == "$release_root" ]] || { echo "unknown current release" >&2; exit 2; }
-  rollback_target_id=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" "$release_root/scripts/release_runtime_recovery.py" target --candidate-manifest "$candidate_manifest")
+  if [[ "$dual_tooling" == yes ]]; then
+    rollback_target_id=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" "$helper_root/scripts/release_runtime_recovery.py" target --candidate-manifest "$candidate_manifest")
+  else
+    rollback_target_id=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" "$release_root/scripts/release_runtime_recovery.py" target --candidate-manifest "$candidate_manifest")
+  fi
   previous="$base/releases/$rollback_target_id/enterprise_agent_poc"
 fi
 predecessor_manifest="$base/releases/$rollback_target_id/$rollback_target_id.manifest.json"
 [[ -f "$candidate_manifest" && -f "$predecessor_manifest" ]] || { echo "release manifest missing" >&2; exit 2; }
 printf '{"data_dir_resolved":true}\n'
-cd "$release_root"
+cd "$helper_root"
 PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/verify_bundled_skills.py --data-dir "$runtime_data_dir" --candidate-release-manifest "$candidate_manifest" --predecessor-release-manifest "$predecessor_manifest"
 # migrate.status() creates history even on an installed database. For BOTH
 # modes use its unchanged checksum/record functions over a read-only SELECT.
@@ -120,6 +153,8 @@ if [[ "$mode" == "--rollback-preflight" ]]; then
   exit 0
 fi
 declared_forward=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "forward_migrations" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+declared_dual=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "dual_source_release" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
+[[ "$dual_tooling" == "$declared_dual" ]] || { echo "unbound dual Source release" >&2; exit 2; }
 declared_runtime_only=$($runtime_venv/bin/python -c 'import json,sys; print("yes" if "runtime_only_release" in json.load(open(sys.argv[1])) else "no")' "$candidate_manifest")
 if [[ "$declared_runtime_only" == yes ]]; then
   [[ "$declared_forward" == no ]] || { echo "runtime-only migration forbidden" >&2; exit 2; }
@@ -218,18 +253,56 @@ Environment=PYTHONPATH=$target_root
 Environment=ENTERPRISE_POC_DATA_DIR=$runtime_data_dir
 ExecStart=
 EOF
-    if [[ "$service" == enterprise-agent-api ]]; then
-      echo "ExecStart=$runtime_venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18090" >> "$dropin" || return 1
-    elif [[ "$service" == enterprise-agent-mcp ]]; then
+    if [[ "$dual_tooling" == yes ]]; then
+      # Root read-only startup guard checks the same pair/catalog/Action data.
+      # No old015 hook/Worker may execute after016; no new Action grant here.
+      role="${service##*-}"
+      printf '%s\n' "ExecStartPre=" "ExecStartPost=" \
+        "ExecStartPre=+$runtime_venv/bin/python -B $helper_root/scripts/release_runtime_recovery.py native --candidate-manifest $candidate_manifest --phase pre --role $role" \
+        "ExecStartPost=+$runtime_venv/bin/python -B $helper_root/scripts/release_runtime_recovery.py native --candidate-manifest $candidate_manifest --phase post --role $role" >> "$dropin" || return 1
+    fi
+    if [[ "$service" == "${services[0]}" ]]; then
+      if [[ "$dual_tooling" == yes ]]; then
+        echo "ExecStart=$runtime_venv/bin/uvicorn app.main:app --host 127.0.0.1 --port $api_service_port" >> "$dropin" || return 1
+      else
+        echo "ExecStart=$runtime_venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18090" >> "$dropin" || return 1
+      fi
+    elif [[ "$service" == "${services[1]}" ]]; then
       echo "ExecStart=$runtime_venv/bin/python -m app.platform_mcp.server" >> "$dropin" || return 1
     else
       echo "ExecStart=$runtime_venv/bin/python -m app.worker" >> "$dropin" || return 1
     fi
   done
 }
+forward_recover_016() {
+  # Known016 only. The guard verifies full schema and every retained Action.
+  # Failed/unknown checks leave the snapshot and do NOT guess a code target.
+  verify_release rollback-guard rollback-guard || return 1
+  PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/rollback_preflight.py \
+    --target-release-id "$release_id" --target-source-commit "$rollback_target_commit_self" || return 1
+  systemctl stop "${services[@]/%/.service}" || return 1
+  local forward_root="$release_root"
+  configure_services "$forward_root" || return 1
+  ln -sfn "$forward_root" "$current_link" || return 1
+  systemctl daemon-reload || return 1
+  systemctl restart "${services[1]}.service" "${services[0]}.service" "${services[2]}.service" || return 1
+  verify_release forward-recovery-state state || return 1
+  printf '{"status":"schema016_forward_runtime_recovered","schema_rollback":false,"old_worker_started":false,"snapshot_retained":true}\n'
+  # No release COMMIT/second Technical Smoke/old-code rollback on abort.
+  # The caller captures evidence and exits failed under the original lock.
+}
 rollback() {
   trap - ERR
   set +e
+  if [[ "$dual_tooling" == yes ]]; then
+    local phase
+    phase=$(PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_runtime_recovery.py phase --candidate-manifest "$candidate_manifest") || return 1
+    if PHASE="$phase" "$runtime_venv/bin/python" -c 'import os,json; raise SystemExit(0 if json.loads(os.environ["PHASE"])["schema"]=="016" else 1)'; then
+      forward_recover_016 || return 1
+      verify_release evidence evidence || return 1
+      return 1 # Abort remains failure; never erase the recovery snapshot.
+    fi
+  fi
   if [[ "$declared_productization" == yes ]]; then
     # Resolvable-Absent compensation must precede code rollback. A mixed or
     # real-use state blocks here; never proceed with code-only rollback.
@@ -269,9 +342,9 @@ rollback() {
   systemctl restart "${services[@]/%/.service}" || return 1
   for service in "${services[@]}"; do systemctl is-active --quiet "$service.service" || return 1; done
   for attempt in $(seq 1 "$api_readiness_attempts"); do
-    if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
+    if curl --fail --silent --show-error "$api_health_url" \
       | tee "$backup/rollback-health.log" \
-      | "$runtime_venv/bin/python" -c 'import json, sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
+      | HEALTH_ENVIRONMENT="$health_environment" "$runtime_venv/bin/python" -c 'import json, sys,os; data=json.load(sys.stdin); expected=os.environ.get("HEALTH_ENVIRONMENT","production"); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and ((expected=="production" and data.get("environment") == "production") or (expected=="test" and data.get("environment")=="test")) else 1)'; then
       verify_release restored state --rollback || return 1
       if [[ "$mode" == "--rollback-runtime" ]]; then
         final_status=POST_COMMIT_RUNTIME_ROLLBACK_PASS
@@ -314,22 +387,32 @@ if [[ "$mode" == "--rollback-runtime" ]]; then
 fi
 
 if [[ "$declared_forward" == yes ]]; then
+  if [[ "$dual_tooling" == yes ]]; then
+    # Snapshot/trap/lock are already armed. Stop old consumers BEFORE DDL.
+    systemctl stop "${services[@]/%/.service}"
+  fi
   printf 'declared-forward-migrations\n' > "$backup/last-step.log"
   if ! PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_migration_transition.py apply \
       --candidate-manifest "$candidate_manifest" > "$backup/migration-apply.log" 2>&1; then
     cat "$backup/migration-apply.log"
     # DDL runs in one PostgreSQL transaction. If its outcome cannot be proven,
     # preserve the snapshot and evidence under the lock; never run a down SQL.
-    trap - ERR
-    verify_release evidence evidence || true
-    exit 1
+    if [[ "$dual_tooling" == yes ]]; then
+      fail_release # Read-only phase proof chooses015 abort or016 forward-safe recovery.
+    else
+      trap - ERR
+      verify_release evidence evidence || true
+      exit 1
+    fi
   fi
   cat "$backup/migration-apply.log"
   printf 'MIGRATION_APPLIED\n' > "$backup/release-stage.log"
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_migration_transition.py verify \
     --candidate-manifest "$candidate_manifest"
-  printf 'predecessor-on-forward-schema\n' > "$backup/last-step.log"
-  verify_release predecessor-on-forward-schema state --rollback
+  if [[ "$dual_tooling" != yes ]]; then
+    printf 'predecessor-on-forward-schema\n' > "$backup/last-step.log"
+    verify_release predecessor-on-forward-schema state --rollback
+  fi
 fi
 
 printf 'binding-apply\n' > "$backup/last-step.log"
@@ -364,13 +447,17 @@ configure_services "$release_root"
 ln -sfn "$release_root" "$current_link"
 printf 'RUNTIME_SWITCHED\n' > "$backup/release-stage.log"
 systemctl daemon-reload
-systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
+if [[ "$dual_tooling" == yes ]]; then
+  systemctl restart "${services[1]}.service" "${services[0]}.service" "${services[2]}.service"
+else
+  systemctl restart enterprise-agent-mcp.service enterprise-agent-api.service enterprise-agent-worker.service
+fi
 for service in "${services[@]}"; do systemctl is-active --quiet "$service.service"; done
 printf 'candidate-health\n' > "$backup/last-step.log"
 for attempt in $(seq 1 "$api_readiness_attempts"); do
-  if curl --fail --silent --show-error http://127.0.0.1:18090/api/health \
+  if curl --fail --silent --show-error "$api_health_url" \
     | tee "$backup/candidate-health.log" \
-    | "$runtime_venv/bin/python" -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and data.get("environment") == "production" else 1)'; then
+    | HEALTH_ENVIRONMENT="$health_environment" "$runtime_venv/bin/python" -c 'import json, sys,os; data = json.load(sys.stdin); expected=os.environ.get("HEALTH_ENVIRONMENT","production"); raise SystemExit(0 if data.get("status") == "ok" and data.get("knowledge") == "ok" and ((expected=="production" and data.get("environment") == "production") or (expected=="test" and data.get("environment")=="test")) else 1)'; then
     break
   fi
   if [[ "$attempt" == "$api_readiness_attempts" ]]; then
@@ -416,7 +503,7 @@ if [[ "$declared_productization" == yes ]]; then
     --candidate-manifest "$candidate_manifest"
 fi
 # RELEASE COMMIT POINT: same global lock + rollback snapshot through all gates.
-if [[ "$declared_runtime_only" == yes ]] || { [[ "$declared_forward" == yes ]] && "$runtime_venv/bin/python" -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1]))["forward_migrations"].get("schema_version")==2 else 1)' "$candidate_manifest"; }; then
+if [[ "$declared_dual" == yes || "$declared_runtime_only" == yes ]] || { [[ "$declared_forward" == yes ]] && "$runtime_venv/bin/python" -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1]))["forward_migrations"].get("schema_version")==2 else 1)' "$candidate_manifest"; }; then
   PYTHONPATH="$release_root" "$runtime_venv/bin/python" scripts/release_runtime_recovery.py receipt \
     --candidate-manifest "$candidate_manifest" --snapshot "$backup/state.json"
 fi

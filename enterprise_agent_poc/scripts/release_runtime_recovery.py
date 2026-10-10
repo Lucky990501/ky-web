@@ -15,6 +15,8 @@ import sys
 
 ROOT = Path(__file__).absolute().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.release_dual_source import application_root
+ROOT = application_root(ROOT)
 from scripts import rollback_preflight as gate
 
 CONTRACT_ID = "migration-015-exact-predecessor-recovery-v1"
@@ -225,17 +227,81 @@ def preflight(base, root, manifest):
             "phase": "POST_COMMIT_HEALTH", "schema_rollback": False}
 
 
+def dual_recovery(args,base,root,manifest):
+    from scripts.release_dual_source import bound,profile
+    from scripts.release_schema016 import inspect,target,RECOVERY
+    from scripts import release_verify
+    from app.store import POCStore
+    from app.settings import settings
+    b,p=bound(manifest)
+    gate.require(base==p['base'],'schema016_recovery_base')
+    state=inspect(POCStore(settings.database_url),root,b)
+    if args.mode=='target': return target(state,manifest)
+    if args.mode=='phase': return state
+    if args.mode=='native':
+        gate.require(args.role is not None and args.phase is not None and state['schema']=='016',
+                     'schema016_native_role_schema')
+        gate.require((base/'release-current').resolve()==root,'schema016_native_current_runtime')
+        if args.phase=='post':
+            current=release_verify.service_state(base)[args.role]
+            gate.require(current.get('pid',0)>0 and current.get('active') in {'active','activating'}
+                and current.get('cwd')==str(root) and current.get('module_ok') and
+                current.get('exe')==str((base/'venv/bin/python').resolve()),'schema016_native_service_identity')
+        return dict(status='PASS',native=state,role=args.role,phase=args.phase,
+                    application_source=b['application']['source'],tooling_source=b['tooling']['source'])
+    gate.require(args.role is None and args.phase is None and state['schema']=='016', 'schema016_recovery_phase')
+    location=receipt_path(base,manifest['release_id'])
+    active=release_verify.bindings(release_verify.registry_for(base))
+    if args.mode=='receipt':
+        gate.require(args.snapshot is not None and json.loads(args.snapshot.read_text())==active, 'schema016_commit_binding_snapshot')
+        final=release_verify.verify_state(base,root.parent/(manifest['release_id']+'.manifest.json'),
+            base/'releases'/b['exact_predecessor']['release_id']/(b['exact_predecessor']['release_id']+'.manifest.json'),args.snapshot)
+        record=dict(schema_version=2,contract=RECOVERY,phase='POST_COMMIT_HEALTH',
+            manifest_sha256=gate.digest(manifest),application=b['application']['source'],
+            application_tree=b['application']['tree'],tooling=b['tooling']['source'],tooling_tree=b['tooling']['tree'],
+            bindings=active,schema=state,final_state=final,exact_predecessor=b['exact_predecessor'])
+        location.parent.mkdir(parents=True,exist_ok=True)
+        gate.require(not location.exists() and not location.is_symlink(), 'schema016_commit_receipt_exists')
+        with location.open('x') as out:
+            os.chmod(location,0o600);json.dump(record,out,sort_keys=True,default=str);out.flush();os.fsync(out.fileno())
+        return dict(status='schema016_release_commit_recorded',recovery_mode=RECOVERY)
+    record=gate.read_json(location)
+    gate.require(record.get('contract')==RECOVERY and record.get('phase')=='POST_COMMIT_HEALTH'
+        and record.get('manifest_sha256')==gate.digest(manifest) and record.get('bindings')==active
+        and record.get('application')==b['application']['source'] and record.get('application_tree')==b['application']['tree']
+        and record.get('tooling')==b['tooling']['source'] and record.get('tooling_tree')==b['tooling']['tree']
+        and record.get('exact_predecessor')==b['exact_predecessor'], 'schema016_commit_receipt_identity')
+    for s in release_verify.service_state(base).values():
+        gate.require(s.get('active') in {'active','inactive','failed'} and isinstance(s.get('pid'),int)
+            and (s['pid']==0 or (s.get('cwd')==str(root) and s.get('module_ok'))), 'schema016_unknown_current_runtime')
+    if args.mode=='capture':
+        gate.require(args.snapshot.name=='state.json' and args.snapshot.parent.parent==base and
+            args.snapshot.parent.name.startswith('.release-switch.') and not args.snapshot.exists(), 'schema016_recovery_snapshot')
+        with args.snapshot.open('x') as out:
+            os.chmod(args.snapshot,0o600);json.dump(active,out,sort_keys=True)
+    return dict(status='schema016_forward_recovery_preflight_passed',recovery_mode=RECOVERY,
+                schema=state,old_worker_allowed=False,schema_rollback=False)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("target", "preflight", "receipt", "capture"))
+    parser.add_argument("mode", choices=("target", "preflight", "receipt", "capture", "native", "phase"))
     parser.add_argument("--candidate-manifest", required=True, type=Path)
     parser.add_argument("--snapshot", type=Path)
+    parser.add_argument('--role',choices=('api','mcp','worker'))
+    parser.add_argument('--phase',choices=('pre','post'))
     args = parser.parse_args(argv)
     try:
         manifest = gate.read_json(args.candidate_manifest)
         root = args.candidate_manifest.parent / "enterprise_agent_poc"
         base = root.parent.parent.parent
         gate.require(root == ROOT, "trusted_recovery_tooling_path")
+        if 'dual_source_release' in manifest:
+            result=dual_recovery(args,base,root,manifest)
+            if args.mode=='target': print(result); return 0
+            print(json.dumps(result,sort_keys=True)); return 0
+        gate.require(args.mode not in {'native','phase'} and args.role is None and args.phase is None,
+                     'schema016_versioned_entry_required')
         if args.mode == "target":
             declared(root, manifest)
             print(PREDECESSOR["release_id"])

@@ -16,6 +16,9 @@ import tarfile
 ROOT = Path(__file__).absolute().parents[1]
 BASE = Path('/opt/enterprise-agent-workbench')
 sys.path.insert(0, str(ROOT))
+from scripts.release_dual_source import application_root, profile
+ROOT = application_root(ROOT)
+if profile() is not None: BASE = profile()['base']
 from scripts.release_manifest import ManifestContractError, validate_manifest_contract
 HASH = re.compile(r'[0-9a-f]{64}')
 COMMIT = re.compile(r'[0-9a-f]{40}')
@@ -234,6 +237,28 @@ def check_history(rows, items, *, plan=False):
 
 
 def verify(base, trusted_root, target_id, target_commit, *, plan=False, database_url=None):
+    from scripts.release_dual_source import profile
+    if profile() is not None:
+        own=read_json(trusted_root.parent/(trusted_root.parent.name+'.manifest.json'))
+        from scripts.release_dual_source import bound
+        from scripts.release_schema016 import inspect,PREDECESSOR
+        from app.store import POCStore
+        from scripts.migrate import settings
+        b,p=bound(own)
+        require(base==p['base'] and trusted_root==ROOT, 'schema016_trusted_rollback_root')
+        state=inspect(POCStore(database_url or settings.database_url),trusted_root,b)
+        self_target=(target_id,target_commit)==(own['release_id'],own['source_commit'])
+        old_target=(target_id,target_commit)==(PREDECESSOR['release_id'],PREDECESSOR['source_commit'])
+        require(self_target or (old_target and state['schema']=='015'), 'schema016_old_worker_rollback_forbidden')
+        if not plan: require(state['schema']=='016' if self_target else state['schema']=='015', 'schema016_target_schema')
+        if old_target:
+            prior,_=release_identity(base,target_id,target_commit,PREDECESSOR)
+            require(hashlib.sha256((prior.parent/(target_id+'.manifest.json')).read_bytes()).hexdigest()==
+                PREDECESSOR['raw_manifest_sha256'], 'schema016_predecessor_raw_manifest')
+        return dict(state,target_release_id=target_id,target_source_commit=target_commit,
+            applied_versions=[f'{n:03}' for n in range(1,int(state['schema'])+1)],
+            epoch_schema_fingerprint=digest(state['schema']),active_data_contract_floors=['member_account_status_v1'],
+            old_runner_invoked=False,read_only=True)
     base = base.absolute()
     require(base.resolve() == base and trusted_root.resolve() == trusted_root
             and trusted_root.parent.parent == base / 'releases', 'trusted_controlled_path')

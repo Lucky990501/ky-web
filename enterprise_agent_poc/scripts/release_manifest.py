@@ -13,7 +13,7 @@ BASE_FIELDS = {
     "build_platform",
 }
 OPTIONAL_FIELDS = {"binding_transition", "forward_migrations", "deferred_skill", "skill_package_staging",
-                   "agent_productization_transition", "runtime_only_release"}
+                   "agent_productization_transition", "runtime_only_release", "dual_source_release"}
 HASH = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASE = re.compile(r"[A-Za-z0-9._-]+")
@@ -114,6 +114,10 @@ def validate_binding_transition(value: object) -> None:
 
 def validate_forward_migrations(value: object) -> None:
     """V1 is deliberately a single exact 012 -> 014 forward-safe plan."""
+    if isinstance(value, dict) and value.get("schema_version") == 3:
+        from scripts.release_schema016 import PLAN
+        require(type(value['schema_version']) is int and value == PLAN, 'forward_migrations_016')
+        return
     if isinstance(value, dict) and value.get("schema_version") == 2:
         require(type(value["schema_version"]) is int and value == {
             "schema_version": 2, "from_schema": "014", "target_schema": "015",
@@ -228,6 +232,15 @@ def validate_manifest_contract(manifest: object) -> dict:
                 "runtime_only_release_code_only_scope")
     if "forward_migrations" in manifest:
         validate_forward_migrations(manifest["forward_migrations"])
+        if manifest['forward_migrations'].get('schema_version') == 3:
+            require('dual_source_release' in manifest, 'schema016_dual_source_required')
+    if 'dual_source_release' in manifest:
+        from scripts.release_schema016 import declaration, PLAN
+        from scripts.release_dual_source import APP_SOURCE
+        pair=manifest['dual_source_release']
+        require(isinstance(pair,dict) and pair==declaration(pair.get('tooling_source'),pair.get('tooling_tree'))
+            and manifest['source_commit']==APP_SOURCE and manifest.get('forward_migrations')==PLAN
+            and not ((OPTIONAL_FIELDS-{'dual_source_release','forward_migrations'}) & fields), 'dual_source_manifest_scope')
     if "deferred_skill" in manifest:
         validate_deferred_skill(manifest["deferred_skill"])
         require("skill_package_staging" in manifest, "skill_package_staging")

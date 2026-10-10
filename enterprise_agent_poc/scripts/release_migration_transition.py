@@ -12,9 +12,12 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.release_dual_source import application_root
+ROOT = application_root(ROOT)
 
 from app.store import POCStore
 from scripts import migrate
+migrate.MIGRATIONS = ROOT / 'migrations/postgres'
 from scripts.release_manifest import validate_manifest_contract
 
 DECLARATION_PATH = ROOT / "deploy/forward_migrations_013_014.json"
@@ -34,6 +37,10 @@ def declaration(manifest: dict) -> dict:
     validate_manifest_contract(manifest)
     require("runtime_only_release" not in manifest, "runtime_only_migration_forbidden")
     declared = manifest.get("forward_migrations")
+    if declared and declared.get('schema_version') == 3:
+        from scripts.release_dual_source import bound
+        bound(manifest)
+        return declared
     if declared and declared.get("schema_version") == 2:
         from scripts.release_runtime_recovery import declared as recovery_declared
         recovery_declared(ROOT, manifest)
@@ -63,6 +70,13 @@ def _wechat_absent(conn):
 
 
 def verify_history(conn, declared: dict, *, applied_count: int) -> dict:
+    if declared.get('schema_version') == 3:
+        from scripts.release_schema016 import ledger, PLAN
+        require(declared==PLAN and applied_count in {0,1}, 'schema016_declared_plan')
+        rows=ledger(conn,ROOT)
+        require(len(rows)==15+applied_count, 'schema016_pending_exactly_016')
+        return dict(schema=f'{len(rows):03}',applied_versions=[r['version'] for r in rows],
+            pending_versions=['016'] if applied_count==0 else [],fingerprints=_fingerprints(conn))
     is015 = declared.get("schema_version") == 2
     if is015:
         from scripts.release_manifest import validate_forward_migrations
@@ -95,6 +109,10 @@ def verify_history(conn, declared: dict, *, applied_count: int) -> dict:
 
 
 def read_only_plan(store: POCStore, declared: dict) -> dict:
+    if declared.get('schema_version')==3:
+        from scripts.release_schema016 import inspect
+        from scripts.release_dual_source import load
+        b,_=load(); inspect(store,ROOT,b,required_schema='015')
     require(declared.get("release_mode") != "RUNTIME_ONLY", "runtime_only_migration_forbidden")
     require(store.is_postgres, "postgres_required")
     from psycopg import connect
@@ -108,8 +126,12 @@ def read_only_plan(store: POCStore, declared: dict) -> dict:
 
 def apply_declared(store: POCStore, declared: dict) -> dict:
     require(declared.get("release_mode") != "RUNTIME_ONLY", "runtime_only_migration_forbidden")
+    if declared.get('schema_version')==3:
+        from scripts.release_schema016 import held_lock,quiesced
+        from scripts.release_dual_source import load
+        held_lock(); _,p=load(); quiesced(p['base'])
     before = read_only_plan(store, declared)
-    items = migrate.migration_items()[14 if declared.get("schema_version") == 2 else 12:]
+    items = migrate.migration_items()[15 if declared.get('schema_version')==3 else 14 if declared.get("schema_version") == 2 else 12:]
     with store.connection() as conn:
         # The existing OS release lock serializes releases; this transaction
         # also excludes a separate migration runner until both DDL files commit.
@@ -135,6 +157,10 @@ def apply_declared(store: POCStore, declared: dict) -> dict:
 
 def read_only_verify(store: POCStore, declared: dict) -> dict:
     require(store.is_postgres, "postgres_required")
+    if declared.get('schema_version')==3:
+        from scripts.release_schema016 import inspect
+        from scripts.release_dual_source import load
+        b,_=load(); inspect(store,ROOT,b,required_schema='016')
     from psycopg import connect
     from psycopg.rows import dict_row
     with connect(store.database_url, row_factory=dict_row,

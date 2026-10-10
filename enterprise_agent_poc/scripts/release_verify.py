@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.release_dual_source import application_root
+ROOT = application_root(ROOT)
 
 
 class GateFailed(ValueError):
@@ -149,9 +151,11 @@ def binding_gate(base, candidate, predecessor, snapshot, mode):
 
 def service_state(base):
     result = {}
+    from scripts.release_dual_source import profile
+    p=profile(); prefix=p['prefix'] if p is not None else 'enterprise-agent-'
     for role in ("api", "mcp", "worker"):
         try:
-            output = subprocess.check_output(["systemctl", "show", f"enterprise-agent-{role}.service",
+            output = subprocess.check_output(["systemctl", "show", f"{prefix}{role}.service",
                                               "-p", "ActiveState", "-p", "MainPID"], text=True, timeout=10)
             values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
             pid = int(values.get("MainPID", "0"))
@@ -186,11 +190,13 @@ def health():
     import httpx
     from app.settings import settings
     from app.task_queue import RedisTaskQueue
-    response = httpx.get("http://127.0.0.1:18090/api/health", timeout=10, trust_env=False)
+    from scripts.release_dual_source import profile
+    p=profile(); port=p['api_port'] if p else 18090
+    response = httpx.get(f"http://127.0.0.1:{port}/api/health", timeout=10, trust_env=False)
     require(response.status_code == 200, "api_health_http")
     data = response.json()
     require(data.get("status") == "ok" and data.get("knowledge") == "ok"
-            and data.get("environment") == "production", "api_health")
+            and data.get("environment") == (p['environment'] if p else "production"), "api_health")
     require(settings.task_queue == "redis", "redis_worker_required")
     from redis import Redis
     queue = RedisTaskQueue.from_settings(settings)
@@ -218,6 +224,10 @@ def final_preflight(base, candidate, predecessor):
     root = candidate.parent / "enterprise_agent_poc"
     require(root == ROOT and root.parent.parent == base / "releases", "candidate_controlled_path")
     manifest = gate.read_json(candidate)
+    dual='dual_source_release' in manifest
+    if dual:
+        from scripts.release_dual_source import bound
+        bound(manifest)  # Original candidate_controlled_path above still holds.
     pins = {
         "source_commit": os.environ.get("RELEASE_EXPECTED_SOURCE_COMMIT", ""),
         "archive_sha256": os.environ.get("RELEASE_EXPECTED_ARCHIVE_SHA256", ""),
@@ -242,6 +252,9 @@ def final_preflight(base, candidate, predecessor):
         declared(root, manifest)
         exact = {**PREDECESSOR, "data_contract": "member_account_status_v1",
                  "schema_fingerprint": gate.digest(compatibility["epoch_contract"]["schema_migrations"])}
+    if dual:
+        from scripts.release_schema016 import PREDECESSOR
+        exact={**PREDECESSOR,'data_contract':'member_account_status_v1'}
     prior_root, prior = gate.release_identity(base, exact["release_id"], exact["source_commit"], exact)
     require(predecessor == prior_root.parent / (prior["release_id"] + ".manifest.json")
             and (base / "release-current").is_symlink()
@@ -308,8 +321,9 @@ def final_preflight(base, candidate, predecessor):
         migration_plan = forward_transition.read_only_plan(registry._store, forward_transition.declaration(manifest))
         require(schema["applied_versions"] == migration_plan["applied_versions"]
                 and migration_plan["pending_versions"] == [x["version"] for x in forward["migrations"]], "declared_migration_plan")
-        require(gate.digest(compatibility["epoch_contract"]["schema_migrations"][:14 if forward015 else 12])
-                == exact["schema_fingerprint"], "preflight_predecessor_schema_fingerprint")
+        if not dual:
+            require(gate.digest(compatibility["epoch_contract"]["schema_migrations"][:14 if forward015 else 12])
+                    == exact["schema_fingerprint"], "preflight_predecessor_schema_fingerprint")
     else:
         require(schema["applied_versions"] == [item["version"] for item in migrate.migration_items()], "pending_migrations")
         if runtime_only:
@@ -337,6 +351,15 @@ def verify_state(base, candidate, predecessor, snapshot, *, rollback=False):
     from scripts.rollback_preflight import verify
     active = binding_gate(base, candidate, predecessor, snapshot, "restored" if rollback else "state")
     target = json.loads((predecessor if rollback else candidate).read_text())
+    own=json.loads(candidate.read_text())
+    if 'dual_source_release' in own:
+        from scripts.release_dual_source import bound
+        from scripts.release_schema016 import inspect,target as recovery_target
+        from app.store import POCStore
+        from app.settings import settings
+        b,_=bound(own); state=inspect(POCStore(settings.database_url),ROOT,b)
+        require(target['release_id']==(recovery_target(state,own) if rollback else own['release_id']),
+                'schema016_final_runtime_target')
     root = base / "releases" / target["release_id"] / "enterprise_agent_poc"
     require((base / "release-current").resolve() == root, "release_current")
     services = service_state(base)
