@@ -9,6 +9,15 @@
     availability: async () => ({state: 'BACKEND_PENDING'}),
     createDraft: async () => { throw Object.assign(new Error('BACKEND_PENDING'), {code: 'BACKEND_PENDING'}); },
   });
+  function serverAdapter(request) {
+    const versions = new Map();
+    const path = c => `/api/v1/agents/${encodeURIComponent(c.agentId)}/messages/${encodeURIComponent(c.messageId)}/wechat-draft`;
+    return Object.freeze({
+      availability: async c => { const value=await request(`${path(c)}/availability`); if(value.article_version) versions.set(path(c),value.article_version); return value; },
+      createDraft: async c => request(path(c),{method:'POST',headers:{'content-type':'application/json','X-Workbench-Action':'CREATE_DRAFT'},body:JSON.stringify({article_version:versions.get(path(c))})}),
+      draftStatus: async c => request(`${path(c)}/status`),
+    });
+  }
   const tags = new Set('article section div p span h1 h2 h3 h4 h5 h6 strong b em i u s blockquote ul ol li br hr table thead tbody tr th td pre code'.split(' '));
   const discard = new Set('script style iframe object embed link base meta form input button textarea select svg math template noscript'.split(' '));
   const properties = new Set('color background-color font-size font-weight font-style text-align text-decoration line-height letter-spacing margin margin-top margin-bottom margin-left margin-right padding padding-top padding-bottom padding-left padding-right border border-top border-bottom border-left border-right border-radius border-color border-width border-style'.split(' '));
@@ -60,11 +69,19 @@
     ACCOUNT_UNVERIFIED: '公众号尚未通过真实连接验证，请先到个人中心测试连接。',
     RESULT_UNCONFIRMED: '草稿结果未确认，不能显示成功。请先核对草稿箱，再决定是否重试。',
     REQUEST_FAILED: '创建草稿失败。请先核对草稿箱，再确认重试；系统不会自动重复提交。',
+    UNKNOWN: '结果未知：可能已提交到微信。已禁止再次上传，请到公众号后台人工核查，或由授权服务回读已知草稿。',
+    QUEUED: '草稿操作已登记，正在等待执行。刷新页面可查询同一操作，不会重复上传。',
+    UPLOADING: '正在上传文章素材，请勿重复提交。',
+    SUBMITTING: '正在提交草稿，请勿重复提交。',
+    VERIFYING: '正在回读核对微信草稿，尚未确认成功。',
+    FAILED: '操作已停止，未获得成功回执。请核查原因，不会自动重新上传。',
+    REVOKED: '草稿操作授权已撤销。',
   };
   function confirmedDraft(result, context) {
     const id = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(value);
-    return result?.status === 'created' && result.confirmed === true && id(result.draft_media_id)
-      && id(result.receipt_id) && result.agent_id === context.agentId && result.message_id === context.messageId;
+    return ((result?.status === 'created' && id(result.draft_media_id) && id(result.receipt_id)) ||
+      (result?.state === 'CONFIRMED' && id(result.media_id) && id(result.operation_id))) && result.confirmed === true
+      && result.agent_id === context.agentId && result.message_id === context.messageId;
   }
   function mount({article, main, agent, route, content, messageId, request, markdown, modal, adapter = pendingAdapter, readAccount}) {
     if (agent?.slug !== SLUG || !messageId || !content?.trim() || article.querySelector('.wechat-article-actions')) return null;
@@ -78,9 +95,22 @@
     const current = () => main.isConnected && article.isConnected && document.querySelector('#main') === main;
     const say = code => { if (current()) feedback.textContent = messages[code] || messages.REQUEST_FAILED; };
     const sync = () => { if (!current()) return; draft.disabled = busy || checking || !ready || succeeded; draft.setAttribute('aria-busy', String(busy || checking)); draft.textContent = busy ? '正在创建草稿…' : succeeded ? '微信草稿已创建' : '创建微信草稿'; };
+    function receipt(value) {
+      if (!value || value.agent_id!==context.agentId || value.message_id!==messageId) return false;
+      ready=false;
+      if(confirmedDraft(value,context)) {
+        succeeded=true;feedback.textContent=`微信草稿已创建 · ${value.media_id||value.draft_media_id} · 回执 ${value.operation_id||value.receipt_id}`;
+      } else say(messages[value.state] ? value.state : 'RESULT_UNCONFIRMED');
+      sync();return true;
+    }
     async function check(fresh = false) {
       checking = true; ready = false; sync();
       try {
+        if (adapter.draftStatus) {
+          const status=await adapter.draftStatus(context);
+          if(!current())return false;
+          if(status?.prior_receipt && receipt(status.prior_receipt))return false;
+        }
         const metadata = fresh ? await request(`/api/v1/agents/${encodeURIComponent(route)}`) : agent;
         if (!current()) return false;
         if (metadata?.id !== context.agentId || metadata.slug !== SLUG || metadata.enabled !== true) throw {code: 'AGENT_UNAVAILABLE'};
@@ -89,6 +119,7 @@
         if (account.verification_status !== 'connected') throw {code: 'ACCOUNT_UNVERIFIED'};
         const permission = await adapter.availability(context);
         if (!current()) return false;
+        if (permission?.prior_receipt && receipt(permission.prior_receipt)) return false;
         if (permission?.state === 'DENIED') throw {code: 'FORBIDDEN'};
         if (permission?.state !== 'READY') throw {code: 'BACKEND_PENDING'};
         if (permission.can_create_draft !== true || permission.agent_id !== context.agentId || permission.message_id !== messageId) throw {code: 'FORBIDDEN'};
@@ -129,18 +160,26 @@
           // Identity only. No HTML, credential, tenant, executable or storage path.
           const result = await adapter.createDraft({...context, userConfirmed: true});
           if (!current()) return;
+          if (result?.operation_id && receipt(result)) return;
           if (!confirmedDraft(result, context)) throw {code: 'RESULT_UNCONFIRMED'};
           succeeded = true; feedback.textContent = `微信草稿已创建 · ${result.draft_media_id} · 回执 ${result.receipt_id}`;
         } catch (error) {
           ready = false;
           say(error?.status === 401 ? 'AUTH_REQUIRED' : error?.status === 403 ? 'FORBIDDEN' : error?.status === 404 ? 'AGENT_UNAVAILABLE' : error?.code || 'REQUEST_FAILED');
           // Retry is always a new explicit click + confirmation; never auto-send.
-          if (error?.status !== 401 && error?.status !== 403 && error?.status !== 404) ready = true;
+          if (!adapter.draftStatus && error?.status !== 401 && error?.status !== 403 && error?.status !== 404) ready = true;
+          if(adapter.draftStatus) {
+            try { const status=await adapter.draftStatus(context);if(current())receipt(status.prior_receipt); } catch { say('UNKNOWN'); }
+          }
         } finally { busy = false; sync(); }
       };
     };
     check();
+    if(adapter.draftStatus) {
+      const refresh=document.createElement('button');refresh.type='button';refresh.className='button secondary';
+      refresh.textContent='查询草稿状态';refresh.onclick=()=>{if(!busy&&!checking)check();};slot.append(refresh);
+    }
     return Object.freeze({refresh: check});
   }
-  window.WorkbenchWechatArticle = Object.freeze({mount, sanitizeArticle, previewDocument, confirmedDraft, pendingAdapter});
+  window.WorkbenchWechatArticle = Object.freeze({mount, sanitizeArticle, previewDocument, confirmedDraft, pendingAdapter, serverAdapter});
 })();

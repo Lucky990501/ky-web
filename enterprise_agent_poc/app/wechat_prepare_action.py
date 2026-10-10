@@ -30,7 +30,41 @@ def safe_html(value):
     if re.search(r'@import|url\s*\(',value,re.I):raise ValueError()
 
 
+def image_sources(html):
+    class Images(HTMLParser):
+        def __init__(self):super().__init__();self.sources=[]
+        def handle_starttag(self,tag,attrs):
+            if tag.lower()=='img':self.sources.append(dict(attrs).get('src'))
+        handle_startendtag=handle_starttag
+    parser=Images();parser.feed(html);return parser.sources
+
+
 class WechatPrepareAdapter:
+    def upload_manifest(self, workspace, relative, task, revision, account_identity, environment):
+        """New PREPARE only: receipt-pinned complete bundle, never a retrofit."""
+        from app.wechat_prepare_reader import _read_regular, identity
+        config=json.loads(_read_regular(workspace/'article.json',64*1024))
+        html=_read_regular(workspace/'run/prepared.html',256*1024)
+        assets={}
+        for path in sorted((workspace/'assets').iterdir()):
+            if not re.fullmatch(r'[a-zA-Z0-9_-]{1,48}\.(png|jpg|jpeg|webp)',path.name):raise ValueError()
+            raw=_read_regular(path,2*1024*1024)
+            assets['assets/'+path.name]=dict(sha256=sha(raw),size_bytes=len(raw))
+        sources=image_sources(html.decode('utf-8'))
+        if any(src not in assets for src in sources) or config['cover'] not in assets:raise ValueError()
+        article=dict(title=config['title'],digest=config['digest'],html_sha256=sha(html),
+                     cover=config['cover'],assets=assets,images=sources)
+        manifest=dict(contract='WECHAT_PREPARE_UPLOAD_MANIFEST_V2',environment=environment,
+            tenant_id=task['tenant_id'],user_id=task['user_id'],agent_id=task['agent_id'],
+            source_task_id=task['id'],source_run_id=task['run_id'],skill_revision_id=revision['id'],
+            skill_checksum=revision['checksum'],account_identity=account_identity,
+            content_version=identity(article),article=article)
+        raw=json.dumps(manifest,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()
+        path=workspace/'upload-manifest.v2.json'
+        if path.exists():raise ValueError()
+        path.write_bytes(raw)
+        return dict(ref='workspace:'+relative+'/upload-manifest.v2.json',mime_type='application/json',size_bytes=len(raw),sha256=sha(raw))
+
     def validate_input(self,payload):
         try:
             if not isinstance(payload,dict) or set(payload)!={'title','digest','html','cover_asset','assets'}:raise ValueError()

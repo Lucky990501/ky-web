@@ -19,6 +19,9 @@ async def run() -> None:
     queue = RedisTaskQueue.from_settings(settings)
     queue.ping()
     queue.recover_processing()
+    from app.wechat_draft_operations import DraftOperations
+    for task_id in DraftOperations(store).recoverable_task_ids():
+        queue.enqueue(task_id)
     logger.info("worker ready")
     try:
         while True:

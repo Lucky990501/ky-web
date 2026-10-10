@@ -93,6 +93,90 @@ class SkillActionDispatcher:
         self.runner=runner or subprocess.run
         self.source_identity=source_identity or {}
 
+    def execute_draft_operation(self,bearer,task_scope,operation,bundle,execution,*,read_only=False):
+        """V2 server Action; old model/MCP enabled=False is left unchanged."""
+        from concurrent.futures import ThreadPoolExecutor
+        from app.wechat_prepare_reader import _read_regular, digest
+        from app.wechat_draft_operations import DraftOperationError
+        principal,task,policy=self._task(bearer,task_scope)
+        if task['id']!=operation['action_task_id'] or task['run_id']!=operation['action_run_id']:
+            raise DraftOperationError()
+        revision=self._revision(task,policy,'wechat-html-draft',operation['skill_revision_id'])
+        registration=self.registrations.get(('wechat-html-draft',revision['version'],'CREATE_DRAFT'))
+        if not registration or registration.checksum!=revision['checksum']:raise DraftOperationError()
+        authorize_tool(self.store,principal,'wechat:draft:create')
+        entry=registration.runtime.resolve(revision,'CREATE_DRAFT')
+        workspace,relative=self._workspace(principal,task,entry,str(uuid.uuid4()))
+        manifest=bundle['manifest'];source=bundle['workspace'];(workspace/'assets').mkdir()
+        for name,pin in manifest['article']['assets'].items():
+            raw=_read_regular(source/name,2*1024*1024)
+            if digest(raw)!=pin['sha256']:raise DraftOperationError()
+            (workspace/name).write_bytes(raw)
+        raw=_read_regular(source/'run/prepared.html',256*1024)
+        if digest(raw)!=manifest['article']['html_sha256']:raise DraftOperationError()
+        (workspace/'prepared.html').write_bytes(raw)
+        (workspace/'upload-manifest.v2.json').write_text(json.dumps(manifest),encoding='utf-8')
+        if read_only:
+            state={'media_id':operation['draft_media_id'],'body':{}}
+            for intent in operation['intent_json']:
+                receipt=operation['upload_receipts_json'].get(intent['id'],{})
+                key=intent.get('artifact_key','')
+                if key.startswith('cover:'):state['cover']=receipt['media_id']
+                if key.startswith('body:'):state['body'][key[5:]]=receipt['url']
+            if not state.get('media_id') or not state.get('cover'):raise DraftOperationError()
+            (workspace/'readback-state.json').write_text(json.dumps(state),encoding='utf-8')
+        child=Path(__file__).resolve().parents[1]/'scripts/wechat_draft_journal_child.py'
+        script=entry.skill_root/registration.entrypoint
+        _,_,account,capability=execution.reauthorize(operation)
+        lease=execution.secrets.resolve_wechat(operation['tenant_id'],account)
+        count=0;confirmed=False;pending=None
+        def authorize():
+            self._active(task);self._task(bearer,task_scope)
+            self._revision(task,policy,'wechat-html-draft',operation['skill_revision_id'])
+            execution.reauthorize(operation)
+        with lease.child_environment() as env:
+            env['WORKSPACE_ROOT']=str(workspace)
+            argv=[str(entry.python),'-I','-B',str(child),str(script),str(workspace)]+(['readback'] if read_only else [])
+            process=subprocess.Popen(argv,
+                cwd=workspace,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                text=True,encoding='utf-8',shell=False)
+            pool=ThreadPoolExecutor(max_workers=1)
+            try:
+                while True:
+                    line=pool.submit(process.stdout.readline,65537).result(timeout=90)
+                    if not line or len(line)>65536:raise DraftOperationError()
+                    event=json.loads(line);reply={'allow':True}
+                    kind=event.get('kind')
+                    if kind in ('intent','read'):
+                        count+=1
+                        if count>capability['max_requests'] or pending:raise DraftOperationError()
+                        authorize()
+                        if kind=='intent':
+                            if read_only:raise DraftOperationError()
+                            pending=execution.operations.intent(operation['id'],operation['lease_id'],
+                                event['endpoint'],event['request_sha256'],authorize,artifact_key=event['artifact_key'])
+                            reply['intent_id']=pending
+                        elif event['endpoint'] not in ('token','draft/get'):raise DraftOperationError()
+                    elif kind=='receipt':
+                        if not pending or event['intent_id']!=pending:raise DraftOperationError()
+                        execution.operations.acknowledge(operation['id'],operation['lease_id'],pending,event['result'])
+                        pending=None
+                    elif kind=='confirmed':
+                        if pending:raise DraftOperationError()
+                        authorize()
+                        execution.operations.confirm(operation['id'],operation['lease_id'],event['readback_sha256'])
+                        confirmed=True
+                    else:raise DraftOperationError()
+                    process.stdin.write(json.dumps(reply)+'\n');process.stdin.flush()
+                    if confirmed:
+                        process.wait(timeout=10)
+                        break
+                if process.returncode!=0:raise DraftOperationError()
+            finally:
+                if process.poll() is None:process.kill()
+                process.wait(timeout=10)
+                process.stdin.close();process.stdout.close();pool.shutdown(wait=True)
+
     def _task(self,bearer,task_scope):
         principal=self.tokens.verify(bearer,'skills:execute')
         task_id=self.tokens.verify_task_scope(task_scope,principal.tenant_id)
@@ -226,6 +310,21 @@ class SkillActionDispatcher:
             registration.runtime.resolve(revision,action)
             phase='normalization'
             output=self._result(registration.adapter.normalize(workspace,relative),workspace,relative)
+            if action=='PREPARE' and hasattr(registration.adapter,'upload_manifest'):
+                from app.wechat_action_contract import account_config
+                from app.wechat_prepare_reader import identity
+                # Missing config retains legacy preview. A configured account is
+                # never inferred from article content or a client-supplied AppID.
+                account=self.store.enterprise_config(task['tenant_id']).get('wechat_account')
+                if account is not None:
+                    account=account_config(account,task['tenant_id'])
+                    secret=account.get('wechat_app_secret_ref') or {}
+                    environment=secret.get('environment')
+                    if environment in ('test','production'):
+                        target=identity(dict(tenant_id=task['tenant_id'],environment=environment,appid=account['wechat_app_id']))
+                        output['artifact_refs'].append(registration.adapter.upload_manifest(
+                            workspace,relative,task,revision,target,environment))
+                        output=self._result(output,workspace,relative)
             receipt.update(status='completed',artifact_refs=output['artifact_refs'])
             output.update(status='completed',action=action,receipt_ref='skill-receipt:'+invocation)
             return output

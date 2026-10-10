@@ -891,6 +891,7 @@ function mountWechatArticle(main,article,content,messageId){
   const context=main?._wechatArticleContext;
   if(!context||context.agent.slug!=='wechat-official-account-writing'||!article)return;
   window.WorkbenchWechatArticle?.mount({main,article,content,messageId,...context,request:api,markdown:markdownHtml,modal:bindModalDialog,
+    adapter:window.WorkbenchWechatArticle.serverAdapter(api),
     readAccount:()=>main._wechatArticleAccountPromise ||= api(wechatAccountPath)});
 }
 function openPasswordEditor(main){

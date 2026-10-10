@@ -25,6 +25,7 @@ class TaskService:
         self.pre_execute_guard = None
         self.execution_permission_guard = None
         self.runtime_test_lifecycle = None
+        self.wechat_draft_execution = None
 
     async def execute(self, task: dict, *, _controlled_action=None) -> None:
         if self.execution_permission_guard:
@@ -48,6 +49,12 @@ class TaskService:
             self.pre_execute_guard()
         task_id, tenant_id = task["id"], task["tenant_id"]
         current = self._store.task_for_worker(task_id) or task
+        from app.wechat_draft_operations import TASK_MARKER
+        if current.get('input_text') == TASK_MARKER:
+            if not self.wechat_draft_execution:
+                raise TaskExecutionNotAuthorized('WECHAT_ACTION_EXECUTOR_REQUIRED')
+            await self.wechat_draft_execution.execute(current)
+            return
         if current.get("status") in {"completed", "cancelled"}:
             return
         if self._store.cancellation_requested(task_id, tenant_id):

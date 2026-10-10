@@ -81,7 +81,14 @@ class WechatPrepareReader:
             # Never expose file paths, raw receipts, SQL, article or credentials.
             raise PrepareReadError() from None
 
-    def _read(self, principal, agent_id, message_id):
+    def bundle(self, principal, agent_id, message_id):
+        """Trusted server use only; never serialize this result into an API."""
+        try:
+            return self._read(principal,agent_id,message_id,internal=True)
+        except Exception:
+            raise PrepareReadError() from None
+
+    def _read(self, principal, agent_id, message_id, internal=False):
         if not all(isinstance(x, str) and re.fullmatch(r'[a-zA-Z0-9_:-]{1,160}', x)
                    for x in (agent_id, message_id, principal.tenant_id, principal.user_id)):
             raise ValueError()
@@ -167,8 +174,9 @@ class WechatPrepareReader:
         prefix = f"workspace:tasks/{task['task_id']}/{receipt['id']}/"
         artifacts = receipt['artifact_refs']
         allowed = {'run/prepared.html': ('text/html', 256 * 1024),
-                   'verification.json': ('application/json', 64 * 1024)}
-        if not isinstance(artifacts, list) or len(artifacts) != 2:
+                   'verification.json': ('application/json', 64 * 1024),
+                   'upload-manifest.v2.json': ('application/json',64*1024)}
+        if not isinstance(artifacts, list) or len(artifacts) not in (2,3):
             raise ValueError()
         bodies = {}
         for artifact in artifacts:
@@ -192,7 +200,39 @@ class WechatPrepareReader:
                                 task_id=task['task_id'], run_id=task['run_id'],
                                 agent_revision_id=task['agent_template_version_id'],
                                 skill_revision_id=skill['id'], receipt_sha256=identity(receipt)))
-        return dict(agent_id=agent_id, message_id=message_id, article_version=version,
+        result=dict(agent_id=agent_id, message_id=message_id, article_version=version,
                     html=html, html_sha256=digest(bodies['run/prepared.html']),
                     action_authorized=False, upload_bundle_verified=False,
                     state='PREVIEW_ONLY', visual_verified=False)
+        manifest_raw=bodies.get('upload-manifest.v2.json')
+        if manifest_raw is not None:
+            from app.wechat_prepare_action import image_sources
+            manifest=strict_json(manifest_raw)
+            expected=dict(contract='WECHAT_PREPARE_UPLOAD_MANIFEST_V2',tenant_id=principal.tenant_id,
+                user_id=principal.user_id,agent_id=agent_id,source_task_id=task['task_id'],source_run_id=task['run_id'],
+                skill_revision_id=skill['id'],skill_checksum=skill['checksum'])
+            if any(manifest.get(k)!=v for k,v in expected.items()):raise ValueError()
+            if manifest['environment'] not in ('test','production') or not re.fullmatch('[a-f0-9]{64}',manifest['account_identity']):raise ValueError()
+            article=manifest['article']
+            if set(article)!={'title','digest','html_sha256','cover','assets','images'}:raise ValueError()
+            if (identity(article)!=manifest['content_version'] or article['html_sha256']!=result['html_sha256']
+                or not 0<len(article['title'])<=64 or not 0<len(article['digest'])<=120):raise ValueError()
+            assets=article['assets'];total=0
+            if not isinstance(assets,dict) or not 1<=len(assets)<=12:raise ValueError()
+            for name,pin in assets.items():
+                if not re.fullmatch(r'assets/[a-zA-Z0-9_-]{1,48}\.(png|jpg|jpeg|webp)',name):raise ValueError()
+                raw=_read_regular(workspace/name,2*1024*1024);total+=len(raw)
+                if pin!={'sha256':digest(raw),'size_bytes':len(raw)}:raise ValueError()
+            if total>8*1024*1024 or article['cover'] not in assets:raise ValueError()
+            images=image_sources(html)
+            if images!=article['images'] or any(name not in assets for name in images):raise ValueError()
+            result.update(upload_bundle_verified=True,state='PREPARED')
+            if internal:
+                result.update(workspace=workspace,manifest=manifest,binding=dict(
+                    tenant_id=principal.tenant_id,user_id=principal.user_id,environment=manifest['environment'],
+                    agent_id=agent_id,agent_revision_id=task['agent_template_version_id'],skill_revision_id=skill['id'],
+                    source_task_id=task['task_id'],source_run_id=task['run_id'],source_message_id=message_id,
+                    context_id=task['context_id'],conversation_id=task['conversation_id'],article_version=version,
+                    account_identity=manifest['account_identity'],manifest_sha256=digest(manifest_raw)))
+        if internal and not result['upload_bundle_verified']:raise ValueError()
+        return result

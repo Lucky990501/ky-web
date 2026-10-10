@@ -42,3 +42,22 @@ test('entry points cover completed SSE/poll rendering and persisted history with
   assert.ok(workbench.includes("context.agent.slug!=='wechat-official-account-writing'"));
   assert.ok(!source.includes('localStorage'));assert.ok(!source.includes('sessionStorage'));
 });
+test('durable UNKNOWN is not success and cannot become an automatic resend',()=>{
+  for(const state of ['UNKNOWN','QUEUED','UPLOADING','SUBMITTING','VERIFYING','FAILED','REVOKED']) {
+    assert.equal(ui().confirmedDraft({state,confirmed:false,media_id:'mock_media',operation_id:'mock_op',agent_id:'agent-1',message_id:'message-1'},identity),false);
+  }
+  assert.ok(source.includes("UNKNOWN: '结果未知"));
+  assert.ok(source.includes("if (!adapter.draftStatus &&"));
+  assert.ok(source.includes("refresh.textContent='查询草稿状态'"));
+});
+test('server adapter sends only server-bound article version and CSRF action header',async()=>{
+  const calls=[];
+  const adapter=ui().serverAdapter(async(path,options)=>{calls.push({path,options});return {article_version:'a'.repeat(64)};});
+  await adapter.availability(identity);
+  await adapter.createDraft({...identity,userConfirmed:true,tenant:'evil',html:'evil'});
+  assert.deepEqual(JSON.parse(calls[1].options.body),{article_version:'a'.repeat(64)});
+  assert.equal(calls[1].options.headers['X-Workbench-Action'],'CREATE_DRAFT');
+  await adapter.draftStatus(identity);
+  assert.equal(calls[2].options,undefined);
+  assert.ok(calls[2].path.endsWith('/status'));
+});

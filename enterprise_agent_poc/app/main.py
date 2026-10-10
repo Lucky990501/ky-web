@@ -345,7 +345,17 @@ app.include_router(wechat_account_router(
                          network_allowed=settings.wechat_network_allowed),current_user))
 from app.wechat_prepare_reader import WechatPrepareReader
 from app.wechat_draft_api import wechat_draft_router
-app.include_router(wechat_draft_router(WechatPrepareReader(store, settings.data_dir), current_user))
+from app.wechat_draft_execution import WechatDraftExecution
+wechat_draft_execution=WechatDraftExecution(product_store,token_issuer,settings)
+task_service.wechat_draft_execution=wechat_draft_execution
+def enqueue_wechat_action(task_id):
+    if settings.task_queue=='redis':
+        from app.task_queue import RedisTaskQueue
+        RedisTaskQueue.from_settings(settings).enqueue(task_id)
+    else:
+        asyncio.create_task(task_service.execute(product_store.task_for_worker(task_id)))
+app.include_router(wechat_draft_router(WechatPrepareReader(store, settings.data_dir), current_user,
+                                      wechat_draft_execution,enqueue_wechat_action))
 
 
 @app.exception_handler(AgentCatalogError)

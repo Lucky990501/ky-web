@@ -1357,7 +1357,8 @@ class ProductStore:
             conn.execute("INSERT INTO credit_transactions(id,tenant_id,user_id,task_id,amount,reason) VALUES (?,?,?,?,?,?)",(str(uuid.uuid4()),tenant_id,user_id,task_id,-amount,agent.slug))
 
     def recoverable_tasks(self) -> list[dict]:
+        from app.wechat_draft_operations import TASK_MARKER
         with self._store.connection() as conn:
-            conn.execute("UPDATE tasks SET status='queued',stage='queued',user_message='服务已恢复，任务重新排队' WHERE status IN ('queued','running')")
-            rows=conn.execute("SELECT * FROM tasks WHERE status='queued' ORDER BY created_at").fetchall()
+            conn.execute("UPDATE tasks SET status='queued',stage='queued',user_message='服务已恢复，任务重新排队' WHERE status IN ('queued','running') AND input_text<>?",(TASK_MARKER,))
+            rows=conn.execute("SELECT * FROM tasks WHERE status='queued' OR (status='running' AND input_text=?) ORDER BY created_at",(TASK_MARKER,)).fetchall()
         return [dict(row) for row in rows]
