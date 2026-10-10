@@ -302,6 +302,7 @@ def runtime_diagnostic(product: ProductStore, settings: Settings) -> dict:
     """Describe readiness without leaking credentials or silently downgrading."""
     reasons: list[str] = []
     pgvector_installed = False
+    embedding_schema = None
     if not product._store.is_postgres:
         reasons.append("生产语义检索需要 PostgreSQL 和 pgvector。")
     else:
@@ -312,6 +313,13 @@ def runtime_diagnostic(product: ProductStore, settings: Settings) -> dict:
             reasons.append("无法确认 pgvector 扩展状态。")
         if not pgvector_installed:
             reasons.append("PostgreSQL 未启用 pgvector 扩展。")
+        if pgvector_installed:
+            try:
+                embedding_schema = product.knowledge_embedding_schema()
+                if embedding_schema["type"] != "vector" or embedding_schema["dimension"] != settings.embedding_dimension:
+                    reasons.append("KNOWLEDGE_EMBEDDING_SCHEMA_DIMENSION_MISMATCH")
+            except Exception:
+                reasons.append("KNOWLEDGE_EMBEDDING_SCHEMA_UNAVAILABLE")
     if settings.embedding_provider == "local-hash":
         reasons.append("当前 Embedding Provider 为 local-hash，不是正式 Embedding Provider。")
     if settings.embedding_provider != "local-hash" and not settings.embedding_api_key:
@@ -328,12 +336,15 @@ def runtime_diagnostic(product: ProductStore, settings: Settings) -> dict:
         "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
         "embedding_dimension": settings.embedding_dimension,
+        "embedding_schema": embedding_schema,
         "allow_fallback": settings.knowledge_allow_fallback,
         "reasons": reasons,
     }
 
 
 def require_semantic_runtime(product: ProductStore, settings: Settings) -> None:
+    if product._store.is_postgres:
+        product.require_knowledge_embedding_dimension(settings.embedding_dimension)
     diagnostic = runtime_diagnostic(product, settings)
     if diagnostic["strict"] and diagnostic["status"] != "ok":
         raise RuntimeError("生产语义检索未就绪：" + "；".join(diagnostic["reasons"]))
@@ -375,6 +386,8 @@ class KnowledgeProcessingService:
             vectors: list[list[float]] = []
             for start in range(0, len(embedding_texts), self.EMBEDDING_BATCH_SIZE):
                 vectors.extend(await self.embedding.embed_documents(embedding_texts[start:start + self.EMBEDDING_BATCH_SIZE]))
+            if len(vectors) != len(chunks) or any(len(vector) != self.settings.embedding_dimension for vector in vectors):
+                raise RuntimeError("KNOWLEDGE_EMBEDDING_RESPONSE_DIMENSION_MISMATCH")
             for item, vector in zip(chunks, vectors):
                 item.update({"embedding": vector, "embedding_provider": self.settings.embedding_provider, "embedding_model": self.settings.embedding_model, "embedding_version": RAG_INDEX_VERSION, "knowledge_base_id": record.get("knowledge_base_id")})
             if not force:
@@ -412,22 +425,26 @@ class KnowledgeRetrievalService:
             raise RuntimeError("Embedding Provider 不支持同步检索。")
         try:
             with self.product._store.connection() as conn:
-                if self.product._store.is_postgres and self.settings.embedding_provider != "local-hash":
+                if self.product._store.is_postgres:
                     literal = "[" + ",".join(f"{value:.10g}" for value in query_vector) + "]"
                     rows = conn.execute(
                         "SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,c.metadata,c.embedding_version,"
                         "(1 - (c.embedding <=> ?::vector)) AS vector_score,f.name filename "
-                        "FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id "
+                        "FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id AND f.tenant_id=c.tenant_id "
                         "WHERE c.tenant_id=? AND f.status='ready' AND c.embedding IS NOT NULL "
-                        "AND c.embedding_provider=? AND c.embedding_model=? AND c.embedding_dimension=? "
+                        "AND c.embedding_provider=? AND c.embedding_model=? AND vector_dims(c.embedding)=? "
                         "ORDER BY c.embedding <=> ?::vector LIMIT ?",
                         (literal, tenant_id, self.settings.embedding_provider, self.settings.embedding_model, self.settings.embedding_dimension, literal, max(top_k * 4, 20)),
                     ).fetchall()
                 else:
                     rows = conn.execute("SELECT c.id,c.file_id,c.content,c.title,c.section,c.page_number,c.embedding,c.metadata,c.embedding_version,f.name filename FROM knowledge_chunks c JOIN knowledge_files f ON f.id=c.file_id WHERE c.tenant_id=? AND f.status='ready'", (tenant_id,)).fetchall()
         except Exception:
+            if self.product._store.is_postgres:
+                raise RuntimeError("KNOWLEDGE_RETRIEVAL_STORAGE_UNAVAILABLE") from None
             rows = []
         if not rows:
+            if self.product._store.is_postgres and not self.settings.knowledge_allow_fallback:
+                return RetrievalOutcome([], False, "no_matching_chunks")
             # Compatibility for the pre-V1 text records while enterprises migrate
             # their content through the file ingestion pipeline.
             legacy_results = self.product._store.knowledge_search(tenant_id, query, top_k)
