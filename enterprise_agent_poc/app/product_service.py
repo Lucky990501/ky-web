@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 
 from PIL import Image, UnidentifiedImageError
@@ -11,6 +12,10 @@ from app.service import AgentRunError, AgentService, GenerationCancelled
 from app.storage import storage_provider
 
 
+class TaskExecutionNotAuthorized(RuntimeError):
+    """No execution has started. Keep the durable queue reservation for recovery."""
+
+
 class TaskService:
     """Async product orchestration around the Gate 2 AgentService."""
 
@@ -18,21 +23,27 @@ class TaskService:
         self._store = store
         self._agents = agents
         self.pre_execute_guard = None
+        self.execution_permission_guard = None
         self.runtime_test_lifecycle = None
 
-    async def execute(self, task: dict) -> None:
+    async def execute(self, task: dict, *, _controlled_action=None) -> None:
+        if self.execution_permission_guard:
+            self.execution_permission_guard(task)
         if self.pre_execute_guard:
             self.pre_execute_guard()
         if self.runtime_test_lifecycle:
             if self.runtime_test_lifecycle.started(task) is False:
                 return
         try:
-            await self._execute(task)
+            if _controlled_action is None:
+                await self._execute(task)
+            else:
+                await self._execute(task, _controlled_action=_controlled_action)
         finally:
             if self.runtime_test_lifecycle:
                 self.runtime_test_lifecycle.finished(task)
 
-    async def _execute(self, task: dict) -> None:
+    async def _execute(self, task: dict, *, _controlled_action=None) -> None:
         if self.pre_execute_guard:
             self.pre_execute_guard()
         task_id, tenant_id = task["id"], task["tenant_id"]
@@ -82,11 +93,22 @@ class TaskService:
 
             agent = self._store.task_definition(task)
             execution_options = {}
+            from app.controlled_skill_action import TASK_MARKER
+            if current.get('input_text', '').endswith(TASK_MARKER) and _controlled_action is None:
+                # Lost ticket, restart or accidental ordinary queue delivery:
+                # enter the formal failed Run path, never the model path.
+                _controlled_action = False
+            if _controlled_action is not None:
+                # Ticket is an internal object minted only after native Test
+                # authority + authenticated caller verification, never JSON.
+                execution_options['_controlled_action'] = _controlled_action
             if self._store.execution_resolver and task["agent_id"] not in CATALOG:
                 with self._store._store.connection() as conn:
                     context = self._store.execution_resolver.task_context(conn, task)
                     self._store.execution_resolver.check_context(conn, context)
                 execution_options["execution_context"] = context
+                if 'skills:execute' in json.loads(context['tool_policy_snapshot'])['scopes']:
+                    execution_options['task_id']=task_id
             if task.get("conversation_id"):
                 self._store.add_message(
                     task["conversation_id"],

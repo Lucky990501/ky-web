@@ -193,6 +193,15 @@ _CUSTOMER_ERROR_MESSAGES = {
     "INSTANCE_NOT_ENABLED": "当前智能体尚未为该企业启用。",
     "SERVICE_TEMPORARILY_UNAVAILABLE": "服务暂时不可用，请稍后重试。",
     "INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE": "请先停用该智能体，再修改配置。",
+    "WECHAT_SECRET_INPUT_INVALID": "请检查AppID；首次配置或轮换时请输入有效AppSecret。",
+    "WECHAT_CONFIG_PERMISSION_REQUIRED": "仅企业管理员可管理微信公众号配置。",
+    "WECHAT_SECRET_BACKEND_BLOCKED": "微信公众号凭据服务暂时不可用，请联系管理员。",
+    "WECHAT_SECRET_VERSION_CONFLICT": "配置已发生变化，请刷新后重新操作。",
+    "WECHAT_CREDENTIAL_REFERENCE_UNAVAILABLE": "微信公众号配置不完整，请重新配置。",
+    "WECHAT_ACCOUNT_CONFIG_BLOCKED": "微信公众号配置不完整，请检查AppID和AppSecret。",
+    "TENANT_SECRET_REFERENCE_BLOCKED": "微信公众号配置暂不可用，请联系管理员。",
+    "WECHAT_CONNECTION_DISABLED": "微信公众号连接验证尚未启用，请联系平台管理员。",
+    "SECRET_EXECUTION_SCOPE_FAILED": "微信公众号服务暂时不可用，请稍后重试。",
 }
 _SENSITIVE_ERROR_MARKERS = re.compile(
     r"traceback|exception|postgres|sqlite|database|\bsql\b|\bmcp\b|runtime|/users/|/app/|\\app\\|\.py[:\s]",
@@ -206,7 +215,8 @@ def _request_id(request: Request) -> str:
 
 def _error_code(status_code: int, detail: object, path: str) -> str:
     raw = str(detail or "")
-    if raw == "ACCOUNT_DISABLED":
+    if (raw == 'ACCOUNT_DISABLED' or raw == 'SECRET_EXECUTION_SCOPE_FAILED'
+            or raw in _CUSTOMER_ERROR_MESSAGES and raw.startswith('WECHAT_')):
         return raw
     if raw == "INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE":
         return raw
@@ -324,6 +334,15 @@ def require_platform_admin(workbench_session: str | None) -> UserPrincipal:
 
 
 app.include_router(catalog_router(agent_catalog_control, require_platform_admin))
+from app.test_exact_admin_gate import install_exact_admin_gate
+install_exact_admin_gate(app, environment=settings.environment, store=product_store, sessions=sessions,
+    catalog=agent_catalog_control, task_service=task_service)
+from app.tenant_secret_backend import backend_from_settings
+from app.wechat_account import WechatAccountService
+from app.wechat_account_api import wechat_account_router
+app.include_router(wechat_account_router(
+    WechatAccountService(product_store,settings.environment,backend_from_settings(settings),
+                         network_allowed=settings.wechat_network_allowed),current_user))
 
 
 @app.exception_handler(AgentCatalogError)

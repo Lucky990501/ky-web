@@ -76,6 +76,14 @@ def _execution_scope_from_context(ctx: Any, bearer_token: str) -> str:
     return "legacy:" + hashlib.sha256(bearer_token.encode("utf-8")).hexdigest()
 
 
+def _wechat_task_scope(ctx: Any, bearer: str) -> str:
+    # External writes must not use session/bearer compatibility fallback.
+    value=_execution_scope_from_context(ctx,bearer)
+    if not value.startswith('runtime:'):
+        raise PermissionError('WECHAT_SIGNED_TASK_SCOPE_REQUIRED')
+    return value.removeprefix('runtime:')
+
+
 def create_mcp():
     mcp = FastMCP(
         "Enterprise Platform MCP",
@@ -101,6 +109,45 @@ def create_mcp():
     async def asset_search(query: str, asset_type: str | None = None, ctx: Context = None) -> list[dict]:
         """Find visual assets belonging only to the authenticated enterprise."""
         return service.asset_search(_bearer_from_context(ctx), query, asset_type)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,openWorldHint=False))
+    async def wechat_prepare_authorize(ctx: Context) -> dict:
+        """Resolve PREPARE permission for the current signed Task. No WeChat calls."""
+        bearer=_bearer_from_context(ctx)
+        return service.wechat_action_permission(bearer,_wechat_task_scope(ctx,bearer),'PREPARE')
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,openWorldHint=False))
+    async def wechat_create_draft_authorize(ctx: Context) -> dict:
+        """Resolve CREATE_DRAFT permission only; this does NOT create a draft.
+
+        Requires current persisted user upload intent, scoped account references
+        and exact Agent/Skill/Action bindings. Receipt status is NOT_EXECUTED.
+        """
+        bearer=_bearer_from_context(ctx)
+        return service.wechat_action_permission(bearer,_wechat_task_scope(ctx,bearer),'CREATE_DRAFT')
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,openWorldHint=False))
+    async def skill_action_execute(skill_key: str, revision: str, action: str,
+                                   article: dict, ctx: Context) -> CallToolResult:
+        """Execute a bound, sealed Skill action in this signed Task's workspace.
+
+        V1 supports wechat-html-draft PREPARE only. revision is the exact UUID
+        returned by wechat_prepare_authorize, never 'latest' or a display name.
+        article has title,digest,html,cover_asset,assets (filename→base64 image).
+        No caller-supplied executable, script, workspace, shell options or secrets.
+        CREATE_DRAFT remains permission-gated and execution-disabled.
+        """
+        try:
+            bearer=_bearer_from_context(ctx)
+            task_scope=_wechat_task_scope(ctx,bearer)
+        except PermissionError:
+            from app.skill_dispatch import failure
+            result=failure('SKILL_ACTION_NOT_ALLOWED',action)
+        else:
+            result=await asyncio.to_thread(service.skill_action_execute,bearer,task_scope,
+                skill_key,revision,action,article)
+        return CallToolResult(isError=result['status']!='completed',structuredContent=result,
+                             content=[TextContent(type='text',text=json.dumps(result,ensure_ascii=False))])
 
     @mcp.tool()
     async def image_generation(prompt: str, references: list[str], aspect_ratio: str,

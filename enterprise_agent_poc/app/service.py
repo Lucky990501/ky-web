@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import json
 from dataclasses import dataclass
 from collections.abc import Awaitable
 from typing import Callable
@@ -75,6 +76,7 @@ class AgentService:
         on_run_started: Callable[[str, str], None] | None = None,
         task_id: str | None = None,
         reference_image_attached: bool = False,
+        _controlled_action=None,
     ) -> RunResult:
         if execution_context is None:
             profile = self.profile_for(tenant_id, agent_id)
@@ -83,9 +85,13 @@ class AgentService:
             from app.agent_execution import definition, profile as context_profile
             if execution_context["tenant_id"] != tenant_id or execution_context["agent_id"] != agent_id:
                 raise PermissionError("Execution context identity mismatch")
-            profile = context_profile(execution_context)
+            if json.loads(execution_context['tool_policy_snapshot']).get('eligibility_mode') == 'SKILL_ONLY_TEST_QUALIFIED':
+                profile = context_profile(execution_context, _controlled=_controlled_action is not None)
+            else:
+                profile = context_profile(execution_context)
             agent = definition(execution_context)
         grounding_enabled = bool(profile.grounding_policy and profile.grounding_policy.get("enabled") is True)
+        session_task_options={"task_id":task_id} if task_id and (reference_image_attached or 'skills:execute' in profile.tool_scopes) else {}
         if reference_image_attached and (agent_id != "image-agent" or not task_id):
             raise ValueError("参考图片必须绑定图片任务。")
         is_resume = bool(conversation_id)
@@ -153,10 +159,15 @@ class AgentService:
         # A startup may fail before Codex returns a thread.  Persist a minimal
         # trace first so the task keeps an auditable run_id without inventing a
         # thread id or storing provider exceptions/secrets.
-        self._store.create_run_trace(run_id, conversation_id, tenant_id, agent_id, "pending", baseline)
+        self._store.create_run_trace(run_id, conversation_id, tenant_id, agent_id, None if _controlled_action is not None else "pending", baseline)
         if on_run_started:
             on_run_started(run_id, conversation_id)
         trace = baseline
+        if _controlled_action is not None:
+            return await self._run_controlled_action(
+                _controlled_action, task_id, execution_context, profile, trace,
+                defer_result_persistence, cancellation_requested,
+            )
         try:
             if cancellation_requested and cancellation_requested():
                 raise GenerationCancelled()
@@ -167,7 +178,7 @@ class AgentService:
                     existing["runtime_thread_id"],
                     developer_instructions=agent.instructions,
                     recovery_context=recovery_context,
-                    **({"task_id": task_id} if reference_image_attached else {}),
+                    **session_task_options,
                 )
                 if session.thread_id != existing["runtime_thread_id"]:
                     if not self._store.replace_conversation_thread(
@@ -177,7 +188,7 @@ class AgentService:
             else:
                 session = await self._runtime.create_session(
                     profile, agent.instructions,
-                    **({"task_id": task_id} if reference_image_attached else {}),
+                    **session_task_options,
                 )
                 if execution_context:
                     with self._store.connection() as conn:
@@ -275,6 +286,70 @@ class AgentService:
                 error_code="runtime_start_error" if isinstance(exc, RuntimeStartError) else "runtime_error",
                 failure_stage=trace["failure_stage"],
             ) from exc
+
+    async def _run_controlled_action(self, ticket, task_id, context, profile, trace,
+                                     defer_result_persistence, cancellation_requested):
+        """Shared Run/Task persistence; deliberately no RuntimeProvider access."""
+        from app.controlled_skill_action import ticket_entry, ControlledActionError
+        from app.skill_dispatch import failure
+        run_id, conversation_id = trace['run_id'], trace['conversation_id']
+        trace.update(execution_kind='controlled_skill_action', CONTROLLED_TEST_ACTION=True,
+                     provider_calls=0, image_calls=0, wechat_calls=0,
+                     model_provider=None, model=None, reasoning_effort=None,
+                     codex_thread_id=None, artifacts={}, lifecycle_events=[])
+        try:
+            entry = ticket_entry(ticket)
+            request, audit = entry.check_ticket(ticket, task_id, context)
+            audit['run_id'] = run_id
+            trace['controlled_action_audit'] = audit
+            if cancellation_requested and cancellation_requested():
+                raise GenerationCancelled()
+            if set(profile.required_tools) - {'skill_action_execute'}:
+                raise ControlledActionError('CONTROLLED_SKILL_ACTION_NOT_ALLOWED')
+            # This is a logical persistence key, NOT a fabricated Codex thread.
+            thread_id = 'controlled:' + run_id
+            with self._store.connection() as conn:
+                conn.execute('INSERT INTO conversations(id,tenant_id,agent_id,runtime_profile_id,runtime_thread_id,runtime_version) VALUES (?,?,?,?,?,?)',
+                    (conversation_id, profile.tenant_id, profile.agent_id, profile.id, thread_id, 'controlled-skill-action-v1'))
+                conn.execute('INSERT INTO conversation_agent_contexts VALUES (?,?)', (conversation_id, context['id']))
+            output, audit = await entry.dispatch(ticket, task_id, context, run_id, conversation_id)
+            trace.update(skill_action_result=output, controlled_action_audit=audit)
+            if cancellation_requested and cancellation_requested():
+                raise GenerationCancelled()
+            if output['status'] != 'completed':
+                raise ControlledActionError(output.get('error_code', 'SKILL_EXECUTION_FAILED'))
+            call = dict(server='platform', tool='skill_action_execute', status='completed',
+                        result_is_error=False, duration_ms=0)
+            # Only the invoked Skill dependency is satisfied. Other required
+            # tools are not invented merely to satisfy completion evidence.
+            text = json.dumps(output, ensure_ascii=False, sort_keys=True)
+            trace.update(status='runtime_completed' if defer_result_persistence else 'completed',
+                runtime_status='completed', runtime_completed=True, final_response_received=True,
+                final_response_length=len(text), final_result=text, mcp_calls=[call], tool_calls=[call],
+                tool_calls_completed=True, required_tool_calls_completed=True,
+                required_tool_calls={'skill_action_execute': dict(attempts=1, completed_attempts=1, failed_attempts=0, satisfied=True)},
+                structured_result=None)
+            self._store.finish_run_trace(run_id, trace['status'], trace)
+            return RunResult(run_id, conversation_id, thread_id, text)
+        except GenerationCancelled:
+            trace.update(status='cancelled', runtime_completed=False, result_persistence_status='not_applicable', failure_stage='cancelled')
+            self._store.finish_run_trace(run_id, 'cancelled', trace)
+            raise
+        except Exception as error:
+            code = error.code if isinstance(error, ControlledActionError) else 'SKILL_EXECUTION_FAILED'
+            action = json.loads(ticket.request_json).get('action') if hasattr(ticket, 'request_json') else None
+            output = trace.get('skill_action_result') or failure(code, action)
+            trace.update(status='failed', runtime_completed=False, failure_stage='controlled_skill_action',
+                         error=code, skill_action_result=output)
+            trace['controlled_receipt_ref'] = 'controlled-action-receipt:' + run_id
+            self._store.finish_run_trace(run_id, 'failed', trace)
+            self._store.log_event(conversation_id, 'skill.controlled_action_failed', {
+                **trace.get('controlled_action_audit', {}), 'error_code': code, 'provider_calls': 0,
+                'CONTROLLED_TEST_ACTION': True, 'run_id': run_id, 'task_id': task_id,
+                'status': 'failed', 'result': output, 'receipt_ref': trace['controlled_receipt_ref'],
+                'runtime_identity': trace.get('controlled_action_audit', {}).get('runtime_identity')})
+            raise AgentRunError(code, run_id=run_id, conversation_id=conversation_id,
+                                error_code=code, failure_stage='controlled_skill_action') from None
 
     async def _run_turn(
         self,

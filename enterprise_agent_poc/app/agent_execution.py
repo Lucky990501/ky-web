@@ -26,8 +26,10 @@ def definition(context):
                            context["output_policy"] == "image_required", context["persona_snapshot"])
 
 
-def profile(context):
+def profile(context, *, _controlled=False):
     policy = json.loads(context["tool_policy_snapshot"])
+    if policy.get('eligibility_mode') == 'SKILL_ONLY_TEST_QUALIFIED' and not _controlled:
+        raise PermissionError('ZERO_PROVIDER_CONTRACT_VIOLATION')
     return RuntimeProfile(context["runtime_profile_id"], context["tenant_id"], context["agent_id"],
                           context["model_provider_id_snapshot"], context["model_id_snapshot"],
                           context["reasoning_level_snapshot"], json.loads(context["skill_manifest_snapshot"]),
@@ -98,7 +100,12 @@ class ExecutionResolver:
                 return True
         return False
 
-    def resolve(self, conn, tenant, user, agent_id, conversation_id=None, *, test_revision=None):
+    def resolve(self, conn, tenant, user, agent_id, conversation_id=None, *, test_revision=None, controlled_qualification=None):
+        if controlled_qualification is not None:
+            if conversation_id or test_revision:
+                raise PermissionError('CONTROLLED_SKILL_ACTION_NOT_ALLOWED')
+            from app.skill_only_test_qualification import resolve_context
+            return resolve_context(self, conn, tenant, user, agent_id, controlled_qualification)
         if agent_id in CATALOG:
             return None
         from app.agent_availability import release_aborted, tenant_available
@@ -160,6 +167,11 @@ class ExecutionResolver:
         if release_aborted(conn, context["agent_id"], postgres=self.store.is_postgres):
             raise PermissionError("Aborted release Agent cannot resume")
         policy = json.loads(context["tool_policy_snapshot"])
+        if policy.get('eligibility_mode') == 'SKILL_ONLY_TEST_QUALIFIED':
+            from app.skill_only_test_qualification import check_context
+            check_context(conn, context, environment=self.settings.environment)
+            self._skills(conn, context['agent_template_version_id'], fixed=policy['skill_refs'])
+            return
         self._skills(conn, context["agent_template_version_id"], historical=True, fixed=policy["skill_refs"])
         instance = conn.execute("SELECT * FROM tenant_agent_instances WHERE instance_id=? AND tenant_id=? AND agent_id=?", (context["instance_id"], context["tenant_id"], context["agent_id"])).fetchone()
         if policy['runtime_test'] and not self.test_allowed(conn,context['tenant_id'],context['agent_id']):
@@ -199,5 +211,11 @@ def authorize_tool(store, principal, scope):
         actual = conn.execute("SELECT * FROM tool_capabilities WHERE id=?",(tool_id,)).fetchone() if tool_id else None
         if not actual or dict(actual) != TOOL_CAPABILITIES[tool_id] or not actual["implemented"]:
             raise TokenError("Bound Tool capability unavailable")
+        if policy.get('eligibility_mode') == 'SKILL_ONLY_TEST_QUALIFIED':
+            if scope not in policy['scopes'] or set(principal.scopes) != set(policy['scopes']):
+                raise TokenError('Qualified scope mismatch')
+            from app.skill_only_test_qualification import authorize_scope
+            authorize_scope(conn, dict(row), scope)
+            return
         if scope not in policy["scopes"] or set(principal.scopes) != set(policy["scopes"]) or (policy["runtime_test"] and not test_running) or (row["instance_status"] != "enabled" and not (row["instance_status"] == "configured" and policy["runtime_test"] and test and test_running)):
             raise TokenError("Runtime instance / bound scope denied")

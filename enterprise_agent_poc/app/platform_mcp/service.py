@@ -76,6 +76,28 @@ class PlatformMCPService:
         self._audit(principal.tenant_id, "enterprise_config_get", "completed")
         return self._store.enterprise_config(principal.tenant_id)
 
+    def wechat_action_permission(self, bearer_token: str, task_scope: str, action: str) -> dict:
+        from app.wechat_action_contract import WechatActionContract
+        from app.tenant_secret_backend import backend_from_settings
+        from app.tenant_secret_reference import TenantSecretReferences
+        return WechatActionContract(self._store,self._tokens,self._settings.environment,
+            TenantSecretReferences(self._settings.environment,backend=backend_from_settings(self._settings)),
+            network_allowed=getattr(self._settings,'wechat_network_allowed',False)).resolve(
+            bearer_token,task_scope,action)
+
+    def skill_action_execute(self, bearer_token: str, task_scope: str, skill_key: str,
+                             revision: str, action: str, article: dict) -> dict:
+        from app.skill_dispatch import SkillDispatchError, failure
+        from app.skill_dispatch_config import from_settings
+        try:
+            dispatcher=getattr(self,'_skill_dispatcher',None)
+            if dispatcher is None:
+                dispatcher=from_settings(self._store,self._tokens,self._settings)
+            return dispatcher.execute(bearer_token,task_scope,skill_key,revision,action,article)
+        except SkillDispatchError as error:
+            return failure(error.code,action)
+
+
     def knowledge_search(self, bearer_token: str, query: str, limit: int = 5) -> list[dict]:
         principal = self._principal(bearer_token, "knowledge:search")
         deadline = time.monotonic() + self.KNOWLEDGE_RETRY_BUDGET_SECONDS

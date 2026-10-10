@@ -1,5 +1,5 @@
 """Platform-admin-only Stage 1 API, isolated from existing execution APIs."""
-from fastapi import APIRouter, Cookie, Depends
+from fastapi import APIRouter, Cookie, Depends, Header
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent_productization import AgentProductization
@@ -71,11 +71,13 @@ def catalog_router(catalog: AgentProductization, require_platform_admin) -> APIR
         return catalog.validate(template_id, version_id, principal.user_id)
 
     @router.post("/{template_id}/versions/{version_id}/test", status_code=202)
-    async def runtime_test(template_id: str, version_id: str, payload: RuntimeTestRequest, principal=Depends(admin)):
+    async def runtime_test(template_id: str, version_id: str, payload: RuntimeTestRequest, principal=Depends(admin),
+                           idempotency_key: str | None = Header(default=None, max_length=36)):
         if not catalog.runtime_tester:
             from app.agent_productization import AgentCatalogError
             raise AgentCatalogError("Runtime Test Pending: Execution Resolver unavailable",409)
-        return await catalog.runtime_tester.run(template_id,version_id,principal.user_id,payload.configuration_fingerprint)
+        return await catalog.runtime_tester.run(template_id,version_id,principal.user_id,payload.configuration_fingerprint,
+            **({'idempotency_key':idempotency_key} if idempotency_key is not None else {}))
 
     @router.post("/{template_id}/instances/{tenant_id}/enable")
     def enable(template_id: str, tenant_id: str, principal=Depends(admin)):

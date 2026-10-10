@@ -1,7 +1,7 @@
 """Asynchronous, server-policy-controlled tests on the normal task queue."""
 import json
 import os
-from uuid import uuid4
+from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
 
 from app.agent_execution import completion_evidence
 from app.agent_productization import AgentCatalogError, canonical
@@ -19,6 +19,18 @@ class AgentRuntimeTest:
         self.resolver, self.product, self.tasks = resolver, product, tasks
         self.isolation_guard = None
         self.enqueue = None
+        self.controlled_skill_actions = None
+
+    async def run_controlled_skill_action(self, session_token, request):
+        """Internal native Test harness only; no HTTP route exposes this method.
+
+        Separate deterministic Skill acceptance from Codex Runtime quality
+        tests. Never grant publication eligibility for a zero-model execution.
+        """
+        from app.controlled_skill_action import ControlledActionError, NOT_ALLOWED
+        if self.resolver.settings.environment != 'test' or self.controlled_skill_actions is None:
+            raise ControlledActionError(NOT_ALLOWED)
+        return await self.controlled_skill_actions.run(session_token, request)
 
     async def run_release(self, *, release_operation_id, revision_id, fingerprint,
                           tenant_id, agent_slug, actor_id, release_identity,
@@ -105,7 +117,7 @@ class AgentRuntimeTest:
                               release_prompt=RELEASE_WECHAT_DRAFT_PROMPT)
 
     async def run(self, template_id, version_id, actor, fingerprint=None, *, release_operation_id=None,
-                  release_prompt=None):
+                  release_prompt=None, idempotency_key=None):
         if release_prompt is not None and (not release_operation_id or release_prompt != RELEASE_WECHAT_DRAFT_PROMPT):
             raise AgentCatalogError('Release Runtime Test prompt scope mismatch', 409)
         r=self.resolver
@@ -119,6 +131,14 @@ class AgentRuntimeTest:
             raise AgentCatalogError('Runtime Test requires real CodexRuntimeProvider',409)
         if not self.enqueue:
             raise AgentCatalogError('Runtime Test queue unavailable',409)
+        if idempotency_key is not None:
+            try:
+                if str(UUID(idempotency_key)) != idempotency_key:
+                    raise ValueError()
+            except (ValueError, TypeError, AttributeError):
+                raise AgentCatalogError('Canonical UUID Idempotency-Key required',422) from None
+        test_id = str(uuid5(NAMESPACE_URL, canonical(['workbench-runtime-test-v1',
+            r.test_tenant_id, actor, template_id, version_id, idempotency_key]))) if idempotency_key else str(uuid4())
         with r.store.connection() as conn:
             if not r.store.is_postgres:conn.execute('BEGIN IMMEDIATE')
             r.catalog._productized(r.catalog._template(conn,template_id,lock=True))
@@ -140,6 +160,18 @@ class AgentRuntimeTest:
             # to the explicitly designated test Tenant; otherwise fail closed.
             if not conn.execute('SELECT 1 FROM users WHERE id=? AND tenant_id=?',(actor,r.test_tenant_id)).fetchone():
                 raise AgentCatalogError('Admin must belong to designated Pilot Tenant',409)
+            prior = conn.execute('SELECT x.*,t.tenant_id,t.user_id,t.agent_id,c.agent_template_version_id AS context_revision, '
+                'c.configuration_fingerprint AS context_fingerprint FROM agent_template_tests x '
+                'JOIN tasks t ON t.id=x.task_id JOIN task_agent_contexts m ON m.task_id=t.id '
+                'JOIN agent_execution_contexts c ON c.id=m.context_id WHERE x.id=?', (test_id,)).fetchone()
+            if prior:
+                if (prior['test_type'], prior['tenant_id'], prior['user_id'], prior['agent_id'],
+                    prior['agent_template_version_id'], prior['context_revision'], prior['configuration_fingerprint'],
+                    prior['context_fingerprint']) != ('runtime',r.test_tenant_id,actor,template_id,
+                    version_id,version_id,fingerprint,fingerprint):
+                    raise AgentCatalogError('Runtime Test idempotency identity mismatch',409)
+                # Replay is observational: no enqueue, new test, or permission.
+                return {'runtime_test_id':test_id,'task_id':prior['task_id'],'status':prior['status']}
             instance=conn.execute('SELECT * FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?',(r.test_tenant_id,template_id)).fetchone()
             if instance and instance['status']=='enabled':
                 raise AgentCatalogError('Disable Pilot instance before testing another Draft',409)
@@ -163,11 +195,12 @@ class AgentRuntimeTest:
                     raise AgentCatalogError('AGENT_PRODUCTIZATION_MANUAL_RECOVERY_REQUIRED',409)
                 if not existing:
                     release._artifact(conn,release_operation_id,'tenant_instance',row['instance_id'],identity)
-        test_id=str(uuid4())
-        task=self.product.create_task(r.test_tenant_id,actor,template_id,
-            release_prompt or '读取绑定 Skill 的 SKILL.md，按 Persona 用一句中文介绍能力。调用全部 required 工具；若绑定 optional enterprise_config_get，请读取企业配置。只返回最终结果。',
-            None,_test_revision=version_id,_test_id=test_id,_test_fingerprint=fingerprint,
-            _release_operation_id=release_operation_id)
+            task=self.product.create_task(r.test_tenant_id,actor,template_id,
+                release_prompt or '读取绑定 Skill 的 SKILL.md，按 Persona 用一句中文介绍能力。调用全部 required 工具；若绑定 optional enterprise_config_get，请读取企业配置。只返回最终结果。',
+                None,_test_revision=version_id,_test_id=test_id,_test_fingerprint=fingerprint,
+                _release_operation_id=release_operation_id,_test_connection=conn)
+        # The short initialization transaction has committed. Queue/provider
+        # operations must remain outside it, including all error handling.
         try:self.enqueue(task['id'])
         except Exception:
             self.product.set_task(task['id'],r.test_tenant_id,'failed','enqueue_failed','任务入队失败',error_code='enqueue_failed')

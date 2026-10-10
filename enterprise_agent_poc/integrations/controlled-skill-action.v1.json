@@ -1,0 +1,41 @@
+{
+  "contract": "TEST_CONTROLLED_SKILL_ACTION_V1",
+  "environment": "test",
+  "entry": "AgentRuntimeTest.run_controlled_skill_action(session_token, request)",
+  "transport": "existing Platform MCP skill_action_execute on fixed native loopback",
+  "mcp_url": "http://127.0.0.1:18101/mcp",
+  "public_endpoint": false,
+  "activation_authority": false,
+  "provider_calls": 0,
+  "image_calls": 0,
+  "wechat_calls": 0,
+  "agent_eligibility": "unchanged published/enabled/current formal Runtime Test gates; no bootstrap quality evidence",
+  "task_reservation": "atomic running reservation with durable marker; lost internal ticket cannot enter model",
+  "approval_path": "/etc/enterprise-agent-integrated-test-v3.3/controlled-skill-action.v1.json",
+  "approval_trust": "root:root immutable file, non-writable ancestors, exact Source/tree, existing fresh versioned isolation guard",
+  "fresh_attestation": "<=30s; exact API/Worker controlled Source+tree, MCP b0 Source+tree, registered fixture identity; legacy/no-op/mixed Source denied",
+  "caller": "current authenticated session of exact registered synthetic member + only platform_admin grant",
+  "input_fields": ["tenant_id", "agent_id", "skill_key", "revision", "action", "input"],
+  "revision": "exact published UUID through current Agent context/Binding; runtime gates unchanged",
+  "dispatch_compatibility": {
+    "source_commit": "b0e96dfd6dfa3d3b71f5b27cb4229eb4905f6092",
+    "source_tree": "aea4cfc6ae6990f08c6c7f860678bab3d85a40e4",
+    "contract_sha256": "71220fd80a27b751db8632f65fc8b2d3b8837eb6b691e59dbf49cffdedcc9c92"
+  },
+  "runtime_compatibility": {
+    "source_commit": "e7e96b1a959d8631dc9dcd5c24939fa483ac134a",
+    "source_tree": "a86b9e4d2f4785f1cbef5ae5e654c54cf20a5f75",
+    "descriptor_sha256": "1b7d02d983867a815c898a94944bf3660597fd513d1bf0310608100f9b70e769",
+    "lock_sha256": "3a5f482475c7cafe660df2d171f369a32832ac91e12e9b0ddffde5c5d6ac8abe"
+  },
+  "source_files": [
+    "app/controlled_skill_action.py",
+    "app/agent_runtime_test.py",
+    "app/service.py",
+    "app/product_service.py",
+    "app/product_store.py",
+    "tests/test_controlled_skill_action.py",
+    "scripts/verify_controlled_skill_action.py",
+    "scripts/seal_controlled_skill_action.py"
+  ]
+}

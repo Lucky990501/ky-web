@@ -1,0 +1,53 @@
+{
+  "reference_url": "https://mp.weixin.qq.com/s/FqVv36rLkHTrZy1tyw1j2Q",
+  "reference_title": "成年人的四次元：给生活装一个“哆啦A梦”的口袋",
+  "recorded_date": "2026-10-05",
+  "scope": "本 skill 的默认排版风格；用户本次指定新参考时优先使用新参考。只排版时保留原文事实和含义。",
+  "observed_style": {
+    "canvas": "white",
+    "body_color": "#3E3E3E",
+    "accent_color": "#FFCA00",
+    "body_font_size_px": 16,
+    "body_line_height_px": 25.6,
+    "body_letter_spacing_px": 0.544,
+    "reference_font_family": "Optima-Regular, PingFangTC-light",
+    "body_alignment": "justify",
+    "key_line_font_size_px": 24,
+    "key_line_line_height_px": 38.4,
+    "key_line_alignment_options": [
+      "right",
+      "center",
+      "justify"
+    ],
+    "caption_color": "#A0A0A0",
+    "caption_font_size_px": 12,
+    "caption_line_height_px": 19.2,
+    "caption_alignment": "center",
+    "cover_visual": "白底、暖黄色大块面、黑色手写感标题、贴纸拼贴元素",
+    "reading_rhythm": "短段落连续展开，重点短句独立呈现，图片作为内容段落之间的过渡，再进入活动或案例模块。"
+  },
+  "production_defaults": {
+    "html_body_selector": "#article",
+    "styles": "inline",
+    "font_stack": "Optima-Regular, PingFangTC-light, PingFang SC, Microsoft YaHei, sans-serif",
+    "layout": "流式单栏，移动端图片宽度自适应；普通段落主要两端对齐，过密或混排段落可左对齐。",
+    "spacing": "疏朗留白，重点句上下增加间距；具体间距随文章长度和内容层级调整。",
+    "emphasis": "黄色仅用于少量关键词与重点短句；大段文字保持深灰色。",
+    "copy_policy": "用户只要求排版时，保留提供的文字，不套用原文专有句子，不编造案例、活动、评价或数据。",
+    "image_policy": "使用用户提供或明确授权的图片。没有图片时，用 HTML 注释记录建议位置，不生成会导致上传失败的空 img src。",
+    "complex_modules": "拼贴、手写文字等复杂视觉模块使用独立图片素材；不假装普通 HTML 能完整还原参考图片。",
+    "output": [
+      "article.html",
+      "article.json：标题、摘要、HTML 路径、封面路径及 body_selector"
+    ],
+    "upload": "使用本 skill 自带 scripts/wechat_draft.py；资料不齐时完成 HTML 与待补字段，不调用真实上传。"
+  },
+  "verification": {
+    "reference_body_read": true,
+    "computed_styles_read": true,
+    "reference_top_screenshot_inspected": true,
+    "all_image_modules_visually_inspected": false,
+    "pixel_identical_claim": false,
+    "note": "颜色、字体参数及对齐方式已从参考页面 DOM 的计算样式核对。封面已视觉查看，文章的全部配图模块未逐张检查。不同设备字体及微信公众号过滤仍会影响最终显示。"
+  }
+}

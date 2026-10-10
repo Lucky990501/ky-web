@@ -1,0 +1,273 @@
+{
+  "contract": "REVISION_BOUND_SKILL_PYTHON_RUNTIME_V1",
+  "skill_slug": "wechat-html-draft",
+  "skill_version": "1.0.0",
+  "target": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "implementation": "cpython",
+    "python": "3.11",
+    "abi": "cp311",
+    "glibc_min": "2.28"
+  },
+  "input_requirements_sha256": "e3470d90abf1c746fc484e1e821522150cba2db9a10f43748e9f54aeb838c6f9",
+  "requirements_sha256": "3a7929f34e0dc587b36b7954ecdc89f8e1cffeedd9f24c16d4c4d46fb1299767",
+  "requirements_file": "wechat-python311-linux.v1.requirements.txt",
+  "resolution": "official_pypi_download_binary_only_complete_closure",
+  "direct_requirements": [
+    "requests<3,>=2.32",
+    "beautifulsoup4<5,>=4.12",
+    "css-inline<0.21,>=0.19",
+    "Pillow<13,>=11",
+    "tinycss2<2,>=1.4"
+  ],
+  "packages": [
+    {
+      "package": "beautifulsoup4",
+      "version": "4.15.0",
+      "filename": "beautifulsoup4-4.15.0-py3-none-any.whl",
+      "sha256": "d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9",
+      "url": "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.7.0",
+      "requires_dist": [
+        "soupsieve>=1.6.1",
+        "typing-extensions>=4.0.0",
+        "cchardet; extra == 'cchardet'",
+        "chardet; extra == 'chardet'",
+        "charset-normalizer; extra == 'charset-normalizer'",
+        "html5lib; extra == 'html5lib'",
+        "lxml; extra == 'lxml'"
+      ],
+      "target_dependencies": [
+        "soupsieve>=1.6.1",
+        "typing-extensions>=4.0.0"
+      ],
+      "official_sha_verified": true
+    },
+    {
+      "package": "certifi",
+      "version": "2026.7.22",
+      "filename": "certifi-2026.7.22-py3-none-any.whl",
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.7",
+      "requires_dist": [],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "charset-normalizer",
+      "version": "3.5.2",
+      "filename": "charset_normalizer-3.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "211d5a3eb6af8f513b8d4ca19a8c1b7accab1b5f0d3175f9826b03c1a920dc1f",
+      "url": "https://files.pythonhosted.org/packages/e4/ed/cf505d3011ffceb12c2067a7a5d3cfe92b875d4d44bb0ff0d69375e2c184/charset_normalizer-3.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "tags": [
+        "cp311-cp311-manylinux2014_x86_64",
+        "cp311-cp311-manylinux_2_17_x86_64",
+        "cp311-cp311-manylinux_2_28_x86_64"
+      ],
+      "requires_python": ">=3.7",
+      "requires_dist": [],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "css-inline",
+      "version": "0.20.2",
+      "filename": "css_inline-0.20.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "38515194a5d378506d2d00a0a99d492722ee1582925fd3e693cc4cc336b63424",
+      "url": "https://files.pythonhosted.org/packages/5b/1f/bc77087533096b76b53bc4fff49046848396b3248252630d3104fbd2c97d/css_inline-0.20.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "tags": [
+        "cp39-abi3-manylinux2014_x86_64",
+        "cp39-abi3-manylinux_2_17_x86_64"
+      ],
+      "requires_python": ">=3.9",
+      "requires_dist": [],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "idna",
+      "version": "3.20",
+      "filename": "idna-3.20-py3-none-any.whl",
+      "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+      "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.9",
+      "requires_dist": [
+        "ruff >= 0.16.0 ; extra == \"all\"",
+        "mypy >= 1.11.2 ; extra == \"all\"",
+        "ty >= 0.0.37 ; extra == \"all\"",
+        "pytest >= 8.3.2 ; extra == \"all\"",
+        "hypothesis >= 6.141.1 ; extra == \"all\"",
+        "coverage >= 7.10.0 ; extra == \"all\""
+      ],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "pillow",
+      "version": "12.3.0",
+      "filename": "pillow-12.3.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "23d27a3e0307ec2244cc51e7287b919aa68d097504ebe19df4e76a98a3eea5bd",
+      "url": "https://files.pythonhosted.org/packages/3b/2d/ede717bc1144f63886c21fd349bb95860b0d1a21149ff16f2bb362b612b6/pillow-12.3.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "tags": [
+        "cp311-cp311-manylinux_2_27_x86_64",
+        "cp311-cp311-manylinux_2_28_x86_64"
+      ],
+      "requires_python": ">=3.10",
+      "requires_dist": [
+        "furo; extra == \"docs\"",
+        "olefile; extra == \"docs\"",
+        "sphinx>=8.2; extra == \"docs\"",
+        "sphinx-autobuild; extra == \"docs\"",
+        "sphinx-copybutton; extra == \"docs\"",
+        "sphinx-inline-tabs; extra == \"docs\"",
+        "sphinxext-opengraph; extra == \"docs\"",
+        "olefile; extra == \"fpx\"",
+        "olefile; extra == \"mic\"",
+        "arro3-compute; extra == \"test-arrow\"",
+        "arro3-core; extra == \"test-arrow\"",
+        "nanoarrow; extra == \"test-arrow\"",
+        "pyarrow; extra == \"test-arrow\"",
+        "coverage>=7.4.2; extra == \"tests\"",
+        "defusedxml; extra == \"tests\"",
+        "markdown2; extra == \"tests\"",
+        "olefile; extra == \"tests\"",
+        "packaging; extra == \"tests\"",
+        "pytest; extra == \"tests\"",
+        "pytest-cov; extra == \"tests\"",
+        "pytest-timeout; extra == \"tests\"",
+        "pytest-xdist; extra == \"tests\"",
+        "setuptools; extra == \"tests\"",
+        "trove-classifiers>=2024.10.12; extra == \"tests\"",
+        "defusedxml; extra == \"xmp\""
+      ],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "requests",
+      "version": "2.34.2",
+      "filename": "requests-2.34.2-py3-none-any.whl",
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.10",
+      "requires_dist": [
+        "charset_normalizer<4,>=2",
+        "idna<4,>=2.5",
+        "urllib3<3,>=1.26",
+        "certifi>=2023.5.7",
+        "PySocks!=1.5.7,>=1.5.6; extra == \"socks\"",
+        "chardet<8,>=3.0.2; extra == \"use-chardet-on-py3\""
+      ],
+      "target_dependencies": [
+        "charset_normalizer<4,>=2",
+        "idna<4,>=2.5",
+        "urllib3<3,>=1.26",
+        "certifi>=2023.5.7"
+      ],
+      "official_sha_verified": true
+    },
+    {
+      "package": "soupsieve",
+      "version": "2.10",
+      "filename": "soupsieve-2.10-py3-none-any.whl",
+      "sha256": "8596eb8967d744174820280fa62b4542a2e955bfaccca73ed8a13c6eb8e9b502",
+      "url": "https://files.pythonhosted.org/packages/66/87/5ed59e1d0290564e2027ed066c52b059892c4637741337fc0967183c8d4d/soupsieve-2.10-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.10",
+      "requires_dist": [],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "tinycss2",
+      "version": "1.5.1",
+      "filename": "tinycss2-1.5.1-py3-none-any.whl",
+      "sha256": "3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661",
+      "url": "https://files.pythonhosted.org/packages/60/45/c7b5c3168458db837e8ceab06dc77824e18202679d0463f0e8f002143a97/tinycss2-1.5.1-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.10",
+      "requires_dist": [
+        "webencodings >=0.4",
+        "sphinx ; extra == \"doc\"",
+        "furo ; extra == \"doc\"",
+        "pytest ; extra == \"test\"",
+        "ruff ; extra == \"test\""
+      ],
+      "target_dependencies": [
+        "webencodings>=0.4"
+      ],
+      "official_sha_verified": true
+    },
+    {
+      "package": "typing-extensions",
+      "version": "4.16.0",
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.9",
+      "requires_dist": [],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "urllib3",
+      "version": "2.8.0",
+      "filename": "urllib3-2.8.0-py3-none-any.whl",
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.10",
+      "requires_dist": [
+        "brotli>=1.2.0; (platform_python_implementation == 'CPython') and extra == 'brotli'",
+        "brotlicffi>=1.2.0.0; (platform_python_implementation != 'CPython') and extra == 'brotli'",
+        "h2<5,>=4; extra == 'h2'",
+        "pysocks!=1.5.7,<2.0,>=1.5.6; extra == 'socks'",
+        "backports-zstd>=1.0.0; (python_version < '3.14') and extra == 'zstd'"
+      ],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    },
+    {
+      "package": "webencodings",
+      "version": "0.6.1",
+      "filename": "webencodings-0.6.1-py3-none-any.whl",
+      "sha256": "7fab6269c8bf237c657876b52058ccb182e861518d1c695c1a9aaa8c1c105d5b",
+      "url": "https://files.pythonhosted.org/packages/77/c6/040cbc72480d789a5f40d63fb484d3106554c4dfa2d2b70ad5022057750f/webencodings-0.6.1-py3-none-any.whl",
+      "tags": [
+        "py3-none-any"
+      ],
+      "requires_python": ">=3.10",
+      "requires_dist": [
+        "sphinx ; extra == \"doc\"",
+        "furo ; extra == \"doc\"",
+        "pytest ; extra == \"test\"",
+        "ruff ; extra == \"test\""
+      ],
+      "target_dependencies": [],
+      "official_sha_verified": true
+    }
+  ]
+}

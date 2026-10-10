@@ -1,0 +1,109 @@
+{
+  "slug": "wechat-html-draft",
+  "name": "公众号文章排版与草稿上传",
+  "version": "1.0.0",
+  "registry_revision_field": "skill_versions.version",
+  "source_type": "native_codex_zip",
+  "original_zip_sha256": "a2f9aae56b1ad59cf9d4532fe9310bfb2827f43465d68e0a4db3746e8b2e14c3",
+  "source_root": "skill_sources/wechat-html-draft/1.0.0",
+  "files": [
+    {
+      "path": "agents/openai.yaml",
+      "sha256": "756fd94fdc76a12b824ebc645b4cedb42ecf522bedbbeb9da215be8e525aa9a9",
+      "git_mode": "100644"
+    },
+    {
+      "path": "assets/article-template.html",
+      "sha256": "f0531365f88baf0bc3de8b3194d31b41f55bb60996c404a0a9b942e804e0a7c4",
+      "git_mode": "100644"
+    },
+    {
+      "path": "assets/article.example.json",
+      "sha256": "8c33f2e2485438dc1d52ab922bc37369a372b76103358566e6de9b1d0d8792fa",
+      "git_mode": "100644"
+    },
+    {
+      "path": "references/account.example.json",
+      "sha256": "654608d21ba152682280f0c4c325d08aab110409556ee122f1af98f32fa81244",
+      "git_mode": "100644"
+    },
+    {
+      "path": "references/reference-style.json",
+      "sha256": "539b67bb205ed53684173c60231a4e6e72faf02c7a70eb7aa14cf3405b06c54f",
+      "git_mode": "100644"
+    },
+    {
+      "path": "references/style.md",
+      "sha256": "cf82618fe443a888104ef47f7ebb23b80d1083d0149f3d3f18e428c1fb0c67ba",
+      "git_mode": "100644"
+    },
+    {
+      "path": "references/upload.md",
+      "sha256": "0a0ed24e1685fc0d82b955cdc1a00f577a772736cfed07cb53f18c56de63d464",
+      "git_mode": "100644"
+    },
+    {
+      "path": "scripts/invoke_wechat.ps1",
+      "sha256": "55a38f196a12cf8e001ea76016a7bd74074f1d00d488eeeaff2d4c2058ab5f49",
+      "git_mode": "100644"
+    },
+    {
+      "path": "scripts/requirements.txt",
+      "sha256": "e3470d90abf1c746fc484e1e821522150cba2db9a10f43748e9f54aeb838c6f9",
+      "git_mode": "100644"
+    },
+    {
+      "path": "scripts/test_workflow.py",
+      "sha256": "396f471c15ff83244c86c05cd6ae095457952944022e7878df6edf7a970fc139",
+      "git_mode": "100644"
+    },
+    {
+      "path": "scripts/wechat_draft.py",
+      "sha256": "245e100e0802123c523043c6c1fe64c2c907abe8844eec5a755c6cfaeeaca49a",
+      "git_mode": "100644"
+    },
+    {
+      "path": "scripts/workbench_guard.py",
+      "sha256": "9b019b6cc91d5f33485e25b442973f3682b68e1d229542a3b3e0789464c8b177",
+      "git_mode": "100644"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "33e4cc417cf47e1e02d7ccd0db50c93a8da270c3010e6b712c37ab01573c7b00",
+      "git_mode": "100644"
+    }
+  ],
+  "artifact_sha256": "4a140c878ae7057583089a4410cd1a23c5c95664988e6dd9700f75ed51d3b18c",
+  "entrypoint": "scripts/wechat_draft.py",
+  "windows_helper": "scripts/invoke_wechat.ps1",
+  "dependencies_sha256": "4320d2df0cc5c28780a8b6b4774b9961fba8f611e732f20d015d805d5e82ca1b",
+  "actions": {
+    "PREPARE": "--check",
+    "CREATE_DRAFT": "--run"
+  },
+  "permissions": {
+    "PREPARE": [
+      "task_workspace:read_write",
+      "skill_assets:read"
+    ],
+    "CREATE_DRAFT": [
+      "task_workspace:read_write",
+      "skill_assets:read",
+      "controlled_image_fetch",
+      "wechat_api:443",
+      "wechat_secret_reference"
+    ]
+  },
+  "upload_gate": "FORMAL_SECRET_AND_EGRESS_BROKER_REQUIRED",
+  "forbidden_actions": [
+    "PUBLISH",
+    "MASS_SEND",
+    "DELETE",
+    "UPDATE_EXISTING_DRAFT"
+  ],
+  "proposed_binding": {
+    "agent_slug": "wechat-official-account-writing",
+    "skill_slug": "wechat-html-draft",
+    "version": "1.0.0"
+  }
+}

@@ -6,6 +6,7 @@ import logging
 from app.main import product_store, runtime, store, task_service, knowledge_processing
 from app.settings import settings
 from app.task_queue import RedisTaskQueue
+from app.product_service import TaskExecutionNotAuthorized
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s worker %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,10 +37,18 @@ async def run() -> None:
             if not task or task["status"] in {"completed", "cancelled"}:
                 queue.acknowledge(task_id)
                 continue
+            held = False
             try:
                 await task_service.execute(task)
+            except TaskExecutionNotAuthorized:
+                # No ACK: retain the durable processing reservation. A later
+                # controlled restart rechecks permission; this is not a retry
+                # grant and does not mutate tests, tasks, runs or audit evidence.
+                logger.warning("task execution held: current authorization unavailable")
+                held = True
             finally:
-                queue.acknowledge(task_id)
+                if not held:
+                    queue.acknowledge(task_id)
     finally:
         await runtime.close()
 

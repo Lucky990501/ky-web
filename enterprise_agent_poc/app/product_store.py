@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -248,6 +250,8 @@ class ProductStore:
 
     def _seed_agent_catalog(self) -> None:
         with self._store.connection() as conn:
+            from app.test_tenant_seeding import authorized_exclusions
+            excluded = authorized_exclusions(conn, self._store)
             # Pre-008 adapters remain compatible. Never overwrite a productized
             # definition; converting the three legacy identities is NOT Stage 1.
             if self._store.is_postgres:
@@ -263,6 +267,8 @@ class ProductStore:
             tenants = conn.execute("SELECT id FROM tenants").fetchall()
             seedable_ids = {r["id"] for r in conn.execute("SELECT id FROM agent_templates WHERE definition_source='legacy'")} if has_source else set(CATALOG)
             for tenant in tenants:
+                if tenant['id'] in excluded:
+                    continue
                 for agent in CATALOG.values():
                     if agent.id not in seedable_ids:
                         continue
@@ -436,22 +442,35 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None, _controlled_action=False, _controlled_qualification=None, _test_connection=None) -> dict:
+        # Internal Runtime Test repository composition only. The caller owns
+        # commit/rollback of Instance + Context + Task + Test; no network work
+        # may run in that transaction. Ordinary task creation is unchanged.
+        if _test_connection is not None and (not all((_test_revision, _test_id, _test_fingerprint))
+                or conversation_id or attachment_ids or _controlled_action or _controlled_qualification):
+            raise PermissionError('Atomic Runtime Test association required')
+        if _controlled_qualification is not None and not _controlled_action:
+            raise PermissionError('CONTROLLED_SKILL_ACTION_NOT_ALLOWED')
+        if _controlled_action:
+            from app.controlled_skill_action import TASK_MARKER
+            if type(_controlled_action) is not bool or not text.endswith(TASK_MARKER) or conversation_id or _test_revision:
+                raise PermissionError('CONTROLLED_SKILL_ACTION_NOT_ALLOWED')
         if _release_operation_id and not _test_revision:
             raise PermissionError("Release ownership is only valid for controlled Runtime Test")
         attachment_ids = attachment_ids or []
         if len(attachment_ids) > 1 or (attachment_ids and agent_id != "image-agent"):
             raise ValueError("当前仅图片生成智能体支持一张参考图。")
-        with self._store.connection() as conn:
+        with (nullcontext(_test_connection) if _test_connection is not None else self._store.connection()) as conn:
             context = None
             if attachment_ids and not self._store.is_postgres:
                 conn.execute("BEGIN IMMEDIATE")
             if agent_id not in CATALOG:
                 if not self.execution_resolver:
                     raise LookupError("Execution resolver unavailable")
-                if not self._store.is_postgres:
+                if not self._store.is_postgres and _test_connection is None:
                     conn.execute("BEGIN IMMEDIATE")
-                context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision)
+                context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision,
+                    **({'controlled_qualification': _controlled_qualification} if _controlled_qualification is not None else {}))
                 if _test_fingerprint is not None and context['configuration_fingerprint'] != _test_fingerprint:
                     raise ValueError('Runtime Test fingerprint changed before task creation')
                 from app.agent_execution import definition
@@ -460,7 +479,7 @@ class ProductStore:
                 agent = get_agent(agent_id)
             credit = conn.execute("SELECT balance FROM credit_accounts WHERE tenant_id=?", (tenant_id,)).fetchone()
             instance = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
-            if not instance or (instance["status"] != "enabled" and _test_revision is None):
+            if not instance or (instance["status"] != "enabled" and _test_revision is None and _controlled_qualification is None):
                 raise LookupError("该智能体尚未为当前企业启用。")
             if not credit or credit["balance"] < agent.credit_cost:
                 raise ValueError("insufficient_credit")
@@ -472,6 +491,10 @@ class ProductStore:
                     raise ValueError("不能跨智能体复用会话。")
             task_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
+            if _controlled_action:
+                # Atomic reservation prevents the ordinary queue/worker from
+                # picking this zero-model Task during the creation/execute gap.
+                conn.execute("UPDATE tasks SET status='running',stage='controlled_action_reserved',started_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
             if attachment_ids:
                 claimed = conn.execute(
                     "UPDATE chat_image_attachments SET task_id=? WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",
@@ -502,6 +525,9 @@ class ProductStore:
                         "tenant_id": tenant_id, "instance_id": context["instance_id"],
                     })
                     release._event(conn, _release_operation_id, "runtime_validation_created", json.dumps({"task_id": task_id, "test_id": _test_id}))
+        # Do not open a second connection to read an uncommitted reservation.
+        if _test_connection is not None:
+            return {'id': task_id}
         return self.task(task_id, tenant_id, user_id) or {}
 
     def set_task(self, task_id: str, tenant_id: str, status: str, stage: str, message: str, *, run_id: str | None = None, error_code: str | None = None, response: str | None = None, conversation_id: str | None = None) -> None:
@@ -1202,6 +1228,8 @@ class ProductStore:
         return {"id":asset_id,"name":name,"type":"poster_reference"}
 
     def update_enterprise_config(self, tenant_id: str, payload: dict) -> dict:
+        from app.wechat_action_contract import validate_enterprise_wechat_config
+        validate_enterprise_wechat_config(payload, tenant_id)
         if {"brand_logo", "brand_logo_metadata", "brand_mark_logo"} & payload.keys():
             raise ValueError("BRAND_LOGO_UPLOAD_REQUIRED")
         with self._store.connection() as conn:

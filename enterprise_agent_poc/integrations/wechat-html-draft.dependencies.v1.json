@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "skill_slug": "wechat-html-draft",
+  "skill_version": "1.0.0",
+  "python_requirement": ">=3.10",
+  "primary_python_target": "3.11",
+  "installation": "controlled environment provisioning only; never install during execution",
+  "packages": {
+    "requests": "2.34.2",
+    "beautifulsoup4": "4.15.0",
+    "css-inline": "0.20.2",
+    "Pillow": "12.3.0",
+    "tinycss2": "1.5.1",
+    "certifi": "2026.7.22",
+    "charset-normalizer": "3.5.2",
+    "idna": "3.20",
+    "soupsieve": "2.10",
+    "typing_extensions": "4.16.0",
+    "urllib3": "2.8.0",
+    "webencodings": "0.6.1"
+  },
+  "wheel_hash_lock": "NOT_ESTABLISHED_FOR_PRIMARY_LINUX_PYTHON311",
+  "primary_compatibility": "NOT_EXECUTED"
+}
