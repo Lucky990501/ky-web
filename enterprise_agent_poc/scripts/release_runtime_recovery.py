@@ -61,7 +61,19 @@ def contract(root):
     return value
 
 
+def recovery_profile(root, manifest=None):
+    if manifest is None:
+        manifest = gate.read_json(root.parent / (root.parent.name + '.manifest.json'))
+    from scripts.release_ui562 import selected, profile
+    return profile(root, manifest) if selected(manifest) else contract(root)
+
+
 def declared(root, manifest):
+    from scripts.release_ui562 import selected
+    if selected(manifest):
+        from scripts.release_manifest import validate_manifest_contract
+        validate_manifest_contract(manifest)
+        return recovery_profile(root, manifest)
     value = contract(root)
     if "runtime_only_release" in manifest:
         from scripts.schema_015_runtime_only import declaration
@@ -76,14 +88,14 @@ def declared(root, manifest):
 
 
 def predecessor(base, root):
-    exact = contract(root)["exact_predecessor"]
+    exact = recovery_profile(root)["exact_predecessor"]
     source, manifest = gate.release_identity(base, exact["release_id"], exact["source_commit"], exact)
     raw = source.parent / (exact["release_id"] + ".manifest.json")
     gate.require(hashlib.sha256(raw.read_bytes()).hexdigest() == exact["raw_manifest_sha256"],
                  "predecessor_raw_manifest_identity")
     # Source -> full Git tree is correlated with the pinned native attestation.
     # A selected-file archive is NOT mislabeled as a complete Git tree hash.
-    gate.require(exact["source_tree"] == PREDECESSOR["source_tree"], "predecessor_source_tree")
+    gate.require(exact["source_tree"] == recovery_profile(root)["exact_predecessor"]["source_tree"], "predecessor_source_tree")
     return source, manifest
 
 
@@ -93,8 +105,9 @@ def verify_schema(base, root, target_id, target_commit, *, plan=False, database_
     installed, _ = gate.release_identity(base, own["release_id"], own["source_commit"])
     gate.require(installed == root, "trusted_recovery_release_path")
     recovery = declared(root, own)
+    exact = recovery['exact_predecessor']
     self_target = (target_id, target_commit) == (own["release_id"], own["source_commit"])
-    prior_target = (target_id, target_commit) == (PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
+    prior_target = (target_id, target_commit) == (exact["release_id"], exact["source_commit"])
     gate.require(self_target or prior_target, "rollback_target_below_member_account_status_floor")
     declaration = gate.read_json(root / "deploy/rollback_compatibility.json")
     epoch = gate.epoch_contract(declaration)
@@ -104,6 +117,9 @@ def verify_schema(base, root, target_id, target_commit, *, plan=False, database_
     lock015 = lock014 + [{k: MIGRATION[k] for k in ("version", "filename", "canonical_sha256")}]
     trusted = gate.check_sources(root, lock015)
     prior_root, _ = predecessor(base, root)
+    from scripts.release_ui562 import selected, verify_pair
+    if selected(own):
+        verify_pair(root, prior_root, own)
     # The exact new predecessor already carries all fifteen migration files.
     gate.check_sources(prior_root, lock015)
     floors = gate.data_contract_floors(declaration, lock015)
@@ -131,6 +147,9 @@ def verify_schema(base, root, target_id, target_commit, *, plan=False, database_
 
 
 def approval(base, root, manifest):
+    from scripts.release_ui562 import selected, tree_approval
+    if selected(manifest):
+        tree_approval(manifest)
     pins = {key: os.environ.get(env, "") for key, env in (
         ("source_commit", "RELEASE_EXPECTED_SOURCE_COMMIT"),
         ("archive_sha256", "RELEASE_EXPECTED_ARCHIVE_SHA256"),
@@ -155,14 +174,15 @@ def receipt_path(base, rid):
 
 def receipt(base, root, manifest, snapshot):
     declared(root, manifest)
-    schema = verify_schema(base, root, PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
+    exact = recovery_profile(root, manifest)['exact_predecessor']
+    schema = verify_schema(base, root, exact["release_id"], exact["source_commit"])
     gate.require(schema["applied_versions"] == [f"{i:03}" for i in range(1, 16)], "receipt_schema_015")
     from scripts import release_verify
     active = release_verify.binding_gate(base, root.parent / (manifest["release_id"] + ".manifest.json"),
-        base / "releases" / PREDECESSOR["release_id"] / (PREDECESSOR["release_id"] + ".manifest.json"), snapshot, "state")
+        base / "releases" / exact["release_id"] / (exact["release_id"] + ".manifest.json"), snapshot, "state")
     value = {"schema_version": 1, "phase": "POST_COMMIT_HEALTH", "release_id": manifest["release_id"],
              "source_commit": manifest["source_commit"], "manifest_sha256": gate.digest(manifest),
-             "recovery_contract_sha256": gate.digest(contract(root)), "predecessor": PREDECESSOR,
+             "recovery_contract_sha256": gate.digest(recovery_profile(root, manifest)), "predecessor": exact,
              "bindings": active, "schema": "015", "schema_rollback": False}
     if "runtime_only_release" in manifest:
         from scripts.schema_015_runtime_only import ledger_snapshot
@@ -182,6 +202,7 @@ def receipt(base, root, manifest, snapshot):
 
 def preflight(base, root, manifest):
     declared(root, manifest)
+    exact = recovery_profile(root, manifest)['exact_predecessor']
     approval(base, root, manifest)
     gate.require((base / "release-current").is_symlink()
                  and (base / "release-current").resolve() == root, "unknown_current_release")
@@ -189,8 +210,8 @@ def preflight(base, root, manifest):
     gate.require(value.get("phase") == "POST_COMMIT_HEALTH" and value.get("release_id") == manifest["release_id"]
                  and value.get("source_commit") == manifest["source_commit"]
                  and value.get("manifest_sha256") == gate.digest(manifest)
-                 and value.get("recovery_contract_sha256") == gate.digest(contract(root))
-                 and value.get("predecessor") == PREDECESSOR, "release_commit_receipt_identity")
+                 and value.get("recovery_contract_sha256") == gate.digest(recovery_profile(root, manifest))
+                 and value.get("predecessor") == exact, "release_commit_receipt_identity")
     if "runtime_only_release" in manifest:
         from scripts.schema_015_runtime_only import ledger_snapshot
         from scripts.migrate import settings
@@ -201,7 +222,7 @@ def preflight(base, root, manifest):
                      and value.get("migration_ledger_sha256") == ledger_snapshot(root, settings.database_url)["ledger_sha256"]
                      and value.get("runtime_only_contract_sha256") == gate.digest(manifest["runtime_only_release"]),
                      "runtime_only_commit_receipt_identity")
-    schema = verify_schema(base, root, PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
+    schema = verify_schema(base, root, exact["release_id"], exact["source_commit"])
     gate.require(schema["applied_versions"] == [f"{i:03}" for i in range(1, 16)] and schema["pending"] == 0,
                  "post_commit_requires_schema_015")
     from scripts import release_verify
@@ -220,8 +241,8 @@ def preflight(base, root, manifest):
         else:
             gate.require(state["active"] in {"inactive", "failed"}, "unknown_current_service_state_" + role)
     return {"status": "post_commit_runtime_rollback_preflight_passed", "read_only": True,
-            "exact_predecessor": PREDECESSOR["release_id"], "predecessor_source": PREDECESSOR["source_commit"],
-            "predecessor_tree": PREDECESSOR["source_tree"], "schema": schema,
+            "exact_predecessor": exact["release_id"], "predecessor_source": exact["source_commit"],
+            "predecessor_tree": exact["source_tree"], "schema": schema,
             "phase": "POST_COMMIT_HEALTH", "schema_rollback": False}
 
 
@@ -238,7 +259,7 @@ def main(argv=None):
         gate.require(root == ROOT, "trusted_recovery_tooling_path")
         if args.mode == "target":
             declared(root, manifest)
-            print(PREDECESSOR["release_id"])
+            print(recovery_profile(root, manifest)['exact_predecessor']['release_id'])
             return 0
         if args.mode == "capture":
             preflight(base, root, manifest)

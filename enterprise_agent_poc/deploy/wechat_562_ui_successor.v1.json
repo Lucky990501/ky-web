@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "contract_id": "WECHAT_562_EXACT_UI_RUNTIME_ONLY_V1",
+  "feature_source": "63925e05021f46ed34d17be13fb0ad65a4ec5283",
+  "feature_tree": "6781719c9cbdeb4cbc1215f22779a288514a28c7",
+  "exact_predecessor": {
+    "release_id": "20261007-562f201-reference-dependency-retry-v1",
+    "source_commit": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
+    "source_tree": "e5205965e57fce6ce2b65dd747a110d00f7f1b1a",
+    "archive_sha256": "17f31cb139ef9a619e455e5999b407fc7cfd98b45c3fd3757912b16a2da39941",
+    "raw_manifest_sha256": "eb6d382b3bc0b720d54349293d4f2afe73f372c8fd3838beb3eb86d557a9811c",
+    "manifest_sha256": "f99d02e36e33e2d0df20127019d019c52f93b5fdb26ebd0105c306c2ae93968a"
+  },
+  "current_schema": "015",
+  "target_schema": "015",
+  "migration_action": "NONE",
+  "data_contract": "member_account_status_v1",
+  "recovery_mode": "PREDECESSOR_ON_SCHEMA_015",
+  "post_commit_runtime_rollback": "ENABLED",
+  "agent_transition": "NONE",
+  "registry_staging": "NONE"
+}

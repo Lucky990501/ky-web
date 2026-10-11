@@ -202,6 +202,9 @@ def write_manifest(result: dict, release_id: str, output: Path, binding_transiti
     if agent_productization_transition is not None:
         manifest["agent_productization_transition"] = agent_productization_transition
     if runtime_only_release is not None:
+        if runtime_only_release.get('schema_version') == 2:
+            from scripts.release_ui562 import validate_git_source
+            validate_git_source(REPO, result['source_commit'], runtime_only_release)
         manifest["runtime_only_release"] = runtime_only_release
     validate_manifest_contract(manifest)
     output.parent.mkdir(parents=True, exist_ok=True)

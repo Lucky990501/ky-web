@@ -238,9 +238,12 @@ def final_preflight(base, candidate, predecessor):
     runtime_only = "runtime_only_release" in manifest
     forward015 = manifest.get("forward_migrations", {}).get("schema_version") == 2 or runtime_only
     if forward015:
-        from scripts.release_runtime_recovery import declared, PREDECESSOR
+        from scripts.release_runtime_recovery import declared, recovery_profile
         declared(root, manifest)
-        exact = {**PREDECESSOR, "data_contract": "member_account_status_v1",
+        from scripts.release_ui562 import selected, tree_approval
+        if selected(manifest):
+            tree_approval(manifest)
+        exact = {**recovery_profile(root, manifest)['exact_predecessor'], "data_contract": "member_account_status_v1",
                  "schema_fingerprint": gate.digest(compatibility["epoch_contract"]["schema_migrations"])}
     prior_root, prior = gate.release_identity(base, exact["release_id"], exact["source_commit"], exact)
     require(predecessor == prior_root.parent / (prior["release_id"] + ".manifest.json")

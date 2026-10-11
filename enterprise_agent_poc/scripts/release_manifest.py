@@ -24,6 +24,10 @@ class ManifestContractError(ValueError):
 
 
 def validate_runtime_only_release(value: object) -> None:
+    if isinstance(value, dict) and value.get('schema_version') == 2:
+        from scripts.release_ui562 import validate
+        validate(value)
+        return
     require(isinstance(value, dict) and type(value.get("schema_version")) is int
             and type(value.get("pending")) is int and type(value.get("unknown")) is int
             and type(value.get("checksum_drift")) is int and value == {
@@ -224,6 +228,9 @@ def validate_manifest_contract(manifest: object) -> dict:
         validate_binding_transition(manifest["binding_transition"])
     if "runtime_only_release" in manifest:
         validate_runtime_only_release(manifest["runtime_only_release"])
+        if manifest['runtime_only_release']['schema_version'] == 2:
+            require(manifest['source_commit'] == manifest['runtime_only_release']['source_commit'],
+                    'ui562_manifest_source_binding')
         require(not ((OPTIONAL_FIELDS - {"runtime_only_release"}) & fields),
                 "runtime_only_release_code_only_scope")
     if "forward_migrations" in manifest:
