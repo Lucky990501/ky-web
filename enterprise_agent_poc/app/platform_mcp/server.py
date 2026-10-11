@@ -13,6 +13,9 @@ import hashlib
 import json
 from typing import Any
 
+from app.test_runtime_tooling import startup as rag_native_startup
+RAG_NATIVE_BOOT = rag_native_startup('mcp')
+
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations, CallToolResult, TextContent
 
@@ -184,5 +187,6 @@ def create_mcp():
 
 
 if __name__ == "__main__":  # pragma: no cover
-    store.initialize()
+    if not RAG_NATIVE_BOOT:
+        store.initialize()
     create_mcp().run(transport="streamable-http")

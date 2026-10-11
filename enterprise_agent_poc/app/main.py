@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
+from app.test_runtime_tooling import startup as rag_native_startup
+# Worker also imports main. Both gates must pass; no environment bypass.
+RAG_NATIVE_BOOT = rag_native_startup('api')
+
 from fastapi import Cookie, FastAPI, File, Form, Header, UploadFile, HTTPException, Query, Response, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
@@ -151,8 +155,9 @@ class ReleaseStaticFiles(StaticFiles):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    product_store.initialize()
-    skill_registry.initialize()
+    if not RAG_NATIVE_BOOT:
+        product_store.initialize()
+        skill_registry.initialize()
     if settings.environment == "production" and settings.embedding_provider != "local-hash":
         product_store.ensure_pgvector_schema(settings.embedding_dimension)
         try:

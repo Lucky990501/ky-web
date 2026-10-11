@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.test_runtime_tooling import startup as rag_native_startup
+RAG_NATIVE_BOOT = rag_native_startup('worker')
+
 from app.main import product_store, runtime, store, task_service, knowledge_processing
 from app.settings import settings
 from app.task_queue import RedisTaskQueue
@@ -14,7 +17,8 @@ logger = logging.getLogger(__name__)
 async def run() -> None:
     if settings.task_queue != "redis":
         raise RuntimeError("Worker 需要 ENTERPRISE_POC_TASK_QUEUE=redis。")
-    store.initialize()
+    if not RAG_NATIVE_BOOT:
+        store.initialize()
     queue = RedisTaskQueue.from_settings(settings)
     queue.ping()
     queue.recover_processing()
