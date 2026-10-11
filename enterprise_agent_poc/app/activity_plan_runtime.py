@@ -40,6 +40,14 @@ STRUCTURED_INSTRUCTION = (
 SAFE_FALLBACK = "本次方案暂无法生成可靠的可导出文档，请调整需求后重试。"
 _FULL_PLAN = re.compile(r"(?:完整|详细|正式).{0,12}(?:活动方案|活动策划|执行方案)|(?:活动方案|活动策划|执行方案).{0,8}(?:完整|详细|全套)|(?:社区|节日|教师节|客户答谢|开学季).{0,8}(?:活动方案|执行方案)")
 _SIMPLE = re.compile(r"(?:想|写|给我|提供).{0,6}(?:\d+|几|五|三).{0,8}(?:标题|主题|句邀约|条文案)|(?:标题|主题|文案).{0,8}(?:几个|几条)")
+_CREATE_PLAN = re.compile(r"(?:做|制作|生成|制定|策划|设计|编写|撰写|拟定|准备|写).{0,24}(?:活动(?:策划|执行)?(?:方案|案)|执行方案)")
+_PLAN_DISCUSSION = re.compile(
+    r"(?:活动(?:策划|执行)?(?:方案|案)|活动策划).{0,4}(?:是什么|什么意思|怎么理解|有何含义)"
+    r"|^(?:(?:请|帮我|麻烦|能否|可以)\s*)*(?:修改|改写|润色|调整|优化|补充|解释|点评|分析).{0,12}(?:活动|方案|邀请|邀约|文案)"
+    r"|活动(?:策划|执行)?(?:方案|案)(?:的)?(?:标题|宣传文案|邀请语|邀约文案|摘要)"
+    r"|(?:活动(?:策划|执行)?(?:方案|案)).{0,8}(?:几个|几条|一些|\d+个).{0,4}(?:创意|点子|建议)"
+    r"|^(?:这个|这份|上述|刚才|已有|原有|既有).{0,12}(?:活动(?:策划|执行)?(?:方案|案)|方案)"
+)
 _CONDITIONAL = re.compile(r"建议|拟|可考虑|计划|待确认|(?<!未)确认后|视.{0,12}情况|以.{0,18}为准|在.{0,18}确认后")
 _IF_CLAUSE = re.compile(r"(?:^|[，,])\s*(?:若|如果|如|假如|倘若)([^，,]{1,60})")
 _COMMITTED = re.compile(r"将|会(?=在|于|由|安排|提供|开展|进行|有|赠送|领取|设置|组织|负责)|已(?:确认|安排|提供|采购|准备|落实)|现场.{0,4}(?:有|设|提供|安排)|(?<!未)(?<!不)提供|(?<!未)(?<!不)安排|确保|赠送|免费|可获得|可领取")
@@ -70,7 +78,9 @@ def _conditional_clause(clause: str) -> bool:
 
 
 def is_full_activity_plan(agent_id: str, message: str) -> bool:
-    return agent_id == "campaign-agent" and bool(_FULL_PLAN.search(message)) and not bool(_SIMPLE.search(message))
+    return (agent_id == "campaign-agent"
+            and not (_SIMPLE.search(message) or _PLAN_DISCUSSION.search(message))
+            and bool(_FULL_PLAN.search(message) or _CREATE_PLAN.search(message)))
 
 
 def parse_plan(raw: str) -> ActivityPlanContent | None:
