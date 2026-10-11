@@ -1,0 +1,121 @@
+{
+  "task": "RAG_810_EXISTING_TEST_NATIVE_OPERATOR_V1",
+  "status": "RAG_810_TEST_OPERATOR_CANDIDATE_READY",
+  "qualification": "CODE_AND_COMPONENT_ONLY_NOT_INSTALL_READY",
+  "application": {
+    "source": "810ccfb5e6d59fdb3e359f3d5e1216ebdca4eeb9",
+    "tree": "06d4a1c794f77f9876dc6fae37635e70b1d7bf48",
+    "unchanged": true,
+    "do_not_install_tooling_head_as_application": true
+  },
+  "rag_baseline": "8ff8ddc732d31bb648fa82227097e1b120c9ec64",
+  "exact_predecessor": {
+    "source": "d8a7814f1ceb528cad8a2d3b4c7a5aa135f6ccf7",
+    "tree": "6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5",
+    "release": "20261008-d8a7814-wechat-personal-v1"
+  },
+  "tooling_branch": "codex/rag810-existing-test-operator-v1",
+  "new_files": [
+    "enterprise_agent_poc/scripts/rag810_test_operator.py",
+    "enterprise_agent_poc/scripts/rag810_test_operator_native.py",
+    "enterprise_agent_poc/tests/test_rag810_test_operator.py",
+    "docs/RAG_810_TEST_OPERATOR_CANDIDATE_V1_REPORT.json"
+  ],
+  "reuse": {
+    "frozen810_interfaces": ["verify_checkout", "load_pair", "authority_root", "guard", "native_state", "recovery_plan_semantics"],
+    "formal_entry": "/etc/enterprise-agent-test-successor-chat-reference-v1/entry.py",
+    "formal_entry_sha256": "5f91603551e38119a294de7ecdce457ef19d557e902c1af0cfc2726f49af6b9e",
+    "unchanged_formal_function_bodies": ["switch_pointer", "units"],
+    "existing_lock": "/run/lock/enterprise-agent-test-successor-v1.lock",
+    "existing_privilege_drop_identity_reader": "/etc/enterprise-agent-test-successor-wechat-d8a-seeding-approval-v1/test_git_owner_context.py",
+    "historical_d8a_selector_guard_approval_changed": false,
+    "d8a_gitdir_granted_root_trust": false,
+    "services": ["enterprise-agent-test-api", "enterprise-agent-test-mcp", "enterprise-agent-test-worker", "enterprise-agent-test-postgresql", "enterprise-agent-test-redis"],
+    "new_long_term_service_sets": 0,
+    "production_operator_used": false,
+    "synthetic_cleanup_used": false
+  },
+  "implemented_boundaries": {
+    "global_lock": "NONBLOCKING_EXCLUSIVE_EXISTING_INODE_EXIT75_ON_BUSY",
+    "preflight": "READONLY_UNTIL_ALL_IDENTITY_DATA_QUEUE_PROFILE_APPROVAL_GATES_PASS",
+    "approval": "NEW_SOURCE_BOUND_ROOT_POLICY_AND_NATIVE_ACCEPTANCE_REQUIRED_NO_ISSUER",
+    "identity": "FROZEN810_APP_AND_SEPARATE_TOOLING_PATH_SOURCE_TREE_FILES_VERIFIED",
+    "services": "QUIESCE_EXISTING_THREE_APP_SERVICES_PG_REDIS_PID_UNCHANGED_NO_NGINX",
+    "profiles": "PRESERVE_ALL_ORIGINAL_FILES_ONLY_NEW_EXACT_OPERATION_OWNED_DROPINS",
+    "writes": "IMMUTABLE_NO_REPLACE_ADMISSION_MARKER_BEFORE_SERVICE_START_MONOTONIC_JOURNAL",
+    "before_write_recovery": "D8A_ONLY_AFTER_EXACT_IDENTITY_AND_UNCHANGED_DATA_GATES_RAG_KNOWN_UNAVAILABLE",
+    "after_admission_recovery": "FROZEN810_FORWARD_ONLY_EVEN_WHEN_CURRENT_DATA_HASH_EQUALS_BASELINE",
+    "knowledge_data": "FROZEN810_APPEND_ONLY_TENANT_USER_GUARD_NO_DB_RESTORE_OR_DELETE",
+    "queues": "EMPTY_PROVIDER_TASK_LISTS_NO_FOREIGN_CONSUMER_QUIESCED_KNOWLEDGE_LIST_CAS_ATOMIC_LEASE_MOVE",
+    "unknown_or_mixed": "NO_GUESSING_PRESERVE_SNAPSHOT_MANUAL_RECOVERY_EVIDENCE",
+    "health": "LOCAL_API_MCP_PROTOCOL_PING_SINGLETON_WORKER_LOOP_PG_GUARD_REDIS_PING_SOURCE_CWD",
+    "commit": "AFTER_FINAL_DATA_SOURCE_HEALTH_PASS_LOCK_STILL_HELD",
+    "hooks": "SOURCE_BOUND_SERVICE_CGROUP_LIVE_ROOT_PID_KERNEL_LOCK_BEFORE_COMMIT_PERSISTENT_AFTER_COMMIT"
+  },
+  "root_execution_trust": {
+    "observed_shared_python": "lucky-owned symlink",
+    "observed_environment_runner": "lucky-owned regular file",
+    "root_executes_lucky_owned_python_or_runner": false,
+    "root_supervisor_requirement": "INDEPENDENTLY_QUALIFIED_ROOT_OWNED_READONLY_TOOLING_ENV_WITH_ISOLATED_INTERPRETER",
+    "business_services_runtime": "EXISTING_LUCKY_RUNTIME_RETAINED_UNPRIVILEGED",
+    "environment_input": "ROOT_APPROVED_HASH_OF_EXISTING_TEST_ENV_AS_TYPED_DATA_ONLY_NO_SHELL_EVALUATION_NO_LOADER_OR_PROVIDER_SECRET_IMPORT",
+    "current_task_created_root_runtime": false
+  },
+  "tests": {
+    "host": "115.190.56.61",
+    "user": "lucky",
+    "scope": "INDEPENDENT_COMPONENT_FIXTURES_IN_ENTERPRISE_AGENT_TEST_SLICE",
+    "python": "3.11.16",
+    "passed": 54,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "pytest_seconds": 0.47,
+    "real_posix_symlink_primitive": "PASS_TEMP_DIRECTORY_ONLY",
+    "real_flock_primitive": "PASS_WITH_EXPLICIT_MOCK_ROOT_METADATA_NOT_NATIVE",
+    "real_redis_primitive": "PASS_SEPARATE_TEMP_UNIX_SOCKET_PORT0_REDIS7_0_15_MOCK_FILE_METADATA",
+    "redis_cas_drift": "REJECTED_BEFORE_MOVE_ALL_ITEMS_PRESERVED",
+    "root_authority_services_and_db_in_component_tests": "EXPLICIT_TEST_DOUBLES_NO_NATIVE_ATTESTATION",
+    "formal_native_release_recovery": "NOT_VERIFIED",
+    "pg16_6_pgvector0_8_6_real_write": "NOT_VERIFIED_NO_APPROVED_INDEPENDENT_DB",
+    "full_pytest": "NOT_EXECUTED_NOT_REQUESTED",
+    "stage2": "NOT_EXECUTED_NOT_REQUESTED",
+    "prior149": "RETAINED_FROZEN810_COMPONENT_EVIDENCE_NOT_RERUN_NOT_NATIVE",
+    "evidence_root": "/opt/enterprise-agent-workbench-test/release-evidence/rag810-operator-v1-20261011-r1",
+    "junit": "code-seal.xml",
+    "source_transport_sha256": "a2559230ed77507507e96a581388de052a5e91e78c9d36e46e44d58e69a1eedd",
+    "base810_transport_sha256": "4484e40cfbfba0b7a6e9d8cd0f790a7be5a5773a6dbaf7ae1d5220f900a2476a",
+    "transport_is_immutable_release_candidate": false
+  },
+  "remaining_root_and_maintenance_gates": [
+    "Protected root-owned tooling interpreter/dependencies must be independently qualified; existing lucky Python is never promoted to Root trust.",
+    "Install frozen810 App and new Tooling separately with root-owned readonly Git metadata and exact file maps; no current pointer or source switch is authorized here.",
+    "Issue independent runtime-pair, RAG data guard, operator-policy/approval and source-bound runtime dispatch artifacts through formal Root authority; code cannot issue these.",
+    "Provide approved existing Test env DATA identity, complete original unit graph hashes, exact target profile hashes and original unchanged seeding approval hash.",
+    "Approve a marked independent PG16.6/pgvector0.8.6 DB and temporary Native rehearsal authority/resources without using PRIMARY business data as a fixture.",
+    "Complete actual Native quiesce/start/health/queue/write/forward-recovery fault rehearsal; signed Native acceptance must bind exact App/Tooling and cannot cite components as Native PASS.",
+    "Separately authorize existing Test maintenance and one actual switch window. Future recovery outside original window needs its own binding-specific Root recovery permit."
+  ],
+  "unchanged": {
+    "schema": "001-015",
+    "migration": "NONE",
+    "data_contract": "member_account_status_v1",
+    "application_business_source": true,
+    "historical_approval_guard_selector": true,
+    "production": true,
+    "primary_source_pointer_database_redis_services": true
+  },
+  "current_task_counters": {
+    "production_changes": 0,
+    "primary_business_state_changes": 0,
+    "source_switches": 0,
+    "existing_service_stops_restarts": 0,
+    "real_knowledge_rows_created": 0,
+    "root_approvals_issued": 0,
+    "real_provider_calls": 0,
+    "real_wechat_calls": 0,
+    "real_image_calls": 0
+  },
+  "install_ready": false,
+  "release_ready": false
+}
