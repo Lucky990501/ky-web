@@ -86,6 +86,7 @@ def root_trusted(path, *, regular=False):
 def runtime_preflight(code_sha):
     need(sys.platform == 'linux' and os.geteuid() != 0, 'NONROOT_LINUX_REQUIRED')
     need(sys.flags.isolated == 1 and sys.dont_write_bytecode, 'ISOLATED_NO_PYC_PYTHON_REQUIRED')
+    need(not any(name in os.environ for name in ('PYTHONPATH', 'PYTHONHOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH')), 'UNAPPROVED_RUNTIME_INJECTION')
     need(re.fullmatch('[0-9a-f]{64}', code_sha) is not None, 'CODE_PIN_REQUIRED')
     script = root_trusted(Path(__file__).absolute(), regular=True)
     need(sha(script.read_bytes()) == code_sha, 'RECEIVER_CODE_PIN_MISMATCH')
@@ -115,6 +116,11 @@ def public_key(path, fingerprint):
     # binds its DER-SPKI fingerprint in the receiver's approved command line.
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
+    # All cryptography modules loaded by this import come from immutable system
+    # packages, not an operator/user-site shadow package.
+    for name, module in tuple(sys.modules.items()):
+        if name.startswith('cryptography') and getattr(module, '__file__', None):
+            root_trusted(Path(module.__file__).absolute(), regular=True)
     need(re.fullmatch('[0-9a-f]{64}', fingerprint) is not None, 'APPROVED_PUBLIC_KEY_REQUIRED')
     raw = read_regular(path, 16384)
     need(b'PRIVATE KEY' not in raw, 'PUBLIC_KEY_ONLY')
@@ -230,7 +236,16 @@ def spawn_receiver(script, code_sha, key_path, fingerprint, sink, *, python=None
     finally:
         os.close(incoming)
         os.close(acknowledgement)
-    return process, credential_fd, ack_fd, process_binding(process, argv)
+    try:
+        binding = process_binding(process, argv)
+        return process, credential_fd, ack_fd, binding
+    except Exception:
+        os.close(credential_fd)
+        os.close(ack_fd)
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        raise Blocked('RECEIVER_START_FAILED') from None
 
 
 def safe_emit(value):

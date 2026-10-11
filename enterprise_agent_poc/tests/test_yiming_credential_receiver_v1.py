@@ -102,10 +102,16 @@ def test_bad_or_multiple_frame_reject(tmp_path, ephemeral_key, raw):
 
 
 def test_RSA_public_key_substitution_reject(tmp_path, ephemeral_key):
-    with actual_receiver(tmp_path, ephemeral_key, key_fingerprint='0'*64) as target:
-        assert target.process.wait(timeout=5) == 2
-        assert os.read(target.ack_fd, 4096) == b''
-        assert not (target.target/receiver.PENDING).exists()
+    # Startup may fail before /proc identity can be collected; both paths must
+    # fail closed with no envelope and no sender execution.
+    try:
+        with actual_receiver(tmp_path, ephemeral_key, key_fingerprint='0'*64) as target:
+            assert target.process.wait(timeout=5) == 2
+            assert os.read(target.ack_fd, 4096) == b''
+            assert not (target.target/receiver.PENDING).exists()
+    except receiver.Blocked as error:
+        assert str(error) == 'RECEIVER_START_FAILED'
+        assert not (tmp_path/'private-receiver'/receiver.PENDING).exists()
 
 
 def test_ciphertext_write_failure_no_ACK(tmp_path, ephemeral_key):
@@ -271,3 +277,21 @@ def test_output_symlink_reject(tmp_path):
     link.symlink_to(private, target_is_directory=True)
     with pytest.raises(receiver.Blocked, match='OUTPUT_PATH_REQUIRED'):
         receiver.output_directory(link)
+
+
+def test_root_owned_actual_script_wrong_code_pin_reject(tmp_path):
+    script = Path(os.environ['YIMING_ROOT_FIXTURE_SCRIPT'])
+    result = subprocess.run(['/usr/bin/python3', '-I', '-B', str(script), 'receive',
+        '--code-sha256', '0'*64, '--public-key', '/nonexistent', '--public-key-fingerprint', '0'*64,
+        '--output-dir', str(tmp_path), '--credential-fd', '3', '--ack-fd', '4'], capture_output=True)
+    assert result.returncode == 2
+    assert json.loads(result.stdout)['first_failure_point'] == 'RECEIVER_CODE_PIN_MISMATCH'
+
+
+def test_root_owned_actual_script_unisolated_python_reject(tmp_path):
+    script = Path(os.environ['YIMING_ROOT_FIXTURE_SCRIPT'])
+    result = subprocess.run(['/usr/bin/python3', '-B', str(script), 'receive',
+        '--code-sha256', receiver.sha(script.read_bytes()), '--public-key', '/nonexistent',
+        '--public-key-fingerprint', '0'*64, '--output-dir', str(tmp_path)], capture_output=True)
+    assert result.returncode == 2
+    assert json.loads(result.stdout)['first_failure_point'] == 'ISOLATED_NO_PYC_PYTHON_REQUIRED'
