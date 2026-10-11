@@ -1,0 +1,324 @@
+{
+  "task": "WECHAT_MANUAL_RICHTEXT_PRODUCTION_BASE_PORT_V1",
+  "round": "PRODUCTION_BASE_PORT_FIXTURES_ONLY",
+  "base_source": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
+  "mode": "ISOLATED_UI_API_FIXTURES_AND_BROWSER_CLIPBOARD",
+  "checks": [
+    {
+      "name": "M01 own persisted article has four manual actions, no draft button or account dependency",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:14.740Z"
+    },
+    {
+      "name": "D01 direct conversation HTML uses shared safe preview, no HTML source or file download",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:15.003Z"
+    },
+    {
+      "name": "D01 direct conversation fenced HTML uses shared safe preview, no HTML source or file download",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:15.246Z"
+    },
+    {
+      "name": "D01 direct conversation Markdown uses shared safe preview, no HTML source or file download",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:15.511Z"
+    },
+    {
+      "name": "D02 inline hostile HTML stays opaque and cannot execute or fetch",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:15.898Z"
+    },
+    {
+      "name": "D03 displayed and copied body retain the same complete article and inline emphasis",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:16.376Z"
+    },
+    {
+      "name": "D04 reload restores own safe HTML article without a Provider request",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:16.564Z"
+    },
+    {
+      "name": "D05 invalid body fails closed, never mounts a raw HTML frame or claims export success",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:16.965Z"
+    },
+    {
+      "name": "D06 another Agent cannot opt into WeChat inline renderer",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:16.969Z"
+    },
+    {
+      "name": "D07 disabled Metadata allows only owned history reading/copying, never a new run",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:17.467Z"
+    },
+    {
+      "name": "D08 long inline article scrolls inside bounded frame, not the page or composer",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.143Z"
+    },
+    {
+      "name": "M02 Chinese paragraphs, headings, emphasis, lists, quote and table are complete",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.148Z"
+    },
+    {
+      "name": "M03 copied fragment is independent inline HTML, no class or stylesheet",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.151Z"
+    },
+    {
+      "name": "M04 hostile tags, attributes, CSS and namespace corpus cannot execute or fetch",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.161Z"
+    },
+    {
+      "name": "M05 server/Windows/file paths are removed from body and separate metadata",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.164Z"
+    },
+    {
+      "name": "M05b inline tags/entities cannot split an internal path to evade removal",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.174Z"
+    },
+    {
+      "name": "M05c path at paragraph end cannot consume the next paragraph",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.176Z"
+    },
+    {
+      "name": "M06 image omission is explicit; no image src or fake assets",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.180Z"
+    },
+    {
+      "name": "M07 title/digest/cover separate from body, no automatic WeChat sync claim",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.187Z"
+    },
+    {
+      "name": "M08 rich copy only after click, both MIME payloads, correct success",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.229Z"
+    },
+    {
+      "name": "M09 permission denial is not success or silent plain fallback",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.290Z"
+    },
+    {
+      "name": "M10 unavailable ClipboardItem fails with recovery, not draft/config gating",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.391Z"
+    },
+    {
+      "name": "M11 source and plain actions have distinct successful payloads and messages",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.446Z"
+    },
+    {
+      "name": "M12 failed text clipboard offers selected manual-copy textarea",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.479Z"
+    },
+    {
+      "name": "M13 pending clipboard disables duplicates and waits for actual resolution",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:18.518Z"
+    },
+    {
+      "name": "M14 stale user or Tenant/message association cannot copy",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:19.527Z"
+    },
+    {
+      "name": "M15 late clipboard completion cannot change a newer view",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:20.124Z"
+    },
+    {
+      "name": "M16 forbidden historical detail exposes no article/manual export",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:20.432Z"
+    },
+    {
+      "name": "M17 Metadata404 cannot fake enabled Agent or run controls",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:20.458Z"
+    },
+    {
+      "name": "M18 sandbox preview has opaque origin, no script/resources, and keyboard close",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:20.809Z"
+    },
+    {
+      "name": "M19 actions and preview 1440x1000",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:21.204Z"
+    },
+    {
+      "name": "M19 actions and preview 1920x1080",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:21.619Z"
+    },
+    {
+      "name": "M19 actions and preview 375x812",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:21.908Z"
+    },
+    {
+      "name": "M19 actions and preview 812x375",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:22.160Z"
+    },
+    {
+      "name": "M29 375px two-column manual actions remain reachable above stable composer",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:22.248Z"
+    },
+    {
+      "name": "M20 completed SSE mounts manual actions using actual event content (fixture)",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:22.640Z"
+    },
+    {
+      "name": "D09 completed task reply is directly rendered, not a second file delivery",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:22.698Z"
+    },
+    {
+      "name": "P01 Fixture enabled=false rejects new chat, without changing metadata or executing a run",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:22.728Z"
+    },
+    {
+      "name": "P02 Fixture403 metadata and history cannot expose article or submit a new task",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:22.968Z"
+    },
+    {
+      "name": "P03 copywriting Fixture chat/SSE remains generic, not a WeChat identity",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:23.321Z"
+    },
+    {
+      "name": "P03 campaign Fixture chat/SSE remains generic, not a WeChat identity",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:23.670Z"
+    },
+    {
+      "name": "P03 image Fixture chat/SSE remains generic, not a WeChat identity",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:24.065Z"
+    },
+    {
+      "name": "P04 component resources load once in correct defer order with exact cache version",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:24.316Z"
+    },
+    {
+      "name": "M21 oversized/empty article safely rejects instead of false copy success",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:24.329Z"
+    },
+    {
+      "name": "M22 real Chrome clipboard roundtrip contains both MIME formats (NOT WeChat)",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:24.687Z"
+    },
+    {
+      "name": "M26 no real calls, credential access, permission writes or browser errors",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T05:21:24.687Z"
+    }
+  ],
+  "provider_calls": 0,
+  "wechat_calls": 0,
+  "image_calls": 0,
+  "production_changes": 0,
+  "test_changes": 0,
+  "deployment": "NOT_DEPLOYED",
+  "schema": "UNCHANGED",
+  "migration": "NONE",
+  "wechat_editor_compatibility": {
+    "status": "USER_REPORTED_RICH_PASTE_RECOGNIZED",
+    "source": "User instruction: directly displayed HTML copies into the WeChat editor and is recognized",
+    "current_candidate_external_test": "NOT_EXECUTED",
+    "save_and_reopen": "NOT_VERIFIED",
+    "styles_retained": "NOT_INDEPENDENTLY_OBSERVED",
+    "styles_lost": "NOT_INDEPENDENTLY_OBSERVED",
+    "pixel_identical": false
+  },
+  "started_at": "2026-10-11T05:21:13.879Z",
+  "browser_clipboard_roundtrip": "PASS_REAL_BROWSER_ONLY",
+  "completed_at": "2026-10-11T05:21:24.687Z",
+  "total": 46,
+  "failed": 0,
+  "skipped": 0,
+  "status": "PASS_AUTOMATED_WITH_REAL_BROWSER_CLIPBOARD_ONLY",
+  "frontend_tests": {"baseline_regressions": 87, "manual_export_and_port_contract_tests": 12, "passed": 99, "failed": 0, "skipped": 0},
+  "production_agent_qualification": {
+    "agent_id": "NOT_VERIFIED",
+    "published_revision": "NOT_VERIFIED",
+    "runtime_test": "NOT_VERIFIED",
+    "tenant_instance": "NOT_VERIFIED",
+    "ordinary_user_metadata_http": "NOT_VERIFIED",
+    "model_authorization": "NOT_VERIFIED",
+    "authority": "Controller reply: continue UI port without waiting for 02; obtain real Production qualification evidence at later authorized release admission",
+    "qualified_by_fixtures": false,
+    "enabled_or_published_by_this_task": false
+  },
+  "source_port": {
+    "parent": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
+    "parent_tree": "e5205965e57fce6ce2b65dd747a110d00f7f1b1a",
+    "ui_reference": "a4a15b5b04faeb59885ca3bed52ca72da24c6710",
+    "ui_reference_parent": "639c560811aa49fb2e595806454b25505fb952a6",
+    "branch": "codex/wechat-richtext-production-base-v1",
+    "merge_or_cherry_pick_of_history": false,
+    "shared_manual_block_sha256": "22e2b9636c768cb650a6da8782e5b28475a36e1dbc842f04bb82a9462af5c30f",
+    "reuse_block": "Exact original tags/sanitizer/preview/inline formatter/clipboard/manual controls; no rewritten formatter",
+    "excluded": "Legacy draft adapter and receipts, personal WeChat configuration API/UI, UI-05 profile modal changes, Runtime, Skill, Prompt, Schema, Migration and Release tooling"
+  },
+  "cache_contract": {
+    "existing_workbench_js_placeholder": "__JS_SHA256_V1__",
+    "existing_workbench_css_placeholder": "__CSS_SHA256_V1_",
+    "existing_build_release_static_mechanism": "UNCHANGED",
+    "component_sha256": "324d64a5a7e6a98d54bd7660c0d5d74b912445e0a331d14d2f73776da2e8609e",
+    "component_url": "/static/wechat-article-ui.js?v=324d64a5a7e6a98d",
+    "load_order": "defer component before defer workbench; one script reference",
+    "checks": "PASS_AUTOMATED: source content-hash identity, unchanged JS/CSS placeholders, actual isolated browser resource load",
+    "formal_release_archive_validation": "NOT_EXECUTED"
+  },
+  "changed_files_relative_to_562f201": [
+    "enterprise_agent_poc/app/static/wechat-article-ui.js",
+    "enterprise_agent_poc/app/static/workbench.js",
+    "enterprise_agent_poc/app/static/workbench.css",
+    "enterprise_agent_poc/app/static/index.html",
+    "enterprise_agent_poc/tests/wechat_manual_export.test.cjs",
+    "enterprise_agent_poc/tests/wechat_manual_export.playwright.cjs",
+    "docs/WECHAT_MANUAL_RICHTEXT_PRODUCTION_BASE_PORT_V1_TEST_RESULT.json"
+  ],
+  "ui_delivery": {
+    "inline_html": "Sanitized and sandboxed existing preview inside completed reply / authorized history",
+    "actions": ["Preview article", "Copy to WeChat", "Copy HTML source", "Copy plain text"],
+    "metadata": "Title/digest/cover separately retained; missing values not invented",
+    "images": "Manual upload guidance; untrusted image URLs removed",
+    "draft_add": "NO_INTERFACE_OR_CALL",
+    "fake_draft_success": "NONE",
+    "other_agent_chat_sse": "PASS_AUTOMATED: copywriting/campaign/image fixtures, original route/payload/Markdown/UI preserved",
+    "disabled_404_403": "PASS_AUTOMATED: no new Task controls or unauthorized article visibility",
+    "offline_backup": "Existing standalone.html on a4a15b5 candidate retained untouched, not imported into Production-base candidate"
+  },
+  "release_remaining_gates": [
+    "Review exact independent UI Source/Tree and its seven-file diff against 562f201; do not merge the historical a4a branch.",
+    "Fresh authorized read-only Production release-current/source/predecessor verification before any release action; 562f201 is the supplied known baseline, not a live attestation.",
+    "Obtain actual Tenant-scoped Agent/Published Revision/Runtime Test/Instance/ordinary-user Metadata/model authorization evidence; if missing, use formal Productization, never UI bypass.",
+    "Approved identity-bound Test validation contract and formal Candidate/archive/resource validation; isolated UI fixture tests are not release admission.",
+    "Separate explicit Production deployment authorization; no switch/restart/live patch by this task.",
+    "After permitted integration, real authorized article generation/history/clipboard acceptance; manually paste into the designated WeChat account, save and reopen to record styles retained/lost."
+  ],
+  "scope": {"root_operations": 0, "business_tasks_created": 0, "primary_changes": 0, "production_changes": 0, "runtime_skill_prompt_schema_api_release_changes": 0, "existing_dirty_content": "PRESERVED"}
+}
