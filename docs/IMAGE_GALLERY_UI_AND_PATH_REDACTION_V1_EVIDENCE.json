@@ -1,0 +1,138 @@
+{
+  "task": "IMAGE_GALLERY_UI_AND_PATH_REDACTION_V1",
+  "status": "IMAGE_GALLERY_UI_AND_PATH_REDACTION_CANDIDATE_READY",
+  "branch": "codex/image-gallery-path-redaction-v1",
+  "base": {
+    "commit": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
+    "tree": "e5205965e57fce6ce2b65dd747a110d00f7f1b1a",
+    "authority": "Human-named Production application baseline; no live Production identity or services accessed"
+  },
+  "scope": [
+    "frontend gallery",
+    "assistant display/copy path redaction",
+    "history gallery compatibility",
+    "direct isolated tests"
+  ],
+  "changed_files": [
+    "enterprise_agent_poc/app/static/workbench.js",
+    "enterprise_agent_poc/app/static/workbench.css",
+    "enterprise_agent_poc/tests/image_gallery_redaction.test.cjs",
+    "enterprise_agent_poc/tests/image_gallery_ui.playwright.cjs",
+    "docs/IMAGE_GALLERY_UI_AND_PATH_REDACTION_V1_EVIDENCE.json"
+  ],
+  "implementation": {
+    "result_source": "Authoritative generations array (including empty) takes precedence; absent array falls back to legacy generation. Never extract artifacts or counts from reply URLs.",
+    "ordering": "Backend array order, no client sort. Live task artifacts require exact artifact.task_id match.",
+    "layout": "Desktop two columns, mobile <=860px one column; single card max360px. Preview height280px, object-fit:contain. Separate view/download controls; error retry is per image.",
+    "history": "Use assistant message generations arrays; legacy scalar retained. Additional scoped conversation.generations get the same cards. Deduplicate by artifact ID; URL fallback only for ID-less old records. Distinct IDs sharing one URL are preserved.",
+    "path_redaction": "Shared assistant display and copy policy for known generated storage/server/workspace/Windows/file paths, including Markdown link destinations/code blocks. Preserve business labels and ordinary external links. Streaming holds unfinished possible address tokens, reclassifies from whole displayed raw prefix. Raw SSE/task text and visual queue are not modified.",
+    "security_limit": "Display redaction is not access control; backend-authorized resource/download URLs remain in src/href and network requests. User prompts are not rewritten.",
+    "cache": "index.html and release toolchain unchanged; existing __JS_SHA256_V1__/__CSS_SHA256_V1_ mechanism retained",
+    "asset_hash_scope": "assets_sha256 describes tested Windows working-copy bytes; git_object_assets_sha256 describes normalized Source object bytes. Approved release tooling must generate its cache keys from the exact deployed Source, not copy the working-copy hashes.",
+    "git_object_assets_sha256": {"enterprise_agent_poc/app/static/workbench.js":"43c617c69ae909c1abf833d21c4d4fff5372cbc7a7ff655f33bbd053edb5553a","enterprise_agent_poc/app/static/workbench.css":"ca5ba28c4dfcc6b72dac832f76eef8f2015be3e84ab33ee81de170bb7a0211c9"},
+    "assets_sha256": {
+      "enterprise_agent_poc/app/static/workbench.js": "43c617c69ae909c1abf833d21c4d4fff5372cbc7a7ff655f33bbd053edb5553a",
+      "enterprise_agent_poc/app/static/workbench.css": "ca5ba28c4dfcc6b72dac832f76eef8f2015be3e84ab33ee81de170bb7a0211c9"
+    }
+  },
+  "tests": {
+    "frontend": {
+      "command": "node --test tests/workbench_routes.test.cjs tests/image_gallery_redaction.test.cjs",
+      "passed": 99,
+      "failed": 0,
+      "skipped": 0,
+      "baseline": 87,
+      "added": 12,
+      "status": "PASS_AUTOMATED"
+    },
+    "browser": {
+      "command": "node tests/image_gallery_ui.playwright.cjs",
+      "executed_at_utc": "2026-10-11T06:33:08.756Z",
+      "passed": 43,
+      "failed": 0,
+      "skipped": 0,
+      "status": "PASS_FIXTURE_BROWSER",
+      "engine": "Local headless Google Chrome / Playwright",
+      "widths": [
+        1440,
+        1920,
+        375
+      ],
+      "counts": [
+        1,
+        2,
+        3
+      ],
+      "unit_additional_count": 5,
+      "checks": [
+        "actual fixture SSE split-delta DOM mutation monitoring",
+        "final render",
+        "real Clipboard API click/readback",
+        "every artifact viewer and nonempty fixture GET download",
+        "fresh page reload and visible history reopening; mobile uses existing history page",
+        "legacy scalar + array precedence",
+        "partial 404 load failure and independent retry",
+        "record without resource placeholder",
+        "polling fallback",
+        "failed and cancelled no false success/cursor",
+        "disabled metadata cannot submit",
+        "legacy history remainder with distinct IDs on same resource"
+      ]
+    },
+    "static_compile": "node --check: workbench.js and both new test scripts PASS",
+    "diff_check": "PASS",
+    "full_pytest": "NOT_RUN: not frontend scope / not authorized release validation",
+    "release_candidate_build": "NOT_RUN",
+    "provider_e2e": "NOT_VERIFIED",
+    "real_business_task_runs": 0
+  },
+  "evidence": {
+    "directory": "C:/Users/猪猪/Documents/ChatGPT/ky_web/.image-gallery-path-redaction-evidence-v1",
+    "browser_report": "browser-results.json",
+    "screenshots": [
+      "gallery-2-1440.png",
+      "gallery-2-1920.png",
+      "gallery-2-375.png",
+      "gallery-3-1920-top.png",
+      "history-2-1440.png",
+      "history-2-1920.png",
+      "history-2-375.png",
+      "history-3-1920-bottom.png"
+    ],
+    "screenshot_sha256": {
+      "gallery-2-1440.png": "9bce43ea08fba81a0edbfb2e5467429de78d16c14d08445decab3fdb23c76209",
+      "history-3-1920-bottom.png": "6da9961ad8c0f42e2484941a42712b28ca92e92a574b8e16eddaf00c554fd253",
+      "gallery-2-375.png": "0347a9b1e4e0cd2fefb8b59296962b92264df78f271995b84a8f79561f70ee19"
+    },
+    "labeling": "All screenshots, Task/Run IDs, API responses, generated SVGs and business content are marked Fixture. No real Provider output or customer data."
+  },
+  "backend_dependency": {
+    "owner": "01",
+    "status": "PENDING_01_GENERATIONS_CONTRACT",
+    "accepted_root_cause": "TASK_IMAGE_ARTIFACT_PROJECTION_IS_SCALAR",
+    "requested_contract": [
+      "completed SSE event and GET /api/v1/tasks/{id}: ordered generations[], each artifact task_id equals current task",
+      "GET /api/v1/conversations/{id}: assistant messages carry their scoped ordered generations[]; stable id/task_id and authorized content_url or storage_key; conversation-level generations retained",
+      "Persist and authorize every generated artifact; frontend cannot restore unpersisted historical files or infer them from model text"
+    ],
+    "final_integration": "NOT_VERIFIED. Once 01 delivers exact Source/Tree, review field shapes, integrate through approved source workflow, and retest current Task + SSE/poll + reload + every authorized image download. Do not silently infer artifacts or bypass authorization."
+  },
+  "boundaries": {
+    "production_changes": 0,
+    "test_environment_changes": 0,
+    "provider_calls": 0,
+    "image_calls": 0,
+    "wechat_calls": 0,
+    "database_changes": 0,
+    "backend_changes": 0,
+    "schema_changes": 0,
+    "deployments": 0,
+    "push": "NO",
+    "root_dirty_preserved": true,
+    "other_candidate_worktrees_untouched": true
+  },
+  "observations": [
+    "Known internal artifact-path patterns are a presentation policy, not universal filesystem/security classification.",
+    "Legacy scalar data cannot prove multi-image persistence; real multi-image acceptance remains dependent on 01."
+  ]
+}

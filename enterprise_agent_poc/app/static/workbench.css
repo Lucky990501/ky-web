@@ -156,3 +156,14 @@ body.dialog-open{overflow:hidden}.global-search-disabled{opacity:.72;cursor:not-
 @media(max-width:860px){.agent-greeting{--agent-greeting-icon-size:44px;--agent-greeting-title-size:20px;gap:12px}.agent-greeting-icon svg{width:38px;height:38px}}
 .login-card .checkbox{display:flex;align-items:center;gap:8px;width:max-content;margin:12px 0!important;font-weight:400;line-height:1.4;cursor:pointer}
 .login-card .checkbox input[type="checkbox"]{flex:none;width:16px!important;height:16px;margin:0!important;padding:0;border-radius:3px}
+/* One gallery for live results and recovered history; each artifact retains its actions. */
+.chatgpt-conversation-layout .message-generations{min-width:0;max-width:100%;margin-top:18px}
+.chatgpt-conversation-layout .message-generations-summary{display:flex;align-items:center;gap:6px;margin:0 0 10px;color:var(--muted);font-size:14px;font-weight:600}
+.chatgpt-conversation-layout .message-generations-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;max-width:732px}
+.chatgpt-conversation-layout .message-generations.is-single .message-generations-grid{grid-template-columns:minmax(0,360px)}
+.chatgpt-conversation-layout .message-generations-grid .message-generation{width:100%;min-width:0;margin-top:0}
+.chatgpt-conversation-layout .message-generations .media-empty{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;color:var(--muted)}
+.chatgpt-conversation-layout .message-generation-actions .muted{font-size:13px;overflow-wrap:anywhere}
+.chatgpt-conversation-layout .message-generation-actions .button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.chatgpt-conversation-layout .conversation-artifacts>.message-generations{display:block}
+@media(max-width:860px){.chatgpt-conversation-layout .message-generations-grid{grid-template-columns:minmax(0,1fr)}.chatgpt-conversation-layout .message-generations.is-single .message-generations-grid{grid-template-columns:minmax(0,1fr)}}
