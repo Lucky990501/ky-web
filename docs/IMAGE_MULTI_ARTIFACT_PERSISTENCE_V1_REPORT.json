@@ -1,0 +1,80 @@
+{
+  "task": "IMAGE_MULTI_ARTIFACT_PERSISTENCE_V1",
+  "status": "IMAGE_MULTI_ARTIFACT_BACKEND_CANDIDATE_READY",
+  "scope": "LOCAL_BACKEND_CODE_CANDIDATE_NOT_RELEASE_OR_INSTALL_READY",
+  "parent_source": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
+  "parent_tree": "e5205965e57fce6ce2b65dd747a110d00f7f1b1a",
+  "candidate_identity": "Commit containing this report; exact Source/Tree supplied in final handoff",
+  "branch": "codex/image-multi-artifact-persistence-v1",
+  "git_push": "NOT_EXECUTED_IN_NO_PUBLICATION_SCOPE",
+  "root_cause": [
+    "Codex preserves one validated artifact per tool call; Gateway calls remain n=1. Multiple effective calls already survive in Run Trace.",
+    "TaskService previously selected only the first effective image storage key.",
+    "Completion used one task-scoped Generation ID and one scalar Task Result pointer.",
+    "Task API used LIMIT 1; history overwrote task mappings; SSE emitted only generation."
+  ],
+  "changed_files": [
+    "enterprise_agent_poc/app/product_service.py",
+    "enterprise_agent_poc/app/product_store.py",
+    "enterprise_agent_poc/app/main.py",
+    "enterprise_agent_poc/tests/test_image_multi_artifact_postgres.py",
+    "enterprise_agent_poc/tests/run_image_multi_pg16.py",
+    "docs/IMAGE_MULTI_ARTIFACT_PERSISTENCE_V1_REPORT.json"
+  ],
+  "schema": {"migrations": "001-015 UNCHANGED", "new_migration": false, "table": "generations", "reason": "Primary key is Generation ID; no unique Task constraint. Existing result_json/payload store ordered generation_ids without a new column."},
+  "artifact_contract": {
+    "source": "Effective platform image_generation Tool artifacts from the saved Task-bound Run Trace, recomputed using the unchanged formal dependency resolver",
+    "order": "Effective successful tool observation order; repeated storage keys deduplicated",
+    "identity": "First image retains task:<task_id>:generation; later IDs append SHA256(storage_key)",
+    "authorization": "Existing signed Runtime/MCP scope, exact Task/Run/Tenant/User/Agent/Conversation checks; supplied reference dependency must match Task/Tenant",
+    "verification": "All objects read from the existing storage backend before commit; Tenant path boundary enforced. Modern requested-size artifacts and all multi-image objects must decode and verify as real images.",
+    "legacy_boundary": "Existing single-image artifacts without requested_size retain the old unknown-dimensions compatibility contract. Historical persisted rows are readable; no missing row is backfilled from prose, URLs, or old Tool summaries.",
+    "not_used": "Model final-response URLs and legacy output-summary key parser are not used by the new persistence path"
+  },
+  "atomicity": {
+    "transaction": "Existing complete_task_success transaction and PostgreSQL Task FOR UPDATE lock",
+    "writes": ["all generations", "assistant message", "task_results with generation_id/generation_ids", "one credit transaction", "final Run Trace", "Task completed event"],
+    "replay": "Stable PKs plus saved completion metadata; completed redelivery is a no-op and does not reopen model execution",
+    "recovery": "Existing persistence-only failed Trace recovery, including a new Worker/TaskService instance; artifacts reread, never regenerated",
+    "failure_policy": "Overall Runtime failure or unverified image set cannot form a successful gallery or charge. Partial transaction rolls back all images/message/result/credit writes, preserving runtime facts for bounded persistence recovery."
+  },
+  "api": {
+    "new": "generations: [] on Task API, SSE complete/error projection, history assistant message and conversation gallery",
+    "compatibility": "generation remains first available ordered image or null; first image ID unchanged; legacy scalar metadata maps to the already-persisted row",
+    "order_authority": "generation_ids stored together in Task Result and Run Trace; not generated_at timestamps",
+    "download": "Existing /api/v1/storage Tenant/User authorization unchanged"
+  },
+  "tests": {
+    "passed": 235, "failed": 0, "errors": 0, "skipped": 0, "warnings": 2,
+    "new_real_postgres_cases": 18, "inherited_cases": 217,
+    "postgres": "16.6", "pgvector": "0.6.0, not PRIMARY 0.8.6 parity",
+    "host": "Independent local Ubuntu22.04 WSL, Unix lucky UID1000, private socket only, TCP disabled",
+    "scope": "Targeted tests, not Full pytest/Stage2/Candidate Build/Native acceptance",
+    "runtime": "Explicit deterministic Runtime outputs and Mock Gateway regressions, no real Provider/Image/WeChat calls",
+    "coverage": ["1/2/3 image records", "order", "Task API/SSE/history equality", "authorized downloads", "Tenant/User isolation", "valid retry and object dedup", "duplicate Attempt rejection", "missing/corrupt/unapproved artifacts", "wrong Task/Tenant proof", "runtime failure", "PG failure after first image with full rollback", "Worker persistence-only recovery", "concurrent duplicate completion", "one charge", "historical scalar and no backfill", "old image/reference/stop/auth/history regression"],
+    "initial_fixture_failure": "Duplicate Attempt IDs in the new retry Fixture were correctly rejected; fixed the Fixture namespace, not the retry Guard. Prior evidence retained.",
+    "source_snapshot": "/var/tmp/image-multi-artifacts.7MLWe8/enterprise_agent_poc",
+    "junit": "/var/tmp/image-multi-artifacts.7MLWe8/image-multi-seal.xml",
+    "junit_sha256": "105706bbf8f4432c4683c41a03c240865377ffaac774d62a9dab9ed9da568fa6",
+    "pg_root": "/private/tmp/ky-web-stage1-postgres.image-multi-b7exokxm",
+    "cluster_stopped": true
+  },
+  "real_persistence_evidence": {
+    "windows_path": "C:/Users/猪猪/Documents/ChatGPT/ky_web/.image-multi-evidence-v1/multi-image-evidence.json",
+    "sha256": "d347fc2194adf238a891b6f1de803f9253ae60a71b1d8e77b3a0b5105447b7f1",
+    "synthetic_database": "stage1_images_0eb195ecf97f44b4ab592b07a9ac835e",
+    "task_id": "1e5973e8-18c8-47a5-b6d4-7a91ac627bfa",
+    "run_id": "d56e4d1c-a202-4067-8dad-27e01b396a8f",
+    "conversation_id": "632f3d61-8d09-4e8e-8755-ef2a2f7c049a",
+    "generation_rows": 3, "charge_rows": 1,
+    "purpose": "Raw Synthetic rows and ordered result metadata; API/SSE/history and download checked before fixture cleanup. Test databases and object lifetime ended, not customer artifacts."
+  },
+  "remaining_integration": [
+    "03 consumes generations for gallery UI while retaining generation fallback; this turn does not modify frontend.",
+    "02 reviews and integrates this exact local Source/Tree on the approved Application baseline; Git publication requires separate direction under the current no-publication boundary.",
+    "06 qualifies the exact candidate and dynamic Generation/Task Result/Trace identities against current Native Guard/Release/Recovery contracts before any installation.",
+    "Actual Provider multi-call behavior, PRIMARY/Production service E2E and customer visual acceptance require independent authorization and remain NOT_EXECUTED."
+  ],
+  "unchanged": ["Production", "PRIMARY Test", "Provider request n=1", "Model config", "Skill", "Prompt", "Schema/Migration", "Runtime/SDK extraction", "formal retry protocol", "storage authorization", "frontend"],
+  "counters": {"primary_changes": 0, "production_changes": 0, "real_provider_calls": 0, "real_image_calls": 0, "real_wechat_calls": 0, "deployments": 0, "agent_publish": 0}
+}

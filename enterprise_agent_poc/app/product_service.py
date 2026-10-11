@@ -212,42 +212,40 @@ class TaskService:
     def _persist_result(self, task: dict, trace: dict) -> dict:
         current = self._store.task_for_worker(task["id"])
         payload = dict(trace["payload"])
-        storage_key = self._image_storage_key(trace)
-        artifact = next((call.get("artifact") for call in reversed(trace["payload"].get("mcp_calls", []))
-                         if call.get("tool") == "image_generation" and isinstance(call.get("artifact"), dict)
-                         and call["artifact"].get("storage_key") == storage_key), {})
+        images = []
         if self._store.task_definition(task).allows_image_generation and (not current or current["status"] != "completed"):
             # Reuse the generated object. Never invoke image_generation during
             # result recovery, even if this read or the DB transaction fails.
-            if (not storage_key or not storage_key.startswith(f"generated/{task['tenant_id']}/")
-                    or "\\" in storage_key or any(part in {"", ".", ".."} for part in storage_key.split("/"))):
+            images = self._store.image_artifacts(payload, task_id=task["id"], tenant_id=task["tenant_id"])
+            if not images:
                 raise ResultPersistenceError("artifact_association")
-            try:
-                image_content = storage_provider(self._agents._settings).get(storage_key)
-                if not image_content:
-                    raise ValueError("empty artifact")
+            for artifact in images:
+                storage_key = artifact["storage_key"]
+                if (not storage_key.startswith(f"generated/{task['tenant_id']}/") or len(storage_key) > 1024
+                        or "\\" in storage_key or any(part in {"", ".", ".."} for part in storage_key.split("/"))):
+                    raise ResultPersistenceError("artifact_association")
                 try:
-                    with Image.open(io.BytesIO(image_content)) as picture:
-                        image_width, image_height = picture.size
-                except (UnidentifiedImageError, OSError, ValueError):
-                    # Historical artifacts predate validated-format metadata.
-                    # Do not invent their dimensions or change their recovery contract.
-                    if artifact.get("requested_size"):
-                        raise
-                    image_width = image_height = None
-            except Exception as exc:
-                raise ResultPersistenceError("artifact_verification") from exc
+                    image_content = storage_provider(self._agents._settings).get(storage_key)
+                    if not image_content:
+                        raise ValueError("empty artifact")
+                    try:
+                        with Image.open(io.BytesIO(image_content)) as picture:
+                            artifact["width"], artifact["height"] = picture.size
+                            picture.verify()
+                    except (UnidentifiedImageError, OSError, ValueError):
+                        # Retain the existing single-image historical metadata
+                        # contract; new Gateway artifacts include requested_size.
+                        if artifact.get("requested_size") or len(images) > 1:
+                            raise
+                        artifact["width"] = artifact["height"] = None
+                except Exception as exc:
+                    raise ResultPersistenceError("artifact_verification") from exc
             payload["artifact_available"] = True
-        else:
-            image_width = image_height = None
         return self._store.complete_task_success(
             task,
             run_id=trace["run_id"],
             conversation_id=trace["conversation_id"],
             response=str(payload["final_result"]),
             trace_payload=payload,
-            image_storage_key=storage_key,
-            image_width=image_width,
-            image_height=image_height,
-            image_requested_size=artifact.get("requested_size"),
+            image_artifacts=images,
         )

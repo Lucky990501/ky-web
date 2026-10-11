@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -111,6 +112,47 @@ class ProductStore:
     def __init__(self, store: POCStore) -> None:
         self._store = store
         self.execution_resolver = None
+
+    @staticmethod
+    def image_artifacts(payload: dict, *, task_id: str, tenant_id: str) -> list[dict]:
+        """Ordered active Tool artifacts only; never infer identity from prose.
+
+        Reuse the formal retry resolver, including its single-result reference
+        image contract. Repeated observations of one object are not new images.
+        """
+        from app.tool_dependencies import resolve_dependencies, call_completed
+        calls, dependencies, _ = resolve_dependencies(payload.get("mcp_calls", []))
+        active = {item["active_attempt_id"] for item in dependencies if item.get("satisfied")}
+        images, seen = [], set()
+        for call in calls:
+            if (call.get("tool") != "image_generation" or not call_completed(call)
+                    or call.get("attempt_id") not in active):
+                continue
+            artifact = call.get("artifact")
+            if (call.get("server") != "platform" or not isinstance(artifact, dict)
+                    or not isinstance(artifact.get("storage_key"), str)):
+                raise ResultPersistenceError("artifact_association")
+            proof = call.get("image_dependency")
+            if isinstance(proof, dict) and (proof.get("task_id") != task_id or proof.get("tenant_id") != tenant_id):
+                raise ResultPersistenceError("artifact_association")
+            key = artifact["storage_key"]
+            if key not in seen:
+                images.append({"storage_key": key, "requested_size": artifact.get("requested_size")})
+                seen.add(key)
+        return images
+
+    @staticmethod
+    def _ordered_generations(rows, metadata: dict) -> list[dict]:
+        views = {row["id"]: _generation_view(dict(row)) for row in rows}
+        ids = metadata.get("generation_ids")
+        if not isinstance(ids, list):
+            # Historical rows are already persisted authority, not backfilled
+            # from a model reply or an unpersisted Tool result.
+            ids = list(views)
+            primary = metadata.get("generation_id")
+            if primary in ids:
+                ids = [primary] + [item for item in ids if item != primary]
+        return [views[item] for item in dict.fromkeys(ids) if item in views]
 
     def _history_agent(self, conversation_id: str, tenant_id: str, agent_id: str) -> dict:
         agent = _agent_view(agent_id)
@@ -628,6 +670,7 @@ class ProductStore:
         image_width: int | None = None,
         image_height: int | None = None,
         image_requested_size: str | None = None,
+        image_artifacts: list[dict] | None = None,
     ) -> dict:
         """Atomically persist a successful product result and its final Trace.
 
@@ -638,7 +681,8 @@ class ProductStore:
         task_id, tenant_id, user_id = task["id"], task["tenant_id"], task["user_id"]
         assistant_message_id = f"task:{task_id}:assistant"
         user_message_id = f"task:{task_id}:user"
-        generation_id = f"task:{task_id}:generation" if image_storage_key else None
+        generation_id = None
+        generation_ids = []
         conversation_title = _project_title(task["agent_id"], task.get("input_text"))
         stage = "task_validation"
         try:
@@ -664,9 +708,12 @@ class ProductStore:
                 if (current["run_id"] and current["run_id"] != run_id) or (current["conversation_id"] and current["conversation_id"] != conversation_id):
                     raise ValueError("Task/Run association mismatch.")
                 if current["status"] == "completed":
+                    saved_result = conn.execute("SELECT result_json FROM task_results WHERE task_id=?", (task_id,)).fetchone()
+                    metadata = json.loads(saved_result["result_json"] or "{}") if saved_result else {}
                     return {
                         "assistant_message_id": assistant_message_id,
-                        "generation_id": generation_id,
+                        "generation_id": metadata.get("generation_id"),
+                        "generation_ids": metadata.get("generation_ids") or ([metadata["generation_id"]] if metadata.get("generation_id") else []),
                         "replayed": True,
                     }
 
@@ -716,25 +763,37 @@ class ProductStore:
 
                 stage = "artifact_association"
                 if agent.allows_image_generation:
+                    trusted = self.image_artifacts(evidence, task_id=task_id, tenant_id=tenant_id)
+                    images = image_artifacts if image_artifacts is not None else [dict(
+                        storage_key=image_storage_key, width=image_width, height=image_height,
+                        requested_size=image_requested_size)]
+                    if (not trusted or len(images) != len(trusted)
+                            or any({k: item.get(k) for k in ("storage_key", "requested_size")} != proof
+                                   for item, proof in zip(images, trusted))):
+                        raise ValueError("Image set conflicts with saved Tool evidence.")
                     expected_prefix = f"generated/{tenant_id}/"
-                    if (
-                        not image_storage_key
-                        or not image_storage_key.startswith(expected_prefix)
-                        or "\\" in image_storage_key
-                        or any(part in {"", ".", ".."} for part in image_storage_key.split("/"))
-                    ):
-                        raise ValueError("图片任务缺少已持久化 storage key。")
-                    conn.execute(
-                        "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type,width,height,requested_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (generation_id, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gpt-image-2.5-sunburst-c", image_storage_key, _image_mime_type(image_storage_key), image_width, image_height, image_requested_size),
-                    )
-                    generation = conn.execute("SELECT task_id,conversation_id,storage_key FROM generations WHERE id=?", (generation_id,)).fetchone()
-                    if not generation or generation["task_id"] != task_id or generation["conversation_id"] != conversation_id or generation["storage_key"] != image_storage_key:
-                        raise ValueError("Existing generation conflicts with runtime result.")
+                    for index, image in enumerate(images):
+                        key = image["storage_key"]
+                        if (not key or not key.startswith(expected_prefix) or len(key) > 1024
+                                or "\\" in key or any(part in {"", ".", ".."} for part in key.split("/"))):
+                            raise ValueError("图片任务缺少已持久化 storage key。")
+                        gid = (f"task:{task_id}:generation" if index == 0 else
+                               f"task:{task_id}:generation:{hashlib.sha256(key.encode()).hexdigest()}")
+                        generation_ids.append(gid)
+                        conn.execute(
+                            "INSERT OR IGNORE INTO generations(id,tenant_id,user_id,conversation_id,task_id,provider,model,storage_key,mime_type,width,height,requested_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (gid, tenant_id, user_id, conversation_id, task_id, "image-gateway", "gpt-image-2.5-sunburst-c", key,
+                             _image_mime_type(key), image.get("width"), image.get("height"), image.get("requested_size")),
+                        )
+                        generation = conn.execute("SELECT tenant_id,user_id,task_id,conversation_id,storage_key FROM generations WHERE id=?", (gid,)).fetchone()
+                        if not generation or tuple(generation[k] for k in ("tenant_id", "user_id", "task_id", "conversation_id", "storage_key")) != (tenant_id, user_id, task_id, conversation_id, key):
+                            raise ValueError("Existing generation conflicts with runtime result.")
+                    generation_id = generation_ids[0]
 
                 stage = "task_result"
                 result_json = json.dumps(
                     {"run_id": run_id, "assistant_message_id": assistant_message_id, "generation_id": generation_id,
+                     "generation_ids": generation_ids,
                      "structured_result": structured_result},
                     ensure_ascii=False,
                 )
@@ -775,6 +834,7 @@ class ProductStore:
                         "artifact_available": True if generation_id else None,
                         "artifact_completed": True if agent.allows_image_generation else None,
                         "generation_id": generation_id,
+                        "generation_ids": generation_ids,
                         "structured_result": structured_result,
                         "structured_result_diagnostic": evidence.get("structured_result_diagnostic") or (
                             {"code": "persistence_validation_failed"} if evidence.get("structured_result") and not structured_result else None
@@ -802,6 +862,7 @@ class ProductStore:
         return {
             "assistant_message_id": assistant_message_id,
             "generation_id": generation_id,
+            "generation_ids": generation_ids,
             "replayed": False,
         }
 
@@ -819,8 +880,8 @@ class ProductStore:
             tasks = [
                 dict(item)
                 for item in conn.execute(
-                    "SELECT t.id,t.agent_id,t.input_text,t.status,t.stage,t.run_id,t.created_at,t.started_at,t.completed_at "
-                    "FROM tasks t WHERE t.conversation_id=? AND t.tenant_id=? AND t.user_id=? ORDER BY t.created_at,t.id",
+                    "SELECT t.id,t.agent_id,t.input_text,t.status,t.stage,t.run_id,t.created_at,t.started_at,t.completed_at,r.result_json "
+                    "FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id WHERE t.conversation_id=? AND t.tenant_id=? AND t.user_id=? ORDER BY t.created_at,t.id",
                     (conversation_id, tenant_id, user_id),
                 ).fetchall()
             ]
@@ -869,9 +930,11 @@ class ProductStore:
         result["project"] = {"id": result["id"], "name": display_title, "type": _project_type(agent)}
         result["tasks"] = tasks
         result["task_count"] = len(tasks)
-        result["generations"] = generations
-        result["image_count"] = len(generations)
-        generation_by_task = {item["task_id"]: item for item in generations}
+        generation_by_task = {task["id"]: self._ordered_generations(
+            [item for item in generations if item["task_id"] == task["id"]],
+            json.loads(task.pop("result_json") or "{}")) for task in tasks}
+        result["generations"] = [item for task in tasks for item in generation_by_task[task["id"]]]
+        result["image_count"] = len(result["generations"])
         attachments_by_task = {item["task_id"]: _chat_image_attachment_view(dict(item)) for item in attachment_rows}
         task_runs = {item["id"]: item.get("run_id") for item in tasks}
         trace_payloads = {
@@ -911,7 +974,8 @@ class ProductStore:
                 if message["role"] == "user" and task_id in attachments_by_task:
                     message["attachments"] = [attachments_by_task[task_id]]
                 if message["role"] == "assistant" and task_id in generation_by_task:
-                    message["generation"] = generation_by_task[task_id]
+                    message["generations"] = generation_by_task[task_id]
+                    message["generation"] = message["generations"][0] if message["generations"] else None
                 if message["role"] == "assistant":
                     payload = trace_payloads.get(task_runs.get(task_id), {})
                     referenced = []
@@ -1002,14 +1066,14 @@ class ProductStore:
                 return None
             row = conn.execute("SELECT t.*, r.final_response,r.result_json FROM tasks t LEFT JOIN task_results r ON r.task_id=t.id WHERE t.id=? AND t.tenant_id=? AND t.user_id=?", (task_id,tenant_id,user_id)).fetchone()
             events = conn.execute("SELECT stage,message,created_at FROM task_events WHERE task_id=? AND stage<>'delta' ORDER BY id", (task_id,)).fetchall()
-            generation = None
+            generations = []
             if row and row["status"] in {"completed", "failed", "cancelled"}:
-                generation = conn.execute(
+                generations = conn.execute(
                     "SELECT id,task_id,storage_key,mime_type,width,height,requested_size,created_at FROM generations "
                     "WHERE task_id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL "
-                    "AND storage_key IS NOT NULL AND TRIM(storage_key)<>'' LIMIT 1",
+                    "AND storage_key IS NOT NULL AND TRIM(storage_key)<>'' ORDER BY created_at,id",
                     (task_id, tenant_id, user_id),
-                ).fetchone()
+                ).fetchall()
         if not row: return None
         result = dict(row)
         result_metadata = json.loads(result.pop("result_json") or "{}")
@@ -1030,7 +1094,8 @@ class ProductStore:
             ),
             None,
         )
-        result["generation"] = _generation_view(dict(generation)) if generation else None
+        result["generations"] = self._ordered_generations(generations, result_metadata)
+        result["generation"] = result["generations"][0] if result["generations"] else None
         return result
 
     @staticmethod
