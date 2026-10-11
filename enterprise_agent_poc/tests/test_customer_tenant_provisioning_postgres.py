@@ -2,12 +2,14 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
+from io import BytesIO
 import json
 import os
 from pathlib import Path
 import select
 import subprocess
 import sys
+import tarfile
 import time
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -496,6 +498,170 @@ def test_actual_mid_transaction_handoff_or_approval_loss_rolls_back(pg, interrup
                 future.result(timeout=10)
     assert all(n == 0 for n in counts(pg,a.wanted['tenant_id']).values())
     assert 'COMMITTED' not in (pg.receipts/(a.wanted['operation_id']+'.jsonl')).read_text()
+
+
+@pytest.fixture
+def production_layout(pg, monkeypatch):
+    """Real directory/symlink/archive/manifest/loader, NOT a Production permit.
+
+    Only Root ownership is simulated: no sudo or /etc writes. All source,
+    manifest, archive, installed file, path, mode and code-pin checks are real.
+    The database retains its exact marked synthetic PG identity, not a fake
+    Production/Test-server identity. This never claims Native Root acceptance.
+    """
+    base = pg.tmp / 'synthetic-production-layout'
+    rid = '20261011-synthetic-562f201-pointer'
+    release = base / 'releases' / rid
+    app_root = release / 'enterprise_agent_poc'
+    app_root.mkdir(parents=True)
+    selected = ['enterprise_agent_poc/'+name for name in ('app/auth.py','app/store.py','app/product_store.py')]
+    archive = release / (rid+'.tar.gz')
+    with tarfile.open(archive, 'w:gz', format=tarfile.PAX_FORMAT, pax_headers={'comment':tool.APP_SOURCE}) as out:
+        for name in selected:
+            original = tool.ROOT / Path(name).relative_to('enterprise_agent_poc')
+            installed = release / name
+            installed.parent.mkdir(parents=True, exist_ok=True)
+            content = original.read_bytes()
+            installed.write_bytes(content)
+            installed.chmod(0o644)
+            entry = tarfile.TarInfo(name)
+            entry.size, entry.mode = len(content), 0o644
+            out.addfile(entry, BytesIO(content))
+    manifest = dict(release_id=rid, source_commit=tool.APP_SOURCE,
+                    archive_sha256=tool.file_sha(archive), selected_files=selected,
+                    selected_file_count=len(selected), build_platform='linux-synthetic-pointer-fixture')
+    manifest_path = release / (rid+'.manifest.json')
+    manifest_path.write_text(json.dumps(manifest))
+    pointer = base / 'release-current'
+    pointer.symlink_to(app_root, target_is_directory=True)
+    authority = pg.tmp / 'synthetic-root-approval-layout'
+    authority.mkdir(mode=0o755)
+    authority.chmod(0o755)
+    monkeypatch.setattr(tool, 'PRODUCTION_APPROVAL_ROOT', authority)
+    a = approval(pg)
+    a.value.update(scope=tool.VERSION, environment='production', production_authority=True,
+                   application=dict(base=str(base), release_id=rid, source=tool.APP_SOURCE,
+                                    tree=tool.APP_TREE, archive_sha256=manifest['archive_sha256'],
+                                    manifest_sha256=tool.gate.digest(manifest)))
+    a.path = authority / (a.wanted['operation_id']+'.json')
+    a.path.write_text(json.dumps(a.value))
+    a.path.chmod(0o444)
+    real_protection = tool.protected_path
+    def root_owner_double(path, owner, **kwargs):
+        if owner == 0:
+            assert Path(path) in {authority, a.path}, 'Root metadata simulation escaped exact fixture scope'
+            return real_protection(path, os.geteuid(), **kwargs)
+        return real_protection(path, owner, **kwargs)
+    monkeypatch.setattr(tool, 'protected_path', root_owner_double)
+    monkeypatch.setenv('APP_ENV', 'production')  # Only this test process; no Settings/startup changes.
+    return SimpleNamespace(approval=a, base=base, release=release, app_root=app_root,
+                           pointer=pointer, archive=archive, manifest=manifest,
+                           manifest_path=manifest_path, real_protection=real_protection)
+
+
+def save_production_fixture_approval(layout):
+    a = layout.approval
+    a.path.chmod(0o600)
+    a.path.write_text(json.dumps(a.value))
+    a.path.chmod(0o444)
+
+
+def test_production_release_current_points_to_verified_application_directory(production_layout):
+    f = production_layout
+    a = f.approval
+    # Execute the real gate, not a stub returning our expected directory.
+    root, manifest = tool.gate.release_identity(f.base, f.manifest['release_id'], tool.APP_SOURCE, a.value['application'])
+    assert root == f.app_root and root.parent == f.release and manifest == f.manifest
+    assert f.pointer.is_symlink() and f.pointer.resolve() == root
+    assert tool.load_context(a.path, a.wanted) == a.value
+
+
+@pytest.mark.parametrize('target', ['release_root', 'other_application'])
+def test_production_release_current_wrong_real_target_rejected(production_layout, target):
+    f = production_layout
+    f.pointer.unlink()  # Only our own tmp_path symlink, never the actual pointer.
+    if target == 'release_root':
+        wrong = f.release
+    else:
+        wrong = f.base / 'releases' / '20261011-other-release' / 'enterprise_agent_poc'
+        wrong.mkdir(parents=True)
+    f.pointer.symlink_to(wrong, target_is_directory=True)
+    assert f.pointer.resolve() == wrong and f.pointer.resolve() != f.app_root
+    with pytest.raises(tool.ProvisionBlocked, match='^PRODUCTION_RELEASE_CURRENT_MISMATCH$'):
+        tool.load_context(f.approval.path, f.approval.wanted)
+
+
+@pytest.mark.parametrize('field', ['source', 'tree'])
+def test_production_application_source_tree_mismatch_rejected(production_layout, field):
+    f = production_layout
+    f.approval.value['application'][field] = '0'*40
+    save_production_fixture_approval(f)
+    with pytest.raises(tool.ProvisionBlocked, match='^EXACT_PRODUCTION_APPLICATION_REQUIRED$'):
+        tool.load_context(f.approval.path, f.approval.wanted)
+
+
+@pytest.mark.parametrize('change,check', [
+    ('manifest', 'approved_manifest_identity'),
+    ('archive', 'archive_checksum'),
+    ('installed_helper', 'release_file_identity'),
+])
+def test_production_real_manifest_archive_and_installed_file_drift_rejected(production_layout, change, check):
+    f = production_layout
+    if change == 'manifest':
+        altered = dict(f.manifest, build_platform='altered-unapproved-manifest')
+        f.manifest_path.write_text(json.dumps(altered))
+    elif change == 'archive':
+        f.archive.write_bytes(f.archive.read_bytes()+b'unapproved-archive-bytes')
+    else:
+        path = f.app_root / 'app/auth.py'
+        path.write_bytes(path.read_bytes()+b'\n# unapproved installed file change\n')
+    with pytest.raises(tool.gate.RollbackBlocked, match='^'+check+'$'):
+        tool.load_context(f.approval.path, f.approval.wanted)
+
+
+def test_unapproved_production_fixture_file_location_and_actual_owner_rejected(production_layout, monkeypatch):
+    f = production_layout
+    a = f.approval
+    wrong_path = a.path.parent / ('unauthorized-'+a.path.name)
+    wrong_path.write_bytes(a.path.read_bytes())
+    wrong_path.chmod(0o444)
+    with pytest.raises(tool.ProvisionBlocked, match='^PRODUCTION_APPROVAL_LOCATION$'):
+        tool.load_context(wrong_path, a.wanted)
+    # Without the explicitly marked Root-ownership double, even this otherwise
+    # correct synthetic layout cannot authorize a real Production operation.
+    monkeypatch.setattr(tool, 'protected_path', f.real_protection)
+    with pytest.raises(tool.ProvisionBlocked, match='^PROTECTED_PATH_OWNER$'):
+        tool.load_context(a.path, a.wanted)
+
+
+def test_production_layout_still_requires_exact_code_pins(production_layout):
+    f = production_layout
+    f.approval.value['code_pins']['scripts/provision_customer_tenant_v1.py'] = '0'*64
+    save_production_fixture_approval(f)
+    with pytest.raises(tool.ProvisionBlocked, match='^CODE_PIN_MISMATCH$'):
+        tool.load_context(f.approval.path, f.approval.wanted)
+
+
+def test_correct_production_layout_dry_run_has_no_pg_business_writes(pg, production_layout, monkeypatch):
+    f = production_layout
+    a = f.approval
+    with pg.store.connection() as conn:
+        before = tool.other_row_pins(conn, a.wanted['tenant_id'])
+    before_manifest = f.manifest_path.read_bytes()
+    before_archive = f.archive.read_bytes()
+    monkeypatch.setattr(POCStore, 'initialize', lambda *args: pytest.fail('dry-run implicitly initialized database'))
+    monkeypatch.setattr(ProductStore, 'initialize', lambda *args: pytest.fail('dry-run implicitly seeded agents'))
+    monkeypatch.setattr(tool.secrets, 'token_urlsafe', lambda *args: pytest.fail('dry-run generated a credential'))
+    result = tool.provision(pg.store, a.path, a.wanted, a.config)
+    assert result['status'] == 'dry_run_pass' and result['read_only'] and result['database_writes'] == 0
+    assert not result['execution_ready'] and result['credential_handoff_status'] == 'CREDENTIAL_HANDOFF_BLOCKED'
+    assert result['credit_balance'] == 0 and result['agents'] == 'disabled'
+    assert all(n == 0 for n in counts(pg, a.wanted['tenant_id']).values())
+    assert not list(pg.receipts.iterdir())
+    with pg.store.connection() as conn:
+        assert tool.other_row_pins(conn, a.wanted['tenant_id']) == before
+    assert f.pointer.resolve() == f.app_root and f.manifest_path.read_bytes() == before_manifest
+    assert f.archive.read_bytes() == before_archive
 
 
 @pytest.mark.parametrize('ack_mode',['wrong_operation','wrong_digest','missing'])

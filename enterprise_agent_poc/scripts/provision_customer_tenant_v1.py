@@ -114,7 +114,8 @@ def load_context(path, wanted):
         need(set(app) == {'base', 'release_id', 'source', 'tree', 'archive_sha256', 'manifest_sha256'}
              and (app['source'], app['tree']) == (APP_SOURCE, APP_TREE), 'EXACT_PRODUCTION_APPLICATION_REQUIRED')
         app_root, _ = gate.release_identity(Path(app['base']), app['release_id'], APP_SOURCE, app)
-        need((Path(app['base'])/'release-current').resolve() == app_root.parent, 'PRODUCTION_RELEASE_CURRENT_MISMATCH')
+        # release_identity returns the verified enterprise_agent_poc directory.
+        need((Path(app['base'])/'release-current').resolve() == app_root, 'PRODUCTION_RELEASE_CURRENT_MISMATCH')
         # No Test authority or isolated socket context can grant Production writes.
         need(raw['database'].get('database') != 'enterprise_agent_test', 'PRODUCTION_DATABASE_SCOPE')
     need(os.environ.get('APP_ENV') == raw['environment'], 'EXACT_ENVIRONMENT_REQUIRED')
