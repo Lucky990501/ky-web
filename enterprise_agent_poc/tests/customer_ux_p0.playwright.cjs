@@ -53,7 +53,11 @@ async function main(){
     const draft=()=>page.locator('[data-create-draft]');
     const openArticle=async()=>{
       await page.goto(`${origin}/agents/${slug}`);await page.locator('[data-select-agent-conversation]').waitFor();
-      await page.locator('[data-select-agent-conversation]').click();await feedback().waitFor();await page.waitForFunction(()=>!document.querySelector('.wechat-article-feedback')?.textContent.includes('正在读取'));
+      await page.locator('[data-select-agent-conversation]').click();await feedback().waitFor();
+      // Legacy draft adapter regression is opt-in in this fixture test only.
+      // Active customer manual export is covered in the separate manual suite.
+      await page.evaluate(content=>{const main=document.querySelector('#main'),article=main.querySelector('[data-assistant-message-id="fixture-message"]');article.querySelector('.wechat-article-actions')?.remove();WorkbenchWechatArticle.mount({main,article,agent:main._wechatArticleContext.agent,route:main._wechatArticleContext.route,messageId:'fixture-message',content,request:api,markdown:markdownHtml,modal:bindModalDialog});},content);
+      await page.waitForFunction(()=>!document.querySelector('.wechat-article-feedback')?.textContent.includes('正在读取'));
     };
     const installAdapter=async(mode='success',permission='READY')=>{
       await page.evaluate(({mode,permission})=>{
@@ -141,7 +145,7 @@ async function main(){
     });
     await check('missing config and unverified connection are explicit',async()=>{
       account={app_secret_configured:false,verification_status:'unconfigured'};await openArticle();assert.equal(await draft().isDisabled(),true);assert.match(await feedback().textContent(),/个人中心配置/);
-      account={app_secret_configured:true,verification_status:'unverified'};await openArticle();assert.equal(await draft().isDisabled(),true);assert.match(await feedback().textContent(),/真实连接验证/);assert.equal(await page.getByRole('button',{name:'去配置',exact:true}).count(),1);
+      account={app_secret_configured:true,verification_status:'unverified'};await openArticle();assert.equal(await draft().isDisabled(),true);assert.match(await feedback().textContent(),/真实连接验证/);
       account={app_secret_configured:true,verification_status:'connected'};await openArticle();
     });
     await check('mock permission denied does not expose submit capability',async()=>{
@@ -174,7 +178,7 @@ async function main(){
     });
     await check('completed SSE reply mounts real-content entry without extra action request',async()=>{
       await page.goto(`${origin}/agents/${slug}`);await page.locator('#prompt').fill('写一篇公众号文章');await page.locator('#composer-submit').click();await page.locator('[data-assistant-message-id="fixture-stream-message"] [data-article-preview]').waitFor();
-      assert.equal(await page.locator('[data-create-draft]').isDisabled(),true);assert.equal(mutations.filter(item=>item.path.endsWith('/runs')).length,1);
+      assert.equal(await page.locator('[data-create-draft]').count(),0);assert.equal(await page.locator('[data-copy-rich]').count(),1);assert.equal(mutations.filter(item=>item.path.endsWith('/runs')).length,1);
       await page.locator('[data-article-preview]').click();const frame=await (await page.locator('#wechat-article-preview iframe').elementHandle()).contentFrame();await frame.waitForSelector('h1');assert.equal(await frame.locator('h1').textContent(),'新生成文章');await page.locator('[data-preview-close]').click();
     });
     await check('all transport is isolated; no credentials, permissions writes or real calls',async()=>{

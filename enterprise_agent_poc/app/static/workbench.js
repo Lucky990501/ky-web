@@ -659,7 +659,7 @@ async function agentWorkspaceV2(main, agentId) {
     composer.querySelector(':scope > div:last-of-type').insertAdjacentHTML('afterbegin',chatImageComposerButton());
     bindChatImageComposer(main);
   }
-  main._wechatArticleContext={agent,route:agentId};
+  main._wechatArticleContext={agent,route:agentId,userId:me?.user_id,tenantId:me?.tenant_id};
   if(agent.slug==='wechat-official-account-writing')for(const item of history){
     if(item.role!=='assistant')continue;
     const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===item.id);
@@ -882,16 +882,13 @@ async function renderWechatAccountSettings(main){
 async function renderWechatAgentSetupHint(main,agent){
   if(agent?.slug!=='wechat-official-account-writing')return;
   const composer=main.querySelector('#composer');if(!composer?.insertAdjacentHTML)return;
-  try{const state=await api(wechatAccountPath);if(document.querySelector('#main')!==main||main.querySelector('#composer')!==composer||state.app_secret_configured&&state.verification_status==='connected')return;
-    const hint=state.app_secret_configured?'公众号尚未通过真实连接验证，请先到个人中心测试连接。':'请先在个人中心配置微信公众号，然后再创建草稿。';
-    composer.insertAdjacentHTML('beforeend',`<p class="wechat-config-hint" role="status">${hint}<button class="button secondary" type="button" data-go="profile">去配置</button></p>`);bindNavigation();
-  }catch{}
+  composer.insertAdjacentHTML('beforeend','<p class="wechat-config-hint" role="status">文章生成后可复制排版内容，在公众号后台人工保存草稿；复制无需配置 AppSecret。</p>');
 }
 function mountWechatArticle(main,article,content,messageId){
   const context=main?._wechatArticleContext;
   if(!context||context.agent.slug!=='wechat-official-account-writing'||!article)return;
-  window.WorkbenchWechatArticle?.mount({main,article,content,messageId,...context,request:api,markdown:markdownHtml,modal:bindModalDialog,
-    readAccount:()=>main._wechatArticleAccountPromise ||= api(wechatAccountPath)});
+  window.WorkbenchWechatArticle?.mountManual({main,article,content,messageId,...context,markdown:markdownHtml,modal:bindModalDialog,
+    isCurrent:()=>Boolean(context.userId&&context.tenantId&&me?.user_id===context.userId&&me?.tenant_id===context.tenantId&&document.querySelector('#main')===main&&main._wechatArticleContext===context)});
 }
 function openPasswordEditor(main){
   app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="password-editor" role="presentation"><form class="profile-editor" aria-labelledby="password-editor-title"><button type="button" class="dialog-close" aria-label="关闭修改密码">${icon('x')}</button><h2 id="password-editor-title">修改密码</h2><p>修改后，下次登录请使用新密码。</p><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required minlength="8"></label><label>新密码<input name="new_password" type="password" autocomplete="new-password" required minlength="8"></label><label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" required minlength="8"></label><p class="form-error" role="alert"></p><div class="editor-actions"><button type="button" class="button secondary" data-close-editor>取消</button><button class="button primary" type="submit">保存新密码</button></div></form></div>`);

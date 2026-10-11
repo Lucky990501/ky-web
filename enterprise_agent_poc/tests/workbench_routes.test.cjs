@@ -24,10 +24,11 @@ test('Wechat read-only members have no management controls and failure labels ar
   assert.ok(html.includes('验证失败'));assert.ok(html.includes('IP白名单'));assert.ok(!html.includes('data-wechat-test'));assert.ok(!html.includes('data-wechat-unlink'));
   assert.equal(h.run("wechatSafeMessages.WECHAT_CONNECTION_TIMEOUT"),'连接微信公众号超时');
 });
-test('Wechat agent setup hint follows stable slug and keeps existing task execution',()=>{
+test('Wechat manual export hint follows stable slug and does not require credentials',()=>{
   assert.ok(source.includes("agent?.slug!=='wechat-official-account-writing'"));
-  assert.ok(source.includes('请先在个人中心配置微信公众号，然后再创建草稿。'));
-  assert.ok(source.includes('data-go="profile"'));assert.ok(source.includes('renderWechatAgentSetupHint(main,agent);'));
+  assert.ok(source.includes('复制无需配置 AppSecret。'));
+  const hint=source.slice(source.indexOf('async function renderWechatAgentSetupHint'),source.indexOf('function mountWechatArticle'));
+  assert.ok(!hint.includes('api('));assert.ok(source.includes('renderWechatAgentSetupHint(main,agent);'));
 });
 test('generic agent pathname wins over stale agent and page history state',()=>{
   const h=harness('/agents/social-content-agent',{page:'campaign',activeAgentId:'campaign-agent'});

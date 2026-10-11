@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src about:; base-uri 'none'; form-action 'none'; connect-src 'none'; img-src 'none'">
+<title>公众号文章人工排版工具 · 本地离线</title>
+<style>
+:root{--ink:#25334b;--muted:#53657e;--line:#dce5f7;--primary:#315fe5;--shadow:0 12px 40px #1b355226}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:#f5f8ff;font:16px/1.6 system-ui,sans-serif}#app{max-width:1160px;margin:auto;padding:28px 24px}h1{font-size:24px;margin:0 0 8px}h2{font-size:20px;margin:0 0 12px}p{margin:0 0 16px}.muted{color:var(--muted);font-size:14px}.editor-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px;margin-top:24px}.editor-pane{min-width:0;background:white;padding:20px;border:1px solid var(--line);border-radius:12px}label{display:block;font-size:14px;margin-bottom:12px}input,textarea{display:block;width:100%;border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:6px;font:16px/1.6 system-ui,sans-serif;color:var(--ink);background:white}textarea{min-height:240px;resize:vertical}button{cursor:pointer}.button{border:1px solid var(--line);border-radius:8px;padding:10px 14px;min-height:44px;font:14px/1.5 system-ui,sans-serif;color:var(--ink);background:white}.primary{color:white;background:var(--primary);border-color:var(--primary)}button:disabled{opacity:.6;cursor:default}:focus-visible{outline:3px solid var(--primary);outline-offset:3px}.dialog-backdrop{position:fixed;inset:0;background:#18284666;display:flex;align-items:center;justify-content:center;padding:20px;z-index:80}.dialog-close{position:absolute;top:10px;right:10px;min-width:44px;min-height:44px;background:white;border:0;font-size:24px}.tool-error{color:#a92727;font-size:14px;min-height:24px}.output-placeholder{color:var(--muted)}
+.wechat-article-actions{margin:14px 0;min-width:0}
+#profile-editor,#wechat-article-preview,#wechat-draft-confirm{z-index:80}
+.wechat-article-buttons{display:flex;flex-wrap:wrap;gap:10px}
+.wechat-article-buttons .button{min-height:44px;white-space:normal}
+.wechat-article-feedback{margin:8px 0 0;color:var(--muted);font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.wechat-manual-metadata{display:grid;gap:6px;margin:12px 0;font-size:14px;line-height:1.6}
+.wechat-manual-metadata>div{display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px}
+.wechat-manual-metadata dt{color:var(--muted)}
+.wechat-manual-metadata dd{margin:0;overflow-wrap:anywhere}
+.wechat-manual-notice{color:var(--muted);font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.wechat-article-actions [data-copy-recovery] label{display:block;font-size:14px;line-height:1.6}
+.wechat-article-actions [data-copy-recovery] textarea{display:block;box-sizing:border-box;width:100%;min-height:120px;margin-top:8px;padding:12px;border:1px solid var(--line);border-radius:8px;resize:vertical;font:14px/1.6 monospace;overflow-wrap:anywhere}
+.wechat-preview-dialog,.wechat-draft-dialog{position:relative;min-width:0;width:min(760px,100%);max-height:calc(100dvh - 40px);padding:22px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:var(--shadow)}
+.wechat-preview-dialog{display:flex;flex-direction:column;height:min(820px,calc(100dvh - 40px))}
+.wechat-preview-dialog header{padding-right:32px}
+.wechat-preview-dialog h2,.wechat-draft-dialog h2{margin:0;font-size:20px;color:var(--ink)}
+.wechat-preview-dialog p,.wechat-draft-dialog p{color:var(--muted);font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.wechat-preview-dialog iframe{flex:1;min-height:0;width:100%;border:1px solid var(--line);border-radius:8px;background:#fff}
+.wechat-preview-dialog footer{padding-top:12px}
+.wechat-preview-dialog footer .button{min-height:44px}
+#profile-editor .profile-editor{max-height:calc(100dvh - 40px);overflow-y:auto}
+@media(max-width:600px){.wechat-preview-dialog,.wechat-draft-dialog{padding:16px}.wechat-article-buttons .button{flex:1}.wechat-preview-dialog footer .button{width:100%}}
+@media(max-width:700px){#app{padding:20px 16px}.editor-grid{grid-template-columns:minmax(0,1fr);gap:16px}.editor-pane{padding:16px}.dialog-backdrop{padding:12px}.button{width:100%}}
+</style></head><body><div id="app"><header><h1>公众号文章人工排版工具</h1><p class="muted">本地离线 · 仅处理你粘贴的已有内容，不生成文章、不读取账号、不连接微信、不上传或保存内容。</p></header><div class="editor-grid"><section class="editor-pane"><h2>已有文章内容</h2><form id="tool-form"><label>正文（HTML、Markdown 或纯文本）<textarea id="article-input" required maxlength="262144" placeholder="粘贴已有文章正文"></textarea></label><label>标题（单独填写，可留空使用首个一级标题建议）<input id="article-title" maxlength="120"></label><label>摘要（单独填写）<input id="article-digest" maxlength="120"></label><label>封面说明（图片需在公众号后台手动上传）<input id="article-cover" maxlength="500"></label><button class="button primary" type="submit">准备安全排版</button><p class="tool-error" role="alert"></p></form></section><main class="editor-pane" id="main"><h2>人工导出</h2><div id="output"><p class="output-placeholder">准备排版后，可预览或复制到公众号编辑器。</p></div><p class="muted">请自行打开目标公众号后台 → 粘贴 → 核对标题、摘要和图片 → 保存草稿 → 重新打开检查。尚无真实公众号粘贴验收证据；不承诺样式完全一致。</p></main></div></div>
+<script>
+/* Manual rich-text export is the active customer delivery mode. It writes only
+ * to the user's clipboard, never to WeChat. The legacy draft adapter remains
+ * fail-closed for a separately authorized future integration.
+ */
+(() => {
+  'use strict';
+  const SLUG = 'wechat-official-account-writing';
+  const pendingAdapter = Object.freeze({
+    availability: async () => ({state: 'BACKEND_PENDING'}),
+    createDraft: async () => { throw Object.assign(new Error('BACKEND_PENDING'), {code: 'BACKEND_PENDING'}); },
+  });
+  const tags = new Set('article section div p span h1 h2 h3 h4 h5 h6 strong b em i u s blockquote ul ol li br hr table thead tbody tr th td pre code'.split(' '));
+  const discard = new Set('script style iframe object embed link base meta form input button textarea select svg math template noscript'.split(' '));
+  const properties = new Set('color background-color font-size font-weight font-style text-align text-decoration line-height letter-spacing margin margin-top margin-bottom margin-left margin-right padding padding-top padding-bottom padding-left padding-right border border-top border-bottom border-left border-right border-radius border-color border-width border-style'.split(' '));
+  function sanitizeArticle(html) {
+    if (typeof html !== 'string' || !html.trim() || html.length > 256 * 1024) throw new Error('ARTICLE_INVALID');
+    // Template is inert: resources/scripts are never inserted into the host DOM.
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    let count = 0;
+    const clean = (parent, depth = 0) => {
+      if (depth > 64) throw new Error('ARTICLE_INVALID');
+      for (const node of [...parent.childNodes]) {
+        if (++count > 10000) throw new Error('ARTICLE_INVALID');
+        if (node.nodeType === Node.COMMENT_NODE) { node.remove(); continue; }
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        const tag = node.localName.toLowerCase();
+        if (discard.has(tag)) { node.remove(); continue; }
+        clean(node, depth + 1);
+        if (!tags.has(tag)) { node.replaceWith(...node.childNodes); continue; }
+        const style = node.style;
+        const safe = [];
+        for (const property of [...style]) {
+          const value = style.getPropertyValue(property).trim();
+          // No URLs, CSS functions/escapes, custom props, positioning or overlays.
+          const plain = value.replace(/\b(?:rgb|rgba|hsl|hsla)\([\d.,%\s+-]+\)/g, 'color');
+          if (properties.has(property) && /^[#a-zA-Z0-9.,%\s+-]+$/.test(plain) && value.length < 100) safe.push(`${property}:${value}`);
+        }
+        for (const attribute of [...node.attributes]) node.removeAttribute(attribute.name);
+        if (safe.length) node.setAttribute('style', safe.join(';'));
+      }
+    };
+    clean(template.content);
+    return template.innerHTML;
+  }
+  function previewDocument(html) {
+    const safe = sanitizeArticle(html);
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'"><style>html{overflow-wrap:anywhere}body{box-sizing:border-box;max-width:680px;margin:0 auto;padding:24px 20px;color:#25334b;font:16px/1.8 system-ui,sans-serif}*{box-sizing:border-box;max-width:100%}h1,h2,h3{line-height:1.45}h1{font-size:24px}h2{font-size:20px}p{margin:0 0 16px}blockquote{margin:16px 0;padding:8px 16px;border-left:3px solid #315fe5;background:#f5f8ff}table{display:block;overflow:auto;border-collapse:collapse}td,th{padding:8px;border:1px solid #dce5f7}pre{white-space:pre-wrap}a{color:inherit}</style></head><body>${safe}</body></html>`;
+  }
+  function articleHtml(content, markdown) {
+    const fenced = /^\s*```html\s*\n([\s\S]*?)\n```\s*$/i.exec(content);
+    return fenced ? fenced[1] : /^\s*</.test(content) ? content : markdown(content);
+  }
+  const inlineDefaults = Object.freeze({
+    section: 'margin:0;padding:0;max-width:100%;overflow-wrap:anywhere;color:#25334b;font-size:16px;line-height:1.8;text-align:left',
+    article: 'margin:0;padding:0', div: 'margin:0;padding:0',
+    h1: 'font-size:24px;font-weight:700;line-height:1.5;margin:24px 0 16px',
+    h2: 'font-size:20px;font-weight:700;line-height:1.5;margin:24px 0 12px',
+    h3: 'font-size:18px;font-weight:700;line-height:1.5;margin:20px 0 12px',
+    h4: 'font-size:16px;font-weight:700;line-height:1.6;margin:16px 0 8px',
+    h5: 'font-size:16px;font-weight:700;line-height:1.6;margin:16px 0 8px',
+    h6: 'font-size:16px;font-weight:700;line-height:1.6;margin:16px 0 8px',
+    p: 'font-size:16px;line-height:1.8;margin:0 0 16px',
+    strong: 'font-weight:700', b: 'font-weight:700', em: 'font-style:italic', i: 'font-style:italic',
+    u: 'text-decoration:underline', s: 'text-decoration:line-through',
+    blockquote: 'margin:16px 0;padding:8px 16px;border-left:3px solid #315fe5;background-color:#f5f8ff;line-height:1.8',
+    ul: 'margin:12px 0 16px;padding-left:24px;line-height:1.8',
+    ol: 'margin:12px 0 16px;padding-left:24px;line-height:1.8', li: 'margin:0 0 8px',
+    table: 'width:100%;border-collapse:collapse;font-size:14px;line-height:1.6',
+    th: 'padding:8px;border:1px solid #dce5f7;font-weight:700;background-color:#f5f8ff',
+    td: 'padding:8px;border:1px solid #dce5f7',
+    pre: 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.6;margin:16px 0',
+    code: 'font-size:14px', hr: 'border:0;border-top:1px solid #dce5f7;margin:20px 0',
+  });
+  const internalPathPattern = /(?:file:[\\/]{2,3}|[a-z]:[\\/]|\\\\[^\s\\/]+[\\/]|\/(?:opt|var|home|tmp|srv|etc|root|proc|mnt|workspace|usr|data|run|private|users)\/)[^\s<>"'，。；、）)\]]*/gi;
+  function redactPaths(value) {
+    // Display text is untrusted too; never turn internal paths into attachments.
+    return String(value || '').replace(internalPathPattern, '[内部路径已移除]');
+  }
+  function plainArticle(root) {
+    const blocks = new Set('section article div p h1 h2 h3 h4 h5 h6 blockquote ul ol table thead tbody tr pre'.split(' '));
+    const walk = node => {
+      if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+      const tag = node.localName;
+      if (tag === 'br') return '\n';
+      if (tag === 'hr') return '\n';
+      const value = [...node.childNodes].map(walk).join('');
+      if (tag === 'li') {
+        const siblings = [...node.parentNode.children].filter(item => item.localName === 'li');
+        return `\n${node.parentNode.localName === 'ol' ? siblings.indexOf(node) + 1 + '.' : '•'} ${value.trim()}\n`;
+      }
+      if (tag === 'td' || tag === 'th') return value + '\t';
+      return blocks.has(tag) ? `\n${value}\n` : value;
+    };
+    return redactPaths(walk(root)).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  function buildManualExport(content, markdown, metadata = {}) {
+    const raw = articleHtml(content, markdown);
+    const input = document.createElement('template'); input.innerHTML = raw;
+    const imageCount = input.content.querySelectorAll('img,picture').length;
+    // Reuse the reviewed sanitizer. Do not export the preview's stylesheet.
+    const safe = document.createElement('template'); safe.innerHTML = sanitizeArticle(raw);
+    // Match over contiguous DOM text as well: inline tags/entities must not
+    // split an internal path and evade removal. Only text nodes are rewritten.
+    const nodes = [], chunks = [], blockTags = new Set('section article div p h1 h2 h3 h4 h5 h6 blockquote ul ol li table tr th td pre br hr'.split(' '));
+    let position = 0;
+    const boundary = () => { chunks.push('\n'); position++; };
+    const collect = parent => { for (const node of parent.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) { nodes.push({node, offset: position}); chunks.push(node.textContent); position += node.textContent.length; }
+      else { const block = blockTags.has(node.localName); if (block) boundary(); collect(node); if (block) boundary(); }
+    } };
+    collect(safe.content);
+    const joined = chunks.join('');
+    const ranges = [...joined.matchAll(internalPathPattern)].map(match => [match.index, match.index + match[0].length]);
+    const redacted = ranges.length > 0;
+    for (const {node, offset} of nodes) {
+      const original = node.textContent, end = offset + original.length; let cursor = 0, value = '';
+      for (const [start, finish] of ranges) {
+        if (finish <= offset || start >= end) continue;
+        const first = Math.max(0, start - offset), last = Math.min(original.length, finish - offset);
+        value += original.slice(cursor, first) + (start >= offset ? '[内部路径已移除]' : ''); cursor = last;
+      }
+      node.textContent = value + original.slice(cursor);
+    }
+    for (const node of safe.content.querySelectorAll('*')) {
+      const previous = node.style, kept = [];
+      for (const property of ['color', 'background-color', 'font-weight', 'font-style', 'text-align', 'text-decoration']) {
+        const value = previous.getPropertyValue(property); if (value) kept.push(`${property}:${value}`);
+      }
+      const size = previous.fontSize, height = previous.lineHeight;
+      if (/^\d+(?:\.\d+)?px$/.test(size) && parseFloat(size) >= 12 && parseFloat(size) <= 32) kept.push(`font-size:${size}`);
+      if (/^\d+(?:\.\d+)?$/.test(height) && Number(height) >= 1.4 && Number(height) <= 2.4) kept.push(`line-height:${height}`);
+      node.removeAttribute('style');
+      const style = [inlineDefaults[node.localName], ...kept].filter(Boolean).join(';');
+      if (style) node.setAttribute('style', style);
+    }
+    const wrapper = document.createElement('section'); wrapper.setAttribute('style', inlineDefaults.section); wrapper.append(safe.content);
+    const text = plainArticle(wrapper);
+    if (!text) throw new Error('ARTICLE_INVALID');
+    const field = value => redactPaths(String(value || '').replace(/[\u0000-\u001f]/g, ' ').trim());
+    return Object.freeze({html: wrapper.outerHTML, text, imageCount, redacted,
+      title: field(metadata.title || wrapper.querySelector('h1')?.textContent).slice(0, 120),
+      digest: field(metadata.digest).slice(0, 120), cover: field(metadata.cover).slice(0, 500)});
+  }
+  async function copyManualExport(result, mode) {
+    const clipboard = navigator.clipboard;
+    if (mode === 'rich') {
+      if (!clipboard?.write || typeof ClipboardItem !== 'function') throw new Error('RICH_CLIPBOARD_UNAVAILABLE');
+      // Called directly in the click handler, before any asynchronous preflight.
+      await clipboard.write([new ClipboardItem({
+        'text/html': new Blob([result.html], {type: 'text/html'}),
+        'text/plain': new Blob([result.text], {type: 'text/plain'}),
+      })]);
+    } else {
+      if (!clipboard?.writeText) throw new Error('TEXT_CLIPBOARD_UNAVAILABLE');
+      await clipboard.writeText(mode === 'source' ? result.html : result.text);
+    }
+  }
+  function mountManual({article, main, agent, content, messageId, markdown, modal, isCurrent, metadata = {}}) {
+    if (agent?.slug !== SLUG || !messageId || !content?.trim() || typeof isCurrent !== 'function' || article.querySelector('.wechat-article-actions')) return null;
+    const current = () => main.isConnected && article.isConnected && article.dataset.assistantMessageId === messageId && isCurrent();
+    const slot = document.createElement('section'); slot.className = 'wechat-article-actions';
+    slot.setAttribute('aria-label', '公众号文章人工导出');
+    slot.innerHTML = '<div class="wechat-article-buttons"><button type="button" class="button secondary" data-article-preview>预览文章</button><button type="button" class="button primary" data-copy-rich>复制到公众号</button><button type="button" class="button secondary" data-copy-source>复制HTML源码</button><button type="button" class="button secondary" data-copy-plain>复制纯文本</button></div><dl class="wechat-manual-metadata"><div><dt>建议标题</dt><dd data-manual-title></dd></div><div><dt>摘要</dt><dd data-manual-digest></dd></div><div><dt>封面</dt><dd data-manual-cover></dd></div></dl><p class="wechat-article-feedback" role="status" aria-live="polite"></p><p class="wechat-manual-notice">请自行打开目标公众号后台，粘贴正文后保存草稿。标题、摘要和封面需单独填写／上传；正文图片请在后台手动上传。复制不会连接公众号或创建草稿。</p><div data-copy-recovery hidden><label>复制失败，可选中下方内容后按 Ctrl+C（Mac：⌘C）<textarea readonly aria-label="手动复制内容"></textarea></label></div>';
+    article.append(slot);
+    const feedback = slot.querySelector('[role="status"]'), buttons = [...slot.querySelectorAll('button')], preview = slot.querySelector('[data-article-preview]');
+    let result, busy = false;
+    try { result = buildManualExport(content, markdown, metadata); }
+    catch { buttons.forEach(button => button.disabled = true); feedback.textContent = '文章内容过大或无效，暂无法导出。'; return null; }
+    slot.querySelector('[data-manual-title]').textContent = result.title || '请在公众号后台手动填写';
+    slot.querySelector('[data-manual-digest]').textContent = result.digest || '未提供，请在公众号后台手动填写';
+    slot.querySelector('[data-manual-cover]').textContent = result.cover || '请在公众号后台手动上传';
+    feedback.textContent = result.redacted ? '安全排版已准备；内部文件路径已移除，请核对正文。' : '安全排版已准备。粘贴后请核对内容和样式；未经过真实公众号编辑器兼容验收。';
+    for (const [selector, mode] of [['[data-copy-rich]', 'rich'], ['[data-copy-source]', 'source'], ['[data-copy-plain]', 'plain']]) {
+      slot.querySelector(selector).onclick = async () => {
+        if (!current() || busy) return;
+        busy = true; buttons.forEach(button => button.disabled = true); slot.setAttribute('aria-busy', 'true');
+        feedback.textContent = '正在复制…'; slot.querySelector('[data-copy-recovery]').hidden = true;
+        try {
+          await copyManualExport(result, mode);
+          if (current()) feedback.textContent = mode === 'rich' ? '已复制排版内容，请粘贴到公众号编辑器' : mode === 'source' ? '已复制HTML源码；这是源码文本，不是富文本粘贴。' : '已复制纯文本；不包含排版样式。';
+        } catch {
+          if (!current()) return;
+          feedback.textContent = mode === 'rich' ? '富文本复制失败，未复制排版内容。请使用“复制HTML源码”或“复制纯文本”，或手动复制下方内容。' : '复制失败；请手动选中下方内容并复制。';
+          const recovery = slot.querySelector('[data-copy-recovery]'), area = recovery.querySelector('textarea');
+          recovery.hidden = false; area.value = mode === 'plain' ? result.text : result.html; area.focus(); area.select();
+        } finally {
+          busy = false; if (current()) { buttons.forEach(button => button.disabled = false); slot.setAttribute('aria-busy', 'false'); }
+        }
+      };
+    }
+    preview.onclick = () => {
+      if (!current() || document.querySelector('#wechat-article-preview')) return;
+      const backdrop = document.createElement('div'); backdrop.className = 'dialog-backdrop'; backdrop.id = 'wechat-article-preview';
+      backdrop.innerHTML = '<section class="wechat-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="wechat-preview-title"><button type="button" class="dialog-close" aria-label="关闭文章预览">×</button><header><h2 id="wechat-preview-title">文章排版预览</h2><p>安全正文预览，不是微信草稿。粘贴后请核对样式；图片需手动上传。</p></header><iframe title="公众号文章安全预览" sandbox="" referrerpolicy="no-referrer"></iframe><footer><button type="button" class="button secondary" data-preview-close>返回文章</button></footer></section>';
+      backdrop.querySelector('iframe').srcdoc = previewDocument(result.html);
+      main.closest('#app').append(backdrop);
+      const close = modal(backdrop, preview); backdrop.querySelector('[data-preview-close]').onclick = close;
+    };
+    return Object.freeze({result});
+  }
+  const messages = {
+    BACKEND_PENDING: 'BACKEND_PENDING · 正式草稿接口尚未接入，当前不能创建微信草稿。',
+    AUTH_REQUIRED: '请重新登录后再操作。',
+    FORBIDDEN: '你没有创建微信草稿的操作权限。',
+    AGENT_UNAVAILABLE: '公众号智能体暂未启用，不能创建草稿。',
+    ACCOUNT_UNCONFIGURED: '请先在个人中心配置微信公众号。',
+    ACCOUNT_UNVERIFIED: '公众号尚未通过真实连接验证，请先到个人中心测试连接。',
+    RESULT_UNCONFIRMED: '草稿结果未确认，不能显示成功。请先核对草稿箱，再决定是否重试。',
+    REQUEST_FAILED: '创建草稿失败。请先核对草稿箱，再确认重试；系统不会自动重复提交。',
+  };
+  function confirmedDraft(result, context) {
+    const id = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(value);
+    return result?.status === 'created' && result.confirmed === true && id(result.draft_media_id)
+      && id(result.receipt_id) && result.agent_id === context.agentId && result.message_id === context.messageId;
+  }
+  function mount({article, main, agent, route, content, messageId, request, markdown, modal, adapter = pendingAdapter, readAccount}) {
+    if (agent?.slug !== SLUG || !messageId || !content?.trim() || article.querySelector('.wechat-article-actions')) return null;
+    const context = Object.freeze({agentId: agent.id, messageId});
+    const slot = document.createElement('section'); slot.className = 'wechat-article-actions';
+    slot.setAttribute('aria-label', '公众号文章操作');
+    slot.innerHTML = '<div class="wechat-article-buttons"><button type="button" class="button secondary" data-article-preview>预览文章</button><button type="button" class="button primary" data-create-draft disabled>创建微信草稿</button></div><p class="wechat-article-feedback" role="status" aria-live="polite">正在读取草稿操作状态…</p>';
+    article.append(slot);
+    const preview = slot.querySelector('[data-article-preview]'), draft = slot.querySelector('[data-create-draft]'), feedback = slot.querySelector('[role="status"]');
+    let busy = false, checking = true, succeeded = false, ready = false, confirmation = null;
+    const current = () => main.isConnected && article.isConnected && document.querySelector('#main') === main;
+    const say = code => { if (current()) feedback.textContent = messages[code] || messages.REQUEST_FAILED; };
+    const sync = () => { if (!current()) return; draft.disabled = busy || checking || !ready || succeeded; draft.setAttribute('aria-busy', String(busy || checking)); draft.textContent = busy ? '正在创建草稿…' : succeeded ? '微信草稿已创建' : '创建微信草稿'; };
+    async function check(fresh = false) {
+      checking = true; ready = false; sync();
+      try {
+        const metadata = fresh ? await request(`/api/v1/agents/${encodeURIComponent(route)}`) : agent;
+        if (!current()) return false;
+        if (metadata?.id !== context.agentId || metadata.slug !== SLUG || metadata.enabled !== true) throw {code: 'AGENT_UNAVAILABLE'};
+        const account = !fresh && readAccount ? await readAccount() : await request('/api/v1/profile/wechat-account');
+        if (!account?.app_secret_configured) throw {code: 'ACCOUNT_UNCONFIGURED'};
+        if (account.verification_status !== 'connected') throw {code: 'ACCOUNT_UNVERIFIED'};
+        const permission = await adapter.availability(context);
+        if (!current()) return false;
+        if (permission?.state === 'DENIED') throw {code: 'FORBIDDEN'};
+        if (permission?.state !== 'READY') throw {code: 'BACKEND_PENDING'};
+        if (permission.can_create_draft !== true || permission.agent_id !== context.agentId || permission.message_id !== messageId) throw {code: 'FORBIDDEN'};
+        ready = true; feedback.textContent = '创建前需确认；仅保存到草稿箱，不发布、不群发。'; return true;
+      } catch (error) {
+        say(error?.status === 401 ? 'AUTH_REQUIRED' : error?.status === 403 ? 'FORBIDDEN' : error?.status === 404 ? 'AGENT_UNAVAILABLE' : error?.code);
+        return false;
+      } finally { checking = false; sync(); }
+    }
+    preview.onclick = () => {
+      if (!current() || document.querySelector('#wechat-article-preview')) return;
+      let doc;
+      try { doc = previewDocument(articleHtml(content, markdown)); } catch { feedback.textContent = '文章内容过大或无效，暂无法预览。'; return; }
+      const backdrop = document.createElement('div'); backdrop.className = 'dialog-backdrop'; backdrop.id = 'wechat-article-preview';
+      backdrop.innerHTML = '<section class="wechat-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="wechat-preview-title"><button type="button" class="dialog-close" aria-label="关闭文章预览">×</button><header><h2 id="wechat-preview-title">文章排版预览</h2><p>生成正文的安全预览；尚未完成 PREPARE 校验或上传。外部图片、链接和脚本已禁用。</p></header><iframe title="公众号文章安全预览" sandbox="" referrerpolicy="no-referrer"></iframe><footer><button type="button" class="button secondary" data-preview-close>返回对话</button></footer></section>';
+      backdrop.querySelector('iframe').srcdoc = doc;
+      document.querySelector('#app').append(backdrop);
+      const close = modal(backdrop, preview); backdrop.querySelector('[data-preview-close]').onclick = close;
+    };
+    draft.onclick = async () => {
+      if (!current() || busy || checking || succeeded || confirmation) return;
+      if (!await check(true) || !current()) return;
+      const backdrop = document.createElement('div'); backdrop.className = 'dialog-backdrop'; backdrop.id = 'wechat-draft-confirm';
+      backdrop.innerHTML = '<section class="wechat-draft-dialog" role="dialog" aria-modal="true" aria-labelledby="wechat-draft-title"><button type="button" class="dialog-close" aria-label="关闭草稿确认">×</button><h2 id="wechat-draft-title">确认创建微信草稿？</h2><p>将这篇文章保存到当前企业已连接的微信公众号草稿箱。不会发布、群发或删除任何内容。</p><div class="wechat-article-buttons"><button type="button" class="button secondary" data-draft-cancel>取消</button><button type="button" class="button primary" data-draft-confirm>确认创建草稿</button></div></section>';
+      document.querySelector('#app').append(backdrop);
+      const dismiss = modal(backdrop, draft);
+      confirmation = backdrop;
+      const close = () => { dismiss(); confirmation = null; };
+      // Modal Escape/mask/close also clears the pending-confirmation sentinel.
+      const watch = new MutationObserver(() => { if (!backdrop.isConnected) { confirmation = null; watch.disconnect(); } });
+      watch.observe(backdrop.parentNode, {childList: true});
+      backdrop.querySelector('[data-draft-cancel]').onclick = close;
+      backdrop.querySelector('[data-draft-confirm]').onclick = async () => {
+        if (busy || succeeded || !current()) return;
+        busy = true; close(); sync(); feedback.textContent = '正在创建微信草稿，请勿重复提交…';
+        try {
+          if (!await check(true) || !current()) return;
+          // Identity only. No HTML, credential, tenant, executable or storage path.
+          const result = await adapter.createDraft({...context, userConfirmed: true});
+          if (!current()) return;
+          if (!confirmedDraft(result, context)) throw {code: 'RESULT_UNCONFIRMED'};
+          succeeded = true; feedback.textContent = `微信草稿已创建 · ${result.draft_media_id} · 回执 ${result.receipt_id}`;
+        } catch (error) {
+          ready = false;
+          say(error?.status === 401 ? 'AUTH_REQUIRED' : error?.status === 403 ? 'FORBIDDEN' : error?.status === 404 ? 'AGENT_UNAVAILABLE' : error?.code || 'REQUEST_FAILED');
+          // Retry is always a new explicit click + confirmation; never auto-send.
+          if (error?.status !== 401 && error?.status !== 403 && error?.status !== 404) ready = true;
+        } finally { busy = false; sync(); }
+      };
+    };
+    check();
+    return Object.freeze({refresh: check});
+  }
+  window.WorkbenchWechatArticle = Object.freeze({mount, mountManual, buildManualExport, copyManualExport, sanitizeArticle, previewDocument, confirmedDraft, pendingAdapter});
+})();
+
+const escapeHtml = v => String(v || '').replace(/[&<>'"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;' })[c]);
+const markdownInlineHtml = value => {
+  let html=escapeHtml(String(value||''));
+  html=html.replace(/`([^`]+)`/g,'<code>$1</code>');
+  html=html.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/__([^_]+)__/g,'<strong>$1</strong>');
+  html=html.replace(/\*([^*]+)\*/g,'<em>$1</em>').replace(/_([^_]+)_/g,'<em>$1</em>');
+  return html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+};
+function markdownTableCells(line){
+  const value=String(line||'').trim().replace(/^\|/,'').replace(/\|$/,'');let cell='',cells=[];
+  for(let index=0;index<value.length;index++){
+    if(value[index]==='\\'&&value[index+1]==='|'){cell+='|';index++;}
+    else if(value[index]==='|'){cells.push(cell.trim());cell='';}
+    else cell+=value[index];
+  }
+  cells.push(cell.trim());return cells;
+}
+const markdownTableSeparator=line=>{const cells=markdownTableCells(line);return cells.length>1&&cells.every(cell=>/^:?-{3,}:?$/.test(cell));};
+const markdownTableCellHtml=value=>markdownInlineHtml(value).replace(/&lt;br\s*\/?&gt;/gi,'<br>');
+const markdownHtml = content => {
+  const blocks=[],paragraph=[],lines=String(content||'').replace(/\r\n?/g,'\n').split('\n');let listType='',codeLines=null;
+  const closeList=()=>{if(listType){blocks.push(`</${listType}>`);listType='';}};
+  const flushParagraph=()=>{if(paragraph.length){blocks.push(`<p>${paragraph.splice(0).map(markdownInlineHtml).join('<br>')}</p>`);}};
+  for(let index=0;index<lines.length;index++){const raw=lines[index],line=raw.trim(),heading=line.match(/^(#{1,3})\s+(.+)$/),ordered=line.match(/^\d+[.)]\s+(.+)$/),bullet=line.match(/^[-*+]\s+(.+)$/),quote=line.match(/^>\s?(.+)$/);
+    if(codeLines){if(/^```/.test(line)){blocks.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);codeLines=null;}else codeLines.push(raw);continue;}
+    if(/^```/.test(line)){flushParagraph();closeList();codeLines=[];continue;}
+    if(!line){flushParagraph();closeList();continue;}
+    if(line.includes('|')&&index+1<lines.length&&markdownTableSeparator(lines[index+1])){
+      flushParagraph();closeList();const headers=markdownTableCells(line);index++;
+      const rows=[];while(index+1<lines.length&&lines[index+1].trim().includes('|'))rows.push(markdownTableCells(lines[++index]));
+      blocks.push(`<div class="markdown-table-scroll"><table><thead><tr>${headers.map(value=>`<th>${markdownTableCellHtml(value)}</th>`).join('')}</tr></thead><tbody>${rows.map(cells=>`<tr>${headers.map((_,cellIndex)=>`<td>${markdownTableCellHtml(cells[cellIndex]||'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);continue;
+    }
+    if(heading){flushParagraph();closeList();blocks.push(`<h${heading[1].length}>${markdownInlineHtml(heading[2])}</h${heading[1].length}>`);continue;}
+    if(quote){flushParagraph();closeList();blocks.push(`<blockquote>${markdownInlineHtml(quote[1])}</blockquote>`);continue;}
+    if(/^(---+|\*\*\*+|___+)$/.test(line)){flushParagraph();closeList();blocks.push('<hr>');continue;}
+    if(ordered||bullet){flushParagraph();const nextType=ordered?'ol':'ul';if(listType!==nextType){closeList();blocks.push(`<${nextType}>`);listType=nextType;}blocks.push(`<li>${markdownInlineHtml((ordered||bullet)[1])}</li>`);continue;}
+    closeList();paragraph.push(raw);
+  }
+  flushParagraph();closeList();if(codeLines)blocks.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);return blocks.join('')||'<p>暂无内容。</p>';
+};
+function bindModalDialog(container,trigger=document.activeElement){
+  const requestedOrigin=trigger instanceof HTMLElement?trigger:document.activeElement,hiddenParent=requestedOrigin instanceof HTMLElement?requestedOrigin.closest('[hidden]'):null,origin=hiddenParent?.previousElementSibling instanceof HTMLElement?hiddenParent.previousElementSibling:requestedOrigin;
+  const focusableSelector='a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),iframe,summary,[tabindex]:not([tabindex="-1"])';
+  const inerted=[];let closed=false;
+  for(let branch=container;branch.parentElement;branch=branch.parentElement){
+    for(const sibling of branch.parentElement.children){if(sibling!==branch&&sibling instanceof HTMLElement){inerted.push([sibling,sibling.inert]);sibling.inert=true;}}
+    if(branch.parentElement===document.body)break;
+  }
+  const focusables=()=>[...container.querySelectorAll(focusableSelector)].filter(node=>!node.hidden&&!node.closest('[inert]')&&node.getClientRects().length);
+  const topmost=()=>[...document.querySelectorAll('.dialog-backdrop,.generation-viewer')].at(-1)===container;
+  const close=()=>{
+    if(closed)return;closed=true;
+    document.removeEventListener('keydown',onKeydown);document.removeEventListener('focusin',onFocus);
+    container.remove();for(const [node,wasInert]of inerted)node.inert=wasInert;
+    if(!document.querySelector('.dialog-backdrop,.generation-viewer'))document.body.classList.remove('dialog-open');
+    if(origin instanceof HTMLElement&&origin.isConnected&&!origin.closest('[hidden],[inert]'))origin.focus();
+  };
+  const onKeydown=event=>{
+    if(!container.isConnected||!topmost())return;
+    if(event.key==='Escape'){event.preventDefault();close();return;}
+    if(event.key!=='Tab')return;
+    const focusable=focusables(),first=focusable[0],last=focusable.at(-1);
+    if(!first){event.preventDefault();return;}
+    if(!container.contains(document.activeElement)){event.preventDefault();(event.shiftKey?last:first).focus();}
+    else if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
+    else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
+  };
+  const onFocus=event=>{if(container.isConnected&&topmost()&&!container.contains(event.target))focusables()[0]?.focus();};
+  container.onclick=event=>{if(event.target===container&&topmost())close();};
+  container.querySelector('.dialog-close')?.addEventListener('click',close);
+  document.addEventListener('keydown',onKeydown);document.addEventListener('focusin',onFocus);document.body.classList.add('dialog-open');focusables()[0]?.focus();return close;
+}
+
+const form=document.querySelector('#tool-form'),main=document.querySelector('#main');let generation=0;
+form.onsubmit=event=>{
+  event.preventDefault();const error=form.querySelector('[role="alert"]');error.textContent='';
+  const content=document.querySelector('#article-input').value;
+  const metadata={title:document.querySelector('#article-title').value,digest:document.querySelector('#article-digest').value,cover:document.querySelector('#article-cover').value};
+  try{
+    WorkbenchWechatArticle.buildManualExport(content,markdownHtml,metadata);
+    const instance=++generation,article=document.createElement('article');article.dataset.assistantMessageId='local-article';
+    document.querySelector('#output').replaceChildren(article);
+    WorkbenchWechatArticle.mountManual({main,article,agent:{slug:'wechat-official-account-writing'},messageId:'local-article',content,metadata,markdown:markdownHtml,modal:bindModalDialog,isCurrent:()=>generation===instance});
+  }catch{error.textContent='文章为空、过大或无有效正文，请检查后重试。';}
+};
+</script></body></html>

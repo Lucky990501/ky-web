@@ -1,0 +1,249 @@
+{
+  "task": "WECHAT_ARTICLE_MANUAL_RICHTEXT_EXPORT_V1",
+  "base_source": "57fc4ec543a27a8bd876d8e0dc0fccc2676e27dd",
+  "mode": "ISOLATED_UI_API_FIXTURES_AND_BROWSER_CLIPBOARD",
+  "checks": [
+    {
+      "name": "M01 own persisted article has four manual actions, no draft button or account dependency",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.350Z"
+    },
+    {
+      "name": "M02 Chinese paragraphs, headings, emphasis, lists, quote and table are complete",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.359Z"
+    },
+    {
+      "name": "M03 copied fragment is independent inline HTML, no class or stylesheet",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.361Z"
+    },
+    {
+      "name": "M04 hostile tags, attributes, CSS and namespace corpus cannot execute or fetch",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.369Z"
+    },
+    {
+      "name": "M05 server/Windows/file paths are removed from body and separate metadata",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.371Z"
+    },
+    {
+      "name": "M05b inline tags/entities cannot split an internal path to evade removal",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.373Z"
+    },
+    {
+      "name": "M05c path at paragraph end cannot consume the next paragraph",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.375Z"
+    },
+    {
+      "name": "M06 image omission is explicit; no image src or fake assets",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.379Z"
+    },
+    {
+      "name": "M07 title/digest/cover separate from body, no automatic WeChat sync claim",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.385Z"
+    },
+    {
+      "name": "M08 rich copy only after click, both MIME payloads, correct success",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.414Z"
+    },
+    {
+      "name": "M09 permission denial is not success or silent plain fallback",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.456Z"
+    },
+    {
+      "name": "M10 unavailable ClipboardItem fails with recovery, not draft/config gating",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.526Z"
+    },
+    {
+      "name": "M11 source and plain actions have distinct successful payloads and messages",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.555Z"
+    },
+    {
+      "name": "M12 failed text clipboard offers selected manual-copy textarea",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.582Z"
+    },
+    {
+      "name": "M13 pending clipboard disables duplicates and waits for actual resolution",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:33.603Z"
+    },
+    {
+      "name": "M14 stale user or Tenant/message association cannot copy",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:34.197Z"
+    },
+    {
+      "name": "M15 late clipboard completion cannot change a newer view",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:34.403Z"
+    },
+    {
+      "name": "M16 forbidden historical detail exposes no article/manual export",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:34.613Z"
+    },
+    {
+      "name": "M17 Metadata404 cannot fake enabled Agent or run controls",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:34.625Z"
+    },
+    {
+      "name": "M18 sandbox preview has opaque origin, no script/resources, and keyboard close",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:34.879Z"
+    },
+    {
+      "name": "M19 actions and preview 1440x1000",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:35.070Z"
+    },
+    {
+      "name": "M19 actions and preview 1920x1080",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:35.276Z"
+    },
+    {
+      "name": "M19 actions and preview 375x812",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:35.483Z"
+    },
+    {
+      "name": "M19 actions and preview 812x375",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:35.696Z"
+    },
+    {
+      "name": "M29 375px manual rich-copy action is reachable above stable composer",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:35.752Z"
+    },
+    {
+      "name": "M20 completed SSE mounts manual actions using actual event content (fixture)",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:36.022Z"
+    },
+    {
+      "name": "M21 oversized/empty article safely rejects instead of false copy success",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:36.039Z"
+    },
+    {
+      "name": "M22 real Chrome clipboard roundtrip contains both MIME formats (NOT WeChat)",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:36.363Z"
+    },
+    {
+      "name": "M23 standalone opens via file:// with shared exporter and zero network/API",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:36.620Z"
+    },
+    {
+      "name": "M24 standalone safe preview and no overflow 1440",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:36.818Z"
+    },
+    {
+      "name": "M24 standalone safe preview and no overflow 1920",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:37.019Z"
+    },
+    {
+      "name": "M24 standalone safe preview and no overflow 375",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:37.192Z"
+    },
+    {
+      "name": "M25 standalone Markdown preserves body, metadata remains separate",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:37.225Z"
+    },
+    {
+      "name": "M27 standalone file:// real rich clipboard roundtrip, no server needed",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:37.249Z"
+    },
+    {
+      "name": "M28 invalid offline content retains previous usable result, no false success",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:37.288Z"
+    },
+    {
+      "name": "M26 no real calls, credential access, permission writes or browser errors",
+      "status": "PASS_AUTOMATED",
+      "observed_at": "2026-10-11T04:18:37.288Z"
+    }
+  ],
+  "provider_calls": 0,
+  "wechat_calls": 0,
+  "image_calls": 0,
+  "production_changes": 0,
+  "test_changes": 0,
+  "deployment": "NOT_DEPLOYED",
+  "schema": "UNCHANGED",
+  "migration": "NONE",
+  "wechat_editor_compatibility": {
+    "status": "PENDING_MANUAL",
+    "copy_paste_save_reopen": "NOT_EXECUTED",
+    "styles_retained": "NOT_OBSERVED",
+    "styles_lost": "NOT_OBSERVED",
+    "pixel_identical": false
+  },
+  "started_at": "2026-10-11T04:18:32.539Z",
+  "browser_clipboard_roundtrip": "PASS_REAL_BROWSER_ONLY",
+  "offline_clipboard_roundtrip": "PASS_REAL_BROWSER_ONLY",
+  "completed_at": "2026-10-11T04:18:37.288Z",
+  "total": 36,
+  "failed": 0,
+  "skipped": 0,
+  "status": "PASS_AUTOMATED_WITH_REAL_BROWSER_CLIPBOARD_ONLY",
+  "validation_summary": {
+    "frontend_node_tests": {"passed": 104, "failed": 0, "skipped": 0},
+    "manual_export_browser_checks": {"passed": 36, "failed": 0, "skipped": 0},
+    "adjacent_customer_ux_browser_checks": {"passed": 26, "failed": 0, "skipped": 0, "executed_at": "2026-10-11T04:17:55.016Z", "mode": "ISOLATED_FIXTURES_ONLY"},
+    "node_syntax_check": "PASS: wechat-article-ui.js and workbench.js",
+    "offline_generated_artifact_check": "OFFLINE_ARTIFACT_MATCH",
+    "full_pytest": "NOT_EXECUTED: frontend-only scope; no release validation authorized",
+    "real_provider_or_wechat_task": "NOT_EXECUTED"
+  },
+  "integration_handoff": {
+    "owner": "02",
+    "branch": "codex/wechat-manual-richtext-export-v1",
+    "parent": "57fc4ec543a27a8bd876d8e0dc0fccc2676e27dd",
+    "compared_draft_successor": "f8b90319abd8afe95a5de2a7b91cf9c8768e67d3",
+    "mode": "Manual copy only; active workbench mounts mountManual, not the draft adapter",
+    "schema016_dependency": false,
+    "draft_add_dependency": false,
+    "agent_gate": "Unchanged: Metadata404/disabled cannot start a new run; owned history remains read-only",
+    "source_integration": "Review the exact candidate commit. On f8b, preserve manual mode rather than reactivating serverAdapter/createDraft. No automatic install or source switch.",
+    "deployment": "NOT_DEPLOYED",
+    "offline_tool": "enterprise_agent_poc/tools/wechat-manual-export/standalone.html",
+    "offline_rebuild": "node enterprise_agent_poc/scripts/build_wechat_manual_tool.cjs",
+    "offline_parity_check": "node enterprise_agent_poc/scripts/build_wechat_manual_tool.cjs --check"
+  },
+  "manual_acceptance_steps": [
+    "Use an existing authorized article; no new Provider calls required.",
+    "Open standalone.html locally, paste article, supply title/digest/cover description separately, prepare and preview.",
+    "Click Copy to WeChat; require the rich-copy success message, not plain-text success.",
+    "Manually open the designated account backend. Confirm account identity before pasting into its article editor.",
+    "Enter title/digest separately; manually upload cover/body images; compare every paragraph, list and table.",
+    "Save draft manually, reopen it, record actual retained/lost heading, line-height, emphasis, quote, list and table styles.",
+    "Do not label customer E2E PASS until that real editor evidence exists."
+  ],
+  "observations": [
+    "The existing fail-closed legacy draft UI remains available for separately authorized integration, but is not mounted by customer entry points.",
+    "The offline HTML embeds generated copies of shared source; --check detects stale artifacts, avoiding separately maintained preview/export implementations.",
+    "Inline layout and text are browser-tested; WeChat editor filtering is not yet observed and may change styles.",
+    "No Runtime, Prompt, Skill, Secret, Guard/Approval, Schema, Migration, server API or deployment changes. Original dirty worktree content is preserved."
+  ]
+}
