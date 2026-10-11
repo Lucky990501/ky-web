@@ -887,7 +887,7 @@ async function renderWechatAgentSetupHint(main,agent){
 function mountWechatArticle(main,article,content,messageId){
   const context=main?._wechatArticleContext;
   if(!context||context.agent.slug!=='wechat-official-account-writing'||!article)return;
-  window.WorkbenchWechatArticle?.mountManual({main,article,content,messageId,...context,markdown:markdownHtml,modal:bindModalDialog,
+  window.WorkbenchWechatArticle?.mountManual({main,article,content,messageId,...context,markdown:markdownHtml,modal:bindModalDialog,inlineBody:true,
     isCurrent:()=>Boolean(context.userId&&context.tenantId&&me?.user_id===context.userId&&me?.tenant_id===context.tenantId&&document.querySelector('#main')===main&&main._wechatArticleContext===context)});
 }
 function openPasswordEditor(main){

@@ -45,3 +45,11 @@ test('manual exporter reuses sanitizer and cannot use a draft adapter or endpoin
   assert.ok(!manual.includes('fetch('));assert.ok(!manual.includes('/api/'));assert.ok(!manual.includes('createDraft'));
   assert.ok(!manual.includes('localStorage'));assert.ok(!manual.includes('sessionStorage'));
 });
+test('direct chat display is opt-in and reuses the existing sandboxed preview',()=>{
+  const workbench=fs.readFileSync(path.join(__dirname,'../app/static/workbench.js'),'utf8');
+  assert.ok(workbench.includes('modal:bindModalDialog,inlineBody:true'));
+  assert.ok(source.includes('inlineBody = false'));assert.ok(source.includes("frame.setAttribute('sandbox', '')"));
+  assert.ok(source.includes('frame.srcdoc = previewDocument(result.html)'));assert.ok(source.includes('body.replaceChildren(frame)'));
+  assert.ok(source.includes("article.querySelector('[data-copy-response]')?.remove()"));
+  assert.ok(!source.includes('allow-scripts'));assert.ok(!source.includes('allow-same-origin'));
+});

@@ -158,6 +158,8 @@ body.dialog-open{overflow:hidden}.global-search-disabled{opacity:.72;cursor:not-
 .login-card .checkbox{display:flex;align-items:center;gap:8px;width:max-content;margin:12px 0!important;font-weight:400;line-height:1.4;cursor:pointer}
 .login-card .checkbox input[type="checkbox"]{flex:none;width:16px!important;height:16px;margin:0!important;padding:0;border-radius:3px}
 .wechat-article-actions{margin:14px 0;min-width:0}
+.wechat-inline-message-content{min-width:0;white-space:normal}
+.wechat-inline-article{display:block;width:100%;max-width:100%;max-height:64dvh;border:1px solid var(--line);border-radius:8px;background:#fff}
 #profile-editor,#wechat-article-preview,#wechat-draft-confirm{z-index:80}
 .wechat-article-buttons{display:flex;flex-wrap:wrap;gap:10px}
 .wechat-article-buttons .button{min-height:44px;white-space:normal}

@@ -156,9 +156,10 @@
       await clipboard.writeText(mode === 'source' ? result.html : result.text);
     }
   }
-  function mountManual({article, main, agent, content, messageId, markdown, modal, isCurrent, metadata = {}}) {
+  function mountManual({article, main, agent, content, messageId, markdown, modal, isCurrent, metadata = {}, inlineBody = false}) {
     if (agent?.slug !== SLUG || !messageId || !content?.trim() || typeof isCurrent !== 'function' || article.querySelector('.wechat-article-actions')) return null;
     const current = () => main.isConnected && article.isConnected && article.dataset.assistantMessageId === messageId && isCurrent();
+    if (!current()) return null;
     const slot = document.createElement('section'); slot.className = 'wechat-article-actions';
     slot.setAttribute('aria-label', '公众号文章人工导出');
     slot.innerHTML = '<div class="wechat-article-buttons"><button type="button" class="button secondary" data-article-preview>预览文章</button><button type="button" class="button primary" data-copy-rich>复制到公众号</button><button type="button" class="button secondary" data-copy-source>复制HTML源码</button><button type="button" class="button secondary" data-copy-plain>复制纯文本</button></div><dl class="wechat-manual-metadata"><div><dt>建议标题</dt><dd data-manual-title></dd></div><div><dt>摘要</dt><dd data-manual-digest></dd></div><div><dt>封面</dt><dd data-manual-cover></dd></div></dl><p class="wechat-article-feedback" role="status" aria-live="polite"></p><p class="wechat-manual-notice">请自行打开目标公众号后台，粘贴正文后保存草稿。标题、摘要和封面需单独填写／上传；正文图片请在后台手动上传。复制不会连接公众号或创建草稿。</p><div data-copy-recovery hidden><label>复制失败，可选中下方内容后按 Ctrl+C（Mac：⌘C）<textarea readonly aria-label="手动复制内容"></textarea></label></div>';
@@ -167,10 +168,26 @@
     let result, busy = false;
     try { result = buildManualExport(content, markdown, metadata); }
     catch { buttons.forEach(button => button.disabled = true); feedback.textContent = '文章内容过大或无效，暂无法导出。'; return null; }
+    if (inlineBody) {
+      const body = article.querySelector('.chat-message-content');
+      if (body) {
+        // Reuse the exact existing sandbox/CSP preview, now inside the reply.
+        // Never insert raw model HTML into the host permission context.
+        const frame = document.createElement('iframe'); frame.className = 'wechat-inline-article';
+        frame.title = '公众号文章正文'; frame.setAttribute('sandbox', ''); frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.style.height = `${Math.min(640, Math.max(160, 48 + result.text.split('\n').length * 28 + Math.ceil(result.text.length / 32) * 12))}px`;
+        frame.srcdoc = previewDocument(result.html);
+        body.replaceChildren(frame); body.classList.remove('chat-message-content-markdown'); body.classList.add('wechat-inline-message-content');
+        // The manual controls already provide safe rich/source/plain copying.
+        // Keep regeneration, but remove the old raw model-source copy action.
+        article.querySelector('[data-copy-response]')?.remove();
+        const actions = article.querySelector('.message-actions'); if (actions && !actions.children.length) actions.hidden = true;
+      }
+    }
     slot.querySelector('[data-manual-title]').textContent = result.title || '请在公众号后台手动填写';
     slot.querySelector('[data-manual-digest]').textContent = result.digest || '未提供，请在公众号后台手动填写';
     slot.querySelector('[data-manual-cover]').textContent = result.cover || '请在公众号后台手动上传';
-    feedback.textContent = result.redacted ? '安全排版已准备；内部文件路径已移除，请核对正文。' : '安全排版已准备。粘贴后请核对内容和样式；未经过真实公众号编辑器兼容验收。';
+    feedback.textContent = result.redacted ? '安全排版已准备；内部文件路径已移除，请核对正文。' : '安全排版已准备。粘贴到公众号后请核对内容、样式和图片，再手动保存草稿。';
     for (const [selector, mode] of [['[data-copy-rich]', 'rich'], ['[data-copy-source]', 'source'], ['[data-copy-plain]', 'plain']]) {
       slot.querySelector(selector).onclick = async () => {
         if (!current() || busy) return;
