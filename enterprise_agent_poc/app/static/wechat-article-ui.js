@@ -213,4 +213,3 @@
   }
   window.WorkbenchWechatArticle = Object.freeze({mountManual, buildManualExport, copyManualExport, sanitizeArticle, previewDocument});
 })();
-
