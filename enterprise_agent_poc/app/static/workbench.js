@@ -359,6 +359,16 @@ function hydrateHistoryActivityPlans(main,history,agentId){
     }).catch(()=>{});
   }
 }
+const isActivityWordExportRequest=value=>/^(?:(?:请|麻烦)?(?:我要|我想要|给我|帮我(?:导出|生成)|导出|下载|生成|转成|转换成))?(?:一个|一份|这份方案的|这个方案的)?(?:word|docx)(?:格式)?(?:的)?(?:文档|文件|版本|方案)?[。！？!?]*$/i.test(String(value||'').replace(/\s+/g,''));
+function latestActivityPlanMessage(main){
+  const articles=[...(main?.querySelectorAll('[data-assistant-message-id]')||[])].reverse();
+  return articles.map(node=>node.dataset.assistantMessageId).find(id=>activityPlanResultIsValid(activityPlanDocuments.get(id)?.structuredResult))||'';
+}
+function activityWordExportFeedback(main){
+  let feedback=main.querySelector('.document-intent-feedback');
+  if(!feedback){feedback=document.createElement('p');feedback.className='document-intent-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');main.querySelector('#composer').append(feedback);}
+  return feedback;
+}
 function bindConversationActions(main){
   main.querySelectorAll('[data-example-prompt]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.examplePrompt;input.focus();});
   main.querySelectorAll('[data-copy-response]').forEach(node=>node.onclick=async()=>{const original=node.innerHTML;try{await navigator.clipboard.writeText(node.dataset.copyResponse);node.textContent='已复制';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}catch{node.textContent='复制失败';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}});
@@ -610,6 +620,7 @@ function completeStreamingMessage(node,state,sourcePrompt,main){
     const result=node.querySelector?.('[data-stream-document-result]');if(result)result.innerHTML=documentResultSlotHtml(state.assistantMessageId);
   }else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
   if(state.assistantMessageId&&node.dataset)node.dataset.assistantMessageId=state.assistantMessageId;
+  mountWechatArticle(main,node,finalResponse,state.assistantMessageId);
   if(state.generation&&!node.querySelector?.('.message-generation'))node.insertAdjacentHTML?.('beforeend',messageGenerationHtml(state.generation));
   node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);state.completedAt??=Date.now();renderThinkingSummary(node,state);stopWatchingStreamingFollow(state);
 }
@@ -658,6 +669,12 @@ async function agentWorkspaceV2(main, agentId) {
     composer.querySelector(':scope > div:last-of-type').insertAdjacentHTML('afterbegin',chatImageComposerButton());
     bindChatImageComposer(main);
   }
+  main._wechatArticleContext={agent,route:agentId,userId:me?.user_id,tenantId:me?.tenant_id};
+  if(agent.slug==='wechat-official-account-writing')for(const item of history){
+    if(item.role!=='assistant')continue;
+    const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===item.id);
+    if(article)mountWechatArticle(main,article,item.content,item.id);
+  }
   bindConversationRail(main,agentId); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
   if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
   if(!canRun){main.querySelector('#new-chat').disabled=true;main.querySelector('#composer').innerHTML='<p role="status">智能体已停用，历史项目只读；不能创建任务或继续执行。</p>';main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
@@ -665,6 +682,14 @@ async function agentWorkspaceV2(main, agentId) {
 }
 async function submitAgentTaskV2(event,agentId,main){
   event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim(),attachment=agentId==='image-agent'?main._chatImage:null;if(!text||document.querySelector('#task-status')||attachment&&attachment.status!=='idle'&&attachment.status!=='ready')return;
+  if(agentId==='campaign-agent'&&isActivityWordExportRequest(text)){
+    const messageId=latestActivityPlanMessage(main),feedback=activityWordExportFeedback(main);
+    if(!messageId){feedback.textContent='当前回复尚未形成可导出的活动方案数据。请先生成完整方案；服务器文件路径不能作为下载附件。';return;}
+    input.value='';feedback.textContent='正在使用已验证的活动方案导出 Word…';
+    await handleActivityPlanDocumentAction(main,messageId);
+    if(main.isConnected)feedback.textContent=activityPlanDocuments.get(messageId)?.state==='ready'?'Word 文档已生成，请点击方案下方的下载入口。':'Word 导出未完成，请查看方案下方的提示并重试。';
+    return;
+  }
   const submittedAt=Date.now();if(attachment?.record){attachment.locked=true;attachment.render();}
   input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
   body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${userMessageAttachmentHtml(attachment?.record?[attachment.record]:[])}${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
@@ -828,6 +853,12 @@ async function billing(main){const [data, gens]=await Promise.all([api('/api/v1/
 async function profile(main){const workspaceData=await api('/api/v1/workspace');const enterpriseName=workspaceData.brand_name||workspaceData.tenant_name||me.tenant_id;main.innerHTML=`${header('个人中心','管理个人信息与账号安全','user-round')}<div class="profile-layout"><section class="profile-card"><div class="profile-card-heading"><div><h2>基本资料</h2><p>完善个人资料，便于团队协作</p></div><button class="button secondary" disabled title="个人资料编辑 API 尚未接入">${icon('pencil')}编辑资料</button></div><div class="profile-identity"><span class="profile-avatar">${escapeHtml((me.display_name||'我')[0])}</span><div><h2>${escapeHtml(me.display_name)}</h2><span class="role-badge">${roleName(me.role)}</span><p>${escapeHtml(enterpriseName)}</p></div></div><dl class="profile-list"><div><dt>${icon('user-round')}姓名</dt><dd>${escapeHtml(me.display_name)}</dd></div>${me.email?`<div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd></div>`:''}<div><dt>${icon('building-2')}所属企业</dt><dd>${escapeHtml(enterpriseName)}</dd></div><div><dt>${icon('users')}角色</dt><dd>${roleName(me.role)}</dd></div></dl></section><section class="profile-card" id="security"><div class="profile-card-heading"><div><h2>账号安全</h2><p>保护你的登录账号与数据</p></div></div><dl class="profile-list security-list"><div><dt>${icon('lock-keyhole')}登录密码</dt><dd>********</dd><button class="button secondary" disabled title="修改密码 API 尚未接入">修改密码</button></div>${me.email?`<div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd><span class="binding-status">${icon('check-circle',16)}已绑定</span></div>`:''}</dl><p class="backend-dependency">资料编辑、手机号和密码修改将在普通产品账号 API 接入后开放；企业、角色、权限与积分始终只读。</p></section></div>`;refreshIcons();}
 
 async function profileV2(main){const workspaceData=await api('/api/v1/workspace');const enterpriseName=workspaceData.brand_name||workspaceData.tenant_name||me.tenant_name||me.tenant_id;main.innerHTML=`${header('个人中心','管理个人信息与账号安全','user-round')}<p class="page-feedback" role="status" aria-live="polite"></p><div class="profile-layout"><section class="profile-card"><div class="profile-card-heading"><div><h2>基本资料</h2><p>完善个人资料，便于团队协作</p></div><button class="button secondary" id="edit-profile">${icon('pencil')}编辑资料</button></div><div class="profile-identity">${avatarMarkup('profile-avatar','当前头像')}<div><h2>${escapeHtml(me.display_name)}</h2><span class="role-badge">${roleName(me.role)}</span><p>${escapeHtml(enterpriseName)}</p></div></div><dl class="profile-list"><div><dt>${icon('user-round')}姓名</dt><dd>${escapeHtml(me.display_name)}</dd></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd></div><div><dt>${icon('building-2')}所属企业</dt><dd>${escapeHtml(enterpriseName)}</dd></div><div><dt>${icon('users')}角色</dt><dd>${roleName(me.role)}</dd></div></dl></section><section class="profile-card" id="security"><div class="profile-card-heading"><div><h2>账号安全</h2><p>保护你的登录账号与数据</p></div></div><dl class="profile-list security-list"><div><dt>${icon('lock-keyhole')}登录密码</dt><dd>********</dd><button class="button secondary" id="change-password">修改密码</button></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd><span class="binding-status">${icon('check-circle',16)}已绑定</span></div></dl><p class="backend-dependency">企业、角色、权限与积分保持只读。</p></section></div>`;main.querySelector('#edit-profile').onclick=()=>openProfileEditor();main.querySelector('#change-password').onclick=()=>openPasswordEditor(main);refreshIcons();}
+function mountWechatArticle(main,article,content,messageId){
+  const context=main?._wechatArticleContext;
+  if(!context||context.agent.slug!=='wechat-official-account-writing'||!article)return;
+  window.WorkbenchWechatArticle?.mountManual({main,article,content,messageId,...context,markdown:markdownHtml,modal:bindModalDialog,inlineBody:true,
+    isCurrent:()=>Boolean(context.userId&&context.tenantId&&me?.user_id===context.userId&&me?.tenant_id===context.tenantId&&document.querySelector('#main')===main&&main._wechatArticleContext===context)});
+}
 function openPasswordEditor(main){
   app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="password-editor" role="presentation"><form class="profile-editor" aria-labelledby="password-editor-title"><button type="button" class="dialog-close" aria-label="关闭修改密码">${icon('x')}</button><h2 id="password-editor-title">修改密码</h2><p>修改后，下次登录请使用新密码。</p><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required minlength="8"></label><label>新密码<input name="new_password" type="password" autocomplete="new-password" required minlength="8"></label><label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" required minlength="8"></label><p class="form-error" role="alert"></p><div class="editor-actions"><button type="button" class="button secondary" data-close-editor>取消</button><button class="button primary" type="submit">保存新密码</button></div></form></div>`);
   const dialog=document.querySelector('#password-editor'),form=dialog.querySelector('form'),close=bindModalDialog(dialog);dialog.querySelector('[data-close-editor]').onclick=close;
