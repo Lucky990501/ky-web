@@ -1,5 +1,13 @@
 const app = document.querySelector('#app');
-let me, activeConversationId = null, activeAgentId = 'image-agent', mobileDrawerController = () => {};
+let me, activeConversationId = null, activeTaskId = null, activeAgentId = 'image-agent', mobileDrawerController = () => {};
+const agentConversationSelections = new Map(), pendingConversationSubmissions = new Map();
+const acceptedTaskReferences = new Map();
+let orphanHistoryPointer = null;
+let sessionViewVersion = 0, enterpriseBrand = null;
+const principalSnapshot = () => ({userId:me?.user_id,tenantId:me?.tenant_id,role:me?.role,platformAdmin:Boolean(me?.is_platform_admin),version:sessionViewVersion});
+const principalIsCurrent = owner => !owner || owner.userId===me?.user_id&&owner.tenantId===me?.tenant_id&&owner.role===me?.role&&owner.platformAdmin===Boolean(me?.is_platform_admin)&&owner.version===sessionViewVersion;
+const principalCacheScope = () => JSON.stringify([me?.tenant_id,me?.user_id,me?.role,Boolean(me?.is_platform_admin),sessionViewVersion]);
+const agentSelectionKey = agentId => `${principalCacheScope()}:${agentId}`;
 const pageCache = new Map();
 const activityPlanDocuments = new Map();
 const activityPlanDocumentStoragePrefix = 'activity-plan-document-v1:';
@@ -8,12 +16,13 @@ const cacheablePaths = new Set(['/api/v1/me','/api/v1/workspace','/api/v1/conver
 const customerErrorMessages = {AUTH_REQUIRED:'请先登录或重新登录。',ACCOUNT_DISABLED:'账号已停用，请联系企业管理员。',FORBIDDEN:'你没有权限访问此功能。',AGENT_UNAVAILABLE:'当前智能体暂不可用。',TASK_FAILED:'任务处理失败，请重试。',TASK_TIMEOUT:'任务处理时间较长，请稍后重试。',KNOWLEDGE_PROCESSING_FAILED:'资料处理失败，请重新上传。',INVALID_INPUT:'输入内容不符合要求，请检查后重试。',INSTANCE_NOT_ENABLED:'当前智能体尚未为该企业启用。',SERVICE_TEMPORARILY_UNAVAILABLE:'服务暂时不可用，请稍后重试。',INSTANCE_MUST_BE_DISABLED_BEFORE_RECONFIGURE:'请先停用该智能体，再修改配置。'};
 const fallbackErrorCode = status => status===401?'AUTH_REQUIRED':status===403?'FORBIDDEN':status===408||status===504?'TASK_TIMEOUT':status>=500?'SERVICE_TEMPORARILY_UNAVAILABLE':'INVALID_INPUT';
 const api = (path, options = {}) => {
-  const method=(options.method||'GET').toUpperCase(),canCache=method==='GET'&&cacheablePaths.has(path),cached=pageCache.get(path);
-  if(canCache&&cached&&Date.now()-cached.at<15000)return Promise.resolve(cached.value);
+  const scope=principalCacheScope(),method=(options.method||'GET').toUpperCase(),canCache=method==='GET'&&path!=='/api/v1/me'&&options.cache!=='no-store'&&cacheablePaths.has(path),cached=pageCache.get(path);
+  if(canCache&&cached&&cached.scope===scope&&Date.now()-cached.at<15000)return Promise.resolve(cached.value);
   return fetch(path,{credentials:'same-origin',headers:{'content-type':'application/json',...(options.headers||{})},...options}).then(async response=>{
     let body={};try{body=await response.json();}catch{}
     if(!response.ok){const code=body.error_code||fallbackErrorCode(response.status),error=Error(body.user_message||customerErrorMessages[code]||'请求失败，请稍后重试。');error.code=code;error.status=response.status;error.requestId=body.request_id||response.headers?.get?.('x-request-id')||'';throw error;}
-    if(canCache)pageCache.set(path,{at:Date.now(),value:body});if(method!=='GET')pageCache.clear();return body;
+    if(scope!==principalCacheScope()){const error=Error('登录会话已变化，请重新打开页面。');error.code='SESSION_CHANGED';throw error;}
+    if(canCache)pageCache.set(path,{at:Date.now(),value:body,scope});if(method!=='GET')pageCache.clear();return body;
   });
 };
 const apiForm=(path,form)=>fetch(path,{method:'POST',credentials:'same-origin',body:form}).then(async response=>{let body={};try{body=await response.json();}catch{}if(!response.ok){const code=body.error_code||fallbackErrorCode(response.status),error=Error(body.user_message||customerErrorMessages[code]||'上传失败，请稍后重试。');error.code=code;error.requestId=body.request_id||response.headers?.get?.('x-request-id')||'';throw error;}pageCache.clear();return body;});
@@ -21,12 +30,45 @@ const escapeHtml = v => String(v || '').replace(/[&<>'"]/g, c => ({ '&':'&amp;',
 const icon = (name, size = 18) => `<i data-lucide="${name}" width="${size}" height="${size}"></i>`;
 const avatarMarkup = (className = 'avatar', label = '用户头像') => me?.avatar_url ? `<img class="${className} avatar-image" src="${escapeHtml(me.avatar_url)}" alt="${escapeHtml(label)}">` : `<span class="${className}">${escapeHtml((me?.display_name || '我')[0])}</span>`;
 const syncAvatarViews = () => { if (!me?.avatar_url) return; document.querySelectorAll('span.avatar').forEach(node => { const imageNode = document.createElement('img'); imageNode.className = `${node.className} avatar-image`; imageNode.src = me.avatar_url; imageNode.alt = '用户头像'; node.replaceWith(imageNode); }); };
+const companyDisplayName = () => enterpriseBrand?.scope===principalCacheScope()?enterpriseBrand.name:me?.tenant_name||me?.tenant_id||'企业工作台';
+function safeCompanyLogoUrl(value){
+  if(typeof value!=='string'||!value.trim()||/^(?:file:|data:|javascript:)|\/opt\/|runtime-data|workspace\//i.test(value))return '';
+  try{const url=new URL(value,location.origin);return ['http:','https:'].includes(url.protocol)&&!url.username&&!url.password?url.href:'';}catch{return '';}
+}
+function companyLogoUrl(){
+  if(enterpriseBrand?.scope!==principalCacheScope())return '';
+  if(me?.role==='enterprise_admin'&&enterpriseBrand.logo)return `${brandLogoPath}?v=${enterpriseBrand.logoVersion}`;
+  return enterpriseBrand.legacyLogo||'';
+}
+function companyLogoMarkup(){const url=companyLogoUrl();return url?`<img class="company-brand-image" src="${escapeHtml(url)}" alt="企业品牌 Logo">`:icon('building-2');}
+function syncCompanyViews(){
+  document.querySelectorAll('[data-company-name]').forEach(node=>node.textContent=companyDisplayName());
+  document.querySelectorAll('[data-company-logo]').forEach(node=>{const markup=companyLogoMarkup();if(node.innerHTML!==markup)node.innerHTML=markup;});
+  refreshIcons();
+}
+function applyEnterpriseBrand(data,kind='workspace',owner=null,{refreshLogo=false}={}){
+  if(!data||!principalIsCurrent(owner))return;
+  const scope=principalCacheScope(),previous=enterpriseBrand?.scope===scope?enterpriseBrand:null;
+  const name=typeof data.brand_name==='string'&&data.brand_name.trim()?data.brand_name.trim():kind==='config'&&Object.hasOwn(data,'brand_name')?me?.tenant_name||me?.tenant_id:previous?.name||data.tenant_name||me?.tenant_name||me?.tenant_id||'企业工作台';
+  let logo=previous?.logo||null,logoVersion=previous?.logoVersion||Date.now();
+  if(kind==='config'&&me?.role==='enterprise_admin'&&Object.hasOwn(data,'brand_logo')){
+    const next=brandLogoMetadata(data.brand_logo);if(refreshLogo||JSON.stringify(next)!==JSON.stringify(logo))logoVersion=Math.max(Date.now(),Number(logoVersion)+1);logo=next;
+  }
+  enterpriseBrand={scope,name,logo,logoVersion,legacyLogo:Object.hasOwn(data,'logo')?safeCompanyLogoUrl(data.logo):previous?.legacyLogo||''};
+  if(Object.hasOwn(data,'brand_name'))activityPlanBrandName=typeof data.brand_name==='string'?data.brand_name:'';syncCompanyViews();
+}
+function resetSessionViews(){
+  detachConversationView(document.querySelector('#main'));sessionViewVersion++;
+  agentConversationSelections.clear();acceptedTaskReferences.clear();pendingConversationSubmissions.clear();pageCache.clear();enterpriseBrand=null;
+  orphanHistoryPointer=null;
+}
 const storageUrl = item => item?.content_url || item?.image_url || `/api/v1/storage/${String(item?.storage_key||'').split('/').map(encodeURIComponent).join('/')}`;
 const image = (item, label = '图片') => item?.storage_key || item?.content_url || item?.image_url ? `<a class="media-thumb" data-generation-link href="${escapeHtml(storageUrl(item))}" target="_blank" rel="noopener"><span class="media-loading" aria-hidden="true">${icon('loader-circle',20)}</span><img loading="lazy" decoding="async" data-generation-image src="${escapeHtml(storageUrl(item))}" alt="${escapeHtml(label)}"></a>` : `<div class="media-thumb media-empty">${icon('image-off',24)}<span>暂无图片</span></div>`;
 const bindImageFallbacks = () => document.querySelectorAll('img[data-generation-image]:not([data-image-bound])').forEach(node=>{node.dataset.imageBound='true';const wrap=node.closest('.media-thumb')||node.parentElement;if(!wrap)return;const loading=wrap.querySelector('.media-loading'),source=node.currentSrc||node.src;const clearFailure=()=>{wrap.classList.remove('media-failed');wrap.classList.add('media-loaded');wrap.removeAttribute('aria-live');wrap.querySelector('.media-error')?.remove();node.hidden=false;if(loading)loading.hidden=true;};const showFailure=()=>{wrap.classList.remove('media-loaded');wrap.classList.add('media-failed');node.hidden=true;if(loading)loading.hidden=true;if(!wrap.matches('.media-thumb')){wrap.innerHTML=`${icon('image-off',24)}<span class="sr-only">图片加载失败</span>`;window.lucide?.createIcons({attrs:{'stroke-width':1.9}});return;}if(!wrap.querySelector('.media-error'))wrap.insertAdjacentHTML('beforeend',`<span class="media-error"><i data-lucide="image-off" aria-hidden="true"></i><b>图片加载失败</b><small>点击重新加载</small></span>`);wrap.setAttribute('aria-live','polite');window.lucide?.createIcons({attrs:{'stroke-width':1.9}});};const retry=event=>{if(!wrap.classList.contains('media-failed')||!wrap.matches('.media-thumb'))return;event.preventDefault();event.stopImmediatePropagation();wrap.classList.remove('media-failed','media-loaded');wrap.querySelector('.media-error')?.remove();node.hidden=false;if(loading)loading.hidden=false;node.src=`${source}${source.includes('?')?'&':'?'}retry=${Date.now()}`;};node.addEventListener('load',clearFailure);node.addEventListener('error',showFailure);wrap.addEventListener('click',retry,{capture:true});wrap.addEventListener('keydown',event=>{if((event.key==='Enter'||event.key===' ')&&wrap.classList.contains('media-failed'))retry(event);},{capture:true});if(node.complete){if(node.naturalWidth)clearFailure();else showFailure();}});
 const refreshIcons = () => { window.lucide?.createIcons({ attrs: { 'stroke-width': 1.9 } }); bindGenerationViewers(); bindImageFallbacks(); };
 
 function login() {
+  resetSessionViews();me=null;
   activityPlanDocuments.clear();activityPlanBrandName='';clearActivityPlanSessionDocuments();
   app.innerHTML = `<div class="login-layout"><section class="login-hero"><div class="brand-lockup">${icon('bot',35)}<div><b>AI Workbench</b><span>企业 AI 智能体工作台</span></div></div><div class="hero-copy"><h1>让 AI 成为<br>每一位团队成员的<span>创造力引擎</span></h1><p>在 AI 的陪伴下，激发灵感，高效创作，共同成长</p><div class="hero-values"><span>${icon('zap')} 高效创作</span><span>${icon('users')} 协同共建</span><span>${icon('book-open')} 专业可信</span></div></div></section><section class="login-side"><nav class="login-links">产品官网　 |　 帮助中心　 |　 下载客户端</nav><form class="login-card" id="login"><div class="brand-lockup small">${icon('bot',28)}<div><b>AI Workbench</b><span>企业 AI 智能体工作台</span></div></div><h2>欢迎登录 AI Workbench</h2><p>开启高效、智能、协同的创作新体验</p><label><span>账号</span><input name="account" type="email" required autocomplete="username" placeholder="请输入账号 / 邮箱"></label><label><span>密码</span><input name="password" type="password" required autocomplete="current-password" placeholder="请输入密码"></label><label class="checkbox"><input type="checkbox" checked> 记住我</label><button class="button primary full" type="submit">登 录</button><p class="form-error" role="alert"></p></form></section></div>`;
   document.querySelector('.login-links').innerHTML = '<button type="button" class="login-help" id="login-help">帮助中心</button>';
@@ -43,10 +85,28 @@ const profileNav = ['profile','user-round','个人中心'];
 const navigationForUser = user => [...memberNavs,...(user?.role==='enterprise_admin'?enterpriseAdminNavs:[]),...(user?.is_platform_admin?platformAdminNavs:[]),profileNav];
 const pageRoutes = Object.freeze({workspace:'/workspace',image:'/agents/image',copywriting:'/agents/copywriting',campaign:'/agents/campaign',history:'/conversations',generations:'/generations',knowledge:'/knowledge',assets:'/assets','recent-tasks':'/recent-tasks',members:'/members',enterprise:'/enterprise-config',profile:'/profile','platform-skills':'/platform/skills','platform-agents':'/platform/agents'});
 const pageFromPath = path => Object.entries(pageRoutes).find(([,route])=>route===path)?.[0]||( /^\/agents\/[a-zA-Z0-9-]+$/.test(path) ? `agent:${path.slice(8)}` : null);
-const navigationState = page => ({page,activeAgentId,activeConversationId});
+const navigationState = page => ({page,activeAgentId,activeConversationId,activeTaskId,...(page==='history'?{orphanHistory:readOrphanHistoryPointer()}: {})});
 const allowedPage = page => ['platform-skills','platform-agents'].includes(page)&&!me?.is_platform_admin?'workspace':['knowledge','assets','recent-tasks','members','enterprise','billing'].includes(page)&&me?.role!=='enterprise_admin'?'workspace':page;
-function navigate(page,{replace=false}={}){
-  const target=allowedPage(page),path=pageRoutes[target]||(target.startsWith('agent:')?`/agents/${encodeURIComponent(target.slice(6))}`:location.pathname),state=navigationState(target),current=window.history.state||{};
+const agentRouteForPage=page=>({image:'image-agent',copywriting:'copywriting-agent',campaign:'campaign-agent'})[page]||(page?.startsWith('agent:')?page.slice(6):null);
+function agentNavigationPath(page,conversationId,taskId=activeTaskId){
+  const path=pageRoutes[page]||(page.startsWith('agent:')?`/agents/${encodeURIComponent(page.slice(6))}`:location.pathname);
+  if(!agentRouteForPage(page))return path;
+  const query=[];if(conversationId)query.push(`conversation=${encodeURIComponent(conversationId)}`);if(taskId)query.push(`task=${encodeURIComponent(taskId)}`);
+  return query.length?`${path}?${query.join('&')}`:path;
+}
+function navigate(page,options={}){
+  const {replace=false}=options,target=allowedPage(page),route=agentRouteForPage(target);
+  if(route){
+    const previous=document.querySelector('#main')?._conversationContext;
+    if(Object.hasOwn(options,'conversationId'))activeConversationId=options.conversationId||null;
+    else if(previous?.route!==route)activeConversationId=agentConversationSelections.get(agentSelectionKey(route))||(activeAgentId===route?activeConversationId:null);
+    if(Object.hasOwn(options,'conversationId')){const reference=acceptedTaskReferences.get(agentSelectionKey(route));activeTaskId=reference?.conversationId===activeConversationId?reference.taskId:null;}
+    else if(previous?.route!==route){const reference=acceptedTaskReferences.get(agentSelectionKey(route));activeTaskId=!activeConversationId||reference?.conversationId===activeConversationId?reference?.taskId||null:null;}
+    if(Object.hasOwn(options,'taskId'))activeTaskId=options.taskId||null;
+    activeAgentId=route;
+    if(options.newProject){agentConversationSelections.delete(agentSelectionKey(route));acceptedTaskReferences.delete(agentSelectionKey(route));activeTaskId=null;}
+  }
+  const path=agentNavigationPath(target,activeConversationId),state={...navigationState(target),newProject:Boolean(options.newProject)},current=window.history.state||{};
   const same=location.pathname===path&&current.page===state.page&&current.activeAgentId===state.activeAgentId&&current.activeConversationId===state.activeConversationId;
   window.history[replace||same?'replaceState':'pushState'](state,'',path);
   return render(target);
@@ -55,14 +115,56 @@ function pageFromNavigation(state=window.history.state){
   const page=allowedPage(pageFromPath(location.pathname)||state?.page||'workspace');
   if(state&&Object.prototype.hasOwnProperty.call(state,'activeAgentId'))activeAgentId=state.activeAgentId||'image-agent';
   if(state&&Object.prototype.hasOwnProperty.call(state,'activeConversationId'))activeConversationId=state.activeConversationId||null;
-  if(page.startsWith('agent:'))activeAgentId=page.slice(6);
+  const route=agentRouteForPage(page);
+  if(route){
+    activeAgentId=route;
+    const query=new URL(location.pathname+(location.search||''),location.origin).searchParams.get('conversation');
+    const queryTask=new URL(location.pathname+(location.search||''),location.origin).searchParams.get('task');
+    const fromState=!state?.page||state.page===page||state.activeAgentId===route?state?.activeConversationId:null;
+    activeConversationId=query||fromState||agentConversationSelections.get(agentSelectionKey(route))||null;
+    activeTaskId=queryTask||((!state?.page||state.page===page||state.activeAgentId===route)?state?.activeTaskId:null)||null;
+  }
   return page;
 }
+function selectAgentConversation(agentId,conversationId,{newProject=false,taskId=null}={}){
+  return navigate(agentPage(agentId),{conversationId:conversationId||null,newProject,...(taskId?{taskId}:{})});
+}
+function rememberServerConversation(main,agentId,conversationId){
+  if(typeof conversationId!=='string'||!conversationId||!principalIsCurrent(main?._conversationContext?.owner))return;
+  agentConversationSelections.set(agentSelectionKey(agentId),conversationId);
+  if(main?.isConnected!==false&&document.querySelector('#main')===main){
+    activeAgentId=agentId;activeConversationId=conversationId;
+    const reference=acceptedTaskReferences.get(agentSelectionKey(agentId));activeTaskId=reference?.conversationId===conversationId?reference.taskId:null;
+    if(main._conversationContext)main._conversationContext.conversationId=conversationId;
+    const page=agentPage(agentId);window.history.replaceState({...navigationState(page),newProject:false},'',agentNavigationPath(page,conversationId));
+  }
+}
+function rememberAcceptedTask(main,agentId,task){
+  if(!task?.id||!principalIsCurrent(main?._conversationContext?.owner))return;
+  acceptedTaskReferences.set(agentSelectionKey(agentId),{taskId:task.id,conversationId:task.conversation_id||null});
+  if(task.conversation_id)rememberServerConversation(main,agentId,task.conversation_id);
+  else if(main?.isConnected!==false&&document.querySelector('#main')===main){
+    activeAgentId=agentId;activeTaskId=task.id;
+    window.history.replaceState(navigationState(agentPage(agentId)),'',agentNavigationPath(agentPage(agentId),null,task.id));
+  }
+}
+function conversationViewIsCurrent(main,state){
+  return !state?.detached&&principalIsCurrent(state?.owner)&&main?.isConnected!==false&&(!state?.main||document.querySelector('#main')===state.main);
+}
+function detachConversationView(main){
+  const state=main?._submittingState||main?.querySelector?.('#task-status')?._streamState;
+  if(!state)return;
+  state.detached=true;clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);
+  if(state.pollTimer)clearTimeout(state.pollTimer);state.pollTimer=null;
+  // View cleanup is not a server cancel. The accepted Task remains queryable.
+}
+window.addEventListener('pagehide',()=>detachConversationView(document.querySelector('#main')));
+window.addEventListener('pageshow',event=>{if(event.persisted&&me)render(pageFromNavigation());});
 window.addEventListener('popstate',event=>{mobileDrawerController(false);if(me)render(pageFromNavigation(event.state));});
 const roleName = role => role === 'enterprise_admin' ? '企业管理员' : '成员';
 function shell(initialPage = 'workspace') {
   const navs=navigationForUser(me),navMarkup=navs.map(([id,i,label])=>`<button data-page="${id}">${icon(i)}<span>${label}</span></button>`).join('');
-  app.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="brand-lockup">${icon('bot',30)}<div><b>AI Workbench</b><span>Create · Collaborate · Grow</span></div></div><div class="tenant-summary" aria-label="当前企业">${icon('building-2')}<span><b>${escapeHtml(me.tenant_name || me.tenant_id || '企业工作台')}</b><small>${me.is_platform_admin?'平台管理':'企业版'}</small></span></div><nav class="side-nav">${navMarkup}</nav><section class="side-credit" id="side-credit"></section><button type="button" class="side-user" data-go="profile" aria-label="进入个人中心">${avatarMarkup('avatar side-avatar')}<span><b>${escapeHtml(me.display_name)}</b><small>${me.is_platform_admin?'平台管理员':roleName(me.role)}</small></span></button></aside><div class="mobile-drawer-backdrop" id="mobile-drawer-backdrop" hidden></div><aside class="mobile-drawer" id="mobile-drawer" aria-label="主导航" aria-hidden="true"><header><div class="brand-lockup">${icon('bot',26)}<div><b>AI Workbench</b><span>${escapeHtml(me.tenant_name||'企业工作台')}</span></div></div><button class="icon-button" id="mobile-menu-close" aria-label="关闭主导航">${icon('x')}</button></header><nav class="side-nav">${navMarkup}</nav></aside><main class="shell-main"><header class="topbar"><button class="top-icon mobile-menu-button" id="mobile-menu-button" aria-label="打开主导航" aria-controls="mobile-drawer" aria-expanded="false">${icon('menu')}</button><div class="top-actions"><button class="top-icon" id="top-help" aria-label="帮助与反馈">${icon('circle-help')}</button><div class="account-menu-wrap" id="account-menu-wrap"><button class="account-trigger" id="account-trigger" aria-haspopup="menu" aria-expanded="false">${avatarMarkup()}<b>${escapeHtml(me.display_name)}</b>${icon('chevron-down',16)}</button><div class="account-dropdown" id="account-dropdown" role="menu" hidden><div class="account-summary">${avatarMarkup('avatar account-avatar')}<div><b>${escapeHtml(me.display_name)}</b><small class="role-badge">${me.is_platform_admin?'平台管理员':roleName(me.role)}</small><em>${escapeHtml(me.tenant_name || me.tenant_id || '企业工作台')}</em></div></div><div class="account-menu-group"><button role="menuitem" data-account-action="profile">${icon('user-round')}个人中心</button><button role="menuitem" data-account-action="security">${icon('shield-check')}账号与安全</button><button role="menuitem" data-account-action="help">${icon('circle-help')}帮助与反馈</button></div><div class="account-menu-divider"></div><button role="menuitem" class="account-logout" data-account-action="logout">${icon('log-out')}退出登录</button></div></div></div></header><section class="page" id="main"></section></main></div>`;
+app.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="brand-lockup">${icon('bot',30)}<div><b>AI Workbench</b><span>Create · Collaborate · Grow</span></div></div><div class="tenant-summary" aria-label="当前企业"><span class="company-logo-slot" data-company-logo>${companyLogoMarkup()}</span><span><b data-company-name>${escapeHtml(companyDisplayName())}</b><small>${me.is_platform_admin?'平台管理':'企业版'}</small></span></div><nav class="side-nav">${navMarkup}</nav><section class="side-credit" id="side-credit"></section><button type="button" class="side-user" data-go="profile" aria-label="进入个人中心">${avatarMarkup('avatar side-avatar')}<span><b>${escapeHtml(me.display_name)}</b><small>${me.is_platform_admin?'平台管理员':roleName(me.role)}</small></span></button></aside><div class="mobile-drawer-backdrop" id="mobile-drawer-backdrop" hidden></div><aside class="mobile-drawer" id="mobile-drawer" aria-label="主导航" aria-hidden="true"><header><div class="brand-lockup">${icon('bot',26)}<div><b>AI Workbench</b><span data-company-name>${escapeHtml(companyDisplayName())}</span></div></div><button class="icon-button" id="mobile-menu-close" aria-label="关闭主导航">${icon('x')}</button></header><nav class="side-nav">${navMarkup}</nav></aside><main class="shell-main"><header class="topbar"><button class="top-icon mobile-menu-button" id="mobile-menu-button" aria-label="打开主导航" aria-controls="mobile-drawer" aria-expanded="false">${icon('menu')}</button><div class="top-actions"><button class="top-icon" id="top-help" aria-label="帮助与反馈">${icon('circle-help')}</button><div class="account-menu-wrap" id="account-menu-wrap"><button class="account-trigger" id="account-trigger" aria-haspopup="menu" aria-expanded="false">${avatarMarkup()}<b>${escapeHtml(me.display_name)}</b>${icon('chevron-down',16)}</button><div class="account-dropdown" id="account-dropdown" role="menu" hidden><div class="account-summary">${avatarMarkup('avatar account-avatar')}<div><b>${escapeHtml(me.display_name)}</b><small class="role-badge">${me.is_platform_admin?'平台管理员':roleName(me.role)}</small><em data-company-name>${escapeHtml(companyDisplayName())}</em></div></div><div class="account-menu-group"><button role="menuitem" data-account-action="profile">${icon('user-round')}个人中心</button><button role="menuitem" data-account-action="security">${icon('shield-check')}账号与安全</button><button role="menuitem" data-account-action="help">${icon('circle-help')}帮助与反馈</button></div><div class="account-menu-divider"></div><button role="menuitem" class="account-logout" data-account-action="logout">${icon('log-out')}退出登录</button></div></div></div></header><section class="page" id="main"></section></main></div>`;
   const drawer=document.querySelector('#mobile-drawer'),backdrop=document.querySelector('#mobile-drawer-backdrop'),trigger=document.querySelector('#mobile-menu-button');
   const setDrawer=open=>{drawer.classList.toggle('open',open);backdrop.hidden=!open;drawer.setAttribute('aria-hidden',String(!open));trigger.setAttribute('aria-expanded',String(open));document.body.classList.toggle('drawer-open',open);if(open)drawer.querySelector('[data-page]')?.focus();else trigger.focus();};
   mobileDrawerController=setDrawer;drawer.onkeydown=event=>{if(event.key==='Escape')setDrawer(false);};
@@ -81,7 +183,10 @@ const pageLoading = () => `<section class="page-loading" aria-live="polite" aria
 async function render(page) {
   // Give each route its own DOM: late responses can only update a detached view.
   const previousMain = document.querySelector('#main'), main = previousMain.cloneNode(false);
+  detachConversationView(previousMain);
+  document.querySelector('#customer-task-details .dialog-close')?.click?.();
   previousMain.replaceWith(main);
+  main._owner=principalSnapshot();
   main.dataset.page = page;
   document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === (page.startsWith('agent:')?'image':page)));
   main.innerHTML = pageLoading();
@@ -106,26 +211,29 @@ async function render(page) {
 }
 
 async function workspaceV2(main) {
-  const data = await api('/api/v1/workspace'); sideCredit(data.credit_balance);
+  const data = await api('/api/v1/workspace',{cache:'no-store'});if(main.isConnected===false||!principalIsCurrent(main._owner))return;applyEnterpriseBrand(data,'workspace',main._owner); sideCredit(data.credit_balance);
   if(main.dataset.page!=='workspace')return;
   const cards=(data.agents||[]).filter(agent=>agent.enabled).map(agent=>`<article class="agent-card" data-agent-id="${escapeHtml(agent.id)}" data-agent-slug="${escapeHtml(agent.slug)}">${icon(agent.icon||'bot',30)}<h3>${escapeHtml(agent.name)}</h3><p>${escapeHtml(agent.description)}</p><span class="agent-category">${escapeHtml(agentCategoryLabel(agent.category))}</span><div class="agent-card-footer"><small>${agent.credit_cost} 积分 / 次</small>${button('进入智能体','arrow-right','primary',`data-agent="${escapeHtml(agent.definition_source==='productized'?agent.slug:agent.id)}"`)}</div></article>`).join('');
   const shortcuts=me.role==='enterprise_admin'?[['history','history','历史记录'],['recent-tasks','list-checks','最近任务'],['knowledge','book-open','知识库'],['assets','image','素材库'],['members','users','成员管理'],['enterprise','settings','企业设置']]:[['history','history','历史记录'],['generations','folder-open','我的生成'],['profile','user-round','个人中心']];
-  const greeting=`<header class="workspace-greeting-banner" aria-label="工作台欢迎信息"><div class="workspace-greeting-copy"><p class="workspace-greeting-kicker">${escapeHtml(data.brand_name||data.tenant_name)} · 今日工作台</p><h1>你好，${escapeHtml(me.display_name)}！</h1><p>从这里开始完成今天的第一项 AI 创作。</p></div></header>`;
-  main.innerHTML=`${greeting}<div class="workspace-grid"><section><div class="welcome-banner"><div><b>${escapeHtml(data.brand_name||data.tenant_name)}</b><h2>让 AI 帮你更快完成日常创作</h2><p>选择一个已启用的智能体，描述业务需求，即可开始。</p></div></div><div class="section-title"><h2>可使用的智能体</h2><span class="muted">${(data.agents||[]).filter(agent=>agent.enabled).length} 个可用</span></div><div class="agent-grid">${cards||'<div class="empty-state">暂时没有可使用的智能体，请联系企业管理员。</div>'}</div><div class="two-panels"><section class="panel recent-history"><div class="section-title"><h2>最近项目</h2><a href="/conversations" data-go="history">查看全部</a></div>${(data.recent_conversations||[]).slice(0,3).map(x=>conversationRowHtml(x,'data-agent-conversation')).join('')||'<div class="empty-state">还没有创作项目，选择一个智能体开始第一次 AI 对话。</div>'}</section><section class="panel"><div class="section-title"><h2>最近生成</h2><a data-go="generations">查看全部</a></div><div class="compact-generations">${(data.recent_generations||[]).slice(0,3).map(x=>`<article>${image(x,x.project?.name||'最近生成')}<span><b>${escapeHtml(x.project?.name||'图片生成项目')}</b><small>${escapeHtml(formatHistoryTime(x.created_at))}</small></span></article>`).join('')||'<div class="empty-state">还没有图片生成，使用图片生成智能体开始创作。</div>'}</div></section></div></section><aside class="right-rail"><section class="panel credit-panel"><h3>我的积分</h3><b class="credit-num">${data.credit_balance} <small>积分</small></b><div class="meter"><i style="width:${Math.min(data.credit_balance/10,100)}%"></i></div></section><section class="panel"><h3>快速入口</h3><div class="quick-grid">${shortcuts.map(x=>`<button data-go="${x[0]}">${icon(x[1],24)}<span>${x[2]}</span>${icon('arrow-right',15)}</button>`).join('')}</div></section></aside></div>`;
-  main.querySelectorAll('[data-agent]').forEach(node=>node.onclick=()=>{activeAgentId=node.dataset.agent;activeConversationId=null;navigate(agentPage(activeAgentId));});
-  main.querySelectorAll('[data-agent-conversation]').forEach(node=>node.onclick=()=>{activeAgentId=node.dataset.agentId;activeConversationId=node.dataset.agentConversation;navigate(agentPage(activeAgentId));}); bindNavigation(); refreshIcons();
+const greeting=`<header class="workspace-greeting-banner" aria-label="工作台欢迎信息"><div class="workspace-greeting-copy"><p class="workspace-greeting-kicker"><span data-company-name>${escapeHtml(companyDisplayName())}</span> · 今日工作台</p><h1>你好，${escapeHtml(me.display_name)}！</h1><p>从这里开始完成今天的第一项 AI 创作。</p></div></header>`;
+  main.innerHTML=`${greeting}<div class="workspace-grid"><section><div class="welcome-banner"><div><b data-company-name>${escapeHtml(companyDisplayName())}</b><h2>让 AI 帮你更快完成日常创作</h2><p>选择一个已启用的智能体，描述业务需求，即可开始。</p></div></div><div class="section-title"><h2>可使用的智能体</h2><span class="muted">${(data.agents||[]).filter(agent=>agent.enabled).length} 个可用</span></div><div class="agent-grid">${cards||'<div class="empty-state">暂时没有可使用的智能体，请联系企业管理员。</div>'}</div><div class="two-panels"><section class="panel recent-history"><div class="section-title"><h2>最近项目</h2><a href="/conversations" data-go="history">查看全部</a></div>${(data.recent_conversations||[]).slice(0,3).map(x=>conversationRowHtml(x,'data-agent-conversation')).join('')||'<div class="empty-state">还没有创作项目，选择一个智能体开始第一次 AI 对话。</div>'}</section><section class="panel"><div class="section-title"><h2>最近生成</h2><a data-go="generations">查看全部</a></div><div class="compact-generations">${(data.recent_generations||[]).slice(0,3).map(x=>`<article>${image(x,x.project?.name||'最近生成')}<span><b>${escapeHtml(x.project?.name||'图片生成项目')}</b><small>${escapeHtml(formatHistoryTime(x.created_at))}</small></span></article>`).join('')||'<div class="empty-state">还没有图片生成，使用图片生成智能体开始创作。</div>'}</div></section></div></section><aside class="right-rail"><section class="panel credit-panel"><h3>我的积分</h3><b class="credit-num">${data.credit_balance} <small>积分</small></b><div class="meter"><i style="width:${Math.min(data.credit_balance/10,100)}%"></i></div></section><section class="panel"><h3>快速入口</h3><div class="quick-grid">${shortcuts.map(x=>`<button data-go="${x[0]}">${icon(x[1],24)}<span>${x[2]}</span>${icon('arrow-right',15)}</button>`).join('')}</div></section></aside></div>`;
+  main.querySelectorAll('[data-agent]').forEach(node=>node.onclick=()=>navigate(agentPage(node.dataset.agent)));
+  main.querySelectorAll('[data-agent-conversation]').forEach(node=>node.onclick=()=>selectAgentConversation(node.dataset.agentId,node.dataset.agentConversation)); bindNavigation(); refreshIcons();
 }
 
 async function conversationHistory(main,offset=0,loaded=[]){
-  const pageSize=50,batch=await api(`/api/v1/conversations?limit=${pageSize}&offset=${offset}`),items=[...loaded,...batch];
+  const pageSize=50,batch=await api(`/api/v1/conversations?limit=${pageSize}&offset=${offset}`,{cache:'no-store'}),items=[...loaded,...batch];
   if(main.dataset.page!=='history')return;
   const agents=[...new Map(items.map(item=>[item.agent_id,item.agent||{id:item.agent_id,name:item.agent_id,icon:'bot'}])).values()];
   const groups=agents.map(agent=>{const projects=items.filter(item=>item.agent_id===agent.id);return `<section class="history-group" data-history-group="${escapeHtml(agent.id)}"><header><span>${icon(agent.icon||'bot',24)}</span><div><h2>${escapeHtml(projects[0]?.project?.type||agent.name)}</h2><p>${escapeHtml(agent.name)} · ${projects.length} 个项目</p></div></header><div class="history-list">${projects.map(historyCardHtml).join('')}</div></section>`;}).join('');
   main.innerHTML=`${header('历史记录','按创作项目和智能体归类，快速找回需求、正文与生成图片。','history')}<div class="history-toolbar"><label>${icon('search')}<input id="history-search" aria-label="搜索历史项目" placeholder="搜索项目名称或最近需求"></label><label><span>智能体</span><select id="history-agent-filter" aria-label="按智能体筛选"><option value="">全部智能体</option>${agents.map(agent=>`<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>`).join('')}</select></label></div><div class="history-groups">${groups||'<div class="empty-state large">还没有历史项目，开始第一次 AI 对话后会显示在这里。</div>'}<div class="empty-state large history-filter-empty" id="history-filter-empty" aria-live="polite" hidden>没有找到匹配的历史项目，请调整搜索或筛选条件。</div></div>${batch.length===pageSize?`<div class="history-load-more"><button class="button secondary" id="history-load-more">${icon('chevrons-down')}加载更早项目</button><small>已显示 ${items.length} 个项目</small></div>`:''}`;
   main.querySelector('.page-header')?.insertAdjacentHTML('beforebegin','<nav class="history-mobile-nav" aria-label="历史页导航"><a class="button secondary" href="/workspace" data-go="workspace">'+icon('arrow-left')+'返回工作台</a></nav>');
-  const applyFilter=()=>{const query=main.querySelector('#history-search').value.trim().toLowerCase(),agentId=main.querySelector('#history-agent-filter').value;let visible=0;main.querySelectorAll('[data-history-conversation]').forEach(card=>{card.hidden=Boolean((agentId&&card.dataset.historyAgent!==agentId)||(query&&!card.dataset.historySearch.includes(query)));if(!card.hidden)visible+=1;});main.querySelectorAll('[data-history-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('[data-history-conversation]')).some(card=>!card.hidden);});main.querySelector('#history-filter-empty').hidden=visible!==0||items.length===0;};
-  main.querySelector('#history-search').oninput=applyFilter;main.querySelector('#history-agent-filter').onchange=applyFilter;
-  main.querySelectorAll('[data-history-conversation]').forEach(node=>node.onclick=()=>{activeAgentId=node.dataset.historyAgent;activeConversationId=node.dataset.historyConversation;navigate(agentPage(activeAgentId));});
+  const applyFilter=()=>{const query=main.querySelector('#history-search').value.trim().toLowerCase(),agentId=main.querySelector('#history-agent-filter').value;let visible=0;main.querySelectorAll('[data-history-conversation]').forEach(card=>{card.hidden=Boolean((agentId&&card.dataset.historyAgent!==agentId&&items.find(item=>item.id===card.dataset.historyConversation)?.agent_id!==agentId)||(query&&!card.dataset.historySearch.includes(query)));if(!card.hidden)visible+=1;});main.querySelectorAll('[data-history-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('[data-history-conversation]')).some(card=>!card.hidden);});main.querySelector('#history-filter-empty').hidden=visible!==0||items.length===0;};
+  let orphanList=null;const historyGroups=main.querySelector('.history-groups');
+  if(historyGroups?.insertAdjacentHTML){historyGroups.insertAdjacentHTML('afterend',orphanTaskHistoryShellHtml());orphanList=mountOrphanTaskHistory(main,main.querySelector('[data-orphan-history]'),{conversations:items,agents,history:true,onAgentRestored:applyFilter});}
+  main.querySelector('#history-search').oninput=applyFilter;main.querySelector('#history-agent-filter').onchange=()=>{applyFilter();orphanList?.setAgent(main.querySelector('#history-agent-filter').value);};
+  if(orphanList){main.querySelector('#history-agent-filter').value=orphanList.agentId;applyFilter();}
+  main.querySelectorAll('[data-history-conversation]').forEach(node=>node.onclick=()=>selectAgentConversation(node.dataset.historyAgent,node.dataset.historyConversation));
   main.querySelector('#history-load-more')?.addEventListener('click',()=>conversationHistory(main,offset+pageSize,items));
   bindNavigation();refreshIcons();
 }
@@ -133,7 +241,7 @@ const agentPage=id=>id==='image-agent'?'image':id==='copywriting-agent'?'copywri
 const agentPlaceholder=agentId=>agentId==='image-agent'?'描述你想创作的图片，例如：帮我做一张秋季招生海报':agentId==='copywriting-agent'?'描述需要的文案，例如：写一篇秋季招生公众号推文':'描述需要策划的活动，例如：制定国庆招生开放日方案';
 const formatHistoryTime=value=>String(value||'').replace('T',' ').slice(0,16);
 const compactHistoryText=(value,maxLength=10)=>Array.from(String(value||'')).slice(0,maxLength).join('');
-const taskStatusLabel=status=>({queued:'排队中',running:'处理中',completed:'已完成',failed:'失败',cancelled:'已取消'})[status]||'暂无任务';
+const taskStatusLabel=status=>({queued:'排队中',running:'处理中',cancelling:'正在停止',completed:'已完成',failed:'失败',cancelled:'已取消'})[status]||'暂无任务';
 const conversationStatusLabel=item=>item.agent_id==='image-agent'&&item.latest_status==='failed'&&item.latest_generation?.task_id&&item.latest_task?.id&&item.latest_generation.task_id!==item.latest_task.id?'最近一次失败':taskStatusLabel(item.latest_status);
 const imageConversationStatusHtml=item=>item?.latest_status==='failed'?`<p>${conversationStatusLabel(item)==='最近一次失败'?'最近一次生成失败。此前已生成的图片仍可查看和下载。':'最近一次生成失败，请重试。'}</p>`:item?.latest_status==='cancelled'?'<p>已停止生成。已保存的历史结果仍可查看。</p>':'';
 const conversationRowHtml=(item,attribute,selected=false)=>{const agent=item.agent||{name:item.agent_id,icon:'bot'},project=item.project||{name:item.title,type:'智能创作项目'},name=project.name||item.title||'未命名项目',prompt=item.latest_prompt||'尚无任务内容';return `<button class="conversation-row ${selected?'selected':''}" ${attribute}="${escapeHtml(item.id)}" data-agent-id="${escapeHtml(item.agent?.slug||item.agent_id)}"><span class="conversation-kind">${item.latest_generation?`<img data-generation-image src="${escapeHtml(storageUrl(item.latest_generation))}" alt="">`:icon(agent.icon||'bot',19)}</span><span class="conversation-copy"><span class="conversation-meta"><em>${escapeHtml(project.type)}</em><i class="history-status ${escapeHtml(item.latest_status||'none')}">${escapeHtml(conversationStatusLabel(item))}</i></span><b>${escapeHtml(compactHistoryText(name))}</b><small class="conversation-preview">${escapeHtml(compactHistoryText(prompt))}</small></span></button>`;};
@@ -141,9 +249,83 @@ const historyCardHtml=item=>{const agent=item.agent||{name:item.agent_id,icon:'b
 const agentCategoryLabel=category=>category==='general'?'通用创作':category||'通用创作';
 const agentConversationRailHtml=(items,selectedId)=>`<button class="button primary full" id="new-chat">${icon('plus')}新建项目</button><div class="conversation-rail-heading"><h3>${escapeHtml(items[0]?.project?.type||'创作项目')}</h3><button class="link-button" data-go="history">全部历史</button></div>${items.map(item=>conversationRowHtml(item,'data-select-agent-conversation',selectedId===item.id)).join('')||'<div class="empty-state">暂无历史项目</div>'}`;
 function bindConversationRail(main,agentId){
-  main.querySelector('#new-chat').onclick=()=>{activeConversationId=null;navigate(agentPage(agentId));};
-  main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.selectAgentConversation;navigate(agentPage(agentId));});
+  main.querySelector('#new-chat').onclick=()=>selectAgentConversation(agentId,null,{newProject:true});
+  main.querySelectorAll('[data-select-agent-conversation]').forEach(node=>node.onclick=()=>selectAgentConversation(agentId,node.dataset.selectAgentConversation));
   bindNavigation();
+  const rail=main.querySelector('.conversation-rail');
+  if(rail?.insertAdjacentHTML&&rail.querySelector&&!rail.querySelector('[data-orphan-history]')){
+    rail.insertAdjacentHTML('beforeend',orphanTaskHistoryShellHtml());
+    mountOrphanTaskHistory(main,rail.querySelector('[data-orphan-history]'),{agentId:main.dataset.agentId,route:agentId,conversations:main._orphanKnownConversations||[]});
+  }
+}
+const orphanTaskStatuses=new Set(['all','queued','running','completed','failed','cancelled']);
+function readOrphanHistoryPointer(){
+  const saved=window.history.state?.page==='history'?window.history.state?.orphanHistory:orphanHistoryPointer;
+  if(!saved||saved.userId!==me?.user_id||saved.tenantId!==me?.tenant_id)return null;
+  return {userId:saved.userId,tenantId:saved.tenantId,status:orphanTaskStatuses.has(saved.status)?saved.status:'all',agentId:typeof saved.agentId==='string'?saved.agentId:'',pages:Number.isInteger(saved.pages)&&saved.pages>0?saved.pages:1};
+}
+function orphanTaskQuery({status='all',agentId='',cursor=null}={}){
+  if(!orphanTaskStatuses.has(status)||typeof agentId!=='string')throw Error('任务筛选条件无效。');
+  const query=new URLSearchParams({limit:'25',status});if(agentId)query.set('agent_id',agentId);if(cursor)query.set('cursor',cursor);
+  return `/api/v1/tasks/orphans?${query}`;
+}
+function validateOrphanTaskPage(data,requestedCursor=null){
+  const validId=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,120}$/.test(value);
+  if(!data||!Array.isArray(data.tasks)||data.tasks.length>25||!(data.next_cursor===null||validId(data.next_cursor)))throw Error('任务历史响应不符合已确认合同，请稍后重试。');
+  if(data.tasks.some(task=>!task||!validId(task.id)||!validId(task.agent_id)||task.status==='all'||!orphanTaskStatuses.has(task.status)||!(task.conversation_id===null||validId(task.conversation_id))||!(task.created_at===null||typeof task.created_at==='string'&&Number.isFinite(Date.parse(task.created_at)))))throw Error('任务历史记录不符合已确认合同，请稍后重试。');
+  if(data.next_cursor&&(data.next_cursor===requestedCursor||!data.tasks.length||data.next_cursor!==data.tasks.at(-1).id))throw Error('任务历史分页响应无效，请刷新后重试。');
+  return data;
+}
+function mergeOrphanTaskRows(previous,incoming,{agentId='',status='all',conversations=[]}={}){
+  const ownedConversations=new Set(conversations.map(item=>item.id)),ownedTasks=new Set(conversations.map(item=>item.latest_task?.id).filter(Boolean)),rows=new Map();
+  for(const task of [...previous,...incoming]){
+    if(agentId&&task.agent_id!==agentId||status!=='all'&&task.status!==status||ownedConversations.has(task.conversation_id)||ownedTasks.has(task.id))continue;
+    rows.set(task.id,task);
+  }
+  return [...rows.values()];
+}
+function orphanTaskHistoryShellHtml(){
+  return `<section class="orphan-task-history" data-orphan-history aria-label="未关联会话的已受理任务"><h3>未关联会话任务</h3><p class="muted">已受理的任务按真实状态展示；查看不会重新生成。</p><label class="orphan-task-filter"><span>任务状态</span><select data-orphan-status aria-label="筛选未关联会话任务状态">${[...orphanTaskStatuses].map(status=>`<option value="${status}">${status==='all'?'全部状态':taskStatusLabel(status)}</option>`).join('')}</select></label><div class="orphan-task-list" data-orphan-rows></div><p data-orphan-feedback role="status" aria-live="polite"></p><button type="button" class="button secondary" data-orphan-more hidden>加载更多任务</button><button type="button" class="button secondary" data-orphan-retry hidden>重新查询任务</button></section>`;
+}
+function mountOrphanTaskHistory(main,slot,options={}){
+  if(!slot)return null;
+  const owner=main._owner||principalSnapshot(),saved=options.history?readOrphanHistoryPointer():null;
+  const state={owner,agentId:options.agentId||saved?.agentId||'',status:saved?.status||'all',rows:[],nextCursor:null,pages:0,busy:false,revision:0,cursors:new Set()};
+  const rows=slot.querySelector('[data-orphan-rows]'),feedback=slot.querySelector('[data-orphan-feedback]'),more=slot.querySelector('[data-orphan-more]'),retry=slot.querySelector('[data-orphan-retry]'),filter=slot.querySelector('[data-orphan-status]');
+  const current=()=>main.isConnected!==false&&slot.isConnected!==false&&document.querySelector('#main')===main&&principalIsCurrent(owner);
+  const savePointer=()=>{if(!options.history||!current())return;orphanHistoryPointer={userId:owner.userId,tenantId:owner.tenantId,agentId:state.agentId,status:state.status,pages:Math.max(1,state.pages)};window.history.replaceState({...window.history.state,orphanHistory:orphanHistoryPointer},'',location.href);};
+  const draw=()=>{
+    if(!current())return;
+    const names=new Map((options.agents||[]).map(agent=>[agent.id,agent.name]));
+    rows.innerHTML=state.rows.map(task=>`<button type="button" class="orphan-task-row" data-orphan-task="${escapeHtml(task.id)}" aria-label="查看任务 ${escapeHtml(task.id)}"><span><b>${escapeHtml(names.get(task.agent_id)||task.agent_id)}</b><small class="orphan-task-id">Task ID：${escapeHtml(task.id)}</small><small>${escapeHtml(formatHistoryTime(task.created_at))}</small></span><span class="history-status ${escapeHtml(task.status)}">${escapeHtml(taskStatusLabel(task.status))}</span></button>`).join('');
+    rows.querySelectorAll('[data-orphan-task]').forEach(button=>button.onclick=()=>{if(!current())return;const task=state.rows.find(item=>item.id===button.dataset.orphanTask);if(!task||state.agentId&&task.agent_id!==state.agentId)return;savePointer();selectAgentConversation(options.route||task.agent_id,null,{taskId:task.id});});
+    if(options.history){const selector=main.querySelector('#history-agent-filter');for(const task of state.rows)if(selector&&!Array.from(selector.options).some(option=>option.value===task.agent_id)){const option=document.createElement('option');option.value=task.agent_id;option.textContent=names.get(task.agent_id)||task.agent_id;selector.append(option);}if(selector)selector.value=state.agentId;options.onAgentRestored?.();}
+    more.hidden=!state.nextCursor;more.disabled=state.busy;retry.disabled=state.busy;filter.value=state.status;slot.setAttribute('aria-busy',String(state.busy));
+  };
+  const load=async(reset=false,restorePages=1)=>{
+    if(!current()||state.busy&&!reset)return;
+    const revision=++state.revision;state.busy=true;retry.hidden=true;
+    if(reset){state.rows=[];state.nextCursor=null;state.pages=0;state.cursors.clear();}
+    feedback.textContent=reset?'正在查询已受理任务…':'正在加载更多任务…';draw();
+    try{
+      for(let page=0;page<restorePages;page++){
+        const cursor=state.pages?state.nextCursor:null;if(state.pages&&!cursor)break;
+        const data=validateOrphanTaskPage(await api(orphanTaskQuery({status:state.status,agentId:state.agentId,cursor}),{cache:'no-store'}),cursor);
+        if(!current()||revision!==state.revision)return;
+        if(data.tasks.some(task=>state.agentId&&task.agent_id!==state.agentId||state.status!=='all'&&task.status!==state.status))throw Error('任务历史响应与当前筛选不一致，请重新查询。');
+        if(data.next_cursor&&state.cursors.has(data.next_cursor))throw Error('任务历史分页重复，请重新查询任务。');
+        state.rows=mergeOrphanTaskRows(state.rows,data.tasks,{...state,conversations:options.conversations||[]});state.nextCursor=data.next_cursor;state.pages++;
+        if(data.next_cursor)state.cursors.add(data.next_cursor);savePointer();
+      }
+      feedback.textContent=state.rows.length?`已查询 ${state.rows.length} 个未关联会话任务。`:'当前筛选下没有未关联会话任务。';
+    }catch(error){
+      if(!current()||revision!==state.revision)return;
+      feedback.textContent=error.status===401?'登录已失效，请重新登录后查询任务。':error.status===403?'当前账号无权查询这些任务。':error.status===404?'当前环境尚未提供孤立任务历史接口，需等待正式集成。':`${error.message||'任务历史查询失败'} 请重新查询；这不代表历史为空。`;retry.hidden=false;
+    }finally{if(current()&&revision===state.revision){state.busy=false;draw();}}
+  };
+  filter.onchange=()=>{state.status=filter.value;savePointer();load(true);};more.onclick=()=>load();retry.onclick=()=>load(true);
+  load(true,saved?.pages||1);
+  return {get agentId(){return state.agentId;},setAgent(agentId){if(options.agentId)return;state.agentId=agentId;savePointer();load(true);}};
 }
 const chatImageComposerFields=()=>`<div id="chat-image-attachment" class="chat-image-attachment" aria-live="polite"></div><input id="chat-image-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" hidden>`;
 const chatImageComposerButton=()=>`<button class="chat-image-add" id="chat-image-add" type="button" aria-label="添加参考图片" title="添加参考图片">${icon('plus',18)}</button>`;
@@ -203,7 +385,7 @@ async function refreshConversationRail(main,agentId,terminalTask={}){
     if(document.querySelector('#main')!==main||main.dataset.page!==agentPage(agentId)||main.dataset.agentId!==identity||main._conversationRailRefresh!==token)return;
     const scrollTop=rail.scrollTop;rail.innerHTML=agentConversationRailHtml(items.filter(item=>item.agent_id===identity),activeConversationId);rail.scrollTop=scrollTop;
     const notice=main.querySelector('[data-conversation-result-status]');if(notice)notice.innerHTML=imageConversationStatusHtml(items.find(item=>item.id===activeConversationId));
-    bindConversationRail(main,agentId);refreshIcons();
+    main._orphanKnownConversations=items;bindConversationRail(main,agentId);refreshIcons();
   }catch{/* Keep the last authoritative badge if the list refresh is unavailable. */}
 }
 const agentGreetingHtml=agent=>{
@@ -359,6 +541,16 @@ function hydrateHistoryActivityPlans(main,history,agentId){
     }).catch(()=>{});
   }
 }
+const isActivityWordExportRequest=value=>/^(?:(?:请|麻烦)?(?:我要|我想要|给我|帮我(?:导出|生成)|导出|下载|生成|转成|转换成))?(?:一个|一份|这份方案的|这个方案的)?(?:word|docx)(?:格式)?(?:的)?(?:文档|文件|版本|方案)?[。！？!?]*$/i.test(String(value||'').replace(/\s+/g,''));
+function latestActivityPlanMessage(main){
+  const articles=[...(main?.querySelectorAll('[data-assistant-message-id]')||[])].reverse();
+  return articles.map(node=>node.dataset.assistantMessageId).find(id=>activityPlanResultIsValid(activityPlanDocuments.get(id)?.structuredResult))||'';
+}
+function activityWordExportFeedback(main){
+  let feedback=main.querySelector('.document-intent-feedback');
+  if(!feedback){feedback=document.createElement('p');feedback.className='document-intent-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');main.querySelector('#composer').append(feedback);}
+  return feedback;
+}
 function bindConversationActions(main){
   main.querySelectorAll('[data-example-prompt]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.examplePrompt;input.focus();});
   main.querySelectorAll('[data-copy-response]').forEach(node=>node.onclick=async()=>{const original=node.innerHTML;try{await navigator.clipboard.writeText(node.dataset.copyResponse);node.textContent='已复制';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}catch{node.textContent='复制失败';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}});
@@ -493,7 +685,7 @@ function clearStreamingVisualWork(state,{discard=false}={}){
 function stopThinkingClock(state){if(state?.thinkingTimer)clearInterval(state.thinkingTimer);if(state)state.thinkingTimer=null;}
 function startThinkingClock(node,state){
   if(!state||state.thinkingTimer||typeof setInterval!=='function')return;
-  state.thinkingTimer=setInterval(()=>{if(state.completed||state.error||state.run?.terminal){stopThinkingClock(state);return;}renderThinkingSummary(node,state);},1000);
+  state.thinkingTimer=setInterval(()=>{if(state.detached||state.completed||state.error||state.run?.terminal){stopThinkingClock(state);return;}renderThinkingSummary(node,state);},1000);
 }
 function composerRunControls(main){
   return {input:main?.querySelector?.('#prompt'),submit:main?.querySelector?.('#composer-submit'),feedback:main?.querySelector?.('#composer-run-feedback')};
@@ -501,9 +693,10 @@ function composerRunControls(main){
 function updateComposerRunState(main,state){
   const run=state?.run;if(!run)return;
   const {input,submit,feedback}=composerRunControls(main),stopping=run.phase===ConversationRunPhase.STOPPING,running=run.phase===ConversationRunPhase.RUNNING,draining=state.networkComplete&&!state.completed;
-  if(input)input.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining;
+  const readonly=main?._conversationContext&&(main._conversationContext.canRun===false||main._conversationContext.taskOnly);
+  if(input)input.disabled=Boolean(readonly)||run.phase===ConversationRunPhase.SUBMITTING||stopping||draining;
   if(submit){
-    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining||(!running&&['uploading','failed'].includes(main?._chatImage?.status));
+    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining||(!running&&(readonly||['uploading','failed'].includes(main?._chatImage?.status)));
     submit.type=running||stopping?'button':'submit';
     submit.classList?.toggle?.('composer-stop-button',running||stopping);
     submit.setAttribute?.('aria-label',stopping?'正在停止生成':running?'停止生成':draining?'正在显示回复':'发送消息');
@@ -517,12 +710,12 @@ function updateComposerRunState(main,state){
 }
 function beginConversationRun(state,{taskId=null,agentId=null,conversationId=activeConversationId,phase=ConversationRunPhase.SUBMITTING,restored=false}={}){
   state.run=state.run||createConversationRunState();state.run.taskId=taskId;state.run.agentId=agentId;state.run.terminal=null;state.run.stopError='';
-  if(agentId==='image-agent')state.run.conversationId=conversationId;
+  state.run.conversationId=conversationId;
   if(state.run.phase!==phase&&!transitionConversationRun(state.run,phase)&&restored)state.run.phase=phase;
   return state.run;
 }
 function closeStreamingSource(state){
-  state?.streamSource?.close?.();if(state)state.streamSource=null;
+  state?.streamSource?.close?.();if(state){state.streamSource=null;if(state.pollTimer)clearTimeout(state.pollTimer);state.pollTimer=null;}
 }
 function settleConversationRun(main,state,terminal){
   const run=state?.run;if(!run)return;
@@ -536,17 +729,17 @@ function settleConversationRun(main,state,terminal){
 }
 async function requestStopGeneration(main,state){
   const run=state?.run;
-  if(!run||run.phase!==ConversationRunPhase.RUNNING||!run.taskId)return;
+  if(!run||run.phase!==ConversationRunPhase.RUNNING||!run.taskId||!conversationViewIsCurrent(main,state))return;
   transitionConversationRun(run,ConversationRunPhase.STOPPING);updateComposerRunState(main,state);
   try{
     const task=await api(`/api/v1/tasks/${encodeURIComponent(run.taskId)}/cancel`,{method:'POST'});
-    if(run.terminal)return;
-    if(task.status==='completed')return finishStreamTask(document.querySelector('#task-status'),state,task,run.agentId,main,state.sourcePrompt||'');
-    if(task.status==='cancelled')return cancelStreamingMessage(document.querySelector('#task-status'),state,main);
-    if(task.status==='cancelling')return;
+    if(run.terminal||!conversationViewIsCurrent(main,state))return;
+    if(task.status==='completed')return finishStreamTask(main.querySelector('#task-status'),state,task,run.agentId,main,state.sourcePrompt||'');
+    if(task.status==='cancelled')return cancelStreamingMessage(main.querySelector('#task-status'),state,main);
+    if(task.status==='cancelling'||task.stage==='cancelling')return;
     transitionConversationRun(run,ConversationRunPhase.RUNNING);run.stopError='停止请求未被确认，请重试。';updateComposerRunState(main,state);
   }catch(error){
-    if(run.terminal)return;
+    if(run.terminal||!conversationViewIsCurrent(main,state))return;
     transitionConversationRun(run,ConversationRunPhase.RUNNING);run.stopError=error.message||'停止请求失败，请重试。';updateComposerRunState(main,state);
   }
 }
@@ -595,7 +788,7 @@ function renderStreamingMessage(node,state){
   if(status){status.hidden=Boolean(state.displayText);if(!status.hidden){const label=status.querySelector('span');if(label)label.textContent=state.status;}}
   renderThinkingSummary(node,state);state.lastRenderAt=Date.now();scrollStreamToBottom(follow,state);
 }
-function canRenderStreamingVisual(state,generation){return Boolean(state&&generation===state.visualGeneration&&!state.visualStopped&&!state.completed&&!state.error&&!state.run?.terminal);}
+function canRenderStreamingVisual(state,generation){return Boolean(state&&generation===state.visualGeneration&&!state.detached&&principalIsCurrent(state.owner)&&!state.visualStopped&&!state.completed&&!state.error&&!state.run?.terminal);}
 function scheduleStreamingRender(node,state){
   if(state.renderPending||!canRenderStreamingVisual(state,state.visualGeneration))return;
   const generation=state.visualGeneration,flush=()=>{if(!canRenderStreamingVisual(state,generation))return;state.renderPending=false;state.renderTimer=null;state.renderFrame=null;renderStreamingMessage(node,state);if(state.visualPending)scheduleStreamingRender(node,state);else if(state.networkComplete)state.onVisualDrained?.();},queueFrame=()=>{if(!canRenderStreamingVisual(state,generation))return;if(typeof requestAnimationFrame==='function')state.renderFrame=requestAnimationFrame(flush);else state.renderTimer=setTimeout(flush,0);},wait=Math.max(0,STREAM_VISUAL_FRAME_MS-(Date.now()-state.lastRenderAt));
@@ -610,6 +803,7 @@ function completeStreamingMessage(node,state,sourcePrompt,main){
     const result=node.querySelector?.('[data-stream-document-result]');if(result)result.innerHTML=documentResultSlotHtml(state.assistantMessageId);
   }else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
   if(state.assistantMessageId&&node.dataset)node.dataset.assistantMessageId=state.assistantMessageId;
+  mountWechatArticle(main,node,finalResponse,state.assistantMessageId);
   if(state.generation&&!node.querySelector?.('.message-generation'))node.insertAdjacentHTML?.('beforeend',messageGenerationHtml(state.generation));
   node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);state.completedAt??=Date.now();renderThinkingSummary(node,state);stopWatchingStreamingFollow(state);
 }
@@ -625,29 +819,43 @@ function cancelStreamingMessage(node,state,main){
   settleConversationRun(main,state,'cancelled');
 }
 function replaceTaskFailure(node,message,retryText,diagnosticId='',main=null){
-  if(!node)return;
-  const partial=node._streamState?.displayText||node._streamState?.text||'';clearStreamingVisualWork(node._streamState,{discard:true});stopThinkingClock(node._streamState);
+  if(!node||!conversationViewIsCurrent(main,node._streamState))return;
+  const partial=node._streamState?.displayText||node._streamState?.text||'';clearStreamingVisualWork(node._streamState,{discard:true});stopThinkingClock(node._streamState);closeStreamingSource(node._streamState);
   const card=document.createElement('section');card.innerHTML=streamingFailureHtml(partial,message,diagnosticId);
   const failure=card.firstElementChild;node.replaceWith(failure);failure.querySelector('button').onclick=()=>{const input=document.querySelector('#prompt');if(!input)return;input.value=retryText;input.focus();};refreshIcons();
   if(node._streamState)settleConversationRun(main,node._streamState,'error');
 }
 async function agentWorkspaceV2(main, agentId) {
-  activeAgentId=agentId;
-  const data=await api('/api/v1/workspace');activityPlanBrandName=typeof data.brand_name==='string'?data.brand_name:'';
+  const selectedId=activeConversationId,selectedTaskId=activeTaskId,owner=main._owner||principalSnapshot();
+  const data=await api('/api/v1/workspace',{cache:'no-store'});if(main.isConnected===false||!principalIsCurrent(owner))return;applyEnterpriseBrand(data,'workspace',owner);activityPlanBrandName=typeof data.brand_name==='string'?data.brand_name:'';
   let agent=agentPage(agentId).startsWith('agent:')?await api(`/api/v1/agents/${encodeURIComponent(agentId)}`).catch(()=>null):(data.agents||[]).find(x=>x.id===agentId);
   if(main.dataset.page!==agentPage(agentId))return;
-  if((!agent||!agent.enabled)&&!activeConversationId){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
-  const allConversations=await api('/api/v1/conversations');
-  let detail=activeConversationId?await api(`/api/v1/conversations/${activeConversationId}`).catch(()=>null):null;
-  if(main.dataset.page!==agentPage(agentId))return;
+  if((!agent||!agent.enabled)&&!selectedId&&!selectedTaskId){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
+  const allConversations=await api('/api/v1/conversations',{cache:'no-store'});
+  const selectedTask=selectedTaskId?await api(`/api/v1/tasks/${encodeURIComponent(selectedTaskId)}`,{cache:'no-store'}):null;
+  if(selectedTask&&(selectedTask.id!==selectedTaskId||agent&&selectedTask.agent_id&&selectedTask.agent_id!==agent.id))throw Error('任务与当前智能体不匹配，无法恢复。');
+  if(selectedTask&&selectedId&&selectedTask.conversation_id!==selectedId)throw Error('任务与指定会话不匹配，无法恢复。');
+  const currentProject=selectedId||selectedTask?.conversation_id||(!window.history.state?.newProject?allConversations.find(item=>(item.agent_id===agent?.id||item.agent?.slug===agentId)&&['queued','running','cancelling'].includes(item.latest_status))?.id:null);
+  let detail=null,taskOnly=Boolean(selectedTask&&!currentProject);
+  if(currentProject)try{detail=await api(`/api/v1/conversations/${encodeURIComponent(currentProject)}`,{cache:'no-store'});}catch(error){
+    if(error.status!==404||!selectedTask||selectedTask.conversation_id!==currentProject)throw error;taskOnly=true;
+  }
+  if(main.isConnected===false||!principalIsCurrent(owner)||main.dataset.page!==agentPage(agentId))return;
   const internalId=agent?.id||(detail&&(detail.agent?.slug===agentId||detail.agent_id===agentId)?detail.agent_id:agentId);
+  if(selectedTask?.agent_id&&selectedTask.agent_id!==internalId)throw Error('当前无法确认任务的智能体身份，请从有权限的历史项目打开。');
   main.dataset.agentId=internalId;
-  const conversations=allConversations.filter(x=>x.agent_id===internalId);
-  if(activeConversationId&&detail?.agent_id!==internalId){activeConversationId=null;detail=null;}
+  const conversations=allConversations.filter(x=>x.agent_id===internalId);main._orphanKnownConversations=conversations;
+  if(detail&&detail.agent_id!==internalId)throw Error('该项目不属于当前智能体，无法恢复。');
+  activeAgentId=agentId;activeConversationId=currentProject||null;
+  main._conversationContext={route:agentId,agentId:internalId,conversationId:activeConversationId,owner,taskOnly};
+  if(selectedTask)rememberAcceptedTask(main,agentId,selectedTask);
+  if(detail)rememberServerConversation(main,agentId,activeConversationId);
   const canRun=agent?.enabled===true;
-  if(!canRun&&!detail){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
-  agent={...agent,...detail?.agent,enabled:canRun};
-  const history=detail?.messages||[],attachedIds=new Set(history.map(item=>item.generation?.id).filter(Boolean));
+  main._conversationContext.canRun=canRun;
+  if(!canRun&&!detail&&!selectedTask){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
+  agent={name:'历史任务（智能体不可用）',icon:'bot',...agent,...detail?.agent,enabled:canRun};
+  const taskHistory=selectedTask&&!detail?[{id:`task:${selectedTask.id}:user`,role:'user',content:selectedTask.input_text||''},...selectedTask.status==='completed'&&selectedTask.assistant_message_id?[{id:selectedTask.assistant_message_id,role:'assistant',content:selectedTask.final_response||'',structured_result:selectedTask.structured_result,generation:selectedTask.generation}]:[]]:[];
+  const history=detail?.messages||taskHistory,attachedIds=new Set(history.map(item=>item.generation?.id).filter(Boolean));
   const remainingImages=(detail?.generations||[]).filter(item=>!attachedIds.has(item.id));
   const historicalImages=remainingImages.length?`<section class="conversation-artifacts"><h3>${icon('images',18)}本项目生成图片 <span>${remainingImages.length}</span></h3><div>${remainingImages.map(item=>image(item,detail?.project?.name||'历史生成图片')).join('')}</div></section>`:'';
   const historyMarkup=history.length?`${history.map((item,index)=>messageHtml(item,item.role==='assistant'?[...history.slice(0,index)].reverse().find(previous=>previous.role==='user')?.content||'':'',agentId)).join('')}${historicalImages}`:agentGreetingHtml(agent);
@@ -658,23 +866,47 @@ async function agentWorkspaceV2(main, agentId) {
     composer.querySelector(':scope > div:last-of-type').insertAdjacentHTML('afterbegin',chatImageComposerButton());
     bindChatImageComposer(main);
   }
-  bindConversationRail(main,agentId); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,detail); refreshIcons();
+  main._wechatArticleContext={agent,route:agentId,userId:me?.user_id,tenantId:me?.tenant_id};
+  if(agent.slug==='wechat-official-account-writing')for(const item of history){
+    if(item.role!=='assistant')continue;
+    const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===item.id);
+    if(article)mountWechatArticle(main,article,item.content,item.id);
+  }
+  const recoveredDetail=detail||(selectedTask?{tasks:[selectedTask]}:null);
+  bindConversationRail(main,agentId); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,recoveredDetail); restorePendingSubmission(main,agentId); restoreConversationTerminalStatus(main,recoveredDetail); refreshIcons();
   if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
-  if(!canRun){main.querySelector('#new-chat').disabled=true;main.querySelector('#composer').innerHTML='<p role="status">智能体已停用，历史项目只读；不能创建任务或继续执行。</p>';main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
+  if(!canRun)main.querySelector('#new-chat').disabled=true;
+  if((!canRun||taskOnly)&&!activeConversationTask(recoveredDetail)){main.querySelector('#composer').innerHTML=`<p role="status">${!canRun?'智能体已停用，历史项目只读；不能创建任务或继续执行。':'任务结果可查询；当前历史关联不可访问，不能在该项目续发。请新建项目，或待历史关联恢复后重新打开。'}</p>`;main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
   bindNavigation();
 }
 async function submitAgentTaskV2(event,agentId,main){
   event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim(),attachment=agentId==='image-agent'?main._chatImage:null;if(!text||document.querySelector('#task-status')||attachment&&attachment.status!=='idle'&&attachment.status!=='ready')return;
+  if(main.isConnected===false||!principalIsCurrent(main._conversationContext?.owner)||pendingConversationSubmissions.has(agentSelectionKey(agentId)))return;
+  if(agentId==='campaign-agent'&&isActivityWordExportRequest(text)){
+    const messageId=latestActivityPlanMessage(main),feedback=activityWordExportFeedback(main);
+    if(!messageId){feedback.textContent='当前回复尚未形成可导出的活动方案数据。请先生成完整方案；服务器文件路径不能作为下载附件。';return;}
+    input.value='';feedback.textContent='正在使用已验证的活动方案导出 Word…';
+    await handleActivityPlanDocumentAction(main,messageId);
+    if(main.isConnected)feedback.textContent=activityPlanDocuments.get(messageId)?.state==='ready'?'Word 文档已生成，请点击方案下方的下载入口。':'Word 导出未完成，请查看方案下方的提示并重试。';
+    return;
+  }
+  if(main._conversationContext?.taskOnly||main._conversationContext?.canRun===false)return;
   const submittedAt=Date.now();if(attachment?.record){attachment.locked=true;attachment.render();}
   input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
   body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${userMessageAttachmentHtml(attachment?.record?[attachment.record]:[])}${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
-  const node=document.querySelector('#task-status'),state=createStreamingState();state.conversationStartedAt=submittedAt;state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
+  const node=main.querySelector('#task-status'),state=createStreamingState();state.main=main;state.owner=main._conversationContext?.owner||principalSnapshot();main._submittingState=state;state.conversationStartedAt=submittedAt;state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
   const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;if(attachment?.record)payload.attachments=[{type:'image',id:attachment.record.id}];
-  try{const task=await api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)});if(attachment?.record)attachment.consume();setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,conversationId:task.conversation_id,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){if(attachment){attachment.locked=false;attachment.render();}replaceTaskFailure(node,error.message,text,error.requestId,main);}
+  const key=agentSelectionKey(agentId),pending={owner:state.owner,promise:null};
+  pending.promise=api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)}).then(task=>{
+    if(!principalIsCurrent(state.owner))throw Error('登录会话已变化，请从历史记录查询任务。');
+    rememberAcceptedTask(main,agentId,task);for(const path of ['/api/v1/conversations','/api/v1/workspace'])pageCache.delete(path);return task;
+  }).finally(()=>{if(pendingConversationSubmissions.get(key)===pending)pendingConversationSubmissions.delete(key);});
+  pendingConversationSubmissions.set(key,pending);
+  try{const task=await pending.promise;if(attachment?.record)attachment.consume();if(!conversationViewIsCurrent(main,state))return;setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,conversationId:task.conversation_id,phase:ConversationRunPhase.RUNNING});updateComposerRunState(main,state);streamTask(task.id,agentId,main,text,node,state);}catch(error){if(attachment){attachment.locked=false;attachment.render();}if(conversationViewIsCurrent(main,state))replaceTaskFailure(node,error.message,text,error.requestId,main);}
 }
 function streamPayload(event){try{return JSON.parse(event.data||'{}');}catch{return {};}}
 function finishStreamTask(node,state,done,agentId,main,retryText){
-  if(state?.run?.terminal==='cancelled'||state?.networkComplete||state?.completed)return;
+  if(!conversationViewIsCurrent(main,state)||state?.run?.terminal==='cancelled'||state?.networkComplete||state?.completed)return;
   if(done.status==='cancelled'){cancelStreamingMessage(node,state,main);return;}
   if(done.status!=='completed'){applyStreamingEvent(state,'error',done);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);return;}
   state.assistantMessageId=typeof done.assistant_message_id==='string'?done.assistant_message_id:'';
@@ -683,25 +915,54 @@ function finishStreamTask(node,state,done,agentId,main,retryText){
     state.planMode='full';
     for(const activity of state.activities)activity.label=activityDisplayLabel(activity.stage,activity.status,state.planMode);
   }
-  state.run=state.run||createConversationRunState();if(agentId==='image-agent')state.run.conversationId=done.conversation_id||state.run.conversationId;applyStreamingEvent(state,'complete',done);transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);updateComposerRunState(main,state);activeConversationId=done.conversation_id||activeConversationId;
+  state.run=state.run||createConversationRunState();state.run.conversationId=done.conversation_id||state.run.conversationId;applyStreamingEvent(state,'complete',done);transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);updateComposerRunState(main,state);rememberAcceptedTask(main,agentId,{id:state.run.taskId,conversation_id:state.run.conversationId,status:done.status});
+  confirmRecoveredConversation(main,state);
   pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');
   state.onVisualDrained=()=>{if(state.completed||state.run?.terminal==='cancelled'||state.visualPending)return;state.onVisualDrained=null;completeStreamingMessage(node,state,retryText,main);settleConversationRun(main,state,'completed');};
   if(state.visualPending){if(!state.renderPending)scheduleStreamingRender(node,state);}else state.onVisualDrained();
 }
 function streamTask(taskId,agentId,main,retryText,node,state){
+  if(!conversationViewIsCurrent(main,state))return;
   const source=new EventSource(`/api/v1/tasks/${taskId}/events`);state.streamSource=source;let settled=false;
-  const finish=handler=>{if(settled||state?.run?.terminal)return;settled=true;source.close();handler();};
-  const fallback=()=>{if(settled||state?.run?.terminal)return;settled=true;closeStreamingSource(state);pollAgentTaskV2(taskId,agentId,main,retryText,node,state);};
-  source.addEventListener('activity',event=>{if(!settled&&applyStreamingEvent(state,'activity',streamPayload(event)))scheduleStreamingRender(node,state);});
-  source.addEventListener('progress',event=>{if(!settled&&applyStreamingEvent(state,'progress',streamPayload(event)))scheduleStreamingRender(node,state);});
-  source.addEventListener('delta',event=>{if(!settled&&applyStreamingEvent(state,'delta',streamPayload(event)))scheduleStreamingRender(node,state);});
+  const current=()=>!settled&&conversationViewIsCurrent(main,state)&&!state?.run?.terminal;
+  const finish=handler=>{if(!current())return;settled=true;source.close();handler();};
+  const fallback=()=>{if(!current())return;settled=true;closeStreamingSource(state);pollAgentTaskV2(taskId,agentId,main,retryText,node,state);};
+  source.addEventListener('activity',event=>{if(current()&&applyStreamingEvent(state,'activity',streamPayload(event)))scheduleStreamingRender(node,state);});
+  source.addEventListener('progress',event=>{if(current()&&applyStreamingEvent(state,'progress',streamPayload(event)))scheduleStreamingRender(node,state);});
+  source.addEventListener('delta',event=>{if(current()&&applyStreamingEvent(state,'delta',streamPayload(event)))scheduleStreamingRender(node,state);});
   source.addEventListener('complete',event=>finish(()=>finishStreamTask(node,state,streamPayload(event),agentId,main,retryText)));
   source.addEventListener('cancelled',event=>finish(()=>cancelStreamingMessage(node,state,main,streamPayload(event))));
-  source.addEventListener('error',event=>{const failure=streamPayload(event);if(failure.message){finish(()=>{applyStreamingEvent(state,'error',failure);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);});return;}fallback();});
+  source.addEventListener('error',event=>{const failure=streamPayload(event);if(failure.message){finish(()=>{rememberAcceptedTask(main,agentId,{id:taskId,conversation_id:failure.conversation_id||state.run?.conversationId,status:failure.status||'failed'});applyStreamingEvent(state,'error',failure);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);});return;}fallback();});
   source.onerror=fallback;
 }
 async function pollAgentTaskV2(taskId,agentId,main,retryText,node=document.querySelector('#task-status'),state=node?node._streamState:createStreamingState()){
-  try{const task=await api(`/api/v1/tasks/${taskId}`);setStreamingTaskStartedAt(state,task);if(task.current_activity&&applyStreamingEvent(state,'activity',task.current_activity))scheduleStreamingRender(node,state);if(task.status==='completed'||task.status==='cancelled'){finishStreamTask(node,state,task,agentId,main,retryText);return;}if(task.status==='cancelling'){if(state.run?.phase===ConversationRunPhase.RUNNING)transitionConversationRun(state.run,ConversationRunPhase.STOPPING);updateComposerRunState(main,state);setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),1000);return;}if(task.status==='failed'){applyStreamingEvent(state,'error',task);replaceTaskFailure(node,state.error||task.user_message,retryText,state.diagnosticId||task.diagnostic_id,main);return;}setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),1000);}catch{setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),2500);}
+  if(!conversationViewIsCurrent(main,state)||state?.completed||state?.run?.terminal||state.polling)return;
+  state.polling=true;
+  const again=delay=>{if(conversationViewIsCurrent(main,state)&&!state?.run?.terminal)state.pollTimer=setTimeout(()=>pollAgentTaskV2(taskId,agentId,main,retryText,node,state),delay);};
+  try{
+    const task=await api(`/api/v1/tasks/${encodeURIComponent(taskId)}`,{cache:'no-store'});if(!conversationViewIsCurrent(main,state)||state?.run?.terminal)return;
+    verifyRecoveredTask(main,taskId,task);rememberAcceptedTask(main,agentId,task);setStreamingTaskStartedAt(state,task);
+    if(task.current_activity&&applyStreamingEvent(state,'activity',task.current_activity))scheduleStreamingRender(node,state);
+    if(['completed','cancelled','failed'].includes(task.status)){finishStreamTask(node,state,task,agentId,main,retryText);return;}
+    if(task.status==='cancelling'||task.stage==='cancelling'){if(state.run?.phase===ConversationRunPhase.RUNNING)transitionConversationRun(state.run,ConversationRunPhase.STOPPING);updateComposerRunState(main,state);}
+    again(1000);
+  }catch(error){
+    if(!conversationViewIsCurrent(main,state))return;
+    if([401,403,404].includes(error.status)||error.code==='SESSION_CHANGED'){replaceTaskFailure(node,error.message,retryText,'',main);return;}
+    const feedback=main?.querySelector?.('#composer-run-feedback');if(feedback)feedback.textContent='连接中断，正在查询已有任务；不会重新生成。';again(2500);
+  }finally{state.polling=false;}
+}
+function verifyRecoveredTask(main,taskId,task){
+  const context=main?._conversationContext;
+  if(context&&(task?.id!==taskId||task.agent_id&&task.agent_id!==context.agentId||task.conversation_id&&context.conversationId&&task.conversation_id!==context.conversationId)){
+    const error=Error('任务与当前项目不匹配，无法恢复。');error.status=403;throw error;
+  }
+}
+function confirmRecoveredConversation(main,state){
+  const context=main?._conversationContext;if(!context?.taskOnly||!context.conversationId)return;
+  api(`/api/v1/conversations/${encodeURIComponent(context.conversationId)}`,{cache:'no-store'}).then(detail=>{
+    if(conversationViewIsCurrent(main,state)&&main._conversationContext===context&&detail.agent_id===context.agentId){context.taskOnly=false;updateComposerRunState(main,state);}
+  }).catch(()=>{});
 }
 function activeConversationTask(detail){
   return [...(detail?.tasks||[])].reverse().find(task=>['queued','running','cancelling'].includes(task.status))||null;
@@ -711,7 +972,48 @@ function restoreActiveConversationTask(main,agentId,detail){
   const body=main.querySelector?.('#chat-body');if(!body||main.querySelector?.('#task-status'))return;
   body.insertAdjacentHTML?.('beforeend',streamingMessageHtml(task.stage==='cancelling'?'正在停止生成':'正在恢复生成'));
   const node=main.querySelector?.('#task-status')||document.querySelector('#task-status');if(!node)return;
-  const state=createStreamingState();state.restored=true;state.sourcePrompt=task.input_text||'';state.status=task.stage==='cancelling'?'正在停止生成':'正在恢复生成';state.follow=shouldAutoFollowStream();setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,phase:task.status==='cancelling'?ConversationRunPhase.STOPPING:ConversationRunPhase.RUNNING,restored:true});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);api(`/api/v1/tasks/${task.id}`).then(current=>{if(node._streamState!==state||state.run?.terminal)return;setStreamingTaskStartedAt(state,current);if(current.current_activity&&applyStreamingEvent(state,'activity',current.current_activity))scheduleStreamingRender(node,state);if(['completed','cancelled','failed'].includes(current.status))finishStreamTask(node,state,current,agentId,main,state.sourcePrompt);}).catch(()=>{});streamTask(task.id,agentId,main,state.sourcePrompt,node,state);
+  const state=createStreamingState();state.main=main;state.owner=main._conversationContext?.owner||principalSnapshot();state.restored=true;state.sourcePrompt=task.input_text||'';state.status=task.stage==='cancelling'?'正在停止生成':'正在恢复生成';state.follow=shouldAutoFollowStream();setStreamingTaskStartedAt(state,task);beginConversationRun(state,{taskId:task.id,agentId,conversationId:detail?.id||main._conversationContext?.conversationId,phase:task.status==='cancelling'||task.stage==='cancelling'?ConversationRunPhase.STOPPING:ConversationRunPhase.RUNNING,restored:true});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);
+  api(`/api/v1/tasks/${encodeURIComponent(task.id)}`,{cache:'no-store'}).then(current=>{
+    if(!conversationViewIsCurrent(main,state)||node._streamState!==state||state.run?.terminal)return;
+    verifyRecoveredTask(main,task.id,current);rememberAcceptedTask(main,agentId,current);setStreamingTaskStartedAt(state,current);
+    if(current.current_activity&&applyStreamingEvent(state,'activity',current.current_activity))scheduleStreamingRender(node,state);
+    if(['completed','cancelled','failed'].includes(current.status))finishStreamTask(node,state,current,agentId,main,state.sourcePrompt);
+    else if(current.stage==='cancelling'){state.run.phase=ConversationRunPhase.STOPPING;updateComposerRunState(main,state);}
+  }).catch(error=>{if(conversationViewIsCurrent(main,state)&&[401,403,404].includes(error.status))replaceTaskFailure(node,error.message,state.sourcePrompt,'',main);});
+  streamTask(task.id,agentId,main,state.sourcePrompt,node,state);
+}
+function restorePendingSubmission(main,agentId){
+  const pending=pendingConversationSubmissions.get(agentSelectionKey(agentId));if(!pending||!principalIsCurrent(pending.owner))return;
+  if(main.querySelector('#task-status'))return;
+  const {input,submit,feedback}=composerRunControls(main);if(input)input.disabled=true;if(submit)submit.disabled=true;
+  if(feedback)feedback.textContent='任务正在提交。切换页面不会取消，也不会重复生成。';
+  pending.promise.then(task=>{
+    if(main.isConnected===false||document.querySelector('#main')!==main||!principalIsCurrent(pending.owner))return;
+    if(!main._conversationContext?.conversationId&&!window.history.state?.newProject){rememberAcceptedTask(main,agentId,task);render(agentPage(agentId));}
+    else{if(input)input.disabled=false;if(submit)submit.disabled=false;if(feedback)feedback.textContent='原任务已提交，可从项目列表查看。';}
+  }).catch(error=>{if(main.isConnected!==false&&principalIsCurrent(pending.owner)){if(input)input.disabled=false;if(submit)submit.disabled=false;if(feedback)feedback.textContent=error.message||'提交结果未确认，请先查看历史记录。';}});
+}
+function restoreConversationTerminalStatus(main,detail){
+  const task=detail?.tasks?.at(-1);if(!task||!['failed','cancelled'].includes(task.status))return;
+  const body=main.querySelector('#chat-body');if(!body?.insertAdjacentHTML)return;
+  body.insertAdjacentHTML('beforeend',`<div class="conversation-terminal-status" data-terminal-task="${escapeHtml(task.id)}"><p role="status" data-terminal-status-text>${task.status==='cancelled'?'已停止生成；未保存的部分回复无法从历史恢复。':'最近一次任务失败，已有历史结果仍可查看。'}</p><button type="button" class="link-button" data-view-task="${escapeHtml(task.id)}">查看任务</button></div>`);
+  main.querySelector('[data-view-task]').onclick=event=>showTaskDetails(main,task.id,event.currentTarget);
+  api(`/api/v1/tasks/${encodeURIComponent(task.id)}`,{cache:'no-store'}).then(current=>{
+    if(main.isConnected===false||!principalIsCurrent(main._conversationContext?.owner))return;verifyRecoveredTask(main,task.id,current);
+    const status=main.querySelector('[data-terminal-status-text]');if(status&&current.status==='failed')status.textContent=current.user_message||current.message||customerErrorMessages.TASK_FAILED;
+  }).catch(error=>{const status=main.querySelector('[data-terminal-status-text]');if(status&&main.isConnected!==false)status.textContent=error.message||'暂时无法读取任务状态，请刷新重试。';});
+}
+async function showTaskDetails(main,taskId,trigger){
+  const owner=principalSnapshot();if(document.querySelector('#customer-task-details'))return;
+  const backdrop=document.createElement('div');backdrop.id='customer-task-details';backdrop.className='dialog-backdrop';
+  backdrop.innerHTML='<section class="profile-editor" role="dialog" aria-modal="true" aria-labelledby="task-details-title"><button type="button" class="dialog-close" aria-label="关闭任务详情">×</button><h2 id="task-details-title">任务详情</h2><div data-task-details-body role="status">正在查询已有任务…</div></section>';
+  app.append(backdrop);bindModalDialog(backdrop,trigger);
+  try{
+    const task=await api(`/api/v1/tasks/${encodeURIComponent(taskId)}`,{cache:'no-store'});if(!backdrop.isConnected||main.isConnected===false||!principalIsCurrent(owner))return;
+    if(task.id!==taskId)throw Error('任务身份不匹配。');
+    const body=backdrop.querySelector('[data-task-details-body]');body.innerHTML=`<p>${escapeHtml(taskStatusLabel(task.status))}</p><dl><dt>Task ID</dt><dd>${escapeHtml(task.id)}</dd>${task.diagnostic_id?`<dt>诊断 ID</dt><dd>${escapeHtml(task.diagnostic_id)}</dd>`:''}</dl>${task.status==='failed'?`<p>${escapeHtml(task.user_message||customerErrorMessages.TASK_FAILED)}</p>`:''}${task.conversation_id?'<button type="button" class="button secondary" data-return-task-project>返回项目</button>':''}`;
+    body.querySelector('[data-return-task-project]')?.addEventListener('click',()=>{if(!principalIsCurrent(owner))return;backdrop.querySelector('.dialog-close').click();selectAgentConversation(task.agent_id,task.conversation_id,{taskId:task.id});});
+  }catch(error){if(backdrop.isConnected&&principalIsCurrent(owner))backdrop.querySelector('[data-task-details-body]').textContent=error.message||'任务不可访问，请从有权限的历史项目重试。';}
 }
 
 async function agentWorkspace(main, agentId) {
@@ -735,7 +1037,7 @@ async function imageAgent(main) {
 async function submitTask(event) { event.preventDefault(); const text=document.querySelector('#prompt').value.trim(); if(!text)return; const body=document.querySelector('#chat-body'); const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId; body.insertAdjacentHTML('beforeend',`<div class="user-message">${escapeHtml(text)}</div><section class="task-card" id="task-status"><div class="task-progress"><span class="done">${icon('check')}</span><b>正在理解需求</b><i></i><span class="spin">${icon('loader-circle')}</span><b>正在读取企业资料</b><i></i><span>${icon('image')}</span><b>正在生成图片</b></div><p>正在结合企业资料生成，请稍等。</p></section>`);refreshIcons(); try{const task=await api('/api/v1/agents/image-agent/runs',{method:'POST',body:JSON.stringify(payload)}); pollTask(task.id);}catch(error){document.querySelector('#task-status').outerHTML=`<p class="error">${escapeHtml(error.message)}</p>`;}}
 async function pollTask(id){try{const task=await api(`/api/v1/tasks/${id}`),card=document.querySelector('#task-status');if(!card)return;if(task.status==='completed'){activeConversationId=task.conversation_id||activeConversationId;const items=await api('/api/v1/generations'),g=items.find(x=>x.task_id===id);card.outerHTML=`<section class="generation-result"><b>${icon('check-circle')} 生成完成</b><p>${escapeHtml(task.final_response||'图片已生成')}</p>${g?`${image(g,'本次生成图片')}<div>${button('查看大图','search','secondary',`onclick="window.open('${storageUrl(g)}','_blank')"`)}<a class="button secondary" href="${storageUrl(g)}" download>${icon('download')}下载</a>${button('保存到企业素材库','folder-plus','primary',`data-save="${g.id}"`)}</div>`:''}</section>`;document.querySelector('[data-save]')?.addEventListener('click',async e=>{await api(`/api/v1/generations/${e.currentTarget.dataset.save}/save-to-assets`,{method:'POST',body:JSON.stringify({name:'AI 生成图片'})});e.currentTarget.disabled=true;e.currentTarget.textContent='已保存';});refreshIcons();return;}if(task.status==='failed'){card.outerHTML=`<p class="error">${escapeHtml(task.user_message||'任务生成失败')}</p>`;return;}card.querySelector('p').textContent=stageMap[task.stage]||'正在生成，请稍等。';setTimeout(()=>pollTask(id),1000);}catch{setTimeout(()=>pollTask(id),2500);}}
 
-async function generations(main){const items=await api('/api/v1/generations');if(main.dataset.page!=='generations')return;main.innerHTML=`${header('我的生成','按创作项目管理全部图片，随时返回对应历史记录。','folder-open')}<div class="toolbar"><span class="muted">共 ${items.length} 条生成记录</span>${button('开始新的创作','plus','primary','data-go="image"')}</div><div class="filter-row"><label>${icon('search')}<input id="generation-filter" aria-label="搜索生成记录" placeholder="搜索项目或生成需求…"></label></div><div class="gallery" id="generation-gallery">${items.map(x=>`<article class="generation-tile" data-generation-search="${escapeHtml(`${x.project?.name||''} ${x.prompt||''}`.toLowerCase())}">${image(x,x.project?.name||'生成图片')}<div><span class="generation-project-type">${escapeHtml(x.project?.type||'图片生成项目')}</span><h3>${escapeHtml(x.project?.name||'已删除的历史项目')}</h3><p>${escapeHtml(x.prompt||'暂无需求摘要')}</p><small>${escapeHtml(formatHistoryTime(x.created_at))}</small><div>${x.project_available?`<button class="button secondary" data-open-project="${escapeHtml(x.conversation_id)}" data-agent-id="${escapeHtml(x.agent?.id||'image-agent')}">${icon('history')}查看历史</button>`:'<span class="muted">历史项目已删除</span>'}<a class="button secondary" href="${escapeHtml(storageUrl(x))}" download>${icon('download')}下载</a><button class="icon-button" aria-label="删除生成记录" title="删除生成记录" data-delete-generation="${escapeHtml(x.id)}">${icon('trash-2')}</button></div></div></article>`).join('')||'<div class="empty-state">还没有图片生成，开始第一次 AI 创作吧。</div>'}</div>`;document.querySelectorAll('[data-delete-generation]').forEach(x=>x.onclick=async()=>{if(!confirm('确定删除这条生成记录吗？'))return;await api(`/api/v1/generations/${x.dataset.deleteGeneration}`,{method:'DELETE'});generations(main);});document.querySelectorAll('[data-open-project]').forEach(node=>node.onclick=()=>{activeConversationId=node.dataset.openProject;activeAgentId=node.dataset.agentId;navigate(agentPage(activeAgentId));});document.querySelector('#generation-filter').oninput=e=>document.querySelectorAll('.generation-tile').forEach(x=>x.hidden=!x.dataset.generationSearch.includes(e.target.value.trim().toLowerCase()));bindNavigation();refreshIcons();}
+async function generations(main){const items=await api('/api/v1/generations',{cache:'no-store'});if(main.dataset.page!=='generations')return;main.innerHTML=`${header('我的生成','按创作项目管理全部图片，随时返回对应历史记录。','folder-open')}<div class="toolbar"><span class="muted">共 ${items.length} 条生成记录</span>${button('开始新的创作','plus','primary','data-go="image"')}</div><div class="filter-row"><label>${icon('search')}<input id="generation-filter" aria-label="搜索生成记录" placeholder="搜索项目或生成需求…"></label></div><div class="gallery" id="generation-gallery">${items.map(x=>`<article class="generation-tile" data-generation-search="${escapeHtml(`${x.project?.name||''} ${x.prompt||''}`.toLowerCase())}">${image(x,x.project?.name||'生成图片')}<div><span class="generation-project-type">${escapeHtml(x.project?.type||'图片生成项目')}</span><h3>${escapeHtml(x.project?.name||'已删除的历史项目')}</h3><p>${escapeHtml(x.prompt||'暂无需求摘要')}</p><small>${escapeHtml(formatHistoryTime(x.created_at))}</small><div>${x.project_available?`<button class="button secondary" data-open-project="${escapeHtml(x.conversation_id)}" data-agent-id="${escapeHtml(x.agent?.id||'image-agent')}">${icon('history')}查看历史</button>`:'<span class="muted">历史项目已删除</span>'}<a class="button secondary" href="${escapeHtml(storageUrl(x))}" download>${icon('download')}下载</a><button class="icon-button" aria-label="删除生成记录" title="删除生成记录" data-delete-generation="${escapeHtml(x.id)}">${icon('trash-2')}</button></div></div></article>`).join('')||'<div class="empty-state">还没有图片生成，开始第一次 AI 创作吧。</div>'}</div>`;document.querySelectorAll('[data-delete-generation]').forEach(x=>x.onclick=async()=>{if(!confirm('确定删除这条生成记录吗？'))return;await api(`/api/v1/generations/${x.dataset.deleteGeneration}`,{method:'DELETE'});generations(main);});document.querySelectorAll('[data-open-project]').forEach(node=>node.onclick=()=>selectAgentConversation(node.dataset.agentId,node.dataset.openProject));document.querySelector('#generation-filter').oninput=e=>document.querySelectorAll('.generation-tile').forEach(x=>x.hidden=!x.dataset.generationSearch.includes(e.target.value.trim().toLowerCase()));bindNavigation();refreshIcons();}
 
 async function knowledge(main){const items=await api('/api/v1/knowledge/files');main.innerHTML=`${header('企业知识库','上传企业文档，构建专属知识库，让 AI 更懂你的业务','book-open')}<div class="content-split"><section><div class="upload-zone"><div>${icon('cloud-upload',42)}<h3>上传知识文件</h3><p>当前版本支持文本知识录入；文件上传与解析待后端能力接入。</p>${button('录入文本知识','plus','primary','id="add-knowledge"')}</div></div><section class="panel table-panel"><div class="section-title"><h2>文件列表 <small>（共 ${items.length} 个）</small></h2><label class="small-search">${icon('search')}<input id="knowledge-filter" placeholder="搜索文件名"></label></div><div class="data-table"><div class="thead"><span>文件名称</span><span>状态</span><span>上传时间</span><span>操作</span></div>${items.map(x=>`<div class="trow"><span>${icon('file-text')}<b>${escapeHtml(x.name)}</b></span><span class="status ready">${icon('check-circle',15)}${statusText(x.status)}</span><span>${escapeHtml(x.created_at||'')}</span><button class="link-button danger" data-delete-knowledge="${x.id}">删除</button></div>`).join('')||'<div class="empty-state">暂无知识文件</div>'}</div></section></section><aside class="right-rail"><section class="panel"><h3>知识库概览</h3><div class="stat-grid"><div><b>${items.length}</b><small>文件总数</small></div><div><b>${items.filter(x=>x.status==='ready').length}</b><small>可用文件</small></div></div></section><section class="panel note"><h3>${icon('lightbulb')} 小提示</h3><p>上传结构清晰的企业资料，可提升 AI 的理解效果。</p></section></aside></div>`;document.querySelector('#add-knowledge').onclick=()=>textKnowledge(main);document.querySelectorAll('[data-delete-knowledge]').forEach(x=>x.onclick=async()=>{await api(`/api/v1/knowledge/files/${x.dataset.deleteKnowledge}`,{method:'DELETE'});knowledge(main);});refreshIcons();}
 function textKnowledge(main){main.querySelector('.upload-zone').innerHTML=`<form id="knowledge-form"><label>标题<input name="name" required placeholder="例如：课程介绍"></label><label>知识内容<textarea name="content" required placeholder="输入企业知识内容…"></textarea></label><button class="button primary" type="submit">提交并处理</button></form>`;main.querySelector('#knowledge-form').onsubmit=async e=>{e.preventDefault();await api('/api/v1/knowledge/text',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});knowledge(main);};}
@@ -779,6 +1081,7 @@ function renderBrandLogoCard(main,state){
   refreshIcons();
 }
 async function uploadBrandLogo(main,state,file){
+  const owner=main._owner||principalSnapshot();
   if(!state.canEdit||state.phase==='uploading')return;
   if(!file){state.phase='error';state.error=brandLogoErrorMessages.LOGO_FILE_REQUIRED;renderBrandLogoCard(main,state);return;}
   state.phase='uploading';state.error='';renderBrandLogoCard(main,state);
@@ -788,17 +1091,30 @@ async function uploadBrandLogo(main,state,file){
     let payload={};try{payload=await response.json();}catch{}
     if(!response.ok)throw payload;
     pageCache.delete('/api/v1/enterprise-config');
-    const config=await api('/api/v1/enterprise-config'),saved=brandLogoMetadata(config.brand_logo);
+    const config=await api('/api/v1/enterprise-config',{cache:'no-store'}),saved=brandLogoMetadata(config.brand_logo);
     if(!saved)throw {code:'LOGO_REFRESH_FAILED'};
+    if(!principalIsCurrent(owner))return;
+    pageCache.delete('/api/v1/workspace');applyEnterpriseBrand(config,'config',owner,{refreshLogo:true});
     state.logo=saved;state.previewVersion=Date.now();state.phase='success';
   }catch(error){state.phase='error';state.error=error?.code==='LOGO_REFRESH_FAILED'?'Logo 已上传，但未能读取最新配置，请刷新页面确认。':brandLogoErrorMessage(error);}
   renderBrandLogoCard(main,state);
 }
 async function enterprise(main){
-  const data=await api('/api/v1/enterprise-config');
-  main.innerHTML=`${header('企业配置','设置企业的品牌信息与内容规则，AI 将基于这些配置创作内容。','settings')}<div class="config-layout"><form id="config-form"><section class="panel form-section"><h2>${icon('building-2')} 企业信息</h2><div class="form-grid"><label>企业名称<input name="brand_name" value="${escapeHtml(data.brand_name||'')}"></label><label>企业简介<textarea name="company_intro" placeholder="介绍企业的定位与业务范围">${escapeHtml(data.company_intro||'')}</textarea></label></div></section><section class="panel form-section"><h2>${icon('palette')} 品牌设置</h2><div class="form-grid"><label>品牌主色<input name="primary_color" value="${escapeHtml(data.primary_color||'#2563EB')}"></label><label>品牌辅色<input name="secondary_color" value="${escapeHtml(data.secondary_color||'#F59E0B')}"></label><label>品牌 Slogan<input name="slogan" value="${escapeHtml(data.slogan||'')}"></label><label>品牌标签<input name="brand_tags" value="${escapeHtml((data.brand_tags||[]).join('、'))}"></label></div></section><section class="panel form-section brand-logo-card" id="brand-logo-card" aria-label="品牌 Logo"></section><section class="panel form-section"><h2>${icon('shield-check')} 内容规则</h2><div class="form-grid"><label>目标用户<input name="target_users" value="${escapeHtml(data.target_users||'')}"></label><label>必须遵循的规则<textarea name="required_rules">${escapeHtml((data.required_rules||[]).join('\n'))}</textarea></label><label>禁止内容<textarea name="forbidden_claims">${escapeHtml((data.forbidden_claims||[]).join('\n'))}</textarea></label><label>自定义规则<textarea name="custom_rules">${escapeHtml((data.custom_rules||[]).join('\n'))}</textarea></label></div></section><div class="form-actions">${button('取消','x')}<button class="button primary" type="submit">${icon('save')}保存配置</button></div></form><aside class="panel brand-preview"><h3>品牌效果预览</h3><div class="brand-preview-art" style="--brand:${escapeHtml(data.primary_color||'#2563EB')};--accent:${escapeHtml(data.secondary_color||'#F59E0B')}"><b>${escapeHtml(data.brand_name||'企业品牌')}</b><span>${escapeHtml(data.slogan||'让 AI 成为创造力')}</span></div><h3>品牌信息</h3><p><b>主色</b> ${escapeHtml(data.primary_color||'未设置')}</p><p><b>辅色</b> ${escapeHtml(data.secondary_color||'未设置')}</p><p><b>规则</b> 后续 AI 创作将自动遵循</p></aside></div>`;
+  const owner=main._owner||principalSnapshot(),data=await api('/api/v1/enterprise-config',{cache:'no-store'});if(main.isConnected===false||!principalIsCurrent(owner))return;applyEnterpriseBrand(data,'config',owner);
+  main.innerHTML=`${header('企业配置','设置企业的品牌信息与内容规则，AI 将基于这些配置创作内容。','settings')}<p class="company-config-feedback" role="status" aria-live="polite"></p><div class="config-layout"><form id="config-form"><section class="panel form-section"><h2>${icon('building-2')} 企业信息</h2><div class="form-grid"><label>企业名称<input name="brand_name" value="${escapeHtml(data.brand_name||'')}"></label><label>企业简介<textarea name="company_intro" placeholder="介绍企业的定位与业务范围">${escapeHtml(data.company_intro||'')}</textarea></label></div></section><section class="panel form-section"><h2>${icon('palette')} 品牌设置</h2><div class="form-grid"><label>品牌主色<input name="primary_color" value="${escapeHtml(data.primary_color||'#2563EB')}"></label><label>品牌辅色<input name="secondary_color" value="${escapeHtml(data.secondary_color||'#F59E0B')}"></label><label>品牌 Slogan<input name="slogan" value="${escapeHtml(data.slogan||'')}"></label><label>品牌标签<input name="brand_tags" value="${escapeHtml((data.brand_tags||[]).join('、'))}"></label></div></section><section class="panel form-section brand-logo-card" id="brand-logo-card" aria-label="品牌 Logo"></section><section class="panel form-section"><h2>${icon('shield-check')} 内容规则</h2><div class="form-grid"><label>目标用户<input name="target_users" value="${escapeHtml(data.target_users||'')}"></label><label>必须遵循的规则<textarea name="required_rules">${escapeHtml((data.required_rules||[]).join('\n'))}</textarea></label><label>禁止内容<textarea name="forbidden_claims">${escapeHtml((data.forbidden_claims||[]).join('\n'))}</textarea></label><label>自定义规则<textarea name="custom_rules">${escapeHtml((data.custom_rules||[]).join('\n'))}</textarea></label></div></section><div class="form-actions">${button('取消','x')}<button class="button primary" type="submit">${icon('save')}保存配置</button></div></form><aside class="panel brand-preview"><h3>品牌效果预览</h3><div class="brand-preview-art" style="--brand:${escapeHtml(data.primary_color||'#2563EB')};--accent:${escapeHtml(data.secondary_color||'#F59E0B')}"><span class="company-preview-logo" data-company-logo>${companyLogoMarkup()}</span><b data-company-name>${escapeHtml(companyDisplayName())}</b><span>${escapeHtml(data.slogan||'让 AI 成为创造力')}</span></div><h3>品牌信息</h3><p><b>主色</b> ${escapeHtml(data.primary_color||'未设置')}</p><p><b>辅色</b> ${escapeHtml(data.secondary_color||'未设置')}</p><p><b>规则</b> 后续 AI 创作将自动遵循</p></aside></div>`;
   renderBrandLogoCard(main,{logo:data.brand_logo,phase:'idle',error:'',previewVersion:Date.now(),canEdit:me?.role==='enterprise_admin'});
-  main.querySelector('#config-form').onsubmit=async e=>{e.preventDefault();const p=Object.fromEntries(new FormData(e.target));['brand_tags','required_rules','forbidden_claims','custom_rules'].forEach(k=>p[k]=p[k].split(/[\n、,]/).map(x=>x.trim()).filter(Boolean));await api('/api/v1/enterprise-config',{method:'PUT',body:JSON.stringify({payload:p})});alert('企业配置已保存');};refreshIcons();
+  main.querySelector('#config-form').onsubmit=async e=>{
+    e.preventDefault();if(!principalIsCurrent(owner))return;
+    const form=e.target,submit=form.querySelector('[type="submit"]'),feedback=main.querySelector('.company-config-feedback');if(submit.disabled)return;
+    const p=Object.fromEntries(new FormData(form));['brand_tags','required_rules','forbidden_claims','custom_rules'].forEach(k=>p[k]=p[k].split(/[\n、,]/).map(x=>x.trim()).filter(Boolean));submit.disabled=true;feedback.textContent='正在保存企业配置…';let saved=false;
+    try{
+      const current=await api('/api/v1/me',{cache:'no-store'});if(current.user_id!==owner.userId||current.tenant_id!==owner.tenantId||current.role!=='enterprise_admin')throw Error('登录身份已变化，未提交企业配置。');
+      await api('/api/v1/enterprise-config',{method:'PUT',body:JSON.stringify({payload:p})});saved=true;
+      const config=await api('/api/v1/enterprise-config',{cache:'no-store'});if(!principalIsCurrent(owner))return;applyEnterpriseBrand(config,'config',owner);
+      if(main.isConnected!==false){await enterprise(main);main.querySelector('.company-config-feedback').textContent='企业配置已保存，企业名称和品牌展示已同步。';}
+    }catch(error){if(main.isConnected!==false&&principalIsCurrent(owner))feedback.textContent=saved?'配置已保存，但最新显示信息读取失败，请刷新确认。':error.message||'企业配置保存失败，原展示信息未改变。';}
+    finally{if(main.isConnected!==false)submit.disabled=false;}
+  };refreshIcons();
 }
 
 async function members(main){
@@ -827,7 +1143,13 @@ async function billing(main){const [data, gens]=await Promise.all([api('/api/v1/
 
 async function profile(main){const workspaceData=await api('/api/v1/workspace');const enterpriseName=workspaceData.brand_name||workspaceData.tenant_name||me.tenant_id;main.innerHTML=`${header('个人中心','管理个人信息与账号安全','user-round')}<div class="profile-layout"><section class="profile-card"><div class="profile-card-heading"><div><h2>基本资料</h2><p>完善个人资料，便于团队协作</p></div><button class="button secondary" disabled title="个人资料编辑 API 尚未接入">${icon('pencil')}编辑资料</button></div><div class="profile-identity"><span class="profile-avatar">${escapeHtml((me.display_name||'我')[0])}</span><div><h2>${escapeHtml(me.display_name)}</h2><span class="role-badge">${roleName(me.role)}</span><p>${escapeHtml(enterpriseName)}</p></div></div><dl class="profile-list"><div><dt>${icon('user-round')}姓名</dt><dd>${escapeHtml(me.display_name)}</dd></div>${me.email?`<div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd></div>`:''}<div><dt>${icon('building-2')}所属企业</dt><dd>${escapeHtml(enterpriseName)}</dd></div><div><dt>${icon('users')}角色</dt><dd>${roleName(me.role)}</dd></div></dl></section><section class="profile-card" id="security"><div class="profile-card-heading"><div><h2>账号安全</h2><p>保护你的登录账号与数据</p></div></div><dl class="profile-list security-list"><div><dt>${icon('lock-keyhole')}登录密码</dt><dd>********</dd><button class="button secondary" disabled title="修改密码 API 尚未接入">修改密码</button></div>${me.email?`<div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd><span class="binding-status">${icon('check-circle',16)}已绑定</span></div>`:''}</dl><p class="backend-dependency">资料编辑、手机号和密码修改将在普通产品账号 API 接入后开放；企业、角色、权限与积分始终只读。</p></section></div>`;refreshIcons();}
 
-async function profileV2(main){const workspaceData=await api('/api/v1/workspace');const enterpriseName=workspaceData.brand_name||workspaceData.tenant_name||me.tenant_name||me.tenant_id;main.innerHTML=`${header('个人中心','管理个人信息与账号安全','user-round')}<p class="page-feedback" role="status" aria-live="polite"></p><div class="profile-layout"><section class="profile-card"><div class="profile-card-heading"><div><h2>基本资料</h2><p>完善个人资料，便于团队协作</p></div><button class="button secondary" id="edit-profile">${icon('pencil')}编辑资料</button></div><div class="profile-identity">${avatarMarkup('profile-avatar','当前头像')}<div><h2>${escapeHtml(me.display_name)}</h2><span class="role-badge">${roleName(me.role)}</span><p>${escapeHtml(enterpriseName)}</p></div></div><dl class="profile-list"><div><dt>${icon('user-round')}姓名</dt><dd>${escapeHtml(me.display_name)}</dd></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd></div><div><dt>${icon('building-2')}所属企业</dt><dd>${escapeHtml(enterpriseName)}</dd></div><div><dt>${icon('users')}角色</dt><dd>${roleName(me.role)}</dd></div></dl></section><section class="profile-card" id="security"><div class="profile-card-heading"><div><h2>账号安全</h2><p>保护你的登录账号与数据</p></div></div><dl class="profile-list security-list"><div><dt>${icon('lock-keyhole')}登录密码</dt><dd>********</dd><button class="button secondary" id="change-password">修改密码</button></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd><span class="binding-status">${icon('check-circle',16)}已绑定</span></div></dl><p class="backend-dependency">企业、角色、权限与积分保持只读。</p></section></div>`;main.querySelector('#edit-profile').onclick=()=>openProfileEditor();main.querySelector('#change-password').onclick=()=>openPasswordEditor(main);refreshIcons();}
+async function profileV2(main){const owner=main._owner||principalSnapshot(),workspaceData=await api('/api/v1/workspace',{cache:'no-store'});if(main.isConnected===false||!principalIsCurrent(owner))return;applyEnterpriseBrand(workspaceData,'workspace',owner);const enterpriseName=companyDisplayName();main.innerHTML=`${header('个人中心','管理个人信息与账号安全','user-round')}<p class="page-feedback" role="status" aria-live="polite"></p><div class="profile-layout"><section class="profile-card"><div class="profile-card-heading"><div><h2>基本资料</h2><p>完善个人资料，便于团队协作</p></div><button class="button secondary" id="edit-profile">${icon('pencil')}编辑资料</button></div><div class="profile-identity">${avatarMarkup('profile-avatar','当前头像')}<div><h2>${escapeHtml(me.display_name)}</h2><span class="role-badge">${roleName(me.role)}</span><p data-company-name>${escapeHtml(enterpriseName)}</p></div></div><dl class="profile-list"><div><dt>${icon('user-round')}姓名</dt><dd>${escapeHtml(me.display_name)}</dd></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd></div><div><dt>${icon('building-2')}所属企业</dt><dd data-company-name>${escapeHtml(enterpriseName)}</dd></div><div><dt>${icon('users')}角色</dt><dd>${roleName(me.role)}</dd></div></dl></section><section class="profile-card" id="security"><div class="profile-card-heading"><div><h2>账号安全</h2><p>保护你的登录账号与数据</p></div></div><dl class="profile-list security-list"><div><dt>${icon('lock-keyhole')}登录密码</dt><dd>********</dd><button class="button secondary" id="change-password">修改密码</button></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd><span class="binding-status">${icon('check-circle',16)}已绑定</span></div></dl><p class="backend-dependency">企业、角色、权限与积分保持只读。</p></section></div>`;main.querySelector('#edit-profile').onclick=()=>openProfileEditor();main.querySelector('#change-password').onclick=()=>openPasswordEditor(main);refreshIcons();}
+function mountWechatArticle(main,article,content,messageId){
+  const context=main?._wechatArticleContext;
+  if(!context||context.agent.slug!=='wechat-official-account-writing'||!article)return;
+  window.WorkbenchWechatArticle?.mountManual({main,article,content,messageId,...context,markdown:markdownHtml,modal:bindModalDialog,inlineBody:true,
+    isCurrent:()=>Boolean(context.userId&&context.tenantId&&me?.user_id===context.userId&&me?.tenant_id===context.tenantId&&document.querySelector('#main')===main&&main._wechatArticleContext===context)});
+}
 function openPasswordEditor(main){
   app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="password-editor" role="presentation"><form class="profile-editor" aria-labelledby="password-editor-title"><button type="button" class="dialog-close" aria-label="关闭修改密码">${icon('x')}</button><h2 id="password-editor-title">修改密码</h2><p>修改后，下次登录请使用新密码。</p><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required minlength="8"></label><label>新密码<input name="new_password" type="password" autocomplete="new-password" required minlength="8"></label><label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" required minlength="8"></label><p class="form-error" role="alert"></p><div class="editor-actions"><button type="button" class="button secondary" data-close-editor>取消</button><button class="button primary" type="submit">保存新密码</button></div></form></div>`);
   const dialog=document.querySelector('#password-editor'),form=dialog.querySelector('form'),close=bindModalDialog(dialog);dialog.querySelector('[data-close-editor]').onclick=close;
@@ -840,11 +1162,32 @@ function bindModalDialog(container,trigger=document.activeElement){const request
 function showHelpDialog(){const current=document.querySelector('#help-dialog');if(current){current.querySelector('.dialog-close')?.focus();return;}app.insertAdjacentHTML('beforeend',`<div class="dialog-backdrop" id="help-dialog" role="presentation"><section class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title"><button type="button" class="dialog-close" aria-label="关闭帮助弹窗">${icon('x')}</button>${icon('circle-help',30)}<h2 id="help-title">帮助与反馈</h2><p>如在使用过程中遇到问题，请联系企业管理员或平台服务人员。</p></section></div>`);const dialog=document.querySelector('#help-dialog');bindModalDialog(dialog);refreshIcons();}
 function bindGenerationViewers(){document.querySelectorAll('[data-generation-link]:not([data-viewer-bound])').forEach(link=>{link.dataset.viewerBound='true';link.addEventListener('click',event=>{event.preventDefault();if(link.classList.contains('media-failed'))return;openGenerationViewer(link.href,link.querySelector('img')?.alt||'生成图片',link);});});document.querySelectorAll('.generation-result [onclick]:not([data-viewer-bound])').forEach(button=>{button.dataset.viewerBound='true';button.addEventListener('click',event=>{event.preventDefault();event.stopImmediatePropagation();const result=button.closest('.generation-result'),link=result?.querySelector('.media-thumb');if(link&&!link.classList.contains('media-failed'))openGenerationViewer(link.href,link.querySelector('img')?.alt||'生成图片',button);},{capture:true});});}
 function openGenerationViewer(source,alt,trigger=null){if(document.querySelector('#generation-viewer'))return;const origin=trigger||document.activeElement;app.insertAdjacentHTML('beforeend',`<div class="generation-viewer" id="generation-viewer" role="presentation"><section class="generation-viewer-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(alt)}大图预览"><header><b>${icon('image',18)}生成图片</b><div><a href="${escapeHtml(source)}" download class="viewer-download">${icon('download',18)}下载</a><button type="button" class="dialog-close" aria-label="关闭大图预览">${icon('x')}</button></div></header><div class="viewer-canvas"><img src="${escapeHtml(source)}" alt="${escapeHtml(alt)}"></div></section></div>`);const viewer=document.querySelector('#generation-viewer');bindModalDialog(viewer,origin);refreshIcons();}
-async function logout(){await api('/api/v1/auth/logout',{method:'POST'});me=null;activeConversationId=null;activityPlanDocuments.clear();activityPlanBrandName='';clearActivityPlanSessionDocuments();login();}
-function bindNavigation(){document.querySelectorAll('[data-go]').forEach(x=>x.onclick=event=>{const modified=event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey;if(x.matches('a[href]')&&modified)return;event.preventDefault();navigate(x.dataset.go);});document.querySelectorAll('[data-conversation]').forEach(x=>x.onclick=()=>{activeAgentId='image-agent';activeConversationId=x.dataset.conversation;navigate('image');});}
-async function boot(){try{me=await api('/api/v1/me');const requested=pageFromNavigation(),path=pageRoutes[requested]||location.pathname;window.history.replaceState(navigationState(requested),'',path);shell(requested);}catch{login();}}
+async function logout(){await api('/api/v1/auth/logout',{method:'POST'});resetSessionViews();me=null;activeConversationId=null;activityPlanDocuments.clear();activityPlanBrandName='';clearActivityPlanSessionDocuments();login();}
+function bindNavigation(){document.querySelectorAll('[data-go]').forEach(x=>x.onclick=event=>{const modified=event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey;if(x.matches('a[href]')&&modified)return;event.preventDefault();navigate(x.dataset.go);});document.querySelectorAll('[data-conversation]').forEach(x=>x.onclick=()=>selectAgentConversation('image-agent',x.dataset.conversation));}
+async function boot(){
+  try{
+    const user=await api('/api/v1/me',{cache:'no-store'});if(me&&(me.user_id!==user.user_id||me.tenant_id!==user.tenant_id||me.role!==user.role||Boolean(me.is_platform_admin)!==Boolean(user.is_platform_admin)))resetSessionViews();me=user;
+    const owner=principalSnapshot();try{applyEnterpriseBrand(await api('/api/v1/workspace',{cache:'no-store'}),'workspace',owner);}catch(error){if(error.status===401)throw error;}
+    if(me.role==='enterprise_admin')api('/api/v1/enterprise-config',{cache:'no-store'}).then(config=>applyEnterpriseBrand(config,'config',owner)).catch(error=>{if(error.status===401&&principalIsCurrent(owner))login();});
+    const requested=pageFromNavigation(),path=agentNavigationPath(requested,activeConversationId);window.history.replaceState({...navigationState(requested),newProject:Boolean(window.history.state?.newProject)},'',path);shell(requested);
+  }catch{login();}
+}
+let brandRefreshInFlight=false,lastBrandRefreshAt=0;
+async function refreshBrandOnFocus(){
+  if(!me||brandRefreshInFlight||Date.now()-lastBrandRefreshAt<1000)return;
+  brandRefreshInFlight=true;lastBrandRefreshAt=Date.now();const owner=principalSnapshot();
+  try{
+    const current=await api('/api/v1/me',{cache:'no-store'});if(!principalIsCurrent(owner))return;
+    if(current.user_id!==owner.userId||current.tenant_id!==owner.tenantId||current.role!==owner.role||Boolean(current.is_platform_admin)!==owner.platformAdmin){await boot();return;}
+    applyEnterpriseBrand(await api('/api/v1/workspace',{cache:'no-store'}),'workspace',owner);
+    if(me.role==='enterprise_admin')applyEnterpriseBrand(await api('/api/v1/enterprise-config',{cache:'no-store'}),'config',owner,{refreshLogo:true});
+  }catch(error){if(error.status===401&&principalIsCurrent(owner))login();}
+  finally{brandRefreshInFlight=false;}
+}
+window.addEventListener('focus',refreshBrandOnFocus);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshBrandOnFocus();});
 const knowledgeStatus = value => ({uploaded:'已上传',queued:'排队中',parsing:'知识处理中',chunking:'知识处理中',embedding:'知识处理中',indexing:'知识处理中',ready:'已完成',failed:'失败'})[value]||value;
-const recentTaskStatus = value => ({queued:'排队中',running:'处理中',completed:'已完成',failed:'失败'})[value]||'处理中';
+const recentTaskStatus = value => taskStatusLabel(value);
 async function recentTasks(main){
   const agents=await api('/api/v1/agents');
   let filters={days:'7',status:'all',agent_id:''};
@@ -852,9 +1195,9 @@ async function recentTasks(main){
     const query=new URLSearchParams({days:filters.days,status:filters.status});if(filters.agent_id)query.set('agent_id',filters.agent_id);
     const data=await api(`/api/v1/admin/recent-tasks?${query}`);if(main.dataset.page!=='recent-tasks')return;
     const summary=data.summary||{},rows=data.tasks||[];
-    main.innerHTML=`${header('最近任务','查看本企业近期任务和基础积分使用情况。','list-checks')}<section class="usage-summary"><article><b>${summary.task_count||0}</b><span>任务数</span></article><article><b>${summary.completed_count||0}</b><span>成功数</span></article><article><b>${summary.failed_count||0}</b><span>失败数</span></article><article><b>${summary.credit_used||0}</b><span>积分消耗</span></article></section><section class="panel recent-task-panel"><div class="recent-task-filters"><label><span>时间</span><select id="recent-days"><option value="7" ${filters.days==='7'?'selected':''}>最近 7 天</option><option value="30" ${filters.days==='30'?'selected':''}>最近 30 天</option></select></label><label><span>状态</span><select id="recent-status"><option value="all" ${filters.status==='all'?'selected':''}>全部</option><option value="processing" ${filters.status==='processing'?'selected':''}>处理中</option><option value="completed" ${filters.status==='completed'?'selected':''}>已完成</option><option value="failed" ${filters.status==='failed'?'selected':''}>失败</option></select></label><label><span>智能体</span><select id="recent-agent"><option value="">全部</option>${agents.map(agent=>`<option value="${escapeHtml(agent.id)}" ${filters.agent_id===agent.id?'selected':''}>${escapeHtml(agent.name)}</option>`).join('')}</select></label></div><div class="recent-task-list">${rows.map(item=>`<article><time>${escapeHtml(formatHistoryTime(item.completed_at||item.started_at||item.created_at))}</time><div><b>${escapeHtml(item.member_name||'成员')}</b><small>${escapeHtml(item.agent_name||item.agent_id)}</small></div><span class="status ${escapeHtml(item.status)}">${escapeHtml(recentTaskStatus(item.status))}</span><span>${item.credit_used||0} 积分</span><div class="recent-task-reason">${item.status==='failed'?`<b>${escapeHtml(item.user_message||customerErrorMessages.TASK_FAILED)}</b>${item.diagnostic_id?`<small>诊断 ID：${escapeHtml(item.diagnostic_id)}</small>`:''}`:'—'}</div></article>`).join('')||'<div class="empty-state">当前筛选范围内暂无任务。</div>'}</div></section>`;
+main.innerHTML=`${header('最近任务','查看本企业近期任务和基础积分使用情况。','list-checks')}<section class="usage-summary"><article><b>${summary.task_count||0}</b><span>任务数</span></article><article><b>${summary.completed_count||0}</b><span>成功数</span></article><article><b>${summary.failed_count||0}</b><span>失败数</span></article><article><b>${summary.credit_used||0}</b><span>积分消耗</span></article></section><section class="panel recent-task-panel"><div class="recent-task-filters"><label><span>时间</span><select id="recent-days"><option value="7" ${filters.days==='7'?'selected':''}>最近 7 天</option><option value="30" ${filters.days==='30'?'selected':''}>最近 30 天</option></select></label><label><span>状态</span><select id="recent-status"><option value="all" ${filters.status==='all'?'selected':''}>全部</option><option value="processing" ${filters.status==='processing'?'selected':''}>处理中</option><option value="completed" ${filters.status==='completed'?'selected':''}>已完成</option><option value="failed" ${filters.status==='failed'?'selected':''}>失败</option></select></label><label><span>智能体</span><select id="recent-agent"><option value="">全部</option>${agents.map(agent=>`<option value="${escapeHtml(agent.id)}" ${filters.agent_id===agent.id?'selected':''}>${escapeHtml(agent.name)}</option>`).join('')}</select></label></div><div class="recent-task-list">${rows.map(item=>`<article><time>${escapeHtml(formatHistoryTime(item.completed_at||item.started_at||item.created_at))}</time><div><b>${escapeHtml(item.member_name||'成员')}</b><small>${escapeHtml(item.agent_name||item.agent_id)}</small></div><span class="status ${escapeHtml(item.status)}">${escapeHtml(recentTaskStatus(item.status))}</span><span>${item.credit_used||0} 积分</span><div class="recent-task-reason">${item.status==='failed'?`<b>${escapeHtml(item.user_message||customerErrorMessages.TASK_FAILED)}</b>${item.diagnostic_id?`<small>诊断 ID：${escapeHtml(item.diagnostic_id)}</small>`:''}`:'—'}<button type="button" class="button secondary" data-recent-task-detail="${escapeHtml(item.id)}">查看任务</button></div></article>`).join('')||'<div class="empty-state">当前筛选范围内暂无任务。</div>'}</div></section>`;
     const update=()=>{filters={days:main.querySelector('#recent-days').value,status:main.querySelector('#recent-status').value,agent_id:main.querySelector('#recent-agent').value};draw();};
-    main.querySelectorAll('#recent-days,#recent-status,#recent-agent').forEach(node=>node.onchange=update);refreshIcons();
+    main.querySelectorAll('#recent-days,#recent-status,#recent-agent').forEach(node=>node.onchange=update);main.querySelectorAll('[data-recent-task-detail]').forEach(node=>node.onclick=()=>showTaskDetails(main,node.dataset.recentTaskDetail,node));refreshIcons();
   };
   await draw();
 }

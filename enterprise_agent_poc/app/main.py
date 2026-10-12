@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -675,6 +675,32 @@ async def agent_metadata(agent_id: str, workbench_session: str | None = Cookie(d
     if not agent:
         raise HTTPException(404,"该智能体暂不可用。")
     return agent
+
+
+@app.get("/api/v1/tasks/orphans")
+async def discover_own_orphan_tasks(
+    request: Request,
+    response: Response,
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: UUID | None = Query(default=None),
+    status: Literal["all", "queued", "running", "completed", "failed", "cancelled"] = Query(default="all"),
+    agent_id: str | None = Query(default=None, min_length=1, max_length=120),
+    created_from: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
+    workbench_session: str | None = Cookie(default=None),
+) -> dict:
+    principal = current_user(workbench_session)
+    response.headers["Cache-Control"] = "private, no-store"
+    allowed = {"limit", "cursor", "status", "agent_id", "created_from", "created_before"}
+    if set(request.query_params) - allowed or any(len(request.query_params.getlist(key)) != 1 for key in request.query_params):
+        raise HTTPException(422, "任务筛选条件无效。")
+    try:
+        return product_store.orphan_tasks(
+            principal.tenant_id, principal.user_id, limit=limit, cursor=str(cursor) if cursor else None,
+            status=status, agent_id=agent_id, created_from=created_from, created_before=created_before,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/v1/tasks/{task_id}")

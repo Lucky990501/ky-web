@@ -24,6 +24,13 @@ class ManifestContractError(ValueError):
 
 
 def validate_runtime_only_release(value: object) -> None:
+    if isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 2:
+        from scripts.schema015_successor_binding import validate, BindingBlocked
+        try:
+            validate(value)
+        except BindingBlocked as exc:
+            raise ManifestContractError(str(exc)) from None
+        return
     require(isinstance(value, dict) and type(value.get("schema_version")) is int
             and type(value.get("pending")) is int and type(value.get("unknown")) is int
             and type(value.get("checksum_drift")) is int and value == {
@@ -226,6 +233,11 @@ def validate_manifest_contract(manifest: object) -> dict:
         validate_runtime_only_release(manifest["runtime_only_release"])
         require(not ((OPTIONAL_FIELDS - {"runtime_only_release"}) & fields),
                 "runtime_only_release_code_only_scope")
+        if manifest["runtime_only_release"]["schema_version"] == 2:
+            from scripts.schema015_successor_binding import TOOLING_FILES
+            require(manifest["runtime_only_release"]["successor"]["source_commit"] == manifest["source_commit"]
+                    and all("enterprise_agent_poc/" + p in manifest["selected_files"] for p in TOOLING_FILES),
+                    "successor_manifest_binding")
     if "forward_migrations" in manifest:
         validate_forward_migrations(manifest["forward_migrations"])
     if "deferred_skill" in manifest:

@@ -513,13 +513,74 @@ class ProductStore:
             if response is not None:
                 conn.execute("INSERT INTO task_results(task_id,final_response,result_json) VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET final_response=excluded.final_response,result_json=excluded.result_json", (task_id,response,json.dumps({"run_id":run_id},ensure_ascii=False)))
 
-    def attach_task_run(self, task_id: str, tenant_id: str, run_id: str, conversation_id: str) -> None:
-        """Expose a started Run to cancellation without advancing task state."""
+    def attach_task_run(self, task_id: str, tenant_id: str, run_id: str, conversation_id: str,
+                        *, user_id: str | None = None) -> bool:
+        """Bind a real Run, then retain history as soon as its Conversation exists.
+
+        The first startup notification may precede session initialization. It
+        keeps cancellation/diagnostics working but must not invent a Conversation
+        or owner. The post-initialization notification reuses this transaction.
+        Neither notification advances task state or persists a successful result.
+        """
         with self._store.connection() as conn:
+            if not self._store.is_postgres:
+                conn.execute("BEGIN IMMEDIATE")
+            lock = " FOR UPDATE" if self._store.is_postgres else ""
+            task = conn.execute(
+                "SELECT * FROM tasks WHERE id=? AND tenant_id=?" + lock, (task_id, tenant_id),
+            ).fetchone()
+            if not task:
+                raise LookupError("任务不存在。")
+            actor = task["user_id"]
+            if user_id is not None and actor != user_id:
+                raise PermissionError("任务用户归属不匹配。")
+            if not conn.execute("SELECT 1 FROM users WHERE id=? AND tenant_id=?", (actor, tenant_id)).fetchone():
+                raise PermissionError("任务用户归属不匹配。")
+            if ((task["run_id"] and task["run_id"] != run_id)
+                    or (task["conversation_id"] and task["conversation_id"] != conversation_id)):
+                raise ValueError("Task/Run association mismatch.")
+            if (task["status"] in {"completed", "failed", "cancelled"}
+                    and (task["run_id"] != run_id or task["conversation_id"] != conversation_id)):
+                raise ValueError("Terminal Task/Run association missing.")
+            trace = conn.execute(
+                "SELECT status,codex_thread_id FROM run_traces WHERE run_id=? AND tenant_id=? "
+                "AND conversation_id=? AND agent_id=?" + lock,
+                (run_id, tenant_id, conversation_id, task["agent_id"]),
+            ).fetchone()
+            if not trace:
+                raise ValueError("Task/Run association mismatch.")
+            # The trace lock serializes attempts to reuse one Run for two Tasks;
+            # the Conversation lock below serializes different initial owners.
+            conflict = conn.execute(
+                "SELECT 1 FROM tasks WHERE id<>? AND (run_id=? OR "
+                "(conversation_id=? AND (tenant_id<>? OR user_id<>?))) LIMIT 1",
+                (task_id, run_id, conversation_id, tenant_id, actor),
+            ).fetchone()
+            if conflict:
+                raise PermissionError("任务运行归属冲突。")
+            conversation = conn.execute(
+                "SELECT tenant_id,agent_id FROM conversations WHERE id=?" + lock, (conversation_id,),
+            ).fetchone()
+            if conversation:
+                if conversation["tenant_id"] != tenant_id or conversation["agent_id"] != task["agent_id"]:
+                    raise PermissionError("会话归属不匹配。")
+                conn.execute(
+                    "INSERT OR IGNORE INTO conversation_owners(conversation_id,user_id,title) VALUES (?,?,?)",
+                    (conversation_id, actor, _project_title(task["agent_id"], task["input_text"])),
+                )
+                owner = conn.execute(
+                    "SELECT user_id FROM conversation_owners WHERE conversation_id=?", (conversation_id,),
+                ).fetchone()
+                if not owner or owner["user_id"] != actor:
+                    raise PermissionError("会话用户归属不匹配。")
+                # Do not overwrite a custom title or resurrect deleted history.
+            elif trace["status"] != "running" or trace["codex_thread_id"] != "pending":
+                raise LookupError("会话不存在。")
             conn.execute(
                 "UPDATE tasks SET run_id=?,conversation_id=COALESCE(conversation_id,?) WHERE id=? AND tenant_id=? AND status NOT IN ('completed','failed','cancelled')",
                 (run_id, conversation_id, task_id, tenant_id),
             )
+            return conversation is not None
 
     def cancellation_requested(self, task_id: str, tenant_id: str) -> bool:
         with self._store.connection() as conn:
@@ -994,6 +1055,81 @@ class ProductStore:
         with self._store.connection() as conn:
             cursor=conn.execute("UPDATE conversation_owners SET deleted_at=CURRENT_TIMESTAMP WHERE conversation_id=? AND user_id=? AND EXISTS (SELECT 1 FROM conversations WHERE id=? AND tenant_id=?)",(conversation_id,user_id,conversation_id,tenant_id))
         return cursor.rowcount == 1
+
+    def orphan_tasks(self, tenant_id: str, user_id: str, *, limit: int = 25,
+                     cursor: str | None = None, status: str = "all", agent_id: str | None = None,
+                     created_from: datetime | None = None, created_before: datetime | None = None) -> dict:
+        """Read-only owner discovery; a Task cursor is a position, not authority.
+
+        An existing owner (even soft-deleted) keeps a Task in the Conversation
+        contract, never a duplicate orphan project. A pre-session UUID is not a
+        real Conversation and does not prevent finding the accepted Task here.
+        """
+        if not 1 <= limit <= 100 or status not in {"all", "queued", "running", "completed", "failed", "cancelled"}:
+            raise ValueError("任务筛选条件无效。")
+        if any(value is not None and value.utcoffset() is None for value in (created_from, created_before)):
+            raise ValueError("时间筛选必须包含时区。")
+        if created_from and created_before and created_from >= created_before:
+            raise ValueError("时间筛选范围无效。")
+
+        def canonical_time(value):
+            # psycopg returns datetime; SQLite returns text. Do not compare
+            # SQLite's CURRENT_TIMESTAMP and ISO strings lexicographically.
+            if isinstance(value, datetime):
+                return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+            return self._recent_task_time(value)
+
+        with self._store.connection() as conn:
+            from app.agent_availability import release_provenance_available, retired_validation_task
+            time_expr = "t.created_at" if self._store.is_postgres else "julianday(t.created_at)"
+            bound_expr = "?" if self._store.is_postgres else "julianday(?)"
+            conditions = [
+                "t.tenant_id=?", "t.user_id=?",
+                "NOT EXISTS (SELECT 1 FROM conversation_owners o WHERE o.conversation_id=t.conversation_id)",
+                "NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id=t.conversation_id "
+                "AND (c.tenant_id<>t.tenant_id OR c.agent_id<>t.agent_id))",
+            ]
+            params: list = [tenant_id, user_id]
+            if status != "all":
+                conditions.append("t.status=?")
+                params.append(status)
+            if agent_id is not None:
+                conditions.append("t.agent_id=?")
+                params.append(agent_id)
+            for value, operator in ((created_from, ">="), (created_before, "<")):
+                if value is not None:
+                    conditions.append(f"{time_expr}{operator}{bound_expr}")
+                    utc_value = value.astimezone(timezone.utc)
+                    params.append(utc_value if self._store.is_postgres else utc_value.isoformat())
+            if cursor:
+                anchor = conn.execute(
+                    "SELECT created_at FROM tasks WHERE id=? AND tenant_id=? AND user_id=?",
+                    (cursor, tenant_id, user_id),
+                ).fetchone()
+                anchor_time = canonical_time(anchor["created_at"]) if anchor else None
+                if anchor_time is None or retired_validation_task(conn, cursor, postgres=self._store.is_postgres):
+                    raise ValueError("分页游标无效。")
+                # It may now have an owner/status change; its immutable creation
+                # position is still valid, so navigation never needs a Run replay.
+                conditions.append(f"({time_expr}<{bound_expr} OR ({time_expr}={bound_expr} AND t.id<?))")
+                bound_time = anchor_time if self._store.is_postgres else anchor_time.isoformat()
+                params.extend((bound_time, bound_time, cursor))
+            if release_provenance_available(conn, postgres=self._store.is_postgres):
+                conditions.append(
+                    "NOT EXISTS (SELECT 1 FROM agent_release_operations ro JOIN agent_release_artifacts ra "
+                    "ON ra.operation_id=ro.operation_id WHERE ro.status='aborted' "
+                    "AND ra.artifact_type='runtime_validation' AND ra.artifact_id=t.id)"
+                )
+            rows = conn.execute(
+                "SELECT t.id,t.agent_id,t.status,t.created_at,t.conversation_id FROM tasks t WHERE "
+                + " AND ".join(conditions) + f" ORDER BY {time_expr} DESC,t.id DESC LIMIT ?",
+                (*params, limit + 1),
+            ).fetchall()
+        items = [dict(row) for row in rows[:limit]]
+        for item in items:
+            created = canonical_time(item["created_at"])
+            item["created_at"] = created.isoformat() if created else None
+        return {"tasks": items, "next_cursor": items[-1]["id"] if len(rows) > limit else None}
 
     def task(self, task_id: str, tenant_id: str, user_id: str) -> dict | None:
         with self._store.connection() as conn:

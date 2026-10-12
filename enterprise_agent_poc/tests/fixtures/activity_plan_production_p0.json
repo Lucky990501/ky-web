@@ -1,0 +1,61 @@
+{
+  "evidence_source": "ACTIVITY_FORMAT_AND_COPYWRITING_PRODUCTION_REGRESSION_REVIEW_V1.md",
+  "source": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
+  "task_id": "e4dd1fff-e9ed-46a4-8ba4-3df0cc2b376a",
+  "run_id": "3ce0ce6d-44a6-4d9a-904b-8179cb5f5a1e",
+  "input_text": "请为“易明教育”策划一次面向家长的学习习惯主题体验活动。假设活动时长90分钟、12组家庭参与，输出活动目标、详细时间流程、人员分工、物料清单、宣传话术和风险预案。所有人数及时间均标记为演示假设，不虚构客户已确认的业务事实。",
+  "guard_evidence_sha256": "73bc250fe5701dd8c77daf4af4af89e7fb836d086aa427976622a9bfb17de63f",
+  "pending_items": [
+    "活动具体日期、时段与场次",
+    "活动场地地址、可容纳人数及场地条件",
+    "目标参与人群、最终邀约名单与活动规模",
+    "活动预算及礼品、奖品、权益清单与数量",
+    "企业品牌Logo、主色、历史活动图片等宣传素材",
+    "报名渠道、签到方式及现场人员分工",
+    "企业服务或产品介绍资料及后续转化政策",
+    "活动是否需要安全、消防或物业审批报备"
+  ],
+  "raw_attempt_excerpts": [
+    {
+      "json_sha256": "1ca970ff8f20fb00161d4b0f456cc2bf4759b4e83e8c9fe001ab7bd7e7e4e240",
+      "invitation_copy": "【国庆节活动邀约】亲爱的邻居、客户朋友：国庆佳节将至，诚邀您参加“欢度国庆·礼遇邻里”主题活动。现场设有节日打卡、亲子手工、知识问答和幸运抽奖，完成互动即可参与礼品兑换，具体礼品与权益以现场规则为准。活动时间：【待确认】；活动地点：【待确认】；报名方式：【待确认】。欢迎带上家人一起参加，共度温馨国庆！",
+      "activity_description": "亲子家庭及到场客户参与国庆主题趣味问答和手工DIY（如国旗、灯笼等主题）。完成任一互动可获得印章及活动小礼品；手工物料与礼品规格【待确认】。"
+    },
+    {
+      "json_sha256": "1c51354ff1327efc276e38c76714397532ddf95ab76864b8d83d9300bae0ae36",
+      "invitation_copy": "【国庆节活动邀约】亲爱的邻居、客户朋友：国庆佳节将至，诚邀您参加“欢度国庆·礼遇邻里”主题活动。现场设有节日打卡、亲子手工、知识问答和幸运抽奖；礼品兑换环节为活动提案，具体是否设置、参与条件及礼品权益以最终确认的活动预算与礼品清单为准，相关事项【待确认】。活动时间：【待确认】；活动地点：【待确认】；报名方式：【待确认】。欢迎带上家人一起参加，共度温馨国庆！",
+      "activity_description": "亲子家庭及到场客户参与国庆主题趣味问答和手工DIY（如国旗、灯笼等主题）。是否提供印章及活动小礼品将依据最终确认的活动预算与礼品清单确定，相关事项【待确认】；手工物料【待确认】。"
+    }
+  ],
+  "scripted_plan_note": "The following complete plan is a synthetic provider fixture, not a recovered Production JSON result. Raw attempts above are only the exact public excerpts delivered by 04.",
+  "scripted_plan": {
+    "document_title": "学习习惯主题体验活动方案（演示）",
+    "activity_theme": "亲子共学：学习习惯体验",
+    "activity_time": "演示假设：活动时长90分钟；具体日期【待确认】",
+    "activity_location": "【待确认】",
+    "target_audience": "面向家长及亲子家庭；演示假设：12组家庭",
+    "promotion_channels": ["建议经确认后在家长群发布活动邀约"],
+    "activity_items": [
+      {
+        "phase": "开场",
+        "name": "目标说明与体验导入",
+        "description": "演示假设：20分钟。活动目标是体验学习习惯的记录方式；建议经工作人员确认到位后分配引导及安全岗位。",
+        "image_requirement": "/"
+      },
+      {
+        "phase": "体验",
+        "name": "亲子学习习惯记录",
+        "description": "演示假设：50分钟。建议准备记录纸、笔等物料清单；物料确认后开展互动。风险预案：若材料未到位，调整为口头交流，不承诺额外权益。",
+        "image_requirement": "/"
+      },
+      {
+        "phase": "回顾",
+        "name": "分享与总结",
+        "description": "演示假设：20分钟。建议家庭分享体验并回顾活动目标，人员分工与现场安排以最终确认结果为准。",
+        "image_requirement": "/"
+      }
+    ],
+    "invitation_copy": "欢迎关注学习习惯主题体验活动，具体日期、场地与报名方式【待确认】。演示假设：90分钟、12组家庭，不代表客户已确认的业务事实。",
+    "pending_items": ["活动日期与场地", "工作人员岗位确认", "记录纸及笔等物料采购确认"]
+  }
+}

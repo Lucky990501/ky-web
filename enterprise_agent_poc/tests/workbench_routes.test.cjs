@@ -84,21 +84,21 @@ function harness(pathname = '/platform/skills', state = null) {
     querySelectorAll(){return [];}
   }
   document.main = new View();
-  const location = {pathname,origin:'http://localhost'};
+  const location = {pathname,search:'',origin:'http://localhost'};
   const stack = [{path:pathname,state}], listeners = {};
   let index = 0;
   const history = {
     get state(){return stack[index].state;},
-    pushState(state, _, path){stack.splice(index+1); stack.push({path,state}); index++; location.pathname=path;},
-    replaceState(state, _, path){stack[index]={path,state}; location.pathname=path;},
-    move(delta){index+=delta; location.pathname=stack[index].path; listeners.popstate({state:stack[index].state});},
+    pushState(state, _, path){stack.splice(index+1); stack.push({path,state}); index++; const url=new URL(path,location.origin);location.pathname=url.pathname;location.search=url.search;},
+    replaceState(state, _, path){stack[index]={path,state}; const url=new URL(path,location.origin);location.pathname=url.pathname;location.search=url.search;},
+    move(delta){index+=delta; const url=new URL(stack[index].path,location.origin);location.pathname=url.pathname;location.search=url.search; listeners.popstate({state:stack[index].state});},
   };
   const window = {history, addEventListener(name,fn){listeners[name]=fn;}};
   class EventSource {constructor(url){this.url=url;this.listeners={};this.closed=false;eventSources.push(this);}addEventListener(name,listener){this.listeners[name]=listener;}close(){this.closed=true;}}
   class BrowserURL extends URL {}
   BrowserURL.createObjectURL=()=>`blob:http://localhost/document-${downloads.length+1}`;
   BrowserURL.revokeObjectURL=()=>{};
-  const context = vm.createContext({document,window,location,sessionStorage,console,Map,Set,Date,URL:BrowserURL,EventSource,FormData:class{constructor(){this.items=[];}append(name,file,filename){this.items.push({name,file,filename});}},setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
+  const context = vm.createContext({document,window,location,sessionStorage,console,Map,Set,Date,URL:BrowserURL,URLSearchParams,EventSource,FormData:class{constructor(){this.items=[];}append(name,file,filename){this.items.push({name,file,filename});}},setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
     fetch(url,options){return new Promise((resolve,reject)=>pending.push({url,options,resolve(body){resolve({ok:true,json:async()=>body});},resolveResponse:resolve,reject}));},
   });
   vm.runInContext(source,context);
@@ -141,7 +141,8 @@ for(const [pathname,wrongPage,page,heading] of [['/platform/skills','profile','p
   test(`actual boot repairs stale history on ${pathname} before rendering`,async()=>{
     const h=harness(pathname,{page:wrongPage});
     const started=h.run('boot()');
-    h.respond('/api/v1/me',{is_platform_admin:true,display_name:'Test',email:'test@example.invalid',tenant_name:'Test',role:'member'});
+    h.respond('/api/v1/me',{user_id:'user-test',tenant_id:'tenant-test',is_platform_admin:true,display_name:'Test',email:'test@example.invalid',tenant_name:'Test',role:'member'});
+    await flush();h.respond('/api/v1/workspace',{brand_name:'Test',tenant_name:'Test',agents:[],credit_balance:100});
     await started; await h.settle(); h.consistent(page,heading);
     assert.equal(h.history.state.page,page);
   });
@@ -1130,4 +1131,130 @@ test('brand Logo mobile card scales within 375px and has a touch-sized button',(
   assert.match(css,/\.brand-logo-preview img\{[^}]*max-width:100%/);
   assert.match(css,/\.brand-logo-upload-button\{min-height:44px\}/);
   assert.match(css,/@media\(max-width:860px\)\{\.brand-logo-preview\{width:100%\}/);
+});
+
+test('navigation cleanup detaches only the view, closes SSE/poll/rAF and never cancels the server Task',()=>{
+  const h=harness();h.run("navState=createStreamingState();navState.run.taskId='accepted-task';navState.run.terminal=null;navState.visualPending='未展示';navState.streamSource=new EventSource('/api/v1/tasks/accepted-task/events');navState.pollTimer=setTimeout(()=>{},1000);document.main._submittingState=navState;detachConversationView(document.main)");
+  assert.equal(h.run('navState.detached'),true);assert.equal(h.run('navState.visualPending'),'');assert.equal(h.run('navState.visualStopped'),true);
+  assert.equal(h.run('navState.run.terminal'),null);assert.equal(h.run('navState.run.taskId'),'accepted-task');assert.equal(h.eventSources[0].closed,true);
+  assert.ok(h.timers.every(timer=>timer.cancelled));assert.equal(h.pending.length,0);
+});
+test('late detached SSE callbacks cannot append text or change the current view',()=>{
+  const h=harness();h.run("lateState=createStreamingState();lateState.main=document.main;lateState.owner=principalSnapshot();lateNode={_streamState:lateState};streamTask('accepted-task','copywriting-agent',document.main,'需求',lateNode,lateState);document.main._submittingState=lateState;detachConversationView(document.main)");
+  h.eventSources[0].listeners.delta({data:JSON.stringify({sequence:1,text:'不应出现'})});h.eventSources[0].listeners.complete({data:JSON.stringify({status:'completed',final_response:'不应出现'})});
+  assert.equal(h.run('lateState.text'),'');assert.equal(h.pending.length,0);assert.equal(h.run('lateState.completed'),false);
+});
+test('accepted Task ID is recorded in a deep link even before a conversation exists',()=>{
+  const h=harness('/agents/copywriting');h.run("document.main._conversationContext={route:'copywriting-agent',agentId:'copywriting-agent',owner:principalSnapshot()};rememberAcceptedTask(document.main,'copywriting-agent',{id:'accepted-task',status:'queued',conversation_id:null})");
+  assert.equal(h.run('activeTaskId'),'accepted-task');assert.equal(new URL('http://localhost'+h.location.pathname+h.location.search).searchParams.get('task'),'accepted-task');
+  assert.equal(h.pending.length,0);assert.equal(h.run("acceptedTaskReferences.get(agentSelectionKey('copywriting-agent')).taskId"),'accepted-task');
+});
+test('later server conversation assignment preserves the Task deep link until history is readable',()=>{
+  const h=harness('/agents/copywriting');h.run("document.main._conversationContext={route:'copywriting-agent',agentId:'copywriting-agent',owner:principalSnapshot()};rememberAcceptedTask(document.main,'copywriting-agent',{id:'accepted-task',status:'running',conversation_id:'real-conversation'})");
+  const url=new URL('http://localhost'+h.location.pathname+h.location.search);assert.equal(url.searchParams.get('conversation'),'real-conversation');assert.equal(url.searchParams.get('task'),'accepted-task');
+  assert.equal(h.run('activeConversationId'),'real-conversation');assert.equal(h.run('document.main._conversationContext.conversationId'),'real-conversation');
+});
+test('restoration links keep Agent identity independent from display name',()=>{
+  const h=harness('/agents/renamed-slug');h.location.search='?task=owned-task';assert.equal(h.run('pageFromNavigation()'),'agent:renamed-slug');assert.equal(h.run('activeAgentId'),'renamed-slug');assert.equal(h.run('activeTaskId'),'owned-task');
+  assert.equal(h.run("agentNavigationPath('agent:renamed-slug','owned-conversation','owned-task')"),'/agents/renamed-slug?conversation=owned-conversation&task=owned-task');
+});
+test('Task restoration refuses a wrong Task, Agent or conversation identity',()=>{
+  const h=harness();h.run("document.main._conversationContext={agentId:'copywriting-agent',conversationId:'owned-conversation'}");
+  for(const task of [{id:'other'},{id:'owned',agent_id:'image-agent'},{id:'owned',conversation_id:'other-conversation'}])assert.throws(()=>h.run(`verifyRecoveredTask(document.main,'owned',${JSON.stringify(task)})`));
+  assert.doesNotThrow(()=>h.run("verifyRecoveredTask(document.main,'owned',{id:'owned',agent_id:'copywriting-agent',conversation_id:'owned-conversation'})"));
+});
+test('cached data cannot cross a user/tenant change or warm the new identity from a late response',async()=>{
+  const h=harness();const response=h.run("api('/api/v1/workspace')");const rejected=assert.rejects(response,/登录会话已变化/);h.run("me.tenant_id='other-tenant'");h.respond('/api/v1/workspace',{brand_name:'旧租户私有名称'});await rejected;
+  assert.equal(h.run("pageCache.has('/api/v1/workspace')"),false);
+});
+test('retired view cannot register its accepted Task under another principal',()=>{
+  const h=harness();h.run("document.main._conversationContext={owner:principalSnapshot()};me.user_id='another-user';rememberAcceptedTask(document.main,'copywriting-agent',{id:'old-task',conversation_id:'old-conversation'})");
+  assert.equal(h.run('acceptedTaskReferences.size'),0);assert.equal(h.run('agentConversationSelections.size'),0);
+});
+test('company display uses authoritative brand_name without changing Tenant ID/name or user nickname',()=>{
+  const h=harness();h.run("applyEnterpriseBrand({brand_name:'新企业显示名',tenant_name:'旧Tenant名称'})");assert.equal(h.run('companyDisplayName()'),'新企业显示名');
+  assert.equal(h.run('me.tenant_id'),'tenant-test');assert.equal(h.run('me.tenant_name'),'Test');assert.equal(h.run('me.display_name'),'Test');
+});
+test('company brand is scoped and cannot retain another Tenant name or logo',()=>{
+  const h=harness();h.run("applyEnterpriseBrand({brand_name:'旧租户品牌',logo:'https://example.invalid/logo.png'});me.tenant_id='other-tenant';me.tenant_name='新租户'");
+  assert.equal(h.run('companyDisplayName()'),'新租户');assert.equal(h.run('companyLogoUrl()'),'');
+});
+test('company Logo and personal avatar have independent resources and state',()=>{
+  const h=harness();h.run("me.role='enterprise_admin';me.avatar_url='/api/v1/me/avatar';applyEnterpriseBrand({brand_name:'企业',brand_logo:{filename:'brand.png',content_type:'image/png',download_url:'/api/v1/enterprise-config/brand-logo'}},'config')");
+  assert.match(h.run('companyLogoUrl()'),/^\/api\/v1\/enterprise-config\/brand-logo\?v=/);assert.equal(h.run('me.avatar_url'),'/api/v1/me/avatar');assert.match(h.run('avatarMarkup()'),/\/api\/v1\/me\/avatar/);
+});
+test('members never use the admin-only new brand-logo endpoint',()=>{
+  const h=harness();h.run("applyEnterpriseBrand({brand_name:'企业',brand_logo:{filename:'brand.png',content_type:'image/png',download_url:'/api/v1/enterprise-config/brand-logo'}},'config')");
+  assert.equal(h.run('companyLogoUrl()'),'');assert.ok(!h.run('companyLogoMarkup()').includes('brand-logo'));assert.equal(h.pending.length,0);
+});
+test('same filename/dimensions Logo replacement still refreshes every authorized brand image URL',()=>{
+  const h=harness();h.run("me.role='enterprise_admin';sameLogo={filename:'same.png',width:512,height:512,content_type:'image/png',download_url:'/api/v1/enterprise-config/brand-logo'};applyEnterpriseBrand({brand_name:'企业',brand_logo:sameLogo},'config');previousLogoUrl=companyLogoUrl();applyEnterpriseBrand({brand_name:'企业',brand_logo:sameLogo},'config',principalSnapshot(),{refreshLogo:true})");
+  assert.notEqual(h.run('companyLogoUrl()'),h.run('previousLogoUrl'));assert.equal(h.run('enterpriseBrand.logo.filename'),'same.png');
+});
+test('company logo display rejects executable or internal filesystem addresses',()=>{
+  const h=harness();for(const url of ['javascript:alert(1)','data:text/html,x','file:///opt/private/a.png','/opt/private/a.png'])assert.equal(h.run(`safeCompanyLogoUrl(${JSON.stringify(url)})`),'');
+  assert.equal(h.run("safeCompanyLogoUrl('https://example.invalid/brand.png')"),'https://example.invalid/brand.png');
+});
+test('company markers are shared by Sidebar, account menu, profile and settings, not hardcoded for a customer',()=>{
+  assert.ok((source.match(/data-company-name/g)||[]).length>=6);assert.ok(source.includes('syncCompanyViews()'));assert.ok(source.includes('current.role!==\'enterprise_admin\''));
+  assert.ok(source.includes('配置已保存，但最新显示信息读取失败'));assert.ok(!source.includes("tenant_name='易明教育'"));
+});
+test('recovery contains no localStorage task persistence, POST replay or automatic provider retry',()=>{
+  const recovery=source.slice(source.indexOf('async function pollAgentTaskV2'),source.indexOf('async function agentWorkspace(main'));
+  assert.ok(!recovery.includes('/runs'));assert.ok(!recovery.includes("method:'POST'"));assert.ok(!recovery.includes('localStorage'));
+  assert.ok(source.includes('pendingConversationSubmissions.has(agentSelectionKey(agentId))'));
+});
+test('read-only Task recovery can stop a running task but cannot submit into an unreadable history',()=>{
+  const h=harness();h.run("readonlyInput={};readonlySubmit={classList:{toggle(){}},setAttribute(){}};readonlyMain={_conversationContext:{taskOnly:true,canRun:true},querySelector(selector){return selector==='#prompt'?readonlyInput:selector==='#composer-submit'?readonlySubmit:null;}};readonlyState=createStreamingState();beginConversationRun(readonlyState,{taskId:'owned-task',agentId:'copywriting-agent',phase:ConversationRunPhase.RUNNING,restored:true});updateComposerRunState(readonlyMain,readonlyState)");
+  assert.equal(h.run('readonlyInput.disabled'),true);assert.equal(h.run('readonlySubmit.disabled'),false);assert.equal(h.run('readonlySubmit.type'),'button');
+  h.run("readonlyState.run.phase=ConversationRunPhase.IDLE;updateComposerRunState(readonlyMain,readonlyState)");assert.equal(h.run('readonlySubmit.disabled'),true);
+});
+test('history, task details and Recent Tasks share truthful cancelled/cancelling status labels',()=>{
+  const h=harness();for(const [status,label] of [['running','处理中'],['cancelling','正在停止'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]){
+    assert.equal(h.run(`taskStatusLabel(${JSON.stringify(status)})`),label);assert.equal(h.run(`recentTaskStatus(${JSON.stringify(status)})`),label);
+  }
+  assert.equal(h.run("recentTaskStatus('unknown')"),'暂无任务');
+});
+test('orphan discovery uses only formal GET query selectors, never owner or tenant inputs',()=>{
+  const h=harness(),url=new URL(h.run("orphanTaskQuery({status:'failed',agentId:'internal-agent-id',cursor:'11111111-1111-4111-8111-111111111111',owner_id:'other',tenant_id:'other'})"),'http://localhost');
+  assert.equal(url.pathname,'/api/v1/tasks/orphans');assert.deepEqual([...url.searchParams.keys()],['limit','status','agent_id','cursor']);assert.equal(url.searchParams.get('limit'),'25');assert.equal(url.searchParams.get('agent_id'),'internal-agent-id');
+  assert.throws(()=>h.run("orphanTaskQuery({status:'cancelling'})"),/筛选/);
+});
+test('orphan contract allows early no-Conversation and provisional IDs without inventing projects',()=>{
+  const h=harness();h.run("early={id:'early-task',agent_id:'copywriting-agent',status:'failed',conversation_id:null,created_at:'2026-10-12T09:00:00Z'}");
+  assert.equal(h.run("validateOrphanTaskPage({tasks:[early],next_cursor:null}).tasks[0].conversation_id"),null);
+  assert.equal(h.run("validateOrphanTaskPage({tasks:[{...early,conversation_id:'pre-session-id',status:'cancelled'}],next_cursor:null}).tasks[0].status"),'cancelled');
+});
+test('orphan malformed results are errors rather than successful empty history',()=>{
+  const h=harness();for(const body of [null,{tasks:[]},{tasks:null,next_cursor:null},{tasks:[{id:'x'}],next_cursor:null}])assert.throws(()=>h.run(`validateOrphanTaskPage(${JSON.stringify(body)})`),/合同/);
+  assert.throws(()=>h.run("validateOrphanTaskPage({tasks:[],next_cursor:'cursor'})"),/分页/);
+});
+test('orphan cursor must be the last real result and must make forward progress',()=>{
+  const h=harness();h.run("first={id:'first',agent_id:'copywriting-agent',status:'failed',conversation_id:null,created_at:null};second={...first,id:'second'}");
+  assert.equal(h.run("validateOrphanTaskPage({tasks:[first,second],next_cursor:'second'}).next_cursor"),'second');
+  assert.throws(()=>h.run("validateOrphanTaskPage({tasks:[first,second],next_cursor:'first'})"),/分页/);assert.throws(()=>h.run("validateOrphanTaskPage({tasks:[second],next_cursor:'second'},'second')"),/分页/);
+});
+test('orphan rows retain backend order and deduplicate real Task IDs across pages',()=>{
+  const h=harness();h.run("one={id:'one',agent_id:'copywriting-agent',status:'failed',conversation_id:null};two={...one,id:'two'};three={...one,id:'three'}");
+  assert.equal(h.run("mergeOrphanTaskRows([one,two],[{...two,status:'cancelled'},three]).map(item=>item.id).join(',')"),'one,two,three');assert.equal(h.run("mergeOrphanTaskRows([one,two],[{...two,status:'cancelled'}])[1].status"),'cancelled');
+});
+test('normal owned Conversations and Task IDs never appear again in orphan display',()=>{
+  const h=harness();h.run("base={id:'a',agent_id:'copywriting-agent',status:'failed',conversation_id:'owned'}");
+  assert.equal(h.run("mergeOrphanTaskRows([],[base],{conversations:[{id:'owned'}]}).length"),0);assert.equal(h.run("mergeOrphanTaskRows([],[{...base,conversation_id:null}],{conversations:[{id:'other',latest_task:{id:'a'}}]}).length"),0);
+});
+test('current Agent orphan filtering uses canonical identity and real status, not display names',()=>{
+  const h=harness();h.run("base={id:'a',agent_id:'copywriting-agent',status:'failed',conversation_id:null};other={...base,id:'b',agent_id:'campaign-agent'}");
+  assert.equal(h.run("mergeOrphanTaskRows([],[base,other],{agentId:'copywriting-agent',status:'failed'}).map(item=>item.id).join(',')"),'a');assert.equal(h.run("mergeOrphanTaskRows([],[base],{status:'cancelled'}).length"),0);
+});
+test('history navigation persists only filter/page pointers and scopes them to User and Tenant',()=>{
+  const pointer={userId:'user-test',tenantId:'tenant-test',agentId:'copywriting-agent',status:'failed',pages:2};const h=harness('/conversations',{page:'history',orphanHistory:pointer});
+  assert.equal(h.run('readOrphanHistoryPointer().pages'),2);assert.equal(h.run("navigationState('history').orphanHistory.status"),'failed');assert.equal(h.run("JSON.stringify(readOrphanHistoryPointer()).includes('tasks')"),false);
+  h.run("me.tenant_id='other'");assert.equal(h.run('readOrphanHistoryPointer()'),null);
+});
+test('orphan view memory is cleared when the Principal resets',()=>{
+  const h=harness();h.run("orphanHistoryPointer={userId:me.user_id,tenantId:me.tenant_id,status:'failed',pages:2};resetSessionViews()");assert.equal(h.run('orphanHistoryPointer'),null);
+});
+test('orphan discovery feedback and actions are semantic, bounded and use existing Task GET recovery',()=>{
+  const h=harness();assert.match(h.run('orphanTaskHistoryShellHtml()'),/role="status"/);assert.match(h.run('orphanTaskHistoryShellHtml()'),/data-orphan-more hidden/);
+  const section=source.slice(source.indexOf('const orphanTaskStatuses='),source.indexOf('const chatImageComposerFields='));assert.ok(section.includes("{cache:'no-store'}"));assert.ok(section.includes('selectAgentConversation(options.route||task.agent_id,null,{taskId:task.id})'));assert.ok(!section.includes('/runs'));assert.ok(!section.includes('localStorage'));assert.ok(!section.includes('setInterval'));assert.ok(!section.includes('/cancel'));
 });

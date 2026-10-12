@@ -14,6 +14,9 @@ def declaration(root, manifest):
     validate_manifest_contract(manifest)
     value = manifest.get("runtime_only_release")
     validate_runtime_only_release(value)
+    from scripts import schema015_successor_binding as successor
+    if successor.is_v2(manifest):
+        return successor.declaration(root, manifest)
     gate.require(value == gate.read_json(root / "deploy/schema_015_runtime_only.v1.json"),
                  "runtime_only_release_declared_identity")
     from scripts.release_runtime_recovery import contract
@@ -46,7 +49,8 @@ def ledger_snapshot(root, database_url):
 
 def preflight(base, root, manifest):
     declaration(root, manifest)
-    from scripts.release_runtime_recovery import PREDECESSOR, verify_schema, predecessor
+    from scripts.release_runtime_recovery import exact_predecessor, verify_schema, predecessor
+    exact = exact_predecessor(root, manifest)
     current = (base / "release-current").resolve()
     # Before switch current must be exact predecessor; after switch only this
     # exact Candidate is legal. No arbitrary future/foreign runtime acceptance.
@@ -54,14 +58,14 @@ def preflight(base, root, manifest):
     gate.require(current in {prior, root}, "runtime_only_exact_predecessor")
     from scripts.migrate import settings
     ledger = ledger_snapshot(root, settings.database_url)
-    schema = verify_schema(base, root, PREDECESSOR["release_id"], PREDECESSOR["source_commit"])
+    schema = verify_schema(base, root, exact["release_id"], exact["source_commit"])
     gate.require(schema["applied_versions"] == [f"{i:03}" for i in range(1, 16)]
                  and schema["pending"] == 0, "runtime_only_requires_exact_schema015")
     return {"status": "runtime_only_schema015_verified", "read_only": True,
             "release_mode": "RUNTIME_ONLY", "current_schema": "015", "target_schema": "015",
             "migration_action": "NONE", "migration_commands_executed": 0,
             "migration015_state": "ALREADY_APPLIED", "pending": 0, "unknown": 0,
-            "checksum_drift": 0, "ledger_sha256": ledger["ledger_sha256"], "schema": schema, "exact_predecessor": PREDECESSOR["release_id"],
+            "checksum_drift": 0, "ledger_sha256": ledger["ledger_sha256"], "schema": schema, "exact_predecessor": exact["release_id"],
             "recovery_mode": "PREDECESSOR_ON_SCHEMA_015", "post_commit_runtime_rollback": "ENABLED"}
 
 

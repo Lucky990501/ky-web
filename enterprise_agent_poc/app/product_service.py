@@ -62,6 +62,12 @@ class TaskService:
                     )
                 return
 
+            # A duplicate delivery/read-recovery must not start another model
+            # turn while the recorded Run is still executing. Only the proven
+            # persistence-only path above may recover its already-created result.
+            if current.get("status") == "running":
+                return
+
         # A failed runtime must not be replayed by a duplicate queue delivery.
         # Only the proven persistence-only recovery above can resume this task.
         if current.get("status") == "failed":
@@ -110,7 +116,8 @@ class TaskService:
                 on_visible_delta=on_visible_delta,
                 on_execution_activity=on_execution_activity,
                 cancellation_requested=lambda: self._store.cancellation_requested(task_id, tenant_id),
-                on_run_started=lambda run_id, conversation_id: self._store.attach_task_run(task_id, tenant_id, run_id, conversation_id),
+                on_run_started=lambda run_id, conversation_id: self._store.attach_task_run(
+                    task_id, tenant_id, run_id, conversation_id, user_id=task["user_id"]),
             )
             if self._store.cancellation_requested(task_id, tenant_id):
                 raise TaskCancellationRequested()

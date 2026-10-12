@@ -40,9 +40,31 @@ STRUCTURED_INSTRUCTION = (
 SAFE_FALLBACK = "本次方案暂无法生成可靠的可导出文档，请调整需求后重试。"
 _FULL_PLAN = re.compile(r"(?:完整|详细|正式).{0,12}(?:活动方案|活动策划|执行方案)|(?:活动方案|活动策划|执行方案).{0,8}(?:完整|详细|全套)|(?:社区|节日|教师节|客户答谢|开学季).{0,8}(?:活动方案|执行方案)")
 _SIMPLE = re.compile(r"(?:想|写|给我|提供).{0,6}(?:\d+|几|五|三).{0,8}(?:标题|主题|句邀约|条文案)|(?:标题|主题|文案).{0,8}(?:几个|几条)")
+_CREATE_PLAN = re.compile(r"(?:做|制作|生成|制定|策划|设计|编写|撰写|拟定|准备|写).{0,24}(?:活动(?:策划|执行)?(?:方案|案)|执行方案)")
+_CREATE_EVENT = re.compile(
+    r"(?:^|[。！？\n])\s*(?:(?:请|帮我|为|给|我想|我要|希望|麻烦|能否|可以)[^。！？\n]{0,40})?"
+    r"(?:策划|设计|筹备|组织|规划)(?!好|了|过|完成|结束)[^。！？\n]{0,60}"
+    r"活动(?!的|标题|主题|目标|文案|邀请|邀约|流程|环节|物料|人员|创意)"
+)
+_PLAN_COMPONENTS = tuple(re.compile(pattern) for pattern in (
+    r"活动目标|活动主题", r"流程|议程|执行环节|时间安排", r"人员分工|岗位分工|人员安排",
+    r"物料清单|物料准备", r"宣传话术|宣传渠道|邀约文案|邀请文案", r"风险预案|安全预案",
+))
+_PLAN_DISCUSSION = re.compile(
+    r"(?:活动(?:策划|执行)?(?:方案|案)|活动策划).{0,4}(?:是什么|什么意思|怎么理解|有何含义)"
+    r"|^(?:(?:请|帮我|麻烦|能否|可以)\s*)*(?:修改|改写|润色|调整|优化|补充|解释|点评|分析).{0,12}(?:活动|方案|邀请|邀约|文案)"
+    r"|活动(?:策划|执行)?(?:方案|案)(?:的)?(?:标题|宣传文案|邀请语|邀约文案|摘要)"
+    r"|(?:活动(?:策划|执行)?(?:方案|案)).{0,8}(?:几个|几条|一些|\d+个).{0,4}(?:创意|点子|建议)"
+    r"|^(?:这个|这份|上述|刚才|已有|原有|既有).{0,12}(?:活动(?:策划|执行)?(?:方案|案)|方案)"
+    r"|^(?:(?:请问|请解释|想了解)\s*)*(?:如何|怎么|怎样|为什么|是否|什么是)"
+)
 _CONDITIONAL = re.compile(r"建议|拟|可考虑|计划|待确认|(?<!未)确认后|视.{0,12}情况|以.{0,18}为准|在.{0,18}确认后")
 _IF_CLAUSE = re.compile(r"(?:^|[，,])\s*(?:若|如果|如|假如|倘若)([^，,]{1,60})")
 _COMMITTED = re.compile(r"将|会(?=在|于|由|安排|提供|开展|进行|有|赠送|领取|设置|组织|负责)|已(?:确认|安排|提供|采购|准备|落实)|现场.{0,4}(?:有|设|提供|安排)|(?<!未)(?<!不)提供|(?<!未)(?<!不)安排|确保|赠送|免费|可获得|可领取")
+_NAMED_THEME = re.compile(
+    r"[“‘\"「『][^”’\"」』\n]{1,80}[”’\"」』]\s*主题"
+    r"|主题(?:名称)?(?:为|是|[:：])\s*[“‘\"「『][^”’\"」』\n]{1,80}[”’\"」』]"
+)
 _DISCLOSURE = re.compile(r"(?:将|会)?(?:另行通知|待通知|待公布|待确认|待定)")
 _BENEFIT = re.compile(r"(?:价值|售价|价格|优惠|权益|赠送|免费).{0,15}\d[\d,]*\s*元|\d[\d,]*\s*元.{0,15}(?:课程|礼品|权益|服务)")
 _DEPENDENCIES = {
@@ -70,7 +92,14 @@ def _conditional_clause(clause: str) -> bool:
 
 
 def is_full_activity_plan(agent_id: str, message: str) -> bool:
-    return agent_id == "campaign-agent" and bool(_FULL_PLAN.search(message)) and not bool(_SIMPLE.search(message))
+    return (agent_id == "campaign-agent"
+            and not (_SIMPLE.search(message) or _PLAN_DISCUSSION.search(message))
+            and bool(_FULL_PLAN.search(message) or _CREATE_PLAN.search(message)
+                     # A whole event can be requested without the noun "方案".
+                     # Require creation intent and multiple distinct plan parts,
+                     # not a bare activity/topic keyword or a single copy request.
+                     or _CREATE_EVENT.search(message)
+                     and sum(bool(pattern.search(message)) for pattern in _PLAN_COMPONENTS) >= 2))
 
 
 def parse_plan(raw: str) -> ActivityPlanContent | None:
@@ -118,6 +147,13 @@ def semantic_guard(plan: ActivityPlanContent, grounding: tuple[str, ...] = ()) -
                     if _conditional_clause(clause):
                         continue
                     checked = _DISCLOSURE.sub("", clause)
+                    if kind == "benefit":
+                        # A temporal "将至" must not combine with the theme's
+                        # ambiguous "礼遇" to invent a gift commitment. Keep
+                        # all actual gift/price predicates and other words.
+                        checked = _NAMED_THEME.sub(
+                            lambda match: match.group() if re.search(r"礼包|礼盒", match.group())
+                            else match.group().replace("礼遇", ""), checked)
                     if re.search(use_pattern, checked) and _COMMITTED.search(checked):
                         violations.append(Violation("pending_dependency_committed", field, clause[:180], pending[:180], kind))
     evidence = " ".join(grounding)

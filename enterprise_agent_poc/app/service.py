@@ -187,6 +187,11 @@ class AgentService:
                     self._store.save_conversation(
                         conversation_id, tenant_id, agent_id, profile.id, session.thread_id, profile.runtime_version
                     )
+            if on_run_started:
+                # The early callback retained the Run for cancellation. Now a
+                # real Conversation exists, so the same idempotent callback
+                # can persist ownership before any provider turn or its failure.
+                on_run_started(run_id, conversation_id)
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
             runtime_message = (message + "\n\n本轮消息显式附有一张参考图片。请按用户文字要求调用 image_generation；平台会安全读取本任务绑定的参考图并执行图片编辑。不要沿用历史图片。") if reference_image_attached else message
