@@ -98,7 +98,7 @@ function harness(pathname = '/platform/skills', state = null) {
   class BrowserURL extends URL {}
   BrowserURL.createObjectURL=()=>`blob:http://localhost/document-${downloads.length+1}`;
   BrowserURL.revokeObjectURL=()=>{};
-  const context = vm.createContext({document,window,location,sessionStorage,console,Map,Set,Date,URL:BrowserURL,EventSource,FormData:class{constructor(){this.items=[];}append(name,file,filename){this.items.push({name,file,filename});}},setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
+  const context = vm.createContext({document,window,location,sessionStorage,console,Map,Set,Date,URL:BrowserURL,URLSearchParams,EventSource,FormData:class{constructor(){this.items=[];}append(name,file,filename){this.items.push({name,file,filename});}},setTimeout(fn,delay=0){const timer={id:nextTimerId++,fn,delay,cancelled:false};timers.push(timer);return timer.id;},clearTimeout(id){const timer=timers.find(item=>item.id===id);if(timer)timer.cancelled=true;},
     fetch(url,options){return new Promise((resolve,reject)=>pending.push({url,options,resolve(body){resolve({ok:true,json:async()=>body});},resolveResponse:resolve,reject}));},
   });
   vm.runInContext(source,context);
@@ -1214,4 +1214,47 @@ test('history, task details and Recent Tasks share truthful cancelled/cancelling
     assert.equal(h.run(`taskStatusLabel(${JSON.stringify(status)})`),label);assert.equal(h.run(`recentTaskStatus(${JSON.stringify(status)})`),label);
   }
   assert.equal(h.run("recentTaskStatus('unknown')"),'暂无任务');
+});
+test('orphan discovery uses only formal GET query selectors, never owner or tenant inputs',()=>{
+  const h=harness(),url=new URL(h.run("orphanTaskQuery({status:'failed',agentId:'internal-agent-id',cursor:'11111111-1111-4111-8111-111111111111',owner_id:'other',tenant_id:'other'})"),'http://localhost');
+  assert.equal(url.pathname,'/api/v1/tasks/orphans');assert.deepEqual([...url.searchParams.keys()],['limit','status','agent_id','cursor']);assert.equal(url.searchParams.get('limit'),'25');assert.equal(url.searchParams.get('agent_id'),'internal-agent-id');
+  assert.throws(()=>h.run("orphanTaskQuery({status:'cancelling'})"),/筛选/);
+});
+test('orphan contract allows early no-Conversation and provisional IDs without inventing projects',()=>{
+  const h=harness();h.run("early={id:'early-task',agent_id:'copywriting-agent',status:'failed',conversation_id:null,created_at:'2026-10-12T09:00:00Z'}");
+  assert.equal(h.run("validateOrphanTaskPage({tasks:[early],next_cursor:null}).tasks[0].conversation_id"),null);
+  assert.equal(h.run("validateOrphanTaskPage({tasks:[{...early,conversation_id:'pre-session-id',status:'cancelled'}],next_cursor:null}).tasks[0].status"),'cancelled');
+});
+test('orphan malformed results are errors rather than successful empty history',()=>{
+  const h=harness();for(const body of [null,{tasks:[]},{tasks:null,next_cursor:null},{tasks:[{id:'x'}],next_cursor:null}])assert.throws(()=>h.run(`validateOrphanTaskPage(${JSON.stringify(body)})`),/合同/);
+  assert.throws(()=>h.run("validateOrphanTaskPage({tasks:[],next_cursor:'cursor'})"),/分页/);
+});
+test('orphan cursor must be the last real result and must make forward progress',()=>{
+  const h=harness();h.run("first={id:'first',agent_id:'copywriting-agent',status:'failed',conversation_id:null,created_at:null};second={...first,id:'second'}");
+  assert.equal(h.run("validateOrphanTaskPage({tasks:[first,second],next_cursor:'second'}).next_cursor"),'second');
+  assert.throws(()=>h.run("validateOrphanTaskPage({tasks:[first,second],next_cursor:'first'})"),/分页/);assert.throws(()=>h.run("validateOrphanTaskPage({tasks:[second],next_cursor:'second'},'second')"),/分页/);
+});
+test('orphan rows retain backend order and deduplicate real Task IDs across pages',()=>{
+  const h=harness();h.run("one={id:'one',agent_id:'copywriting-agent',status:'failed',conversation_id:null};two={...one,id:'two'};three={...one,id:'three'}");
+  assert.equal(h.run("mergeOrphanTaskRows([one,two],[{...two,status:'cancelled'},three]).map(item=>item.id).join(',')"),'one,two,three');assert.equal(h.run("mergeOrphanTaskRows([one,two],[{...two,status:'cancelled'}])[1].status"),'cancelled');
+});
+test('normal owned Conversations and Task IDs never appear again in orphan display',()=>{
+  const h=harness();h.run("base={id:'a',agent_id:'copywriting-agent',status:'failed',conversation_id:'owned'}");
+  assert.equal(h.run("mergeOrphanTaskRows([],[base],{conversations:[{id:'owned'}]}).length"),0);assert.equal(h.run("mergeOrphanTaskRows([],[{...base,conversation_id:null}],{conversations:[{id:'other',latest_task:{id:'a'}}]}).length"),0);
+});
+test('current Agent orphan filtering uses canonical identity and real status, not display names',()=>{
+  const h=harness();h.run("base={id:'a',agent_id:'copywriting-agent',status:'failed',conversation_id:null};other={...base,id:'b',agent_id:'campaign-agent'}");
+  assert.equal(h.run("mergeOrphanTaskRows([],[base,other],{agentId:'copywriting-agent',status:'failed'}).map(item=>item.id).join(',')"),'a');assert.equal(h.run("mergeOrphanTaskRows([],[base],{status:'cancelled'}).length"),0);
+});
+test('history navigation persists only filter/page pointers and scopes them to User and Tenant',()=>{
+  const pointer={userId:'user-test',tenantId:'tenant-test',agentId:'copywriting-agent',status:'failed',pages:2};const h=harness('/conversations',{page:'history',orphanHistory:pointer});
+  assert.equal(h.run('readOrphanHistoryPointer().pages'),2);assert.equal(h.run("navigationState('history').orphanHistory.status"),'failed');assert.equal(h.run("JSON.stringify(readOrphanHistoryPointer()).includes('tasks')"),false);
+  h.run("me.tenant_id='other'");assert.equal(h.run('readOrphanHistoryPointer()'),null);
+});
+test('orphan view memory is cleared when the Principal resets',()=>{
+  const h=harness();h.run("orphanHistoryPointer={userId:me.user_id,tenantId:me.tenant_id,status:'failed',pages:2};resetSessionViews()");assert.equal(h.run('orphanHistoryPointer'),null);
+});
+test('orphan discovery feedback and actions are semantic, bounded and use existing Task GET recovery',()=>{
+  const h=harness();assert.match(h.run('orphanTaskHistoryShellHtml()'),/role="status"/);assert.match(h.run('orphanTaskHistoryShellHtml()'),/data-orphan-more hidden/);
+  const section=source.slice(source.indexOf('const orphanTaskStatuses='),source.indexOf('const chatImageComposerFields='));assert.ok(section.includes("{cache:'no-store'}"));assert.ok(section.includes('selectAgentConversation(options.route||task.agent_id,null,{taskId:task.id})'));assert.ok(!section.includes('/runs'));assert.ok(!section.includes('localStorage'));assert.ok(!section.includes('setInterval'));assert.ok(!section.includes('/cancel'));
 });
