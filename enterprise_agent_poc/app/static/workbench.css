@@ -159,6 +159,10 @@ body.dialog-open{overflow:hidden}.global-search-disabled{opacity:.72;cursor:not-
 .wechat-article-actions{margin:14px 0;min-width:0}
 .wechat-inline-message-content{min-width:0;white-space:normal}
 .document-intent-feedback{margin:8px 0 0;color:#536582;font-size:13px;line-height:1.5}
+.tenant-summary .company-logo-slot{display:flex;align-items:center;justify-content:center;flex:none;width:36px;height:36px}
+.company-brand-image{display:block;width:32px;height:32px;object-fit:contain;flex:none;border-radius:6px}
+.company-preview-logo{display:block;margin-bottom:8px}
+.company-config-feedback,.conversation-terminal-status{margin:10px 0;color:var(--muted);font-size:14px;line-height:1.6;overflow-wrap:anywhere}
 .wechat-inline-article{display:block;width:100%;max-width:100%;max-height:64dvh;border:1px solid var(--line);border-radius:8px;background:#fff}
 #wechat-article-preview{z-index:80}
 .wechat-article-buttons{display:flex;flex-wrap:wrap;gap:10px}
