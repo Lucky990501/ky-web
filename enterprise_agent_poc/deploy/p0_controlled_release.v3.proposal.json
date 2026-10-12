@@ -1,0 +1,67 @@
+{
+  "schema_version": 3,
+  "contract_id": "SCHEMA015_P0_CONTROLLED_RELEASE_V3",
+  "status": "PROPOSED_CODE_ONLY_NOT_APPROVED_NOT_RELEASE_READY",
+  "business_base_source": "280ae327a9d4720c5cadfac38aba259c7ff161ae",
+  "business_base_tree": "dc86c0e047cb9001e6ea0f88d32b129ad52f079b",
+  "predecessor_source": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
+  "predecessor_release": "20261007-562f201-reference-dependency-retry-v1",
+  "selection": "Explicit runtime_only_release schema_version=3 plus exact Source-bound declaration; offline prepare defaults to native-v2",
+  "scope": "One exact reviewed 280a direct successor / exact562 pair, Schema015, MigrationNONE. No business, Skill, binding, epoch, permissions or schema change",
+  "preparation": "Existing schema015_successor_binding.py prepare --qualification-mode p0-controlled-v3; writes only an offline builder declaration, never an approval",
+  "protected_inputs": [
+    "shared/release-qualifications/<release_id>.policy-approval.v1.json",
+    "shared/release-qualifications/<release_id>.approval.v1.json",
+    "shared/release-qualifications/<release_id>.evidence.v1.json"
+  ],
+  "record_trust": "Unchanged Root-owned, mode0600, single-link NOFOLLOW regular files, trusted ancestors, size and duplicate-key checks. No issuer/API/writer added. Authorized operations must verify actual source-bound reports and lawful human decisions before installing records; labels alone do not prove execution",
+  "owner_policy": "PROJECT_OWNER_POLICY_AUTHORITY; actual principal/audit, APPROVED decision, exact candidate/predecessor/binding, finite interval, explicit replacement map and accepted risks",
+  "deployment_authority": "Independent PRODUCTION_RELEASE_AUTHORITY decision/audit, not granted by policy approval; exact policy record SHA/audit and evidence SHA required. Distinct approval records/audit IDs do not assume an organizational two-person rule not yet approved",
+  "maximum_approval_lifetime_seconds": 86400,
+  "evidence_maximum_age_seconds": 86400,
+  "recovery_authority": "Policy and deployment approval must cover the full switch and recovery interval. Expiry/revocation/removal remains fail-closed, as existing recovery qualification; no force or emergency bypass added",
+  "required_evidence": [
+    "candidate_regression", "source_installation", "pg_transactions", "pg_concurrency", "pg_permissions",
+    "task_run_ownership", "orphan_task_pagination", "tenant_user_isolation", "api_sse_history",
+    "runtime_startup_health", "production_schema015", "production_backup_restore", "artifact_backup_integrity",
+    "exact_562_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery",
+    "business_data_preserved", "release_lock_audit"
+  ],
+  "evidence_rules": "Every check has exact real evidence_kind, current candidate Source, approved environment identity, report SHA, run/audit identity, timestamp, positive assertion count and zero failures/errors/skips. PG checks require PostgreSQL16.6, Schema015 and exact DB identity. Source-bound authorized report verification remains an operations responsibility, not cryptographically established by metadata",
+  "replacement_map": {
+    "full_pytest": ["candidate_regression", "pg_transactions", "pg_concurrency", "pg_permissions"],
+    "stage2": ["task_run_ownership", "orphan_task_pagination", "tenant_user_isolation", "api_sse_history"],
+    "source_installation": ["source_installation", "artifact_backup_integrity"],
+    "api_native": ["runtime_startup_health", "api_sse_history"],
+    "mcp_native": ["runtime_startup_health"],
+    "worker_native": ["runtime_startup_health", "task_run_ownership"],
+    "exact_predecessor_on_schema015": ["exact_562_compatibility", "production_schema015"],
+    "pre_commit_failure_recovery": ["pre_commit_failure_recovery", "release_lock_audit"],
+    "post_commit_runtime_recovery": ["post_commit_runtime_recovery", "production_backup_restore"],
+    "business_data_preserved": ["business_data_preserved"]
+  },
+  "uncovered_risks_requiring_owner_acceptance": [
+    "FULL_STANDARD_STAGE2_NOT_PROVEN",
+    "DEDICATED_SYSTEMD_SERIAL_NATIVE_REHEARSAL_NOT_PROVEN",
+    "REAL_PROVIDER_BUSINESS_QUALITY_NOT_PROVEN"
+  ],
+  "preserved_runtime_gates": [
+    "Four independent RELEASE_EXPECTED pins and installed archive/file identity",
+    "Source/Tree/Parent and seven code pins, exact562 full artifact identity",
+    "Readonly live PostgreSQL ledger/checksum/epoch/floor, Schema015 pending/unknown/drift0",
+    "Registry/Skill/Agent binding and Tenant/User isolation",
+    "Global lock, final preflight before mutation, commit boundary and audit",
+    "Actual API/MCP/Worker health and fixed production configuration identity",
+    "Current authenticated technical smoke including two actual campaign Tasks, SSE, structured result and DOCX; requires separate credential and Provider/fee authorization",
+    "Preserved business data, exact562 on Schema015, pre/postcommit recovery, failure stop and retained evidence"
+  ],
+  "not_allowed": [
+    "Changing old V1/V2 approvals, historical manifests or policies",
+    "Using only Owner approval or Fixture PASS as Production authority",
+    "Skipping genuine PostgreSQL, backup restoration or exact562 data compatibility",
+    "Calling real Provider/WeChat/Image or publishing while preparing this candidate",
+    "Downgrading schema, deleting Task/Run/Admission/credit/config data for rollback",
+    "External unpinned Tooling paths, wildcard Source, bypass flags or new issuer/framework"
+  ],
+  "required_02_handoff": "Independent authority/producer and lawful installation process for the actual policy/deployment/evidence records must be identified. Fresh real PG/API/startup/backup/recovery/lock reports and exact Linux archive/raw+canonical Manifest pins are not produced by component tests. Old961/288 results cannot silently qualify the new Source"
+}

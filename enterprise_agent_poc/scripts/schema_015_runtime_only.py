@@ -15,7 +15,7 @@ def declaration(root, manifest):
     value = manifest.get("runtime_only_release")
     validate_runtime_only_release(value)
     from scripts import schema015_successor_binding as successor
-    if successor.is_v2(manifest):
+    if successor.is_exact_pair(manifest):
         return successor.declaration(root, manifest)
     gate.require(value == gate.read_json(root / "deploy/schema_015_runtime_only.v1.json"),
                  "runtime_only_release_declared_identity")

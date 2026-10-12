@@ -39,7 +39,7 @@ def exact_predecessor(root, manifest=None):
         path = root.parent / (root.parent.name + ".manifest.json")
         manifest = gate.read_json(path) if path.exists() else {}
     from scripts import schema015_successor_binding as successor
-    if successor.is_v2(manifest):
+    if successor.is_exact_pair(manifest):
         return successor.declaration(root, manifest)["exact_predecessor"]
     return PREDECESSOR
 
@@ -49,7 +49,7 @@ def contract(root):
     if path.exists():
         own = gate.read_json(path)
         from scripts import schema015_successor_binding as successor
-        if successor.is_v2(own):
+        if successor.is_exact_pair(own):
             return successor.declaration(root, own)
     value = gate.read_json(root / "deploy/migration_015_recovery.v1.json")
     expected = {
@@ -79,7 +79,7 @@ def contract(root):
 
 def declared(root, manifest):
     from scripts import schema015_successor_binding as successor
-    if successor.is_v2(manifest):
+    if successor.is_exact_pair(manifest):
         from scripts.schema_015_runtime_only import declaration
         declaration(root, manifest)
         return successor.declaration(root, manifest)
@@ -125,9 +125,9 @@ def verify_schema(base, root, target_id, target_commit, *, plan=False, database_
                  "migration_015_schema_baseline")
     lock015 = lock014 + [{k: MIGRATION[k] for k in ("version", "filename", "canonical_sha256")}]
     from scripts import schema015_successor_binding as successor
-    if successor.is_v2(own):
+    if successor.is_exact_pair(own):
         # No registry capture, service mutation or DB credential loading before
-        # protected current-Source Native qualification has been verified.
+        # protected current-Source qualification (V2 Native / approved V3) has been verified.
         successor.qualification(base, root, own, gate.digest(lock015))
     trusted = gate.check_sources(root, lock015)
     prior_root, _ = predecessor(base, root)
@@ -268,8 +268,8 @@ def main(argv=None):
         if args.mode == "target":
             declared(root, manifest)
             exact = exact_predecessor(root, manifest)
-            from scripts.schema015_successor_binding import is_v2
-            if is_v2(manifest):
+            from scripts.schema015_successor_binding import is_exact_pair
+            if is_exact_pair(manifest):
                 verify_schema(base, root, exact["release_id"], exact["source_commit"], plan=True)
             print(exact["release_id"])
             return 0
