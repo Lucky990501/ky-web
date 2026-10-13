@@ -291,7 +291,8 @@ def main(argv=None):
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as exc:
-        reason = str(exc) if isinstance(exc, gate.RollbackBlocked) else "runtime_recovery_input_or_io"
+        from scripts.schema015_successor_binding import BindingBlocked
+        reason = str(exc) if isinstance(exc, (gate.RollbackBlocked, BindingBlocked)) else "runtime_recovery_input_or_io"
         print(json.dumps({"status": "BLOCKED", "check": reason}))
         return 2
 

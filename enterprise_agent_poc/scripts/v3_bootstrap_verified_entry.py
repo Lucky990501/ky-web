@@ -27,8 +27,8 @@ import stat
 import subprocess
 import sys
 
-VERSION = "V3_VERIFIED_SOURCE_ONLY_ENTRY_V1"
-PARENT = "59d34cd8099b766fdd777284f4961d25810473a9"
+VERSION = "V3_VERIFIED_SOURCE_ONLY_ENTRY_V2"
+PARENT = "664594ae7c680d5eeadd87e7ec79b103fa1b695c"
 CODE_FILES = (
     "scripts/v3_trusted_record_bootstrap.py", "scripts/runtime_policy_rollout.py",
     "scripts/schema015_successor_binding.py", "scripts/rollback_preflight.py",
@@ -128,11 +128,28 @@ def read_manifest(path, expected_sha):
     value = json.loads(raw, object_pairs_hook=pairs)
     require(isinstance(value, dict) and set(value) == {
         "schema_version", "scope", "source_commit", "source_tree", "parent_source_commit",
-        "tooling_root", "git_repository", "code_pins", "entry_sha256"}, "ENTRY_MANIFEST_FIELDS")
-    require(type(value["schema_version"]) is int and value["schema_version"] == 1
+        "tooling_root", "git_repository", "code_pins", "entry_sha256", "application_exact",
+        "binding_sha256"}, "ENTRY_MANIFEST_FIELDS")
+    require(type(value["schema_version"]) is int and value["schema_version"] == 2
             and value["scope"] == VERSION and value["parent_source_commit"] == PARENT
             and all(isinstance(value[name], str) and COMMIT.fullmatch(value[name])
                     for name in ("source_commit", "source_tree")), "ENTRY_SOURCE_IDENTITY")
+    application = value["application_exact"]
+    require(isinstance(application, dict) and set(application) == {
+        "release_id", "source_commit", "source_tree", "parent_source_commit",
+        "archive_sha256", "raw_manifest_sha256", "manifest_sha256"}, "ENTRY_APPLICATION_FIELDS")
+    require(application["source_commit"] == value["source_commit"]
+            and application["source_tree"] == value["source_tree"]
+            and application["parent_source_commit"] == PARENT
+            and value["source_commit"] != PARENT, "ENTRY_APPLICATION_SOURCE_BINDING")
+    require(isinstance(application["release_id"], str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", application["release_id"])
+            and application["release_id"] != "20261012-7dcde57-p0-controlled-v3",
+            "ENTRY_NEW_APPLICATION_RELEASE_REQUIRED")
+    require(all(isinstance(application[key], str) and HASH.fullmatch(application[key])
+                for key in ("archive_sha256", "raw_manifest_sha256", "manifest_sha256"))
+            and isinstance(value["binding_sha256"], str) and HASH.fullmatch(value["binding_sha256"]),
+            "ENTRY_APPLICATION_ARTIFACT_PINS")
     require(isinstance(value["code_pins"], dict) and set(value["code_pins"]) == set(CODE_FILES)
             and all(isinstance(pin, str) and HASH.fullmatch(pin) for pin in value["code_pins"].values())
             and isinstance(value["entry_sha256"], str) and HASH.fullmatch(value["entry_sha256"]),
@@ -256,6 +273,9 @@ def execute_verified(manifest, codes, roots, arguments):
     # that list; all repository execution remains the captured allowlist.
     module = __import__("scripts.v3_trusted_record_bootstrap", fromlist=["main"])
     require(module.CODE_FILES == CODE_FILES, "ENTRY_CODE_CONTRACT_DRIFT")
+    # Context is independently pinned data, never candidate self-authorization.
+    # This runs only after the entire repository execution closure is captured.
+    module.configure_candidate(manifest["application_exact"], manifest["binding_sha256"])
     return module.main(arguments)
 
 

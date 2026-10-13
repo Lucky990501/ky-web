@@ -28,11 +28,18 @@ def sources(tmp_path):
         originals[relative] = (original / relative).read_bytes()
         target.write_bytes(originals[relative])
     manifest = {
-        "schema_version": 1, "scope": entry.VERSION, "source_commit": "a" * 40,
+        "schema_version": 2, "scope": entry.VERSION, "source_commit": "a" * 40,
         "source_tree": "b" * 40, "parent_source_commit": entry.PARENT,
         "tooling_root": str(root), "git_repository": str(tmp_path / "fixture-repository"),
         "code_pins": {name: entry.digest(originals[name]) for name in entry.CODE_FILES},
         "entry_sha256": entry.digest(originals["scripts/v3_bootstrap_verified_entry.py"]),
+        "application_exact": {
+            "release_id": "isolated-new-state-contract-candidate",
+            "source_commit": "a" * 40, "source_tree": "b" * 40,
+            "parent_source_commit": entry.PARENT, "archive_sha256": "c" * 64,
+            "raw_manifest_sha256": "d" * 64, "manifest_sha256": "e" * 64,
+        },
+        "binding_sha256": "f" * 64,
     }
     return root, manifest, originals
 
@@ -129,6 +136,48 @@ def test_independent_manifest_exact_bytes(sources, monkeypatch, tmp_path):
     path.write_text('{"schema_version":1,"schema_version":1}')
     with pytest.raises(entry.EntryBlocked, match="DUPLICATE"):
         entry.read_manifest(path, entry.digest(path.read_bytes()))
+
+
+@pytest.mark.parametrize("mutation", [
+    "old_version", "old_scope", "missing_application", "extra_application_field",
+    "missing_application_field", "source", "tree", "parent", "old_release",
+    "wildcard_release", "path_release", "empty_release", "archive_hash",
+    "raw_manifest_hash", "manifest_hash", "binding_hash", "same_as_parent",
+])
+def test_application_artifact_and_tooling_are_independently_exactly_bound(
+    sources, monkeypatch, tmp_path, mutation,
+):
+    fixture_reader(monkeypatch)
+    _, manifest, _ = sources
+    application = manifest["application_exact"]
+    if mutation == "old_version":
+        manifest["schema_version"] = 1
+    elif mutation == "old_scope":
+        manifest["scope"] = "V3_VERIFIED_SOURCE_ONLY_ENTRY_V1"
+    elif mutation == "missing_application":
+        manifest.pop("application_exact")
+    elif mutation == "extra_application_field":
+        application["approved"] = True
+    elif mutation == "missing_application_field":
+        application.pop("source_tree")
+    elif mutation in {"source", "tree", "parent"}:
+        application[{"source": "source_commit", "tree": "source_tree",
+                     "parent": "parent_source_commit"}[mutation]] = "9" * 40
+    elif mutation in {"old_release", "wildcard_release", "path_release", "empty_release"}:
+        application["release_id"] = {
+            "old_release": "20261012-7dcde57-p0-controlled-v3", "wildcard_release": "candidate-*",
+            "path_release": "../candidate", "empty_release": "",
+        }[mutation]
+    elif mutation == "binding_hash":
+        manifest["binding_sha256"] = "not-an-approved-hash"
+    elif mutation == "same_as_parent":
+        manifest["source_commit"] = application["source_commit"] = entry.PARENT
+    else:
+        application[{"archive_hash": "archive_sha256", "raw_manifest_hash": "raw_manifest_sha256",
+                     "manifest_hash": "manifest_sha256"}[mutation]] = "not-an-approved-hash"
+    path, checksum = pin_manifest(sources, tmp_path)
+    with pytest.raises(entry.EntryBlocked):
+        entry.read_manifest(path, checksum)
 
 
 @pytest.mark.parametrize("location", ["candidate", "ancestor"])

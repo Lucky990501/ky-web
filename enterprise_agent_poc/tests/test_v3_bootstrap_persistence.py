@@ -133,13 +133,14 @@ def test_error_after_successful_protected_write_is_never_reported_zero_writes(pa
     with pytest.raises(tool.Blocked): tool.seal(**arguments(package, 'seal-release-records'))
 
 
-def test_real_cli_mutation_is_blocked_until_frozen_consumer_contract_is_resolved(monkeypatch, capsys):
+def test_real_cli_mutation_is_blocked_without_verified_stateful_entry(monkeypatch, capsys):
     # No Root action: replace Store constructor only to reach the explicit
-    # candidate-wide seal prohibition, before any filesystem/TTY work.
+    # stateful-entry prohibition, before any filesystem/TTY work. The historical
+    # 664 blocker assertion remains in that immutable commit and raw JUnit.
     monkeypatch.setattr(tool, 'Store', lambda: object())
     assert tool.main(['seal-policy', '--git-repository', '/unread', '--archive', '/unread',
                       '--manifest', '/unread', '--seal']) == 2
-    assert 'FROZEN_V3_CONSUMER_DOES_NOT_OBSERVE_COMMIT_UNCERTAINTY' in capsys.readouterr().out
+    assert 'VERIFIED_STATEFUL_ENTRY_REQUIRED' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize('fault', ['fsync', 'readback'])

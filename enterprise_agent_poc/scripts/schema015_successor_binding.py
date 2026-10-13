@@ -8,6 +8,7 @@ issuer, installer, migration, service writer, or pointer mutation command.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -35,6 +36,16 @@ CHECKS = ("full_pytest", "stage2", "source_installation", "api_native", "mcp_nat
           "worker_native", "exact_predecessor_on_schema015", "pre_commit_failure_recovery",
           "post_commit_runtime_recovery", "business_data_preserved")
 P0_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3"
+STATE_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3_STATE_V1"
+STATE_BASE_SOURCE = "664594ae7c680d5eeadd87e7ec79b103fa1b695c"
+STATE_BASE_TREE = "35a727593c5478fc2141f597a8113cd63203d287"
+GLOBAL_RELEASE_LOCK = Path("/run/lock/enterprise-agent-workbench-release.lock")
+STATE_PRODUCER_FILES = (
+    "scripts/v3_trusted_record_bootstrap.py", "scripts/runtime_policy_rollout.py",
+    "scripts/schema015_successor_binding.py", "scripts/rollback_preflight.py",
+    "scripts/verify_runtime_config.py", "scripts/release_manifest.py", "scripts/release_runtime_recovery.py",
+    "app/settings.py", "deploy/rollback_compatibility.json",
+)
 P0_SOURCE = "280ae327a9d4720c5cadfac38aba259c7ff161ae"
 P0_TREE = "dc86c0e047cb9001e6ea0f88d32b129ad52f079b"
 P0_CHECKS = {
@@ -76,6 +87,14 @@ P0_PG_CHECKS = {k for k, v in P0_CHECKS.items() if "POSTGRESQL" in v or "WITH_PG
 P0_PG_CHECKS |= {"production_backup_restore", "business_data_preserved"}
 P0_CHANGE_FILES = {*TOOLING_FILES, "tests/test_p0_lightweight_release_contract.py",
                    "deploy/p0_controlled_release.v3.proposal.json"}
+STATE_CHANGE_FILES = {*P0_CHANGE_FILES,
+    "scripts/v3_trusted_record_bootstrap.py", "scripts/v3_bootstrap_verified_entry.py",
+    "tests/test_v3_trusted_record_bootstrap.py", "tests/test_v3_bootstrap_verified_entry.py",
+    "tests/test_v3_bootstrap_approval_ids.py", "tests/test_v3_bootstrap_persistence.py",
+    "tests/test_v3_bootstrap_frozen_consumer_boundary.py", "tests/test_v3_state_contract.py",
+    "tests/test_v3_state_consumer_entry.py", "tests/test_v3_state_frozen_reader_rejection.py",
+    "tests/test_v3_state_producer_consumer_joint.py",
+    "deploy/V3_TRUSTED_RECORD_BOOTSTRAP_REVIEW_V1.md"}
 COMMIT = re.compile(r"[0-9a-f]{40}")
 HASH = re.compile(r"[0-9a-f]{64}")
 
@@ -101,7 +120,12 @@ def is_v2(manifest):
 
 def is_v3(manifest):
     value = manifest.get("runtime_only_release")
-    return isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 3
+    return isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] in (3, 4)
+
+
+def is_stateful(manifest):
+    value = manifest.get("runtime_only_release")
+    return isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 4
 
 
 def is_exact_pair(manifest):
@@ -118,11 +142,16 @@ def validate(value):
         "post_commit_runtime_rollback": "ENABLED", "data_contract": "member_account_status_v1",
         "exact_predecessor": PREDECESSOR,
     }
-    controlled = isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] == 3
+    controlled = isinstance(value, dict) and type(value.get("schema_version")) is int and value["schema_version"] in (3, 4)
+    stateful = controlled and value["schema_version"] == 4
     if controlled:
         fixed.update(schema_version=3, contract_id=P0_CONTRACT, recovery_contract=P0_CONTRACT,
                      qualification_profile=P0_CONTRACT, business_base_source=P0_SOURCE, business_base_tree=P0_TREE,
                      maximum_approval_lifetime_seconds=86400)
+    if stateful:
+        fixed.update(schema_version=4, contract_id=STATE_CONTRACT, recovery_contract=STATE_CONTRACT,
+                     qualification_profile=STATE_CONTRACT, state_contract=STATE_CONTRACT,
+                     security_base_source=STATE_BASE_SOURCE, security_base_tree=STATE_BASE_TREE)
     require(isinstance(value, dict) and set(value) == set(fixed) | {"successor"}, "successor_binding_fields")
     require(all(value[k] == v for k, v in fixed.items())
             and all(type(value[k]) is int for k in ("schema_version", "pending", "unknown", "checksum_drift")),
@@ -135,7 +164,7 @@ def validate(value):
             and successor["source_commit"] != PREDECESSOR["source_commit"], "successor_source_identity")
     if controlled:
         require(type(value["maximum_approval_lifetime_seconds"]) is int
-                and successor["parent_source_commit"] == P0_SOURCE
+                and successor["parent_source_commit"] == (STATE_BASE_SOURCE if stateful else P0_SOURCE)
                 and successor["source_commit"] != P0_SOURCE, "p0_direct_successor_required")
     pins = successor["tooling_pins"]
     require(isinstance(pins, dict) and set(pins) == set(TOOLING_FILES)
@@ -183,13 +212,204 @@ def protected_json(path):
         os.close(descriptor)
 
 
+def require_release_lock():
+    """Prove the inherited FD9 owns the canonical lock for the entire operation.
+
+    Acquiring on an inherited open-file description retains ownership in the
+    release shell. No descriptor is unlocked or closed here. An independently
+    opened contender must be excluded; a filename or environment flag is not
+    proof of mutual exclusion. Standalone qualification without this lease is
+    deliberately not execution authority.
+    """
+    path = GLOBAL_RELEASE_LOCK
+    require(path.is_absolute() and path.resolve(strict=True) == path, "v3_global_lock_path")
+    for parent in path.parents:
+        info = parent.lstat()
+        allowed_sticky = parent == path.parent and bool(info.st_mode & stat.S_ISVTX)
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0
+                and (not info.st_mode & 0o022 or allowed_sticky), "v3_global_lock_parent")
+    observed, held = path.lstat(), os.fstat(9)
+    require(stat.S_ISREG(observed.st_mode) and observed.st_uid == 0 and observed.st_nlink == 1
+            and not observed.st_mode & 0o022
+            and (observed.st_dev, observed.st_ino) == (held.st_dev, held.st_ino), "v3_global_lock_identity")
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise BindingBlocked("v3_global_lock_not_owned") from None
+    contender = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        current = os.fstat(contender)
+        require((current.st_dev, current.st_ino) == (held.st_dev, held.st_ino), "v3_global_lock_identity")
+        try:
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        raise BindingBlocked("v3_global_lock_not_exclusive")
+    finally:
+        os.close(contender)
+
+
+def protected_durable_json(path):
+    """Independent existing-byte reconciliation, never an approval writer.
+
+    A visible completion/receipt cannot prove its writer's final fsync. Read,
+    independently flush the same protected inode and directory, then reread.
+    Failure remains fail-closed; this does not fill missing records or reissue
+    decisions. The caller retains the global lock through authorization use.
+    """
+    value, fingerprint = protected_json(path)
+    first = path.lstat()
+    for item in (path, path.parent):
+        fd = os.open(item, os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if item == path.parent else 0))
+        try:
+            info = os.fstat(fd)
+            if item == path:
+                require((info.st_dev, info.st_ino) == (first.st_dev, first.st_ino), "v3_durable_inode_changed")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    again, after_hash = protected_json(path)
+    after = path.lstat()
+    require((first.st_dev, first.st_ino) == (after.st_dev, after.st_ino)
+            and again == value and after_hash == fingerprint, "v3_durable_readback_changed")
+    return value, fingerprint
+
+
+def state_paths(paths, rid, action, suffix):
+    require(isinstance(rid, str) and re.fullmatch(r"[A-Za-z0-9._-]+", rid)
+            and rid not in {".", ".."}, "v3_state_release_id")
+    require(action in {"seal-policy", "seal-release-records", "revoke-policy"}
+            and suffix in {"intent", "complete", "reconciled"}, "v3_state_operation")
+    return paths.parent / "release-state/v3-record-bootstrap" / (rid + "." + action + "." + suffix + ".json")
+
+
+def reject_revocation(paths, rid):
+    audit = state_paths(paths, rid, "revoke-policy", "intent").parent
+    require(not any(audit.glob(rid + ".revocation-*"))
+            and not any(audit.glob(rid + ".revoke-policy.*"))
+            and not (audit / (rid + ".revoked.json")).exists()
+            and not (audit / (rid + ".revoked.json")).is_symlink(), "v3_policy_revoking_or_revoked")
+
+
+def state_qualification(paths, value, candidate, record_hashes, *, actions=("seal-policy", "seal-release-records")):
+    """Only explicitly reconciled, exact existing records are consumable."""
+    require_release_lock()
+    rid = candidate["release_id"]
+    reject_revocation(paths, rid)
+    require(isinstance(actions, tuple) and actions and len(set(actions)) == len(actions)
+            and set(actions) <= {"seal-policy", "seal-release-records"}, "v3_state_operation")
+    needed = set()
+    if "seal-policy" in actions:
+        needed.add("policy")
+    if "seal-release-records" in actions:
+        needed.update(("deployment", "evidence"))
+    require(needed <= set(record_hashes) <= {"policy", "deployment", "evidence"}, "v3_state_record_set")
+    suffixes = {"policy": ".policy-approval.v1.json", "deployment": ".approval.v1.json",
+                "evidence": ".evidence.v1.json"}
+    technical_ids = set()
+    authority_ids = set()
+    for name in set(record_hashes) & {"policy", "deployment"}:
+        record, observed = protected_json(paths / (rid + suffixes[name]))
+        require(observed == record_hashes[name], "v3_state_authority_record_changed")
+        authority_ids.add(record["audit_id"])
+    for action in actions:
+        require(action in {"seal-policy", "seal-release-records"}, "v3_state_operation")
+        names = ("policy",) if action == "seal-policy" else ("deployment", "evidence")
+        try:
+            # Require the explicit reconciliation receipt BEFORE considering
+            # publication bytes. Its own durability is independently verified.
+            receipt, _ = protected_durable_json(state_paths(paths, rid, action, "reconciled"))
+            intent, intent_hash = protected_durable_json(state_paths(paths, rid, action, "intent"))
+            completion, completion_hash = protected_durable_json(state_paths(paths, rid, action, "complete"))
+            expected_hashes = {name: record_hashes[name] for name in names}
+            require(completion == {"state": "PREPARED", "action": action, "intent_sha256": intent_hash},
+                    "v3_state_completion")
+            require(intent.get("state_contract") == STATE_CONTRACT
+                    and intent.get("action") == action and intent.get("candidate") == candidate
+                    and intent.get("workflow") == "V3_ROOT_MANUAL_ATTESTATION_STATE_V2"
+                    and intent.get("state") == "CONSUMED_FOR_RECORD_SEAL_ONLY"
+                    and isinstance(intent.get("technical_grant_sha256"), str)
+                    and HASH.fullmatch(intent["technical_grant_sha256"])
+                    and isinstance(intent.get("input_sha256"), dict)
+                    and all(intent["input_sha256"].get(name) == fingerprint for name, fingerprint in expected_hashes.items()),
+                    "v3_state_intent")
+            producer = intent.get("producer")
+            require(isinstance(producer, dict) and set(producer) == {"source_commit", "source_tree", "code_pins"}
+                    and producer["source_commit"] == candidate["source_commit"]
+                    and producer["source_tree"] == candidate["source_tree"]
+                    and isinstance(producer["code_pins"], dict)
+                    and set(producer["code_pins"]) == set(STATE_PRODUCER_FILES)
+                    and all(isinstance(pin, str) and HASH.fullmatch(pin) for pin in producer["code_pins"].values())
+                    and all(producer["code_pins"].get(name) == pin
+                            for name, pin in value["successor"]["tooling_pins"].items()
+                            if name in producer["code_pins"]), "v3_state_producer_identity")
+            audit_id = intent.get("technical_audit_id")
+            require(isinstance(audit_id, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", audit_id)
+                    and audit_id not in technical_ids | authority_ids, "v3_state_approval_id_reuse")
+            technical_ids.add(audit_id)
+            audit = state_paths(paths, rid, action, "intent").parent
+            grant, grant_hash = protected_durable_json(audit / (audit_id + ".technical-decision.json"))
+            require(set(grant) == {"schema_version", "workflow", "authority", "decision", "principal_id",
+                "audit_id", "issued_at", "expires_at", "host", "operator", "action", "candidate",
+                "binding_sha256", "producer", "input_sha256", "independent_decision_references",
+                "production_switch_authorized", "business_database_write_authorized"}
+                and grant_hash == intent["technical_grant_sha256"]
+                and type(grant["schema_version"]) is int and grant["schema_version"] == 1
+                and grant["workflow"] == intent["workflow"]
+                and grant["authority"] == "PRODUCTION_ROOT_MAINTENANCE_AUTHORITY"
+                and grant["decision"] == "APPROVED" and grant["audit_id"] == audit_id
+                and all(isinstance(grant[name], str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", grant[name])
+                        for name in ("principal_id", "operator", "host"))
+                and all(grant[name] == intent.get(name) for name in (
+                    "host", "operator", "action", "candidate", "producer", "input_sha256", "independent_decision_references"))
+                and grant["binding_sha256"] == digest(value)
+                and grant["production_switch_authorized"] is False
+                and grant["business_database_write_authorized"] is False,
+                "v3_state_technical_decision")
+            require(type(intent.get("observed_at")) is int
+                and type(grant["issued_at"]) is int and type(grant["expires_at"]) is int
+                and 0 < grant["issued_at"] <= intent["observed_at"] < grant["expires_at"]
+                and grant["expires_at"] - grant["issued_at"] <= 86400,
+                "v3_state_historical_grant_window")
+            references = grant["independent_decision_references"]
+            require(isinstance(references, dict) and set(references) == set(intent["input_sha256"])
+                and all(isinstance(reference, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", reference)
+                        for reference in references.values()), "v3_state_independent_references")
+            markers = [audit / (audit_id + ".json")]
+            markers += [audit / ("decision-" + record_hashes[name] + ".json") for name in names if name != "evidence"]
+            for marker in markers:
+                marker_value, marker_hash = protected_durable_json(marker)
+                require(marker_value == intent and marker_hash == intent_hash, "v3_state_audit_marker")
+            require(receipt == {"schema_version": 1, "contract_id": STATE_CONTRACT,
+                "scope": "DURABILITY_RECONCILIATION", "state": "VERIFIED_COMMITTED",
+                "action": action, "candidate": candidate, "binding_sha256": digest(value),
+                "intent_sha256": intent_hash, "completion_sha256": completion_hash,
+                "record_sha256": expected_hashes}
+                and type(receipt["schema_version"]) is int, "v3_state_reconciliation")
+            for name in names:
+                _, observed = protected_durable_json(paths / (rid + suffixes[name]))
+                require(observed == record_hashes[name], "v3_state_authority_record_changed")
+        except (OSError, KeyError, TypeError) as exc:
+            raise BindingBlocked("v3_state_pending_or_commit_unknown") from exc
+    reject_revocation(paths, rid)
+    require_release_lock()
+    return {"state_contract": STATE_CONTRACT, "state": "VERIFIED_COMMITTED"}
+
+
 def qualification(base, root, manifest, schema_fingerprint, *, now=None):
-    """Read-only additional gate; env approval pins and live DB gates still apply."""
+    """No business mutation; V4 also independently flushes existing state bytes.
+
+    Environment approval pins and live DB gates still apply. No authority record
+    is created or changed by this consumer's durability reconciliation.
+    """
     from scripts import rollback_preflight as gate
     value = declaration(root, manifest)
     gate.require(root.parent.parent == base / "releases" and base.resolve() == base,
                  "qualification_controlled_release")
     paths = base / "shared/release-qualifications"
+    if is_stateful(manifest):
+        require_release_lock()
+        reject_revocation(paths, manifest["release_id"])
     approved, _ = protected_json(paths / (manifest["release_id"] + ".approval.v1.json"))
     evidence, evidence_hash = protected_json(paths / (manifest["release_id"] + ".evidence.v1.json"))
     candidate = {
@@ -228,6 +448,18 @@ def qualification(base, root, manifest, schema_fingerprint, *, now=None):
 
 
 def _p0_qualification(paths, value, candidate, approved, evidence, evidence_hash, schema_fingerprint, *, now):
+    if value.get("schema_version") == 4:
+        require_release_lock()
+        reject_revocation(paths, candidate["release_id"])
+    result = _p0_decisions(paths, value, candidate, approved, evidence, evidence_hash, schema_fingerprint, now=now)
+    if value.get("schema_version") == 4:
+        _, approved_hash = protected_json(paths / (candidate["release_id"] + ".approval.v1.json"))
+        result.update(state_qualification(paths, value, candidate, {
+            "policy": result["policy_approval_sha256"], "deployment": approved_hash, "evidence": evidence_hash}))
+    return result
+
+
+def _p0_decisions(paths, value, candidate, approved, evidence, evidence_hash, schema_fingerprint, *, now):
     """Consume three independently authorized Root-protected records; never issue one.
 
     Labels/hashes do not prove a test ran. Authorized operations must verify the
@@ -238,6 +470,9 @@ def _p0_qualification(paths, value, candidate, approved, evidence, evidence_hash
     instant = time.time() if now is None else now
     common = {"schema_version", "scope", "issuer_uid", "authority", "principal_id", "audit_id",
               "decision", "issued_at", "expires_at", "binding_sha256", "candidate", "predecessor"}
+    stateful = value.get("schema_version") == 4
+    if stateful:
+        common.add("state_contract")
     require(set(policy) == common | {"replacements", "accepted_risks", "test_environment_id",
                                     "production_environment_id"}, "p0_policy_approval_fields")
     require(set(approved) == common | {"policy_approval_sha256", "policy_audit_id", "evidence_sha256"},
@@ -246,7 +481,8 @@ def _p0_qualification(paths, value, candidate, approved, evidence, evidence_hash
         (policy, "P0_EXACT_PAIR_POLICY_CHANGE", "PROJECT_OWNER_POLICY_AUTHORITY"),
         (approved, "P0_EXACT_PAIR_PRODUCTION_DEPLOYMENT", "PRODUCTION_RELEASE_AUTHORITY"),
     ):
-        require(type(record["schema_version"]) is int and record["schema_version"] == 1
+        require(type(record["schema_version"]) is int and record["schema_version"] == (2 if stateful else 1)
+                and (not stateful or record["state_contract"] == STATE_CONTRACT)
                 and type(record["issuer_uid"]) is int and record["issuer_uid"] == 0
                 and record["scope"] == scope and record["authority"] == authority
                 and record["decision"] == "APPROVED"
@@ -271,6 +507,8 @@ def _p0_qualification(paths, value, candidate, approved, evidence, evidence_hash
                 "predecessor": PREDECESSOR, "binding_sha256": digest(value), "schema_fingerprint": schema_fingerprint,
                 "schema": "015", "pending": 0, "migration_action": "NONE", "data_contract": "member_account_status_v1",
                 "replacements": P0_REPLACEMENTS, "uncovered_risks": P0_RISKS}
+    if stateful:
+        expected.update(schema_version=2, state_contract=STATE_CONTRACT)
     require(set(evidence) == set(expected) | {"checks"} and all(evidence[k] == v for k, v in expected.items())
             and type(evidence["schema_version"]) is int and type(evidence["pending"]) is int,
             "p0_evidence_schema_identity")
@@ -324,10 +562,10 @@ def _p0_qualification(paths, value, candidate, approved, evidence, evidence_hash
     return {"status": "p0_controlled_qualification_verified", "audit_id": approved["audit_id"],
             "policy_audit_id": policy["audit_id"], "expires_at": approved["expires_at"],
             "evidence_sha256": evidence_hash, "policy_approval_sha256": policy_hash,
-            "qualification_profile": P0_CONTRACT, "native_acceptance_claim": False}
+            "qualification_profile": STATE_CONTRACT if stateful else P0_CONTRACT, "native_acceptance_claim": False}
 
 
-def prepare(repo, source, *, controlled=False):
+def prepare(repo, source, *, controlled=False, controlled_state=False):
     """Offline source declaration only. No protected qualification is created."""
     require(isinstance(source, str) and COMMIT.fullmatch(source), "prepare_exact_source_required")
     def git(*args):
@@ -337,7 +575,14 @@ def prepare(repo, source, *, controlled=False):
                    check=True, capture_output=True)
     parents = git("show", "-s", "--format=%P", source).decode().split()
     require(len(parents) == 1, "prepare_single_parent_required")
-    if controlled:
+    if controlled_state:
+        require(parents == [STATE_BASE_SOURCE]
+                and git("rev-parse", STATE_BASE_SOURCE + "^{tree}").decode().strip() == STATE_BASE_TREE,
+                "prepare_state_direct_parent_required")
+        changed = git("diff-tree", "--no-commit-id", "--name-only", "-r", source).decode().splitlines()
+        require(all(p.startswith("enterprise_agent_poc/") and p.removeprefix("enterprise_agent_poc/") in STATE_CHANGE_FILES
+                    for p in changed), "prepare_state_business_and_schema_immutable")
+    elif controlled:
         require(parents == [P0_SOURCE] and git("rev-parse", P0_SOURCE + "^{tree}").decode().strip() == P0_TREE,
                 "prepare_p0_direct_parent_required")
         changed = git("diff-tree", "--no-commit-id", "--name-only", "-r", source).decode().splitlines()
@@ -354,10 +599,14 @@ def prepare(repo, source, *, controlled=False):
              "data_contract": "member_account_status_v1", "exact_predecessor": dict(PREDECESSOR),
              "successor": {"source_commit": source, "source_tree": git("rev-parse", source + "^{tree}").decode().strip(),
                            "parent_source_commit": parents[0], "tooling_pins": pins}}
-    if controlled:
+    if controlled or controlled_state:
         value.update(schema_version=3, contract_id=P0_CONTRACT, recovery_contract=P0_CONTRACT,
                      qualification_profile=P0_CONTRACT, business_base_source=P0_SOURCE, business_base_tree=P0_TREE,
                      maximum_approval_lifetime_seconds=86400)
+    if controlled_state:
+        value.update(schema_version=4, contract_id=STATE_CONTRACT, recovery_contract=STATE_CONTRACT,
+                     qualification_profile=STATE_CONTRACT, state_contract=STATE_CONTRACT,
+                     security_base_source=STATE_BASE_SOURCE, security_base_tree=STATE_BASE_TREE)
     return validate(value)
 
 
@@ -366,11 +615,12 @@ def main(argv=None):
     parser.add_argument("mode", choices=("prepare",))
     parser.add_argument("--successor-source", required=True)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--qualification-mode", choices=("native-v2", "p0-controlled-v3"), default="native-v2")
+    parser.add_argument("--qualification-mode", choices=("native-v2", "p0-controlled-v3", "p0-controlled-v3-state-v1"), default="native-v2")
     args = parser.parse_args(argv)
     try:
         value = prepare(Path(__file__).resolve().parents[2], args.successor_source,
-                        controlled=args.qualification_mode == "p0-controlled-v3")
+                        controlled=args.qualification_mode == "p0-controlled-v3",
+                        controlled_state=args.qualification_mode == "p0-controlled-v3-state-v1")
         require(not args.output.exists() and not args.output.is_symlink(), "prepare_output_exists")
         with args.output.open("x", encoding="utf-8") as stream:
             json.dump(value, stream, sort_keys=True, ensure_ascii=False, indent=2)

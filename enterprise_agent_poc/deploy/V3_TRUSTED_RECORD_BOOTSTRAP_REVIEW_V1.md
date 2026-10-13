@@ -1,4 +1,160 @@
-# V3 Bootstrap security correction — PARTIAL / BLOCKED
+# V3 producer/consumer state contract — isolated review successor
+
+This section supersedes the historical partial-result sections below, which are
+retained as evidence. The direct parent is
+`664594ae7c680d5eeadd87e7ec79b103fa1b695c`, tree
+`35a727593c5478fc2141f597a8113cd63203d287`. The final Source/Tree is the Git commit
+containing this document and is recorded in the separate exact-identity handoff.
+No real approval, record seal, Root operation, PRIMARY maintenance, release,
+database operation, service operation or external model call is authorized here.
+
+## Version and identity boundaries
+
+The existing `schema015_successor_binding.py` remains the single qualification
+consumer. Its new manifest `runtime_only_release.schema_version=4` uses
+`SCHEMA015_P0_CONTROLLED_RELEASE_V3_STATE_V1`. Authority records use schema 2
+with that exact `state_contract`. Evidence requirements, exact 562 predecessor,
+Schema015 and the 280a business base are unchanged. V2 and historical V3 retain
+their original exact contracts. New records cannot be parsed as old V3 or V2:
+their version, exact field sets, contract, binding hash and successor pins differ.
+Old readers reject the new manifest; they must not be deployed under a relabelled
+old declaration. Tests execute the actual Git-frozen 7dc readers to prove this.
+
+`release_manifest.py` accepts and validates only the new exact binding, including
+the required consumer files in the artifact. Existing release preflight,
+`rollback_preflight.verify` and `release_runtime_recovery` all reach the same
+qualification function. `schema_015_runtime_only.py` and `release_switch.sh` need
+no behavioral change. Recovery preserves the specific state rejection code;
+unrelated I/O failures still receive the existing safe generic projection.
+
+The producer and consumer are a coordinated Source/Tree, but **Bootstrap Tooling
+identity and deployment Application artifact identity are separate records and
+inventories**, even when both refer to this successor Git commit. This is not
+the frozen 7dc Application archive. Its old hashes, 147-file/27-directory count,
+installer scope and old QA conclusions are not valid for this successor.
+
+## Publication, uncertainty and revocation
+
+Under the canonical Global Release Lock the producer writes its immutable
+technical decision, consumed audit/decision markers, intent, exact authorized
+outputs, then a `PREPARED` completion. This is deliberately NOT consumer authority.
+A missing or uncertain intent/completion/reconciliation receipt rejects.
+
+The existing verified producer entry gains bounded `--reconcile` (mutually
+exclusive with `--seal`). It can only reconcile a specified existing operation,
+using the original independently approved technical hash, same producer,
+candidate, host/operator, input hashes, original audit bytes and a still-valid
+technical authorization. It never rewrites an approval, issues a replacement,
+resets consumption, or reconstructs missing authority/audit outputs. After
+independent read/fsync/read it may finish the exact missing PREPARED completion
+and append an immutable durability receipt. Exact repeated reconciliation is
+idempotent; changed, revoked, expired or incompletely audited operations reject.
+
+The consumer requires the receipt and verifies its bound original intent,
+completion, authority records, technical-decision snapshot and all decision
+markers. It checks the technical authorization at the original observation
+time; current Owner/deployment validity is separately checked by the unchanged
+qualification rules. `PENDING`, `UNKNOWN`, `COMMIT_UNKNOWN`, `REVOKING`, revoked,
+missing/unknown states and malformed versions are never authorization states.
+
+Receipt visibility alone cannot prove the receipt writer's final fsync. Thus
+the consumer itself performs an independent protected read/fsync/read of the
+receipt AND bound original bytes while holding the same lock. This is bounded
+durability coordination, not an approval writer or a zero-I/O assertion. A
+persistent I/O/readback failure rejects; after independent successful coordination
+existing exact bytes may be used without reissuing or reconsuming any decision.
+Any producer write error preserves `COMMIT_UNKNOWN`, operation and attempted
+phase, with `writes=MAY_HAVE_COMMITTED`; it is never reported as no mutation.
+
+Revocation's protected namespace is the first permanent rejection barrier.
+It is checked before Policy movement, after interruption, after exact retry and
+before every use. A revoke intent or completed revoked record also rejects.
+Neither reconciliation nor repeated revocation can reactivate the original
+Policy. No pending namespace, approval, audit or evidence is deleted to recover.
+
+## Actual lock and recovery boundary
+
+The existing release shell holds FD 9 across preflight, switch, verification and
+its protected recovery path. V4 requires that descriptor to reference the exact
+Root-protected canonical `/run/lock/enterprise-agent-workbench-release.lock`,
+proves exclusive `flock` ownership and exclusion of a separately opened contender,
+and never releases it on return. Alternate lock paths do not qualify. Producer
+operations acquire the same lock and retain it through writes/reconciliation.
+
+Actual separate-process tests prove both orders: a consumer holding the lease
+prevents a concurrent revoke; a revoke barrier committed first prevents a later
+consumer even when Policy bytes have not yet moved. Merely finding a lock file
+is insufficient. These tests use ordinary UID private files and real flock;
+Root metadata is explicitly a fixture boundary.
+
+Validation rejection itself performs no service stop, predecessor removal or
+pointer change. **The existing approval/evidence expiry rules are not extended.**
+If an operation starts but its authority expires before protected recovery, that
+recovery remains fail-closed. A separately approved real execution must have a
+valid recovery window covering the planned switch and failure handling; this
+candidate does not create emergency authority or guarantee recovery past expiry.
+
+## First execution bytes and packaging requirements
+
+`V3_VERIFIED_SOURCE_ONLY_ENTRY_V2` uses byte-manifest schema 2, exact parent 664,
+the new Application artifact identity and binding hash. Before Python starts,
+an authorized operator must verify the entry's independent expected hash using
+an already trusted system tool. The entry then checks the protected manifest,
+Git Source/Tree/blob bytes, paths/permissions and the unchanged original nine
+input names before compiling captured bytes. Seven are executable modules;
+`app/settings.py` and rollback JSON are data only. The entry has its own separate
+initial hash. Extra initializers, pyc files, imports and unsafe ancestors reject
+before candidate side effects. Candidate code still cannot self-authorize.
+
+For a later separately authorized packaging/installation review:
+
+1. Use this exact successor commit (direct parent 664); do not reuse 7dc/59d/664
+   archive or binding identities. Run existing binding `prepare` with
+   `--qualification-mode p0-controlled-v3-state-v1`; it derives all seven consumer
+   pins from Git and requires the bounded security-only diff and unchanged
+   migrations/business base.
+2. Build a new artifact with the existing release builder and derived binding.
+   Recompute archive hash, raw/canonical manifest hashes, full file/directory
+   inventory and all seven consumer pins. No candidate artifact was built or
+   installed by this code-only security task.
+3. Independently approve the entry hash and exact byte manifest: all original
+   nine pins, source/tree/parent, absolute trusted roots, new `application_exact`
+   and `binding_sha256`. The entry/byte manifest is NOT an Owner approval.
+4. Obtain independent Owner policy/risk acceptance, Root technical authorization
+   and Production deployment approval with distinct audit IDs. Have an authorized
+   Root operator verify the authenticated decision sources; role strings or TTY
+   alone do not establish Owner identity. Seal then explicitly reconcile under
+   the approved operation window. No real records are produced in this task.
+5. Retain all 18 actual source-bound evidence checks, current Schema015,
+   API/MCP/Worker health, backup/restore, exact 562 data-compatible rollback,
+   independent deployment approval and the three explicitly reviewed risks.
+
+## Test interpretation and review gate
+
+The local ordinary-UID Linux suite exercises actual producer seal/reconcile,
+release preflight, recovery target and rollback qualification calls with real
+atomic files, fsync/readback, process interruption and subprocess locking.
+Database/service reads and Root/issuer identities are labelled fixtures; this is
+NOT actual Production Native, Root attestation or PG validation. No test result
+authorizes installation or release. Network calls are denied by the runner.
+
+The original 04 attack inputs (initializer, bytecode, reused audit ID) remain
+unchanged and are rerun. The two old frozen-consumer vulnerability observations
+remain historical tests, not closure assertions. New tests assert rejection in
+the actual current consumer chains, including revoke-before-move, unsafe/missing
+states, code drift, fsync/readback failure, repeated coordination and both lock
+orders. Final exact-source JUnit counts and byte hashes accompany the handoff.
+04 must independently review this new exact identity; prior QA is not inherited
+as approval. There is no policy approval, installation or release readiness claim.
+
+Pre-commit joint run: **619 passed, 0 failed, 0 errors, 0 skipped**. This comprises
+the inherited 499 (including two historical blocker observations), 17 additional
+verified-entry cases, 35 shared-state cases, 50 actual consumer-entry cases,
+10 producer/consumer joint cases and eight actual frozen-reader cases. The three
+original 04 attacks are included in the inherited count. A fresh archive of the
+final commit must repeat this exact suite before code-candidate handoff.
+
+# Historical 664 result — PARTIAL / BLOCKED (superseded above)
 
 This successor is a local review candidate with direct parent
 `59d34cd8099b766fdd777284f4961d25810473a9`, tree

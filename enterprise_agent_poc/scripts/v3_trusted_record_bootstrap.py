@@ -47,6 +47,9 @@ EXACT = {
     "manifest_sha256": "71c5b8fdccd41d75cfb068b84cd86562fd8173351881c46542c6acfb6ed56bc8",
 }
 BINDING_SHA = "040ac73cf432184b3dca93121a9336ee2e723f91b275b633f6c43047e0a1a3e1"
+# The constants above describe historical 7dc inspection fixtures only. The
+# formal source-only entry installs a separately pinned NEW artifact identity.
+STATEFUL_CONTEXT = False
 CODE_FILES = (
     "scripts/v3_trusted_record_bootstrap.py", "scripts/runtime_policy_rollout.py",
     "scripts/schema015_successor_binding.py", "scripts/rollback_preflight.py",
@@ -62,6 +65,32 @@ COMMON = {"schema_version", "scope", "issuer_uid", "authority", "principal_id", 
 
 class Blocked(ValueError):
     """Only fixed codes cross the CLI boundary; never echo decision contents."""
+
+
+def configure_candidate(exact, binding_sha):
+    """Called only after independently pinned entry verifies all source bytes.
+
+    No artifact/approval is produced here. The actual artifact is subsequently
+    verified against Git and this independent identity by inspect_artifact.
+    """
+    global EXACT, BINDING_SHA, STATEFUL_CONTEXT, VERSION
+    need(isinstance(exact, dict) and set(exact) == set(EXACT)
+         and all(isinstance(exact[k], str) and binding.COMMIT.fullmatch(exact[k])
+                 for k in ("source_commit", "source_tree", "parent_source_commit"))
+         and exact["parent_source_commit"] == binding.STATE_BASE_SOURCE
+         and exact["source_commit"] != binding.STATE_BASE_SOURCE
+         and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,127}", exact["release_id"])
+         and all(isinstance(exact[k], str) and binding.HASH.fullmatch(exact[k]) for k in (
+             "archive_sha256", "raw_manifest_sha256", "manifest_sha256"))
+         and isinstance(binding_sha, str) and binding.HASH.fullmatch(binding_sha),
+         "STATEFUL_APPLICATION_IDENTITY_REQUIRED")
+    EXACT, BINDING_SHA = dict(exact), binding_sha
+    STATEFUL_CONTEXT = True
+    VERSION = "V3_ROOT_MANUAL_ATTESTATION_STATE_V2"
+
+
+def record_common():
+    return COMMON | ({"state_contract"} if STATEFUL_CONTEXT else set())
 
 
 class CommitUnknown(OSError):
@@ -98,12 +127,24 @@ def operation_state(store, action):
     # and their directory before resolving an uncertain terminal publication.
     try:
         terminal, terminal_raw = store.read(complete)
-        need(terminal == {"state": "VERIFIED_COMMITTED", "action": action,
+        need(terminal == {"state": "PREPARED" if "state_contract" in value else "VERIFIED_COMMITTED", "action": action,
                           "intent_sha256": sha(original)}, "OPERATION_COMPLETION_DRIFT")
         verified_existing(store, intent, original)
         verified_existing(store, complete, terminal_raw)
     except OSError as exc:
         raise CommitUnknown(action, "COMPLETION_RECONCILIATION_REQUIRED") from exc
+    if "state_contract" in value:
+        reconciled = operation_path(store, action, "reconciled")
+        if not reconciled.exists():
+            return {"state": "PENDING_OR_UNKNOWN", "intent": value, "intent_sha256": sha(original)}
+        receipt, receipt_raw = store.read(reconciled)
+        need(receipt.get("intent_sha256") == sha(original)
+             and receipt.get("completion_sha256") == sha(terminal_raw)
+             and receipt.get("candidate") == EXACT and receipt.get("binding_sha256") == BINDING_SHA
+             and receipt.get("state") == "VERIFIED_COMMITTED"
+             and receipt.get("contract_id") == binding.STATE_CONTRACT,
+             "RECONCILIATION_IDENTITY_DRIFT")
+        verified_existing(store, reconciled, receipt_raw)
     return {"state": "VERIFIED_COMMITTED", "intent": value, "intent_sha256": sha(original)}
 
 
@@ -174,10 +215,11 @@ def window(record, now):
 
 
 def policy_valid(record, now):
-    need(isinstance(record, dict) and set(record) == COMMON | {
+    need(isinstance(record, dict) and set(record) == record_common() | {
         "replacements", "accepted_risks", "test_environment_id", "production_environment_id"},
         "OWNER_DECISION_FIELDS")
-    need(type(record["schema_version"]) is int and record["schema_version"] == 1
+    need(type(record["schema_version"]) is int and record["schema_version"] == (2 if STATEFUL_CONTEXT else 1)
+         and (not STATEFUL_CONTEXT or record.get("state_contract") == binding.STATE_CONTRACT)
          and type(record["issuer_uid"]) is int and record["issuer_uid"] == 0
          and record["scope"] == "P0_EXACT_PAIR_POLICY_CHANGE"
          and record["authority"] == "PROJECT_OWNER_POLICY_AUTHORITY"
@@ -219,6 +261,7 @@ def inspect_artifact(archive, manifest_raw, *, blob_reader):
     need(manifest["release_id"] == EXACT["release_id"] and manifest["source_commit"] == EXACT["source_commit"]
          and manifest["archive_sha256"] == EXACT["archive_sha256"], "ARTIFACT_IDENTITY_DRIFT")
     declaration = binding.validate(manifest["runtime_only_release"])
+    need(not STATEFUL_CONTEXT or binding.is_stateful(manifest), "STATEFUL_ARTIFACT_REQUIRED")
     need(binding.digest(declaration) == BINDING_SHA, "BINDING_DRIFT")
     need(archive.stat().st_size <= 8 * 1024 * 1024, "ARCHIVE_SIZE_BLOCKED")
     need(sha(archive.read_bytes()) == EXACT["archive_sha256"], "ARCHIVE_DRIFT")
@@ -248,12 +291,13 @@ def inspect_artifact(archive, manifest_raw, *, blob_reader):
             need(data == source and member.mode & ~0o022 == mode, "ARCHIVE_GIT_BYTES_OR_MODE_DRIFT")
             files[member.name] = sha(data)
             modes[member.name] = mode
-        need(len(files) == manifest["selected_file_count"] == 145 and len(directories) == 26
+        need(len(files) == manifest["selected_file_count"]
+             and (STATEFUL_CONTEXT or len(files) == 145 and len(directories) == 26)
              and set(files) == set(manifest["selected_files"]), "ARTIFACT_INVENTORY_DRIFT")
     pins = declaration["successor"]["tooling_pins"]
     need(all(files["enterprise_agent_poc/" + p] == h for p, h in pins.items()), "SEVEN_CODE_PIN_DRIFT")
-    return manifest, {"files": files, "directories": directories, "permanent_files": 147,
-                      "permanent_directories": 27, "code_pins": pins, "installed_modes": modes}
+    return manifest, {"files": files, "directories": directories, "permanent_files": len(files) + 2,
+                      "permanent_directories": len(directories) + 1, "code_pins": pins, "installed_modes": modes}
 
 
 def git_reader(repo, source, tree, parent):
@@ -318,9 +362,10 @@ def approval_identity_separation(store, action, grant, grant_raw, records, recor
         decisions["deployment"] = store.read(store.path("deployment"))[0]
     if "deployment" in decisions:
         deployment = decisions["deployment"]
-        need(isinstance(deployment, dict) and set(deployment) == COMMON | {
+        need(isinstance(deployment, dict) and set(deployment) == record_common() | {
             "policy_approval_sha256", "policy_audit_id", "evidence_sha256"}, "DEPLOYMENT_DECISION_TYPE_REQUIRED")
-        need(type(deployment["schema_version"]) is int and deployment["schema_version"] == 1
+        need(type(deployment["schema_version"]) is int and deployment["schema_version"] == (2 if STATEFUL_CONTEXT else 1)
+             and (not STATEFUL_CONTEXT or deployment.get("state_contract") == binding.STATE_CONTRACT)
              and type(deployment["issuer_uid"]) is int and deployment["issuer_uid"] == 0
              and deployment["scope"] == "P0_EXACT_PAIR_PRODUCTION_DEPLOYMENT"
              and deployment["authority"] == "PRODUCTION_RELEASE_AUTHORITY"
@@ -415,6 +460,7 @@ class Store:
         if not LOCK.parent.stat().st_mode & 0o022:
             flags |= os.O_CREAT
         fd = os.open(LOCK, flags, 0o600)
+        inherited = False
         try:
             info = os.fstat(fd)
             need(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
@@ -425,8 +471,23 @@ class Store:
                 raise Blocked("GLOBAL_RELEASE_LOCK_BUSY") from None
             current = LOCK.lstat()
             need((current.st_dev, current.st_ino) == (info.st_dev, info.st_ino), "RELEASE_LOCK_INODE_DRIFT")
+            if STATEFUL_CONTEXT:
+                # State consumers prove ownership of the SAME open description
+                # as the existing release shell, never an environment claim.
+                if fd != 9:
+                    try:
+                        os.fstat(9)
+                    except OSError:
+                        pass
+                    else:
+                        raise Blocked("RELEASE_LOCK_DESCRIPTOR_IN_USE")
+                    os.dup2(fd, 9, inheritable=False)
+                    inherited = True
+                binding.require_release_lock()
             yield
         finally:
+            if inherited:
+                os.close(9)
             os.close(fd)
 
     def prepare_directories(self):
@@ -446,6 +507,11 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
          host, now, manifest=None, schema_fingerprint=None, reports=None, attest=tty_attest, publish=True):
     """Consumes only the independent decision for sealing. Does not deploy/install."""
     need(action in {"seal-policy", "seal-release-records", "revoke-policy"}, "ACTION_SCOPE_REJECTED")
+    need(not STATEFUL_CONTEXT or manifest is not None and binding.is_stateful(manifest),
+         "STATEFUL_ARTIFACT_REQUIRED")
+    need(not STATEFUL_CONTEXT or producer.get("source_commit") == EXACT["source_commit"]
+         and producer.get("source_tree") == EXACT["source_tree"], "STATEFUL_PRODUCER_SOURCE_DRIFT")
+    decision_validator = binding._p0_decisions if STATEFUL_CONTEXT else binding._p0_qualification
     names = {"policy"} if action != "seal-release-records" else {"deployment", "evidence"}
     need(set(records) == set(record_raw) == names, "RECORD_SET_REQUIRED")
     need(all(json.loads(raw, object_pairs_hook=binding._pairs) == records[name]
@@ -467,7 +533,7 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
         need(manifest is not None, "VERIFIED_MANIFEST_REQUIRED")
         pending_barrier(store, action, grant_sha)
         declaration = manifest["runtime_only_release"]
-        binding._p0_qualification(store.qualifications, declaration, EXACT, records["deployment"],
+        decision_validator(store.qualifications, declaration, EXACT, records["deployment"],
                                  records["evidence"], inputs["evidence"], schema_fingerprint, now=now)
     approval_identity_separation(store, action, grant, grant_raw, records, record_raw, now)
     if not publish:
@@ -476,6 +542,11 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
     with store.lock():
         store.prepare_directories()
         pending_barrier(store, action, grant_sha)
+        if STATEFUL_CONTEXT:
+            binding.require_release_lock()
+            if action == "seal-release-records":
+                binding.state_qualification(store.qualifications, declaration, EXACT,
+                    {"policy": sha(store.read(store.path("policy"))[1])}, actions=("seal-policy",))
         approval_identity_separation(store, action, grant, grant_raw, records, record_raw, int(time.time()))
         marker = store.audit / (grant["audit_id"] + ".json")
         resume = action == "revoke-policy"
@@ -499,7 +570,7 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
         # Recheck the existing policy while holding the global lock. A concurrent
         # revocation/replacement cannot slip between verification and publication.
         if action == "seal-release-records":
-            binding._p0_qualification(store.qualifications, declaration, EXACT, records["deployment"],
+            decision_validator(store.qualifications, declaration, EXACT, records["deployment"],
                                      records["evidence"], inputs["evidence"], schema_fingerprint, now=int(time.time()))
         tty_evidence = attest(grant_sha, inputs)
         # A person may take time at the TTY. Never seal expired inputs after it.
@@ -507,7 +578,7 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
         if action in {"seal-policy", "revoke-policy"}:
             policy_valid(records["policy"], int(time.time()))
         else:
-            binding._p0_qualification(store.qualifications, declaration, EXACT, records["deployment"],
+            decision_validator(store.qualifications, declaration, EXACT, records["deployment"],
                                      records["evidence"], inputs["evidence"], schema_fingerprint, now=int(time.time()))
         approval_identity_separation(store, action, grant, grant_raw, records, record_raw, int(time.time()))
         # Durable one-use audit BEFORE publication. Failed/partial publication is
@@ -520,6 +591,8 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
                  "tty_evidence": tty_evidence,
                  "observed_at": now, "production_switch_authorized": False,
                  "state": "CONSUMED_FOR_RECORD_SEAL_ONLY"}
+        if STATEFUL_CONTEXT:
+            audit["state_contract"] = binding.STATE_CONTRACT
         if resume and intent.exists():
             original, _ = store.read(intent)
             need(all(original.get(k) == audit[k] for k in (
@@ -589,12 +662,103 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
                 for name in sorted(names, key=lambda n: n == "deployment"):
                     write(store.path(name), record_raw[name])
             write(operation_path(store, action, "complete"), (json.dumps({
-                "state": "VERIFIED_COMMITTED", "action": action, "intent_sha256": sha(audit_raw)},
+                "state": "PREPARED" if STATEFUL_CONTEXT else "VERIFIED_COMMITTED", "action": action, "intent_sha256": sha(audit_raw)},
                 sort_keys=True) + "\n").encode())
         except (OSError, ValueError) as exc:
             raise CommitUnknown(action, phase) from exc
-        return {"status": "RECORD_SEALED_NOT_INSTALL_OR_RELEASE_AUTHORITY", "action": action,
+        return {"status": "PREPARED_REQUIRES_DURABILITY_RECONCILIATION" if STATEFUL_CONTEXT else "RECORD_SEALED_NOT_INSTALL_OR_RELEASE_AUTHORITY", "action": action,
                 "audit_id": grant["audit_id"], "input_sha256": inputs, "deployment_executed": False}
+
+
+def reconcile(store, action, *, grant_sha, producer, operator, host, now, manifest,
+              schema_fingerprint, attest=tty_attest, publish=False):
+    """Finish durability of ONE existing operation, never reissue its decision.
+
+    Only completion/reconciliation metadata may be added. Missing authority,
+    outputs or original audit bytes cannot be reconstructed here. Original
+    technical authority, expiry and exact bytes remain mandatory.
+    """
+    need(STATEFUL_CONTEXT and binding.is_stateful(manifest)
+         and action in {"seal-policy", "seal-release-records"}, "RECONCILIATION_SCOPE_REQUIRED")
+    need(producer.get("source_commit") == EXACT["source_commit"]
+         and producer.get("source_tree") == EXACT["source_tree"], "STATEFUL_PRODUCER_SOURCE_DRIFT")
+    with store.lock():
+        binding.require_release_lock()
+        need(not list(store.audit.glob(EXACT["release_id"] + ".revocation-*"))
+             and not operation_path(store, "revoke-policy", "intent").exists()
+             and not (store.audit / (EXACT["release_id"] + ".revoked.json")).exists(),
+             "REVOKED_OR_REVOKING_CANNOT_RECONCILE")
+        intent_path = operation_path(store, action, "intent")
+        intent, intent_raw = store.read(intent_path)
+        need(intent.get("state_contract") == binding.STATE_CONTRACT and intent.get("action") == action
+             and intent.get("candidate") == EXACT and intent.get("producer") == producer
+             and intent.get("technical_grant_sha256") == grant_sha
+             and intent.get("host") == host and intent.get("operator") == operator
+             and isinstance(intent.get("technical_audit_id"), str)
+             and ID.fullmatch(intent["technical_audit_id"]), "RECONCILIATION_INTENT_DRIFT")
+        grant_path = store.audit / (intent["technical_audit_id"] + ".technical-decision.json")
+        grant, grant_raw = store.read(grant_path)
+        technical_valid(grant, expected_sha=grant_sha, raw=grant_raw, action=action,
+            inputs=intent["input_sha256"], host=host, operator=operator, producer=producer, now=now)
+        names = ("policy",) if action == "seal-policy" else ("deployment", "evidence")
+        records, record_raw = {}, {}
+        for name in names:
+            records[name], record_raw[name] = store.read(store.path(name))
+            need(sha(record_raw[name]) == intent["input_sha256"].get(name), "RECONCILIATION_OUTPUT_DRIFT")
+        # This is not another sealing decision; original consumed ID must not
+        # be accepted by seal() again. Relation/type checks below use original
+        # immutable decision bytes and existing consumer decision checks.
+        if action == "seal-policy":
+            policy_valid(records["policy"], now)
+        else:
+            binding._p0_decisions(store.qualifications, manifest["runtime_only_release"], EXACT,
+                records["deployment"], records["evidence"], sha(record_raw["evidence"]), schema_fingerprint, now=now)
+        need(grant["audit_id"] not in {record.get("audit_id") for record in records.values()}
+             and (action != "seal-release-records" or grant["audit_id"] != store.read(store.path("policy"))[0]["audit_id"]),
+             "TECHNICAL_AND_OWNER_DECISIONS_MUST_BE_SEPARATE")
+        audit_paths = [intent_path, store.audit / (grant["audit_id"] + ".json")]
+        audit_paths += [store.audit / ("decision-" + intent["input_sha256"][n] + ".json") for n in names if n != "evidence"]
+        need(all(store.read(path)[1] == intent_raw for path in audit_paths), "RECONCILIATION_AUDIT_DRIFT")
+        complete = operation_path(store, action, "complete")
+        complete_raw = (json.dumps({"state": "PREPARED", "action": action,
+                                   "intent_sha256": sha(intent_raw)}, sort_keys=True) + "\n").encode()
+        if complete.exists() or complete.is_symlink():
+            need(store.read(complete)[1] == complete_raw, "RECONCILIATION_COMPLETION_DRIFT")
+        receipt = {"schema_version": 1, "contract_id": binding.STATE_CONTRACT,
+                   "scope": "DURABILITY_RECONCILIATION", "state": "VERIFIED_COMMITTED",
+                   "action": action, "candidate": EXACT, "binding_sha256": BINDING_SHA,
+                   "intent_sha256": sha(intent_raw), "completion_sha256": sha(complete_raw),
+                   "record_sha256": {name: sha(data) for name, data in record_raw.items()}}
+        receipt_raw = (json.dumps(receipt, sort_keys=True) + "\n").encode()
+        output = operation_path(store, action, "reconciled")
+        if output.exists() or output.is_symlink():
+            need(store.read(output)[1] == receipt_raw, "RECONCILIATION_RECORD_DRIFT")
+        if not publish:
+            return {"status": "RECONCILIATION_INSPECTED_NOT_AUTHORITY", "writes": 0}
+        attest(grant_sha, intent["input_sha256"])
+        technical_valid(grant, expected_sha=grant_sha, raw=grant_raw, action=action,
+            inputs=intent["input_sha256"], host=host, operator=operator, producer=producer, now=int(time.time()))
+        phase = "RECONCILIATION_READBACK"
+        try:
+            for path in audit_paths:
+                verified_existing(store, path, intent_raw)
+            verified_existing(store, grant_path, grant_raw)
+            for name in names:
+                verified_existing(store, store.path(name), record_raw[name])
+            phase = "RECONCILIATION_COMPLETION"
+            if not complete.exists():
+                store.create(complete, complete_raw)
+            verified_existing(store, complete, complete_raw)
+            phase = "RECONCILIATION_RECEIPT"
+            if not output.exists():
+                store.create(output, receipt_raw)
+            verified_existing(store, output, receipt_raw)
+            binding.state_qualification(store.qualifications, manifest["runtime_only_release"], EXACT,
+                receipt["record_sha256"], actions=(action,))
+        except (OSError, ValueError) as exc:
+            raise CommitUnknown(action, phase) from exc
+        return {"status": "EXISTING_OPERATION_DURABILITY_RECONCILED_NOT_NEW_AUTHORITY", "action": action,
+                "decision_reissued": False, "deployment_executed": False}
 
 
 def main(argv=None):
@@ -612,13 +776,12 @@ def main(argv=None):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--reports", type=Path, help="Root-protected <check>.report bytes for all 18 checks")
     parser.add_argument("--seal", action="store_true", help="future independent Root authority and TTY required")
+    parser.add_argument("--reconcile", action="store_true", help="verify existing operation; never rewrite authority records")
     args = parser.parse_args(argv)
     try:
         store = Store()
-        # This candidate deliberately cannot seal real records while the frozen
-        # 7dc reader ignores commit uncertainty. Component fixtures exercise the
-        # bounded repairs below; they do not approve a reader-contract upgrade.
-        need(not args.seal, "FROZEN_V3_CONSUMER_DOES_NOT_OBSERVE_COMMIT_UNCERTAINTY")
+        need(not (args.seal and args.reconcile), "MUTUALLY_EXCLUSIVE_WRITE_MODES")
+        need(STATEFUL_CONTEXT, "VERIFIED_STATEFUL_ENTRY_REQUIRED")
         # Root-protected uploaded artifact and repo, no arbitrary download/input.
         trusted_path(args.git_repository)
         for path in (args.archive, args.manifest):
@@ -632,12 +795,12 @@ def main(argv=None):
             print(json.dumps({"status": "EXACT_ARTIFACT_VERIFIED_NOT_AUTHORITY", "candidate": EXACT,
                               "files": inventory["permanent_files"], "directories": inventory["permanent_directories"]}))
             return 0
-        need(args.technical_grant is not None and args.operator is not None
+        need((args.reconcile or args.technical_grant is not None) and args.operator is not None
              and isinstance(args.producer_source, str) and binding.COMMIT.fullmatch(args.producer_source)
              and isinstance(args.producer_tree, str) and binding.COMMIT.fullmatch(args.producer_tree),
              "INDEPENDENT_TECHNICAL_APPROVAL_REQUIRED")
         blob = git_reader(args.git_repository, args.producer_source, args.producer_tree,
-                          "59d34cd8099b766fdd777284f4961d25810473a9")
+                          binding.STATE_BASE_SOURCE)
         pins = {}
         for relative in CODE_FILES:
             observed = ROOT / relative
@@ -649,6 +812,16 @@ def main(argv=None):
             need(observed.read_bytes() == original, "PRODUCER_CODE_DRIFT")
             pins[relative] = sha(original)
         producer = {"source_commit": args.producer_source, "source_tree": args.producer_tree, "code_pins": pins}
+        if args.reconcile:
+            from scripts import rollback_preflight as gate
+            from scripts.release_runtime_recovery import MIGRATION
+            lock014 = gate.epoch_contract(gate.read_json(ROOT / "deploy/rollback_compatibility.json"))["schema_migrations"]
+            fingerprint = binding.digest(lock014 + [{k: MIGRATION[k] for k in ("version", "filename", "canonical_sha256")}])
+            print(json.dumps(reconcile(store, args.action,
+                grant_sha=args.independently_approved_technical_sha256, producer=producer,
+                operator=args.operator, host=socket.gethostname(), now=int(time.time()), manifest=manifest,
+                schema_fingerprint=fingerprint, publish=True)))
+            return 0
         grant, grant_raw = store.read(args.technical_grant)
         names = ("deployment", "evidence") if args.action == "seal-release-records" else ("policy",)
         records, raw = {}, {}
