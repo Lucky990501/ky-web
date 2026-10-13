@@ -1,4 +1,65 @@
-# V3 producer/consumer state contract — isolated review successor
+# V3 reconciliation post-TTY expiry correction — isolated P2 successor
+
+Direct parent: `405de8cd524d5d74547aef6fae8e981b763c86bc`, tree
+`82d040f1bb7dd567811c6047633a059af7267104`. This section supersedes only the
+current-candidate identity and the reconciliation waiting-window conclusion
+below; all previous sections remain historical evidence, not new approvals.
+
+04's original `test_reconcile_rechecks_owner_expiry_after_manual_wait` was
+reproduced unchanged on 405: Owner/deployment expire at 100, technical authority
+at 200, initial check at 50, TTY advances to 100. Reconciliation incorrectly
+returned success; the consumer correctly refused the expired records. This is
+a **P2 false-success coordinator defect**, not evidence of a release/recovery
+authorization bypass. Original QA bytes and failed JUnit are retained externally.
+
+The only behavioral correction is in `v3_trusted_record_bootstrap.reconcile`:
+after TTY returns, while still holding the same Global Release Lock, capture one
+fresh current time and rerun `technical_valid` plus `policy_valid` for policy
+coordination, or `_p0_decisions` for deployment/evidence coordination. Reuse the
+existing revocation barrier before any coordination writes. No earlier `now`
+or approval-validity result is reused. The existing strict rule
+`issued_at <= now < expires_at` is unchanged: both 100 and 101 reject, 99 may pass.
+
+Refusal adds no reconciliation receipt or completion, does not erase existing
+receipts/audits/COMMIT_UNKNOWN bytes, does not restore consumed authority, and
+does not imply earlier writes never occurred. Existing fsync/readback failure
+handling and consumer rejection stay intact. A legal concurrent revoke still
+cannot acquire the held lock. State-corruption/revocation-during-wait tests are
+explicit isolated fault injections, not claims of a second authorized writer.
+
+Direct tests are appended to the existing producer/consumer joint test file;
+old assertions are retained. Cases cover both operations, still-valid windows,
+Owner/deployment/technical expiry independently where the contract permits,
+exact/past expiry, existing receipt preservation, UNKNOWN/I/O interruption and
+the same-lock revoke attempt. Owner expiry in the deployment path necessarily
+also expires deployment, whose deadline cannot legally exceed Owner's deadline.
+The original 04 probe is run without editing or copying it into a new assertion.
+Only affected security/identity/consumer regressions are run, not business
+961/288 checks. Exact-commit counts and new Pins accompany the local handoff.
+Pre-commit result: 308 passed / 0 failed / 0 errors / 0 skipped, including
+19 new waiting-window cases and the unchanged original 04 expiry probe. This
+is developer isolated validation, not a replacement for 04's independent verdict.
+
+Required identity-only updates: `STATE_BASE_SOURCE/STATE_BASE_TREE` and verified
+entry `PARENT` now bind 405/82d0. Without those three constant changes, the existing
+direct-parent checks would reject this legitimate successor. No consumer state
+logic, V2 rules, record format, entry byte-set or 18 evidence requirements change.
+The V4 state contract and verified-entry V2 remain the same formats.
+
+Subsequent approved packaging must derive the new binding and all Pins from this
+new exact commit. Bootstrap/binding input Hashes, the independent entry Hash,
+archive and manifests must be recomputed. The old 405/7dc artifacts, installed
+counts, approvals and QA conclusions cannot be silently reused for new bytes.
+Bootstrap Tooling and the later deployable Application artifact remain separate
+identities/inventories. This task builds no release artifact or effective record.
+
+This candidate requires 04 independent targeted review. No real `--seal`, Root
+installation, PRIMARY/Test or Production switch, service/database action, policy
+renewal, real approval issuance, deployment or external provider call is allowed.
+Existing recovery-window risks remain; this fix neither extends authority nor
+guarantees recovery after its independent approval expires or is revoked.
+
+# Historical 405 producer/consumer state contract — isolated review successor
 
 This section supersedes the historical partial-result sections below, which are
 retained as evidence. The direct parent is

@@ -736,8 +736,20 @@ def reconcile(store, action, *, grant_sha, producer, operator, host, now, manife
         if not publish:
             return {"status": "RECONCILIATION_INSPECTED_NOT_AUTHORITY", "writes": 0}
         attest(grant_sha, intent["input_sha256"])
+        # TTY latency invalidates the earlier time-window result. Recheck all
+        # applicable decisions at one fresh instant, under the same lock and
+        # before adding completion/reconciliation bytes. Refusal retains all
+        # earlier evidence; it does not assert that earlier writes never occurred.
+        post_attest_now = int(time.time())
         technical_valid(grant, expected_sha=grant_sha, raw=grant_raw, action=action,
-            inputs=intent["input_sha256"], host=host, operator=operator, producer=producer, now=int(time.time()))
+            inputs=intent["input_sha256"], host=host, operator=operator, producer=producer, now=post_attest_now)
+        binding.reject_revocation(store.qualifications, EXACT["release_id"])
+        if action == "seal-policy":
+            policy_valid(records["policy"], post_attest_now)
+        else:
+            binding._p0_decisions(store.qualifications, manifest["runtime_only_release"], EXACT,
+                records["deployment"], records["evidence"], sha(record_raw["evidence"]),
+                schema_fingerprint, now=post_attest_now)
         phase = "RECONCILIATION_READBACK"
         try:
             for path in audit_paths:

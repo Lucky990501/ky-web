@@ -154,6 +154,136 @@ def test_wrong_producer_identity_rejected_before_state_or_authority_writes(joint
     assert joint["store"].writes == before
 
 
+def expiry_operation(ctx, action, *, owner_expires=200, deployment_expires=200, technical_expires=200):
+    """Independent synthetic decisions BEFORE sealing, never mutate approvals."""
+    ctx["policy"]["expires_at"] = owner_expires
+    ctx["deployment"].update(expires_at=deployment_expires,
+                             policy_approval_sha256=tool.sha(raw(ctx["policy"])))
+    if action == "seal-release-records":
+        policy_args = arguments(ctx, expires_at=200)
+        tool.seal(**policy_args)
+        coordinate(ctx, policy_args)
+    args = arguments(ctx, action, expires_at=technical_expires)
+    tool.seal(**args)
+    return args
+
+
+def preserved_bytes(ctx):
+    return {path: path.read_bytes() for root in (ctx["store"].audit, ctx["store"].qualifications)
+            for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("action", ["seal-policy", "seal-release-records"])
+def test_reconcile_after_tty_all_approvals_still_valid(joint, monkeypatch, action):
+    args = expiry_operation(joint, action, owner_expires=100, deployment_expires=100,
+                            technical_expires=100)
+    before = preserved_bytes(joint)
+    def wait(*_):
+        binding.require_release_lock()
+        monkeypatch.setattr(tool.time, "time", lambda: 99)
+    result = coordinate(joint, args, attest=wait)
+    assert result["status"] == "EXISTING_OPERATION_DURABILITY_RECONCILED_NOT_NEW_AUTHORITY"
+    assert all(path.read_bytes() == data for path, data in before.items())
+    receipt = tool.operation_path(joint["store"], action, "reconciled")
+    assert json.loads(receipt.read_bytes())["state"] == "VERIFIED_COMMITTED"
+    if action == "seal-release-records":
+        with joint["store"].lock():
+            assert binding.qualification(joint["base"], joint["root"], joint["manifest"],
+                                         "e" * 64, now=99)["state"] == "VERIFIED_COMMITTED"
+
+
+@pytest.mark.parametrize("action,expires", [
+    ("seal-policy", "owner"), ("seal-policy", "technical"),
+    ("seal-release-records", "owner"), ("seal-release-records", "deployment"),
+    ("seal-release-records", "technical"),
+])
+@pytest.mark.parametrize("post_tty_time", [100, 101])
+def test_reconcile_post_tty_exact_and_past_expiry_never_adds_receipt(joint, monkeypatch, action, expires, post_tty_time):
+    # Deployment cannot legally outlive Owner approval. Owner expiry in that
+    # path necessarily also expires deployment; deployment-only is independent.
+    args = expiry_operation(joint, action,
+        owner_expires=100 if expires == "owner" else 200,
+        deployment_expires=100 if expires in {"owner", "deployment"} else 200,
+        technical_expires=100 if expires == "technical" else 200)
+    before, writes = preserved_bytes(joint), list(joint["store"].writes)
+    def wait(*_):
+        binding.require_release_lock()
+        monkeypatch.setattr(tool.time, "time", lambda: post_tty_time)
+    expected = "p0_approval_time_window" if action == "seal-release-records" and expires != "technical" else "DECISION_EXPIRED_OR_INVALID"
+    with pytest.raises((tool.Blocked, binding.BindingBlocked), match=expected):
+        coordinate(joint, args, attest=wait)
+    assert joint["store"].writes == writes and preserved_bytes(joint) == before
+    assert not tool.operation_path(joint["store"], action, "reconciled").exists()
+    assert json.loads(tool.operation_path(joint["store"], action, "complete").read_bytes())["state"] == "PREPARED"
+
+
+@pytest.mark.parametrize("action", ["seal-policy", "seal-release-records"])
+def test_expired_reconciliation_retry_preserves_existing_receipt_and_consumption(joint, monkeypatch, action):
+    args = expiry_operation(joint, action, owner_expires=100, deployment_expires=100)
+    coordinate(joint, args)
+    before, writes = preserved_bytes(joint), list(joint["store"].writes)
+    def wait(*_):
+        monkeypatch.setattr(tool.time, "time", lambda: 100)
+    with pytest.raises((tool.Blocked, binding.BindingBlocked), match="DECISION_EXPIRED_OR_INVALID|p0_approval_time_window"):
+        coordinate(joint, args, attest=wait)
+    assert preserved_bytes(joint) == before and joint["store"].writes == writes
+    if action == "seal-release-records":
+        with joint["store"].lock(), pytest.raises(binding.BindingBlocked, match="p0_approval_time_window"):
+            binding.qualification(joint["base"], joint["root"], joint["manifest"], "e" * 64, now=100)
+
+
+@pytest.mark.parametrize("fault", ["revocation_barrier", "unknown_completion", "persistent_readback", "persistent_fsync"])
+def test_post_tty_state_or_io_fault_cannot_return_success_or_erase_evidence(joint, monkeypatch, fault):
+    args = expiry_operation(joint, "seal-release-records")
+    store = joint["store"]
+    before, writes = preserved_bytes(joint), list(store.writes)
+    complete = tool.operation_path(store, args["action"], "complete")
+    intent = tool.operation_path(store, args["action"], "intent")
+    real_read, intent_reads = store.read, []
+    def wait(*_):
+        binding.require_release_lock()
+        if fault == "revocation_barrier":
+            # Fault injection only, not a legal concurrent writer while locked.
+            (store.audit / (tool.EXACT["release_id"] + ".revocation-" + "f" * 64)).mkdir()
+        elif fault == "unknown_completion":
+            value = json.loads(complete.read_bytes())
+            value["state"] = "COMMIT_UNKNOWN"
+            complete.write_bytes(raw(value))
+        elif fault == "persistent_readback":
+            def fail(path):
+                if path == intent:
+                    intent_reads.append(path)
+                    raise OSError("isolated persistent original-intent readback failure")
+                return real_read(path)
+            monkeypatch.setattr(store, "read", fail)
+        else:
+            def fail(_):
+                raise OSError("isolated persistent fsync failure")
+            monkeypatch.setattr(os, "fsync", fail)
+    expected = binding.BindingBlocked if fault == "revocation_barrier" else tool.CommitUnknown
+    with pytest.raises(expected):
+        coordinate(joint, args, attest=wait)
+    assert store.writes == writes
+    assert not tool.operation_path(store, args["action"], "reconciled").exists()
+    for path, data in before.items():
+        if fault == "unknown_completion" and path == complete:
+            assert json.loads(path.read_bytes())["state"] == "COMMIT_UNKNOWN"
+        else:
+            assert path.read_bytes() == data
+    if fault == "persistent_readback":
+        assert intent_reads
+
+
+def test_revoke_attempt_during_tty_still_cannot_cross_original_release_lock(joint):
+    args = expiry_operation(joint, "seal-release-records")
+    revoke = arguments(joint, "revoke-policy", expires_at=200)
+    def wait(*_):
+        result = child_result(lambda: tool.seal(**revoke))
+        assert result == {"ok": False, "type": "Blocked", "code": "GLOBAL_RELEASE_LOCK_BUSY"}
+    assert coordinate(joint, args, attest=wait)["decision_reissued"] is False
+    assert not list(joint["store"].audit.glob(tool.EXACT["release_id"] + ".revocation-*"))
+
+
 def child_result(call):
     """A separate process, not threads or a mocked flock success result."""
     read_fd, write_fd = os.pipe()
