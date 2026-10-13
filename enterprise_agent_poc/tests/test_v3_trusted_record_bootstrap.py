@@ -162,7 +162,9 @@ def test_release_records_only_after_independent_policy_full_consumer_validation(
     sealed_policy(package)
     store = package["store"]
     tool.seal(**arguments(package, "seal-release-records"))
-    assert store.writes[-2:] == [store.path("evidence"), store.path("deployment")]
+    assert store.writes[-3:] == [store.path("evidence"), store.path("deployment"),
+                                tool.operation_path(store, "seal-release-records", "complete")]
+    assert tool.operation_state(store, "seal-release-records")["state"] == "VERIFIED_COMMITTED"
     result = binding._p0_qualification(store.qualifications, package["manifest"]["runtime_only_release"],
         tool.EXACT, package["deployment"], package["evidence"], tool.sha(raw(package["evidence"])), "e" * 64, now=50)
     assert result["status"] == "p0_controlled_qualification_verified"

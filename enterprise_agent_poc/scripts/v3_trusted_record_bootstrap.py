@@ -8,6 +8,12 @@ No key generation, approval synthesis, install, service, DB or Provider action.
 """
 from __future__ import annotations
 
+# Direct execution cannot establish trust in this file or its dependency graph.
+# The independently verified stdlib entry validates every repository byte first.
+# Keep this before *all* imports, including scripts package initialization.
+if __name__ == "__main__":
+    raise SystemExit("BLOCKED: VERIFIED_SOURCE_ONLY_ENTRY_REQUIRED")
+
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -56,6 +62,86 @@ COMMON = {"schema_version", "scope", "issuer_uid", "authority", "principal_id", 
 
 class Blocked(ValueError):
     """Only fixed codes cross the CLI boundary; never echo decision contents."""
+
+
+class CommitUnknown(OSError):
+    """An attempted protected write may have committed. Never means zero writes."""
+    def __init__(self, action, phase):
+        super().__init__("PROTECTED_COMMIT_UNKNOWN")
+        self.action, self.phase = action, phase
+
+
+def operation_path(store, action, suffix):
+    return store.audit / (EXACT["release_id"] + "." + action + "." + suffix + ".json")
+
+
+def operation_state(store, action):
+    """Coordination evidence, NOT a replacement for the frozen consumer.
+
+    An intent without an exact completion remains PENDING_OR_UNKNOWN, even if
+    output bytes happen to be readable. Never infer durability from exists().
+    Completed records undergo independent read/fsync/read reconciliation of
+    unchanged bytes; this does not issue authority or repair a frozen reader.
+    """
+    intent = operation_path(store, action, "intent")
+    complete = operation_path(store, action, "complete")
+    if not intent.exists() and not intent.is_symlink():
+        need(not complete.exists() and not complete.is_symlink(), "ORPHAN_COMPLETION_REJECTED")
+        return None
+    value, original = store.read(intent)
+    need(value.get("action") == action and value.get("candidate") == EXACT,
+         "OPERATION_INTENT_IDENTITY_DRIFT")
+    if not complete.exists() and not complete.is_symlink():
+        return {"state": "PENDING_OR_UNKNOWN", "intent": value, "intent_sha256": sha(original)}
+    # Even the completion write itself can fail after replace. Visible bytes
+    # alone are not recovery proof: independently re-read and flush both records
+    # and their directory before resolving an uncertain terminal publication.
+    try:
+        terminal, terminal_raw = store.read(complete)
+        need(terminal == {"state": "VERIFIED_COMMITTED", "action": action,
+                          "intent_sha256": sha(original)}, "OPERATION_COMPLETION_DRIFT")
+        verified_existing(store, intent, original)
+        verified_existing(store, complete, terminal_raw)
+    except OSError as exc:
+        raise CommitUnknown(action, "COMPLETION_RECONCILIATION_REQUIRED") from exc
+    return {"state": "VERIFIED_COMMITTED", "intent": value, "intent_sha256": sha(original)}
+
+
+def pending_barrier(store, action, grant_sha):
+    for pending in store.audit.glob(EXACT["release_id"] + ".revocation-*"):
+        need(action == "revoke-policy" and pending.name == EXACT["release_id"] + ".revocation-" + grant_sha,
+             "POLICY_REVOCATION_PENDING_OR_COMPLETE")
+        store.writer._directories(pending)
+    for prior in ("seal-policy", "seal-release-records", "revoke-policy"):
+        state = operation_state(store, prior)
+        if state is None:
+            continue
+        if prior == "revoke-policy":
+            need(action == prior and state["intent"]["technical_grant_sha256"] == grant_sha,
+                 "POLICY_REVOCATION_PENDING_OR_COMPLETE")
+        if state["state"] != "VERIFIED_COMMITTED":
+            need(prior == action == "revoke-policy"
+                 and state["intent"]["technical_grant_sha256"] == grant_sha,
+                 "SOURCE_OPERATION_ALREADY_CONSUMED_COMMIT_UNKNOWN")
+
+
+def verified_existing(store, path, expected):
+    """Independent protected read/fsync/read for exact resumption/reconciliation.
+
+    A previous exception is not interpreted as absence. Foreign/mismatched
+    bytes remain blocked; nothing is removed or overwritten to enable retry.
+    """
+    need(store.read(path)[1] == expected, "RECOVERY_RECORD_DRIFT")
+    for item in (path, path.parent):
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        if item == path.parent:
+            flags |= os.O_DIRECTORY
+        fd = os.open(item, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    need(store.read(path)[1] == expected, "RECOVERY_READBACK_DRIFT")
 
 
 def need(ok, code):
@@ -210,6 +296,69 @@ def technical_valid(grant, *, expected_sha, raw, action, inputs, host, operator,
     window(grant, now)
 
 
+def approval_identity_separation(store, action, grant, grant_raw, records, record_raw, now):
+    """Check typed decision identities; this is NOT human issuer authentication.
+
+    The frozen Owner/Deployment scopes and the technical workflow are distinct
+    record types. Their audit IDs name decisions, never cross-type references.
+    Read protected policy bytes again under the release lock and after TTY.
+    Existing immutable technical snapshots provide cross-operation replay checks;
+    no new approval registry or authority is introduced.
+    """
+    if action == "seal-release-records":
+        policy, policy_raw = store.read(store.path("policy"))
+    else:
+        policy, policy_raw = records["policy"], record_raw["policy"]
+    policy_valid(policy, now)
+    owner_id = policy["audit_id"]
+    decisions = {"policy": policy}
+    if "deployment" in records:
+        decisions["deployment"] = records["deployment"]
+    elif store.path("deployment").exists() or store.path("deployment").is_symlink():
+        decisions["deployment"] = store.read(store.path("deployment"))[0]
+    if "deployment" in decisions:
+        deployment = decisions["deployment"]
+        need(isinstance(deployment, dict) and set(deployment) == COMMON | {
+            "policy_approval_sha256", "policy_audit_id", "evidence_sha256"}, "DEPLOYMENT_DECISION_TYPE_REQUIRED")
+        need(type(deployment["schema_version"]) is int and deployment["schema_version"] == 1
+             and type(deployment["issuer_uid"]) is int and deployment["issuer_uid"] == 0
+             and deployment["scope"] == "P0_EXACT_PAIR_PRODUCTION_DEPLOYMENT"
+             and deployment["authority"] == "PRODUCTION_RELEASE_AUTHORITY"
+             and deployment["decision"] == "APPROVED"
+             and all(isinstance(deployment[k], str) and ID.fullmatch(deployment[k])
+                     for k in ("principal_id", "audit_id")), "DEPLOYMENT_DECISION_TYPE_REQUIRED")
+        need(deployment["candidate"] == EXACT and deployment["predecessor"] == binding.PREDECESSOR
+             and deployment["binding_sha256"] == BINDING_SHA
+             and deployment["policy_audit_id"] == owner_id
+             and deployment["policy_approval_sha256"] == sha(policy_raw)
+             and type(deployment["issued_at"]) is int and type(deployment["expires_at"]) is int
+             and policy["issued_at"] <= deployment["issued_at"] < deployment["expires_at"] <= policy["expires_at"],
+             "DEPLOYMENT_OWNER_RELATION_DRIFT")
+        # An expired deployment does not obstruct revoking its still-valid
+        # parent policy; a newly submitted deployment must be currently valid.
+        if "deployment" in records:
+            window(deployment, now)
+    decision_ids = [record["audit_id"] for record in decisions.values()]
+    need(len(set(decision_ids + [grant["audit_id"]])) == len(decision_ids) + 1
+         and all(grant["issued_at"] >= record["issued_at"] for record in decisions.values()),
+         "TECHNICAL_AND_OWNER_DECISIONS_MUST_BE_SEPARATE")
+    for path in sorted(store.audit.glob("*.technical-decision.json")):
+        previous, previous_raw = store.read(path)
+        need(isinstance(previous, dict) and previous.get("workflow") == VERSION
+             and previous.get("authority") == "PRODUCTION_ROOT_MAINTENANCE_AUTHORITY"
+             and previous.get("decision") == "APPROVED"
+             and isinstance(previous.get("audit_id"), str) and ID.fullmatch(previous["audit_id"])
+             and path.name == previous["audit_id"] + ".technical-decision.json"
+             and previous.get("candidate") == EXACT and previous.get("binding_sha256") == BINDING_SHA,
+             "TECHNICAL_HISTORY_IDENTITY_DRIFT")
+        need(previous["audit_id"] not in decision_ids, "DECISION_TYPES_MUST_BE_SEPARATE")
+        if previous["audit_id"] == grant["audit_id"]:
+            # Resuming exact revocation is completion of that one decision, not
+            # a second grant. The state machine must independently permit it.
+            need(action == previous.get("action") == "revoke-policy" and previous_raw == grant_raw,
+                 "TECHNICAL_DECISION_ALREADY_CONSUMED")
+
+
 def tty_attest(grant_sha, inputs):
     """Attestation records human verification, not cryptographic Owner authentication."""
     need(os.geteuid() == 0, "ROOT_TTY_REQUIRED")
@@ -312,33 +461,39 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
             inputs["report:" + name] = sha(raw)
     technical_valid(grant, expected_sha=grant_sha, raw=grant_raw, action=action, inputs=inputs,
                     host=host, operator=operator, producer=producer, now=now)
-    need(all(grant["audit_id"] != record.get("audit_id")
-             and grant["issued_at"] >= record.get("issued_at", 0)
-             for name, record in records.items() if name != "evidence"), "TECHNICAL_AND_OWNER_DECISIONS_MUST_BE_SEPARATE")
     if action in {"seal-policy", "revoke-policy"}:
         policy_valid(records["policy"], now)
     else:
         need(manifest is not None, "VERIFIED_MANIFEST_REQUIRED")
+        pending_barrier(store, action, grant_sha)
         declaration = manifest["runtime_only_release"]
         binding._p0_qualification(store.qualifications, declaration, EXACT, records["deployment"],
                                  records["evidence"], inputs["evidence"], schema_fingerprint, now=now)
+    approval_identity_separation(store, action, grant, grant_raw, records, record_raw, now)
     if not publish:
         return {"status": "DRY_RUN_BYTES_VERIFIED_NOT_AUTHORITY", "writes": 0,
                 "human_authority_verification": "NOT_PERFORMED", "action": action}
     with store.lock():
         store.prepare_directories()
+        pending_barrier(store, action, grant_sha)
+        approval_identity_separation(store, action, grant, grant_raw, records, record_raw, int(time.time()))
         marker = store.audit / (grant["audit_id"] + ".json")
-        need(not marker.exists(), "TECHNICAL_DECISION_ALREADY_CONSUMED")
+        resume = action == "revoke-policy"
+        need(resume or not marker.exists(), "TECHNICAL_DECISION_ALREADY_CONSUMED")
         intent = store.audit / (EXACT["release_id"] + "." + action + ".intent.json")
-        need(not intent.exists(), "SOURCE_OPERATION_ALREADY_CONSUMED")
+        need(resume or not intent.exists(), "SOURCE_OPERATION_ALREADY_CONSUMED")
         revoked = store.audit / (EXACT["release_id"] + ".revoked.json")
-        need(not revoked.exists(), "SOURCE_AUTHORIZATION_REVOKED")
+        need(resume or not revoked.exists(), "SOURCE_AUTHORIZATION_REVOKED")
+        pending_dir = store.audit / (EXACT["release_id"] + ".revocation-" + grant_sha)
+        pending_policy = pending_dir / "policy.json"
+        archive = store.audit / (EXACT["release_id"] + ".withdrawn-policy.json")
         decisions = {name: store.audit / ("decision-" + inputs[name] + ".json")
                      for name in names if name != "evidence" and action != "revoke-policy"}
         need(all(not path.exists() for path in decisions.values()), "INDEPENDENT_DECISION_ALREADY_CONSUMED")
         for name in names:
             if action == "revoke-policy":
-                need(store.read(store.path(name))[1] == record_raw[name], "REVOKE_POLICY_DRIFT")
+                candidates = [p for p in (store.path(name), pending_policy, archive) if p.exists() or p.is_symlink()]
+                need(len(candidates) == 1 and store.read(candidates[0])[1] == record_raw[name], "REVOKE_POLICY_DRIFT")
             else:
                 need(not store.path(name).exists() and not store.path(name).is_symlink(), "RECORD_ALREADY_EXISTS_OR_CONSUMED")
         # Recheck the existing policy while holding the global lock. A concurrent
@@ -354,6 +509,7 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
         else:
             binding._p0_qualification(store.qualifications, declaration, EXACT, records["deployment"],
                                      records["evidence"], inputs["evidence"], schema_fingerprint, now=int(time.time()))
+        approval_identity_separation(store, action, grant, grant_raw, records, record_raw, int(time.time()))
         # Durable one-use audit BEFORE publication. Failed/partial publication is
         # retained and rejects retries; no automatic cleanup/re-authorisation.
         audit = {"workflow": VERSION, "action": action, "technical_audit_id": grant["audit_id"],
@@ -364,32 +520,79 @@ def seal(store, action, grant, grant_raw, records, record_raw, *, grant_sha, pro
                  "tty_evidence": tty_evidence,
                  "observed_at": now, "production_switch_authorized": False,
                  "state": "CONSUMED_FOR_RECORD_SEAL_ONLY"}
-        # Source-wide one-shot intent FIRST, so a crash before the technical
-        # snapshot cannot be replayed under a different audit ID either.
-        store.create(intent, (json.dumps(audit, sort_keys=True) + "\n").encode())
-        store.create(store.audit / (grant["audit_id"] + ".technical-decision.json"), grant_raw)
-        store.create(marker, (json.dumps(audit, sort_keys=True) + "\n").encode())
-        for path in decisions.values():
-            store.create(path, (json.dumps(audit, sort_keys=True) + "\n").encode())
-        if action == "revoke-policy":
-            # Preserve the immutable original under audit; absence of the policy
-            # makes the frozen 7dc consumer reject, without teaching it a new seal.
-            archive = store.audit / (EXACT["release_id"] + ".withdrawn-policy.json")
-            need(not archive.exists() and store.path("policy").stat().st_dev == store.audit.stat().st_dev,
-                 "REVOCATION_ARCHIVE_UNSAFE")
-            os.rename(store.path("policy"), archive)
-            for path in (store.audit, store.qualifications):
-                directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        if resume and intent.exists():
+            original, _ = store.read(intent)
+            need(all(original.get(k) == audit[k] for k in (
+                "workflow", "action", "technical_audit_id", "technical_grant_sha256", "host", "operator",
+                "candidate", "producer", "input_sha256", "independent_decision_references")),
+                "RECOVERY_INTENT_IDENTITY_DRIFT")
+            audit = original
+        audit_raw = (json.dumps(audit, sort_keys=True) + "\n").encode()
+        phase = "BEFORE_FIRST_WRITE"
+
+        def write(path, data):
+            nonlocal phase
+            phase = "ATTEMPTING:" + path.name
+            if resume and (path.exists() or path.is_symlink()):
+                verified_existing(store, path, data)
+            else:
+                store.create(path, data)
+            phase = "VERIFIED:" + path.name
+
+        def sync_dirs(*paths):
+            for path in paths:
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
-                    os.fsync(directory)
+                    os.fsync(fd)
                 finally:
-                    os.close(directory)
-            store.create(revoked, (json.dumps(audit, sort_keys=True) + "\n").encode())
-        else:
-            # Publish approval LAST: no partial evidence-only operation can
-            # authorize release. Policy-only publication cannot deploy either.
-            for name in sorted(names, key=lambda n: n == "deployment"):
-                store.create(store.path(name), record_raw[name])
+                    os.close(fd)
+
+        try:
+            if resume:
+                # FIRST withdraw the policy, retaining its exact bytes. The
+                # pending directory binds the independent grant SHA. After any
+                # successfully persisted revoke intent the frozen reader sees
+                # no active policy, even if later audit publication fails.
+                phase = "REVOKE_WITHDRAWAL_ATTEMPTED"
+                if not pending_dir.exists():
+                    pending_dir.mkdir(mode=0o700)
+                store.writer._directories(pending_dir)
+                sync_dirs(store.audit)
+                if store.path("policy").exists():
+                    need(not pending_policy.exists() and not archive.exists()
+                         and store.path("policy").stat().st_dev == pending_dir.stat().st_dev,
+                         "REVOCATION_ARCHIVE_UNSAFE")
+                    os.rename(store.path("policy"), pending_policy)
+                sync_dirs(store.qualifications, pending_dir)
+                location = pending_policy if pending_policy.exists() else archive
+                verified_existing(store, location, record_raw["policy"])
+                phase = "REVOKE_WITHDRAWAL_VERIFIED"
+            # Before approval publication, persist the one-shot audit. An error
+            # is UNKNOWN, never a claim that no protected bytes were written.
+            write(intent, audit_raw)
+            write(store.audit / (grant["audit_id"] + ".technical-decision.json"), grant_raw)
+            write(marker, audit_raw)
+            for path in decisions.values():
+                write(path, audit_raw)
+            if resume:
+                if pending_policy.exists():
+                    phase = "REVOKE_ARCHIVE_MOVE_ATTEMPTED"
+                    need(not archive.exists() and not archive.is_symlink(), "REVOCATION_ARCHIVE_UNSAFE")
+                    os.rename(pending_policy, archive)
+                sync_dirs(pending_dir, store.audit)
+                verified_existing(store, archive, record_raw["policy"])
+                write(revoked, audit_raw)
+            else:
+                # Approval is last among the authority records; completion is
+                # separate. Frozen consumers still need an approved contract
+                # successor to reject the publication-to-completion crash gap.
+                for name in sorted(names, key=lambda n: n == "deployment"):
+                    write(store.path(name), record_raw[name])
+            write(operation_path(store, action, "complete"), (json.dumps({
+                "state": "VERIFIED_COMMITTED", "action": action, "intent_sha256": sha(audit_raw)},
+                sort_keys=True) + "\n").encode())
+        except (OSError, ValueError) as exc:
+            raise CommitUnknown(action, phase) from exc
         return {"status": "RECORD_SEALED_NOT_INSTALL_OR_RELEASE_AUTHORITY", "action": action,
                 "audit_id": grant["audit_id"], "input_sha256": inputs, "deployment_executed": False}
 
@@ -412,6 +615,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         store = Store()
+        # This candidate deliberately cannot seal real records while the frozen
+        # 7dc reader ignores commit uncertainty. Component fixtures exercise the
+        # bounded repairs below; they do not approve a reader-contract upgrade.
+        need(not args.seal, "FROZEN_V3_CONSUMER_DOES_NOT_OBSERVE_COMMIT_UNCERTAINTY")
         # Root-protected uploaded artifact and repo, no arbitrary download/input.
         trusted_path(args.git_repository)
         for path in (args.archive, args.manifest):
@@ -429,7 +636,8 @@ def main(argv=None):
              and isinstance(args.producer_source, str) and binding.COMMIT.fullmatch(args.producer_source)
              and isinstance(args.producer_tree, str) and binding.COMMIT.fullmatch(args.producer_tree),
              "INDEPENDENT_TECHNICAL_APPROVAL_REQUIRED")
-        blob = git_reader(args.git_repository, args.producer_source, args.producer_tree, EXACT["source_commit"])
+        blob = git_reader(args.git_repository, args.producer_source, args.producer_tree,
+                          "59d34cd8099b766fdd777284f4961d25810473a9")
         pins = {}
         for relative in CODE_FILES:
             observed = ROOT / relative
@@ -471,6 +679,11 @@ def main(argv=None):
             host=socket.gethostname(), now=int(time.time()), manifest=manifest, schema_fingerprint=fingerprint,
             reports=reports, publish=args.seal)))
         return 0
+    except CommitUnknown as exc:
+        print(json.dumps({"status": "COMMIT_UNKNOWN", "check": str(exc), "action": exc.action,
+                          "phase": exc.phase, "writes": "MAY_HAVE_COMMITTED",
+                          "next_action": "STOP_INDEPENDENT_PROTECTED_RECONCILIATION_REQUIRED"}))
+        return 3
     except Exception as exc:
         code = str(exc) if isinstance(exc, (Blocked, binding.BindingBlocked)) else "BOOTSTRAP_INPUT_OR_FILESYSTEM_BLOCKED"
         print(json.dumps({"status": "BLOCKED", "check": code}))

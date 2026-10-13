@@ -1,4 +1,150 @@
-# V3 protected-record bootstrap — proposal, NOT effective authority
+# V3 Bootstrap security correction — PARTIAL / BLOCKED
+
+This successor is a local review candidate with direct parent
+`59d34cd8099b766fdd777284f4961d25810473a9`, tree
+`f1931dd4b1e502cd89eb6d3ff28681d13ac3e1e1`. The frozen application remains
+7dc / tree `1d332373bd8cc31da074456e9e9bcaaa4aceb948`; 280a business code,
+the seven V3 consumer pins, all V2/V3 consumer code, seals and 18 evidence
+requirements are unchanged. The final successor identity is the Git commit
+containing this document, recorded independently in the local handoff evidence.
+
+**Do not execute the historical entry examples below.** Direct execution of
+`v3_trusted_record_bootstrap.py` now rejects before repository imports. The new
+verified entry is a candidate, not an approved trust root. All real `--seal`
+operations are explicitly blocked, including when an operator supplies valid
+record bytes. No installation or Production entry was added.
+
+`FIRST_REMAINING_BLOCKER = FROZEN_V3_CONSUMER_DOES_NOT_OBSERVE_COMMIT_UNCERTAINTY`
+
+## A. Verify bytes before importing candidate code
+
+After future independent adoption of this exact entry, an authorized operator
+would first verify `v3_bootstrap_verified_entry.py` using existing trusted system
+`sha256sum` and an expected hash from the independently approved channel. This
+initial check must happen BEFORE Python executes that file; its own checksum
+check is not a substitute or authorization. Use trusted system Python/stdlib,
+`-I -B -S`, no developer environment, and the Root-owned approved absolute path.
+
+The entry verifies an independently hashed, Root-protected byte manifest:
+`schema_version=1`, `scope=V3_VERIFIED_SOURCE_ONLY_ENTRY_V1`, `source_commit`,
+`source_tree`, `parent_source_commit=59d...`, exact `tooling_root`,
+`git_repository`, the original nine `code_pins`, and `entry_sha256`.
+This is a byte identity manifest, NOT an Owner or deployment approval.
+
+It verifies exact Git identities/blobs and trusted ancestors for ALL nine inputs,
+rejects candidate bytecode and scripts initializers, then compiles the captured
+bytes of seven executable modules. `app/settings.py` and rollback JSON remain
+data only. The synthetic `scripts` namespace executes no disk initializer. The
+sole import finder permits only captured repository sources and trusted system
+stdlib; app modules, other scripts and top-level repository import fallbacks
+reject. Existing nine pin names/contract are retained; the entry has a separate
+initial independently approved pin, not a self-issued approval.
+
+Review-only invocation format (not permission to run as Root):
+
+```text
+/usr/bin/python3 -I -B -S <independently-verified-entry> \
+  --pin-manifest <protected-exact-byte-manifest> \
+  --independently-approved-pin-sha256 <independent-expected-sha> -- \
+  <original-action-and-exact-arguments>
+```
+
+No UID override, alternate import-root bypass or fixture mode exists in the
+formal CLI. Permission metadata is doubled only in ordinary-user test code.
+Actual subprocess/import/canary execution is exercised by those tests.
+
+## B. Typed independent approval identities
+
+The frozen Owner policy scope, Root technical workflow, and Production deployment
+scope are distinct types. All three audit IDs must differ. Existing protected
+Owner and Deployment records and prior immutable technical-decision snapshots
+are checked before mutation, under the global lock, and after TTY latency.
+Policy audit/hash references cannot masquerade as the deployment's identity.
+Cross-type/cross-operation reuse rejects. Only the byte-identical revoke
+technical decision may enter the narrowly bounded revoke continuation checks.
+
+Neither a role/principal string nor Root TTY authenticates the Owner. Actual
+independent issuer identity, authority, exact scope, freshness and revocation
+remain human checks in the separately approved authenticated channel. No Owner
+signature producer, key store, approval platform, database or service was added.
+
+## C. Revocation interruption and commit uncertainty
+
+Under the existing global lock, valid revocation first creates and fsyncs a
+protected pending directory named by the independently pinned technical-decision
+SHA, then withdraws the exact Policy into it. Original bytes remain unchanged. Only after withdrawal
+and directory fsync/readback can revoke intent/audit records be published.
+Thus the original 04 technical-audit failure leaves no active Policy for the
+frozen consumer. A retained pending namespace blocks further producer sealing.
+The pre-withdrawal crash window still leaves the frozen consumer able to read the
+Policy: it does not observe that pending namespace. This is the same unresolved
+consumer-contract blocker below, not a claim that every revocation window is closed.
+
+Same-decision retry verifies exact bytes, scope, audit identity, pending/archive
+state, inode-safe protected reads and fsync/readback. It can finish missing audit
+steps and withdrawal, never reenable policy, erase the pending namespace, overwrite
+history or create a new approval. Completed retries are idempotent. Changed
+grant, policy or audit refuses. Expired grants still refuse; future expired-state
+recovery needs explicit authority, never silent lifetime extension.
+
+Writes retain immutable intent/completion linkage. Any protected mutation that
+raises reports `COMMIT_UNKNOWN`, action and attempted phase, with
+`writes=MAY_HAVE_COMMITTED`; it is not a zero-write BLOCKED claim. Pending
+operations prevent another producer seal. Exact revoke continuation performs
+independent read/fsync/read before accepting an existing write. Ordinary approval
+publication never blindly retries or treats visible bytes as a new approval.
+Even a visible completion requires independent protected read/fsync/read of the
+intent and completion; persistent fsync/readback failure remains COMMIT_UNKNOWN.
+
+**The required global UNKNOWN consumption guarantee is NOT closed.**
+`Rollout._atomic` performs `os.replace` before directory fsync; Store readback
+also follows replace. A failure after replace can leave authentic 0600 single-link
+approved bytes visible. Frozen `schema015_successor_binding.qualification` and
+`_p0_qualification` read only the three approval/evidence files; they never consult
+producer intent/completion/UNKNOWN. This also affects the existing recovery
+consumer. The lock is released on process death. A new producer marker or a
+best-effort metadata rollback cannot change that fact or guarantee crash safety.
+
+The smallest remaining capability is a separately approved, exact-Source-bound
+consumer contract extension requiring verified terminal persistence state and
+rejecting PENDING/UNKNOWN/REVOKING in release AND recovery under the same lock.
+That changes frozen consumer bytes/code pins and would require explicit rebinding
+and artifact review. It was NOT implemented or authorized here. Do not replace
+7dc pins, manufacture a completion, delete traces, or add a parallel authority
+wrapper to get a PASS. The real CLI `--seal` stops on this exact blocker.
+
+## Regression and evidence boundaries
+
+Final combined targeted regression: 499 PASS / 0 FAIL / 0 ERROR / 0 SKIP.
+Breakdown: inherited 415 (91 bootstrap + 128 V3 + 85 V2 + 111 atomic tooling),
+19 approval IDs, 17 persistence, 43 source-only entry, original 04 three failing
+probes unchanged (3 PASS), and 2 frozen-consumer blocker observations.
+Therefore **497 passing component test cases + 2 reproduced blocker observations**;
+the two observations are NOT security acceptance PASS for UNKNOWN consumption.
+No old negative assertion was removed. One existing ordering assertion adds the
+new completion record and verifies its linked terminal state.
+
+Retained 59d evidence: `.v3-bootstrap-59d-independent-qa-v1/` in the main workspace.
+It is unchanged. Current evidence: `.v3-bootstrap-security-fix-v1-evidence/`.
+Initial test setup mistakenly used the parent of the retained artifact directory
+(342 PASS / 112 setup ERROR); corrected using the actual frozen hash-matched
+archive. An intermediate run had 482 PASS / 15 FAIL: six revoke namespace glob
+collisions and nine source-entry import/test-fixture defects, repaired without
+weakening assertions. Both raw JUnit files are retained, separately from final.
+
+Execution: ordinary lucky UID1000, private local Linux POSIX directories,
+Python3.11.16, actual files/rename/fsync/flock/subprocesses, explicitly fictional
+actors/approval/report fixtures. Network/HTTP blocked. No Root, PRIMARY/Test
+service or DB, Production, Provider, WeChat or Image action. No Stage2, full
+pytest, Candidate Build or real Native claim. Git local commit only; no Push.
+
+No READY state is claimed. Required next decision is limited to the frozen
+consumer contract boundary above, followed by 04 independent review and actual
+Owner/Root/Production approvals separately. No broader governance work is proposed.
+
+---
+
+# Historical 59d proposal (retained context, superseded entry and readiness)
 
 Status: `READY_FOR_V3_TRUSTED_BOOTSTRAP_REVIEW` means code and the proposed
 manual-attestation contract can be reviewed. It does NOT mean Root use,
