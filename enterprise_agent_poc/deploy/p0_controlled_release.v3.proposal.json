@@ -27,7 +27,7 @@
     "exact_562_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery",
     "business_data_preserved", "release_lock_audit"
   ],
-  "evidence_rules": "Every check has exact real evidence_kind, current candidate Source, approved environment identity, report SHA, run/audit identity, timestamp, positive assertion count and zero failures/errors/skips. PG checks require PostgreSQL16.6, Schema015 and exact DB identity. Source-bound authorized report verification remains an operations responsibility, not cryptographically established by metadata",
+  "evidence_rules": "Every check has exact real evidence_kind, current candidate Source, approved environment identity, report SHA, run/audit identity, timestamp, positive assertion count and zero failures/errors/skips. Test PG checks require exactly PostgreSQL16.6; Production PG checks require exactly PostgreSQL16.14. Both require Schema015 and exact DB identity. Source-bound authorized report verification remains an operations responsibility, not cryptographically established by metadata",
   "replacement_map": {
     "full_pytest": ["candidate_regression", "pg_transactions", "pg_concurrency", "pg_permissions"],
     "stage2": ["task_run_ownership", "orphan_task_pagination", "tenant_user_isolation", "api_sse_history"],

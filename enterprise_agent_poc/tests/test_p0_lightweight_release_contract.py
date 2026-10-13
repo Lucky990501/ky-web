@@ -53,7 +53,8 @@ def controlled(pair, monkeypatch):
         environment = policy["production_environment_id" if name in binding.P0_PRODUCTION_CHECKS else "test_environment_id"]
         facts = {"assertions": 1, "failures": 0, "errors": 0, "skipped": 0}
         if name in binding.P0_PG_CHECKS:
-            facts.update(postgres_version="16.6", schema="015", database_identity=environment)
+            version = "16.14" if name in binding.P0_PRODUCTION_CHECKS else "16.6"
+            facts.update(postgres_version=version, schema="015", database_identity=environment)
         if name == "production_schema015":
             facts.update(pending=0, unknown=0, checksum_drift=0, migration_action="NONE")
         if name == "runtime_startup_health":
@@ -113,6 +114,33 @@ def test_mock_and_fixture_evidence_never_pass_real_check(controlled, name):
 def test_sqlite_or_wrong_pg_version_cannot_substitute_for_pg16(controlled, name):
     controlled[4]["checks"][name]["measurements"]["postgres_version"] = "sqlite"
     with pytest.raises(binding.BindingBlocked, match="real_pg_required"):
+        verify(controlled)
+
+
+def test_production_and_test_keep_separate_exact_postgres_versions(controlled):
+    checks = controlled[4]["checks"]
+    assert binding.P0_CHECKS["production_schema015"] == "PRODUCTION_READONLY_POSTGRESQL_16_14"
+    for name in binding.P0_PG_CHECKS:
+        expected = "16.14" if name in binding.P0_PRODUCTION_CHECKS else "16.6"
+        assert checks[name]["measurements"]["postgres_version"] == expected
+    assert verify(controlled)["status"] == "p0_controlled_qualification_verified"
+
+
+@pytest.mark.parametrize("name", tuple(sorted(binding.P0_PG_CHECKS)))
+def test_postgres_versions_cannot_be_swapped_between_production_and_test(controlled, name):
+    checks = controlled[4]["checks"]
+    checks[name]["measurements"]["postgres_version"] = (
+        "16.6" if name in binding.P0_PRODUCTION_CHECKS else "16.14"
+    )
+    with pytest.raises(binding.BindingBlocked, match="real_pg_required:" + name):
+        verify(controlled)
+
+
+@pytest.mark.parametrize("version", ["16.13", "16.15", "17.0", "16", "16.14 (Ubuntu)"])
+@pytest.mark.parametrize("name", ["production_schema015", "production_backup_restore"])
+def test_production_version_is_exact_not_a_compatible_range(controlled, name, version):
+    controlled[4]["checks"][name]["measurements"]["postgres_version"] = version
+    with pytest.raises(binding.BindingBlocked, match="real_pg_required:" + name):
         verify(controlled)
 
 

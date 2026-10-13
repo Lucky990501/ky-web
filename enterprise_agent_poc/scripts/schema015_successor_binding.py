@@ -37,8 +37,8 @@ CHECKS = ("full_pytest", "stage2", "source_installation", "api_native", "mcp_nat
           "post_commit_runtime_recovery", "business_data_preserved")
 P0_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3"
 STATE_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3_STATE_V1"
-STATE_BASE_SOURCE = "fd0227409c1845286de652fb88d6de6b57a1e071"
-STATE_BASE_TREE = "0974e94a08b76454a721db37e11920e9789e4e13"
+STATE_BASE_SOURCE = "7ca9be5ecf912f95d363b93ca11a9b0b82ea4fb2"
+STATE_BASE_TREE = "32cc824d7aa4dd65633e1d63816ffef76ced0c82"
 GLOBAL_RELEASE_LOCK = Path("/run/lock/enterprise-agent-workbench-release.lock")
 STATE_PRODUCER_FILES = (
     "scripts/v3_trusted_record_bootstrap.py", "scripts/runtime_policy_rollout.py",
@@ -59,7 +59,7 @@ P0_CHECKS = {
     "tenant_user_isolation": "REAL_POSTGRESQL_16_6",
     "api_sse_history": "REAL_ASGI_WITH_POSTGRESQL",
     "runtime_startup_health": "REAL_API_MCP_WORKER_PROCESSES",
-    "production_schema015": "PRODUCTION_READONLY_POSTGRESQL_16_6",
+    "production_schema015": "PRODUCTION_READONLY_POSTGRESQL_16_14",
     "production_backup_restore": "REAL_ENCRYPTED_BACKUP_RESTORE",
     "artifact_backup_integrity": "REAL_ARTIFACT_CHECKSUM",
     "exact_562_compatibility": "REAL_562_ON_SCHEMA015_WITH_PG_DATA",
@@ -530,7 +530,8 @@ def _p0_decisions(paths, value, candidate, approved, evidence, evidence_hash, sc
                 and all(type(facts.get(k)) is int and facts[k] == 0 for k in ("failures", "errors", "skipped")),
                 "p0_real_assertions_required:" + name)
         if name in P0_PG_CHECKS:
-            require(facts.get("postgres_version") == "16.6" and facts.get("schema") == "015"
+            expected_postgres = "16.14" if name in P0_PRODUCTION_CHECKS else "16.6"
+            require(facts.get("postgres_version") == expected_postgres and facts.get("schema") == "015"
                     and facts.get("database_identity") == record["environment_id"], "p0_real_pg_required:" + name)
         if name == "production_schema015":
             require(all(type(facts.get(k)) is int and facts[k] == 0 for k in ("pending", "unknown", "checksum_drift"))

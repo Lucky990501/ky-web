@@ -89,6 +89,12 @@ def test_actual_frozen_consumer_rejects_each_new_record_format(
     for record in records.values():
         record.pop("state_contract")
         record.update(schema_version=1, candidate=candidate, binding_sha256=old.digest(value))
+    # The historical control must retain its own exact PG16.6 contract,
+    # rather than borrowing the successor's Production16.14 fixture.
+    for name, check in records["evidence"]["checks"].items():
+        check["evidence_kind"] = old.P0_CHECKS[name]
+        if name in old.P0_PG_CHECKS:
+            check["measurements"]["postgres_version"] = "16.6"
 
     def checksum(record):
         return hashlib.sha256((json.dumps(record, sort_keys=True) + "\n").encode()).hexdigest()
