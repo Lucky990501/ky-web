@@ -37,8 +37,8 @@ CHECKS = ("full_pytest", "stage2", "source_installation", "api_native", "mcp_nat
           "post_commit_runtime_recovery", "business_data_preserved")
 P0_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3"
 STATE_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3_STATE_V1"
-STATE_BASE_SOURCE = "405de8cd524d5d74547aef6fae8e981b763c86bc"
-STATE_BASE_TREE = "82d040f1bb7dd567811c6047633a059af7267104"
+STATE_BASE_SOURCE = "fd0227409c1845286de652fb88d6de6b57a1e071"
+STATE_BASE_TREE = "0974e94a08b76454a721db37e11920e9789e4e13"
 GLOBAL_RELEASE_LOCK = Path("/run/lock/enterprise-agent-workbench-release.lock")
 STATE_PRODUCER_FILES = (
     "scripts/v3_trusted_record_bootstrap.py", "scripts/runtime_policy_rollout.py",

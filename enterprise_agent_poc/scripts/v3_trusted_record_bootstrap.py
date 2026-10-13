@@ -407,15 +407,16 @@ def approval_identity_separation(store, action, grant, grant_raw, records, recor
 def tty_attest(grant_sha, inputs):
     """Attestation records human verification, not cryptographic Owner authentication."""
     need(os.geteuid() == 0, "ROOT_TTY_REQUIRED")
-    with open("/dev/tty", "r+", encoding="utf-8") as tty:
-        need(os.isatty(tty.fileno()), "ROOT_TTY_REQUIRED")
+    with open("/dev/tty", "r", encoding="utf-8") as tty_in, \
+            open("/dev/tty", "w", encoding="utf-8") as tty_out:
+        need(os.isatty(tty_in.fileno()) and os.isatty(tty_out.fileno()), "ROOT_TTY_REQUIRED")
         challenge = "VERIFIED-INDEPENDENT-DECISIONS " + grant_sha + " " + binding.digest(inputs)
-        tty.write("Verify actual identities, authority, expiry/revocation and report contents in the independent\n"
-                  "authenticated channel. Root possession and these JSON labels are NOT authorization.\n"
-                  "Paste the externally approved technical SHA and the exact acknowledgement:\n" + challenge + "\n")
-        tty.flush()
-        need(tty.readline().strip() == challenge, "INDEPENDENT_HUMAN_VERIFICATION_NOT_ATTESTED")
-        return {"device": os.ttyname(tty.fileno()), "euid": os.geteuid(), "pid": os.getpid(),
+        tty_out.write("Verify actual identities, authority, expiry/revocation and report contents in the independent\n"
+                      "authenticated channel. Root possession and these JSON labels are NOT authorization.\n"
+                      "Paste the externally approved technical SHA and the exact acknowledgement:\n" + challenge + "\n")
+        tty_out.flush()
+        need(tty_in.readline().strip() == challenge, "INDEPENDENT_HUMAN_VERIFICATION_NOT_ATTESTED")
+        return {"device": os.ttyname(tty_in.fileno()), "euid": os.geteuid(), "pid": os.getpid(),
                 "acknowledgement_sha256": sha(challenge.encode())}
 
 

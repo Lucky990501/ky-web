@@ -379,3 +379,114 @@ def test_real_git_identity_wrong_source_tree_parent_rejected(field):
     values[field] = "0" * 40
     with pytest.raises((tool.Blocked, subprocess.CalledProcessError)):
         tool.git_reader(Path(os.environ["V3_BOOTSTRAP_GIT_REPOSITORY"]), values["source"], values["tree"], values["parent"])
+
+
+@pytest.mark.parametrize("reply", ["exact", "refuse", "wrong_pin", "eof"])
+def test_tty_attest_real_controlling_pty_flush_fail_closed_and_fd_close(monkeypatch, reply):
+    """Actual PTY I/O; only effective-Root identity is a local fixture.
+
+    Calls the exact current function, never seal/reconcile or an authority writer.
+    Parent-generated acknowledgements are explicitly synthetic isolated input.
+    """
+    import errno
+    import hashlib
+    import pty
+    import select
+    import signal
+    import time
+
+    monkeypatch.setattr(tool.os, "geteuid", lambda: 0)
+    grant = "a" * 64
+    inputs = {"policy": "b" * 64}
+    challenge = "VERIFIED-INDEPENDENT-DECISIONS " + grant + " " + binding.digest(inputs)
+    payload = {"exact": (challenge + "\n").encode(), "refuse": b"REFUSED\n",
+               "wrong_pin": ("VERIFIED-INDEPENDENT-DECISIONS " + "0" * 64 + " " + binding.digest(inputs) + "\n").encode(),
+               "eof": b"\x04"}[reply]
+    pid, master = pty.fork()
+    if pid == 0:
+        before = set(os.listdir("/proc/self/fd"))
+        try:
+            result = {"success": True, "record": tool.tty_attest(grant, inputs)}
+        except Exception as error:
+            result = {"success": False, "error": str(error)}
+        result["fds_closed"] = set(os.listdir("/proc/self/fd")) == before
+        os.write(1, ("FIXTURE_RESULT=" + json.dumps(result) + "\n").encode())
+        os._exit(0)
+    data, sent, reaped = b"", False, False
+    deadline = time.monotonic() + 5
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if not ready:
+                continue
+            try:
+                piece = os.read(master, 8192)
+            except OSError as error:
+                if error.errno == errno.EIO:
+                    break
+                raise
+            if not piece:
+                break
+            data += piece
+            if not sent and challenge.encode() in data:
+                os.write(master, payload)
+                sent = True
+            if b"FIXTURE_RESULT=" in data and data.endswith(b"\r\n"):
+                break
+        finish = time.monotonic() + 1
+        while time.monotonic() < finish:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                reaped = True
+                break
+            time.sleep(0.01)
+        assert reaped, "controlling PTY child timed out"
+    finally:
+        os.close(master)
+        if not reaped:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    lines = [line for line in data.decode().splitlines() if line.startswith("FIXTURE_RESULT=")]
+    assert len(lines) == 1
+    observed = json.loads(lines[0].split("=", 1)[1])
+    assert sent and observed["fds_closed"]
+    if reply == "exact":
+        assert observed["success"]
+        assert observed["record"]["acknowledgement_sha256"] == hashlib.sha256(challenge.encode()).hexdigest()
+        assert observed["record"]["device"] == "/dev/tty"
+    else:
+        assert not observed["success"]
+        assert "INDEPENDENT_HUMAN_VERIFICATION_NOT_ATTESTED" in observed["error"]
+
+
+def test_tty_attest_missing_controlling_terminal_rejects():
+    """A real new session has no /dev/tty; no fake tty file or approval fallback."""
+    code = """
+from scripts import v3_trusted_record_bootstrap as tool
+tool.os.geteuid = lambda: 0  # effective-Root fixture only
+try:
+    tool.tty_attest('a' * 64, {})
+except OSError:
+    print('NO_CONTROLLING_TTY_REJECTED')
+else:
+    raise AssertionError('missing controlling terminal accepted')
+"""
+    result = subprocess.run([__import__('sys').executable, "-c", code],
+                            start_new_session=True, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "NO_CONTROLLING_TTY_REJECTED"
+
+
+def test_tty_attest_output_open_failure_closes_input(monkeypatch):
+    import builtins
+    from io import StringIO
+    stream = StringIO()
+    def fail_output(path, mode, **kwargs):
+        assert path == "/dev/tty"
+        if mode == "r":
+            return stream
+        raise OSError("isolated output open failure")
+    monkeypatch.setattr(tool.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(builtins, "open", fail_output)
+    with pytest.raises(OSError, match="isolated output open failure"):
+        tool.tty_attest("a" * 64, {})
+    assert stream.closed
