@@ -18,14 +18,14 @@ import stat
 import subprocess
 import time
 
-CONTRACT_ID = "SCHEMA_015_562_RUNTIME_SUCCESSOR_V2"
+CONTRACT_ID = "SCHEMA_015_D906_RUNTIME_SUCCESSOR_V2"
 PREDECESSOR = {
-    "release_id": "20261007-562f201-reference-dependency-retry-v1",
-    "source_commit": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
-    "source_tree": "e5205965e57fce6ce2b65dd747a110d00f7f1b1a",
-    "archive_sha256": "17f31cb139ef9a619e455e5999b407fc7cfd98b45c3fd3757912b16a2da39941",
-    "raw_manifest_sha256": "eb6d382b3bc0b720d54349293d4f2afe73f372c8fd3838beb3eb86d557a9811c",
-    "manifest_sha256": "f99d02e36e33e2d0df20127019d019c52f93b5fdb26ebd0105c306c2ae93968a",
+    "release_id": "20261014-d9063ee-release-tty-pg1614-v1",
+    "source_commit": "d9063ee43bc65e821457221ad824f5dde84fe408",
+    "source_tree": "3a612584d278925afbcd1e2004fd47016fc9b6ce",
+    "archive_sha256": "9d8f56ba6748ed44de6aa994f5972c86021ed02d1afd88de2fccfb9c2a54ee86",
+    "raw_manifest_sha256": "30fb8c512253ce62cfce7c5bee7ef072c0d16dab5b436c47e94c12a7f7ab36fc",
+    "manifest_sha256": "f54752cfd149526f98adad416a6626fdb02e347c356c52dc5ccc6b6ed50dd166",
 }
 TOOLING_FILES = (
     "scripts/schema015_successor_binding.py", "scripts/release_runtime_recovery.py",
@@ -36,9 +36,9 @@ CHECKS = ("full_pytest", "stage2", "source_installation", "api_native", "mcp_nat
           "worker_native", "exact_predecessor_on_schema015", "pre_commit_failure_recovery",
           "post_commit_runtime_recovery", "business_data_preserved")
 P0_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3"
-STATE_CONTRACT = "SCHEMA015_P0_CONTROLLED_RELEASE_V3_STATE_V1"
-STATE_BASE_SOURCE = "7ca9be5ecf912f95d363b93ca11a9b0b82ea4fb2"
-STATE_BASE_TREE = "32cc824d7aa4dd65633e1d63816ffef76ced0c82"
+STATE_CONTRACT = "SCHEMA015_D906_BUSINESS_SUCCESSOR_V3_STATE_V1"
+STATE_BASE_SOURCE = "d11c2fb5ddb6203eb5cee23832fafec47a2781f0"
+STATE_BASE_TREE = "ce8922c95be85c8edfdb117172107aaa72fb03e9"
 GLOBAL_RELEASE_LOCK = Path("/run/lock/enterprise-agent-workbench-release.lock")
 STATE_PRODUCER_FILES = (
     "scripts/v3_trusted_record_bootstrap.py", "scripts/runtime_policy_rollout.py",
@@ -46,8 +46,8 @@ STATE_PRODUCER_FILES = (
     "scripts/verify_runtime_config.py", "scripts/release_manifest.py", "scripts/release_runtime_recovery.py",
     "app/settings.py", "deploy/rollback_compatibility.json",
 )
-P0_SOURCE = "280ae327a9d4720c5cadfac38aba259c7ff161ae"
-P0_TREE = "dc86c0e047cb9001e6ea0f88d32b129ad52f079b"
+P0_SOURCE = "d11c2fb5ddb6203eb5cee23832fafec47a2781f0"
+P0_TREE = "ce8922c95be85c8edfdb117172107aaa72fb03e9"
 P0_CHECKS = {
     "candidate_regression": "REAL_CANDIDATE_TEST_RUN",
     "source_installation": "REAL_ARCHIVE_INSTALLATION",
@@ -62,7 +62,7 @@ P0_CHECKS = {
     "production_schema015": "PRODUCTION_READONLY_POSTGRESQL_16_14",
     "production_backup_restore": "REAL_ENCRYPTED_BACKUP_RESTORE",
     "artifact_backup_integrity": "REAL_ARTIFACT_CHECKSUM",
-    "exact_562_compatibility": "REAL_562_ON_SCHEMA015_WITH_PG_DATA",
+    "exact_d906_compatibility": "REAL_D906_ON_SCHEMA015_WITH_PG_DATA",
     "pre_commit_failure_recovery": "REAL_FAILURE_RECOVERY_WITH_POSTGRESQL",
     "post_commit_runtime_recovery": "REAL_FAILURE_RECOVERY_WITH_POSTGRESQL",
     "business_data_preserved": "REAL_PERSISTENT_DATA_COMPARISON",
@@ -75,7 +75,7 @@ P0_REPLACEMENTS = {
     "api_native": ["runtime_startup_health", "api_sse_history"],
     "mcp_native": ["runtime_startup_health"],
     "worker_native": ["runtime_startup_health", "task_run_ownership"],
-    "exact_predecessor_on_schema015": ["exact_562_compatibility", "production_schema015"],
+    "exact_predecessor_on_schema015": ["exact_d906_compatibility", "production_schema015"],
     "pre_commit_failure_recovery": ["pre_commit_failure_recovery", "release_lock_audit"],
     "post_commit_runtime_recovery": ["post_commit_runtime_recovery", "production_backup_restore"],
     "business_data_preserved": ["business_data_preserved"],
@@ -94,6 +94,7 @@ STATE_CHANGE_FILES = {*P0_CHANGE_FILES,
     "tests/test_v3_bootstrap_frozen_consumer_boundary.py", "tests/test_v3_state_contract.py",
     "tests/test_v3_state_consumer_entry.py", "tests/test_v3_state_frozen_reader_rejection.py",
     "tests/test_v3_state_producer_consumer_joint.py",
+    "tests/test_d906_business_release_identity.py",
     "deploy/V3_TRUSTED_RECORD_BOOTSTRAP_REVIEW_V1.md"}
 COMMIT = re.compile(r"[0-9a-f]{40}")
 HASH = re.compile(r"[0-9a-f]{64}")
@@ -552,7 +553,7 @@ def _p0_decisions(paths, value, candidate, approved, evidence, evidence_hash, sc
             require(facts.get("candidate_archive_sha256") == candidate["archive_sha256"]
                     and facts.get("predecessor_archive_sha256") == PREDECESSOR["archive_sha256"],
                     "p0_artifact_backup_identity")
-        if name in {"exact_562_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery",
+        if name in {"exact_d906_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery",
                     "business_data_preserved"}:
             require(facts.get("predecessor_source") == PREDECESSOR["source_commit"]
                     and facts.get("schema_rollback") is False and facts.get("data_preserved") is True,

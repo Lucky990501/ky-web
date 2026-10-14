@@ -28,7 +28,7 @@ import subprocess
 import sys
 
 VERSION = "V3_VERIFIED_SOURCE_ONLY_ENTRY_V2"
-PARENT = "7ca9be5ecf912f95d363b93ca11a9b0b82ea4fb2"
+PARENT = "d11c2fb5ddb6203eb5cee23832fafec47a2781f0"
 CODE_FILES = (
     "scripts/v3_trusted_record_bootstrap.py", "scripts/runtime_policy_rollout.py",
     "scripts/schema015_successor_binding.py", "scripts/rollback_preflight.py",

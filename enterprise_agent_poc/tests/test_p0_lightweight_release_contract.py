@@ -66,7 +66,7 @@ def controlled(pair, monkeypatch):
         if name == "artifact_backup_integrity":
             facts.update(candidate_archive_sha256=candidate["archive_sha256"],
                          predecessor_archive_sha256=binding.PREDECESSOR["archive_sha256"])
-        if name in {"exact_562_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery", "business_data_preserved"}:
+        if name in {"exact_d906_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery", "business_data_preserved"}:
             facts.update(predecessor_source=binding.PREDECESSOR["source_commit"], schema_rollback=False, data_preserved=True)
         if name == "release_lock_audit":
             facts.update(exclusive_global_lock=True, preflight_before_mutation=True, failure_stop_verified=True)

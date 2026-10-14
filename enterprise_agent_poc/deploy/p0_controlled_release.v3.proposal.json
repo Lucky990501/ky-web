@@ -1,13 +1,14 @@
 {
   "schema_version": 3,
-  "contract_id": "SCHEMA015_P0_CONTROLLED_RELEASE_V3",
+  "contract_id": "SCHEMA015_D906_BUSINESS_SUCCESSOR_V3_STATE_V1",
   "status": "PROPOSED_CODE_ONLY_NOT_APPROVED_NOT_RELEASE_READY",
-  "business_base_source": "280ae327a9d4720c5cadfac38aba259c7ff161ae",
-  "business_base_tree": "dc86c0e047cb9001e6ea0f88d32b129ad52f079b",
-  "predecessor_source": "562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3",
-  "predecessor_release": "20261007-562f201-reference-dependency-retry-v1",
+  "business_base_source": "d11c2fb5ddb6203eb5cee23832fafec47a2781f0",
+  "business_base_tree": "ce8922c95be85c8edfdb117172107aaa72fb03e9",
+  "predecessor_source": "d9063ee43bc65e821457221ad824f5dde84fe408",
+  "predecessor_release": "20261014-d9063ee-release-tty-pg1614-v1",
   "selection": "Explicit runtime_only_release schema_version=3 plus exact Source-bound declaration; offline prepare defaults to native-v2",
-  "scope": "One exact reviewed 280a direct successor / exact562 pair, Schema015, MigrationNONE. No business, Skill, binding, epoch, permissions or schema change",
+  "scope": "One identity-only direct successor of exact d11 business base / actual d906 runtime predecessor, Schema015, MigrationNONE. Business/Skill/Migration bytes unchanged versus d11; current Production WeChat1.0.0 Binding unchanged. This identity candidate does not authorize Registry staging, Skill1.0.1 activation, installation or deployment. Legacy PhaseA is not applicable to1.0.1; existing platform Registry package import/test/publish is a separate controlled unbound-package path requiring its actual authorized actor and scope.",
+  "deferred_skill_enablement": "Register only the exact1.0.1 package via existing platform Registry lifecycle under separate explicit scope, preserving shared name/description and all1.0.0 Agent/Revision/Instance bindings. Package byte-test/publish is not Agent Runtime Test/Publish/enable. If package registration cannot be lawfully executed, release preflight remains BLOCKED; never hide/delete1.0.1 from the immutable source/archive.",
   "preparation": "Existing schema015_successor_binding.py prepare --qualification-mode p0-controlled-v3; writes only an offline builder declaration, never an approval",
   "protected_inputs": [
     "shared/release-qualifications/<release_id>.policy-approval.v1.json",
@@ -24,7 +25,7 @@
     "candidate_regression", "source_installation", "pg_transactions", "pg_concurrency", "pg_permissions",
     "task_run_ownership", "orphan_task_pagination", "tenant_user_isolation", "api_sse_history",
     "runtime_startup_health", "production_schema015", "production_backup_restore", "artifact_backup_integrity",
-    "exact_562_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery",
+    "exact_d906_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery",
     "business_data_preserved", "release_lock_audit"
   ],
   "evidence_rules": "Every check has exact real evidence_kind, current candidate Source, approved environment identity, report SHA, run/audit identity, timestamp, positive assertion count and zero failures/errors/skips. Test PG checks require exactly PostgreSQL16.6; Production PG checks require exactly PostgreSQL16.14. Both require Schema015 and exact DB identity. Source-bound authorized report verification remains an operations responsibility, not cryptographically established by metadata",
@@ -35,7 +36,7 @@
     "api_native": ["runtime_startup_health", "api_sse_history"],
     "mcp_native": ["runtime_startup_health"],
     "worker_native": ["runtime_startup_health", "task_run_ownership"],
-    "exact_predecessor_on_schema015": ["exact_562_compatibility", "production_schema015"],
+    "exact_predecessor_on_schema015": ["exact_d906_compatibility", "production_schema015"],
     "pre_commit_failure_recovery": ["pre_commit_failure_recovery", "release_lock_audit"],
     "post_commit_runtime_recovery": ["post_commit_runtime_recovery", "production_backup_restore"],
     "business_data_preserved": ["business_data_preserved"]
@@ -47,13 +48,13 @@
   ],
   "preserved_runtime_gates": [
     "Four independent RELEASE_EXPECTED pins and installed archive/file identity",
-    "Source/Tree/Parent and seven code pins, exact562 full artifact identity",
+    "Source/Tree/Parent and seven code pins, exactd906 full artifact identity",
     "Readonly live PostgreSQL ledger/checksum/epoch/floor, Schema015 pending/unknown/drift0",
     "Registry/Skill/Agent binding and Tenant/User isolation",
     "Global lock, final preflight before mutation, commit boundary and audit",
     "Actual API/MCP/Worker health and fixed production configuration identity",
     "Current authenticated technical smoke including two actual campaign Tasks, SSE, structured result and DOCX; requires separate credential and Provider/fee authorization",
-    "Preserved business data, exact562 on Schema015, pre/postcommit recovery, failure stop and retained evidence"
+    "Preserved business data, exactd906 on Schema015, pre/postcommit recovery, failure stop and retained evidence"
   ],
   "not_allowed": [
     "Changing old V1/V2 approvals, historical manifests or policies",
