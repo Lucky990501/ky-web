@@ -118,7 +118,10 @@ def create_mcp():
         size is explicit WxH pixels. outputs lists one {purpose,prompt} per
         user-requested image (max5). Select the requested aspect_ratio exactly.
         include_brand_logo composes the tenant original, never a model drawing.
-        Current reference contract accepts one reference and one result.
+        reference_images are this signed Task's ordered private upload IDs,
+        not URLs. Multi-input V2 accepts 2-5 inputs only after exact Provider
+        qualification; currently disabled. Reference editing still yields ONE
+        output, independently of the number of input images.
         """
         arguments = {"prompt": prompt, "references": references, "aspect_ratio": aspect_ratio}
         if reference_images is not None:
@@ -138,7 +141,9 @@ def create_mcp():
                 include_brand_logo=include_brand_logo,
             )
         except ImageRequestError as error:
-            failure = {"error_code": error.code, "message": str(error), "retryable": False, "provider_invoked": False}
+            failure = {"error_code": error.code, "message": str(error), "retryable": False, "provider_invoked": error.provider_invoked}
+            if error.tool_dependency is not None:
+                failure["_tool_dependency"] = error.tool_dependency
             return CallToolResult(isError=True, structuredContent=failure,
                                   content=[TextContent(type="text", text=json.dumps(failure, ensure_ascii=False))])
         except BrandLogoError as error:

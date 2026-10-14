@@ -10,6 +10,10 @@ RATIO_SIZES = {"1:1": "1024x1024", "9:16": "864x1536", "16:9": "1536x864",
                "4:5": "1024x1280", "3:2": "1536x1024", "2:3": "1024x1536"}
 MAX_OUTPUTS = 5
 INPUT_ERRORS = {
+    "multi_reference_provider_not_verified": "当前网关及模型的多参考图能力尚未核验，未发送图片请求；可保留素材，明确选择一张后另建单图任务。",
+    "reference_dispatch_unknown_or_consumed": "本任务图片调用已提交或结果不确定，禁止自动重传；请查询原任务并人工核对。",
+    "reference_binding_invalid": "当前参考图片绑定或内容不匹配，未发送图片请求。",
+    "reference_task_cancelled": "任务已结束或正在取消，未发送新的图片请求。",
     "image_size_invalid": "图片尺寸格式无效，请提供明确像素。",
     "image_size_not_verified": "该图片尺寸尚未完成当前模型能力核验，未发送生成请求；请确认使用明确像素候选。",
     "image_size_conflict": "工具尺寸与用户指定像素不一致，未发送生成请求。",
@@ -28,6 +32,8 @@ class ImageRequestError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+        self.provider_invoked = False
+        self.tool_dependency = None
 
 
 def normalized(text: str) -> str:

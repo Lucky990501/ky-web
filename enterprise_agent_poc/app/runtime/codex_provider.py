@@ -921,6 +921,10 @@ class CodexRuntimeProvider(RuntimeProvider):
                         artifact[key] = record[key]
                 if isinstance(record.get("purpose"), str):
                     artifact["purpose"] = record["purpose"][:120]
+                if isinstance(record.get("reference_images_used"), list) and all(isinstance(v, str) for v in record["reference_images_used"]):
+                    artifact["reference_images_used"] = record["reference_images_used"][:5]
+                if isinstance(record.get("reference_manifest_sha256"), str) and re.fullmatch(r"[a-f0-9]{64}", record["reference_manifest_sha256"]):
+                    artifact["reference_manifest_sha256"] = record["reference_manifest_sha256"]
                 original = record.get("original_storage_key")
                 if isinstance(original, str) and original.startswith("generated/") and "\\" not in original and all(part not in {"", ".", ".."} for part in original.split("/")):
                     artifact["original_storage_key"] = original

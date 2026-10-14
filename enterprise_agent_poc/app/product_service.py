@@ -102,9 +102,12 @@ class TaskService:
                 )
             if task["agent_id"] == "image-agent":
                 execution_options["task_id"] = task_id
-                attachment = self._store.task_chat_image_attachment(task_id, tenant_id)
-                if attachment:
+                attachments = self._store.task_chat_image_attachments(task_id, tenant_id)
+                if attachments:
                     execution_options.update(task_id=task_id, reference_image_attached=True)
+                    if len(attachments) > 1:
+                        execution_options["reference_image_inputs"] = [
+                            {"id": r["id"], "position": r["position"], "purpose": r["purpose"]} for r in attachments]
             self._store.add_task_activity(task_id, tenant_id, "context_loading", "completed")
             self._store.set_task(task_id, tenant_id, "running", "starting_runtime", f"正在启动{agent.name}")
             result = await self._agents.run(

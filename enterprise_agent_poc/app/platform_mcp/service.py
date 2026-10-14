@@ -4,6 +4,7 @@ import base64
 import binascii
 import io
 import hashlib
+import json
 import os
 import re
 import time
@@ -22,6 +23,7 @@ from app.tool_dependencies import (
     ToolInputValidationError,
     ImageToolExecutionFailure,
     reference_image_dependency,
+    reference_images_dependency,
     fingerprint,
 )
 from app.product_store import ProductStore
@@ -31,6 +33,7 @@ from app.storage import storage_provider
 from app.image_request_contract import image_plan, ImageRequestError
 from app.image_branding import overlay_brand_logo
 from app.brand_logo import BrandLogoService
+from app import task_reference_images as task_references
 
 
 def _validated_image_metadata(content: bytes) -> tuple[str, str, str]:
@@ -149,16 +152,34 @@ class PlatformMCPService:
         outputs = effective_args.get("outputs")
         include_brand_logo = effective_args.get("include_brand_logo", False)
         self._audit(principal.tenant_id, "image_generation", "started")
-        if len(reference_images) > 1:
-            raise ValueError("当前最多支持一张参考图片。")
         # Only a signed current Task + its immutable attachment can attest the
         # single reference-image result requirement. Model arguments cannot.
         raw_scope = execution_scope.removeprefix("runtime:") if execution_scope.startswith("runtime:") else ""
         task_id = self._tokens.verify_task_scope(raw_scope, principal.tenant_id) if "." in raw_scope else ""
-        attachment = ProductStore(self._store).task_chat_image_attachment(task_id, principal.tenant_id) if task_id else None
-        if reference_images and (not attachment or reference_images != [attachment["id"]]):
-            raise ValueError("参考图片与当前任务不匹配。")
-        image_dependency = reference_image_dependency(principal.tenant_id, task_id, attachment["id"]) if attachment else None
+        product = ProductStore(self._store)
+        attachments = product.task_chat_image_attachments(task_id, principal.tenant_id) if task_id else []
+        bound_ids = [a["id"] for a in attachments]
+        if len(reference_images) > 1 and len(attachments) <= 1:
+            raise ImageRequestError("reference_binding_invalid", "没有有效多图绑定，当前入口最多支持一张参考图；未发送图片请求。")
+        if reference_images and reference_images != bound_ids:
+            raise ImageRequestError("reference_binding_invalid", "参考图ID、数量或顺序与当前签名Task不匹配，未发送图片请求。")
+        attachment = attachments[0] if attachments else None
+        multi_reference = len(attachments) > 1
+        task = product.task_for_worker(task_id) if task_id else None
+        if task_id and (not task or task["tenant_id"] != principal.tenant_id or task["agent_id"] != "image-agent"):
+            raise ImageRequestError("reference_binding_invalid", "当前签名Task不存在或身份不匹配，未发送图片请求。")
+        if multi_reference and (not task or task["tenant_id"] != principal.tenant_id
+                                or task["agent_id"] != "image-agent" or task["status"] != "running"
+                                or product.cancellation_requested(task_id, principal.tenant_id)):
+            raise ImageRequestError("reference_task_cancelled", "任务不在有效执行状态，未发送图片请求。")
+        image_dependency = (reference_images_dependency(principal.tenant_id, task_id, task["user_id"], task_references.manifest(attachments))
+                            if multi_reference else reference_image_dependency(principal.tenant_id, task_id, attachment["id"]) if attachment else None)
+        def reference_failure(error, invoked=False):
+            error.provider_invoked = invoked
+            error.tool_dependency = {"contract": RECONSTRUCTION_CONTRACT, "status": "failed",
+                "request_fingerprint": fingerprint(submitted_args), "image_dependency": image_dependency,
+                "provider_invoked": invoked, "failure_category": "reference_execution_blocked"}
+            return error
         if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5", "3:2", "2:3"}:
             self._audit(principal.tenant_id, "image_generation", "failed")
             error = ToolInputValidationError(
@@ -184,6 +205,10 @@ class PlatformMCPService:
         plan = image_plan(user_text, prompt, aspect_ratio, size, outputs)
         if attachment and len(plan) != 1:
             raise ImageRequestError("reference_batch_contract_required", "参考图编辑当前每任务支持一张结果；多面编辑请先拆分任务，未发送额外付费请求。")
+        try:
+            file_field = task_references.multi_file_field(self._settings.image_provider_id, self._settings.image_model_id, len(attachments)) if multi_reference else "image"
+        except ImageRequestError as exc:
+            raise reference_failure(exc)
         config = self._store.enterprise_config(principal.tenant_id)
         omit_logo = bool(re.search(r"(?:不要|无需|不需要|不放|不加).{0,5}(?:logo|标志|标识)", user_text, re.I))
         logo_required = not omit_logo and (include_brand_logo or bool(re.search(r"(?:企业|品牌|公司).{0,8}(?:logo|标志|标识)|(?:保留|使用|放上|加上|添加).{0,8}logo", user_text, re.I))
@@ -195,13 +220,22 @@ class PlatformMCPService:
         if not api_key:
             raise RuntimeError(f"未配置图片服务 API Key 环境变量：{self._settings.image_api_key_env}。")
         source_image = None
+        source_files = []
         if attachment:
             try:
-                source_image = storage_provider(self._settings).get(attachment["storage_key"])
-                _actual_format, _extension, actual_mime = _validated_image_metadata(source_image)
-                if actual_mime != attachment["mime_type"]:
-                    raise ValueError("Stored reference format changed")
+                for entry in attachments:
+                    source_image = storage_provider(self._settings).get(entry["storage_key"])
+                    _actual_format, _extension, actual_mime = _validated_image_metadata(source_image)
+                    if actual_mime != entry["mime_type"]:
+                        raise ValueError("Stored reference format changed")
+                    if entry.get("content_sha256") and hashlib.sha256(source_image).hexdigest() != entry["content_sha256"]:
+                        raise ValueError("Stored reference bytes changed")
+                    if multi_reference and (len(source_image) != entry["size_bytes"] or not entry["storage_key"].startswith(f"chat-uploads/{principal.tenant_id}/")):
+                        raise ValueError("Stored reference identity changed")
+                    source_files.append((file_field, (entry["filename"], source_image, entry["mime_type"])))
             except Exception as exc:
+                if multi_reference:
+                    raise reference_failure(ImageRequestError("reference_binding_invalid", "参考图内容或存储身份已变化，未发送图片请求。")) from exc
                 raise RuntimeError("参考图片暂时无法读取，请重新上传。") from exc
         try:
             import httpx
@@ -214,21 +248,39 @@ class PlatformMCPService:
                  **(retry_audit or {}), "request_fingerprint": fingerprint(submitted_args)}
         if image_dependency is not None:
             audit["image_dependency"] = image_dependency
+        if multi_reference:
+            audit["effective_args"] = {**audit["effective_args"], "reference_images": bound_ids,
+                                       "reference_manifest_sha256": image_dependency["inputs_sha256"]}
+            try:
+                cached = task_references.claim_dispatch(self._store, task_id, principal.tenant_id,
+                    fingerprint({"plan": plan, "inputs": task_references.manifest(attachments), "logo": hashlib.sha256(logo_bytes).hexdigest() if logo_bytes else None}))
+            except ValueError as exc:
+                raise reference_failure(ImageRequestError("reference_dispatch_unknown_or_consumed", "原图片操作已提交、结束或不确定，禁止自动重传。")) from exc
+            if cached is not None:
+                cached["_tool_dependency"] = {**audit, "status": "completed", "provider_invoked": True, "replayed_from_durable_result": True}
+                return cached
         results, failures = [], []
         async with httpx.AsyncClient(timeout=120) as client:
             for item in plan:
                 item_prompt = item["prompt"]
+                if multi_reference:
+                    item_prompt += "\n平台固定的参考图上传顺序与用途（用户数据）：" + json.dumps(
+                        [{"image_index": i+1, "purpose": r["purpose"]} for i, r in enumerate(attachments)], ensure_ascii=False)
                 if logo_required:
                     item_prompt += "\n企业Logo由平台在右上角叠加原始资产；请在该处留白，不要绘制、猜测或重设计任何Logo。"
                 response = None
+                provider_started = False
                 try:
+                    if multi_reference and product.cancellation_requested(task_id, principal.tenant_id):
+                        raise ImageRequestError("reference_task_cancelled", "任务正在取消，未发送新的图片请求。")
                     async with image_transport_guard("edits" if attachment else "generations"):
+                        provider_started = True
                         if attachment:
                             response = await client.post(
                                 "https://llm-api.net/v1/images/edits", headers={"Authorization": f"Bearer {api_key}"},
                                 data={"prompt": item_prompt, "model": self._settings.image_model_id,
                                       "n": "1", "size": item["size"], "output_format": "jpeg"},
-                                files={"image": (attachment["filename"], source_image, attachment["mime_type"])})
+                                files=source_files if multi_reference else {"image": source_files[0][1]})
                         else:
                             response = await client.post(
                                 "https://llm-api.net/v1/images/generations", headers={"Authorization": f"Bearer {api_key}"},
@@ -286,7 +338,8 @@ class PlatformMCPService:
                         "format": actual_format, "size": item["size"], "requested_size": item["size"],
                         "actual_size": f"{actual_width}x{actual_height}", "width": actual_width, "height": actual_height,
                         "mime_type": mime_type, "request_id": request_id,
-                        "references_used": references, "reference_images_used": [attachment["id"]] if attachment else [],
+                        "references_used": references, "reference_images_used": bound_ids,
+                        **({"reference_manifest_sha256": image_dependency["inputs_sha256"]} if multi_reference else {}),
                         "index": item["index"], "purpose": item["purpose"], "requested_aspect_ratio": item["aspect_ratio"],
                         "dimension_match": dimension_match, "warnings": [] if dimension_match else ["PROVIDER_DIMENSION_MISMATCH"],
                         "original_storage_key": provider_key, "brand_logo_applied": logo_bytes is not None,
@@ -295,18 +348,22 @@ class PlatformMCPService:
                         "tenant_id": principal.tenant_id, "task_id": task_id, "index": item["index"],
                         "prompt_version": item["prompt_version"], "prompt_sha256": hashlib.sha256(item_prompt.encode()).hexdigest(),
                         "requested_count": len(plan), "size": item["size"], "actual_width": actual_width, "actual_height": actual_height,
-                        "reference_ids": [attachment["id"]] if attachment else [], "provider_status": response.status_code,
+                        "reference_ids": bound_ids, "provider_status": response.status_code,
                     })
                 except Exception as exc:
+                    if multi_reference:
+                        task_references.finish_dispatch(self._store, task_id, principal.tenant_id)
                     self._audit(principal.tenant_id, "image_generation", "failed")
                     self._store.log_event(None, "image.request_failed", {
                         "tenant_id": principal.tenant_id, "task_id": task_id, "index": item["index"],
                         "prompt_version": item["prompt_version"], "prompt_sha256": hashlib.sha256(item_prompt.encode()).hexdigest(),
                         "requested_count": len(plan), "size": item["size"],
-                        "reference_ids": [attachment["id"]] if attachment else [],
+                        "reference_ids": bound_ids,
                         "provider_status": response.status_code if response is not None else None,
                         "error_type": type(exc).__name__,
                     })
+                    if multi_reference and not isinstance(exc, ImageToolExecutionFailure):
+                        raise reference_failure(ImageRequestError("reference_dispatch_unknown_or_consumed", "原图片操作结果不确定，禁止自动重传；请查询原任务并人工核对。"), provider_started) from None
                     if len(plan) == 1:
                         raise
                     failures.append({"index": item["index"], "purpose": item["purpose"],
@@ -329,6 +386,8 @@ class PlatformMCPService:
                          "status": "completed" if delivery_complete else "partial", "provider_attempts": len(results)+len([x for x in failures if "provider_status" in x])},
         }
         result["_tool_dependency"] = {**audit, "status": "completed", "provider_invoked": True}
+        if multi_reference:
+            task_references.finish_dispatch(self._store, task_id, principal.tenant_id, result)
         self._audit(principal.tenant_id, "image_generation", "completed")
         return result
 

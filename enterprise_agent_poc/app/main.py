@@ -19,7 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.auth import AuthenticationError, SessionIssuer, UserPrincipal, hash_password, verify_password
 from app.agent_catalog_api import catalog_router
@@ -30,6 +30,7 @@ from app.product_service import TaskService
 from app.product_store import ProductStore
 from app.brand_logo import BrandLogoError, BrandLogoService, MAX_LOGO_BYTES, public_brand_logo
 from app.chat_image_uploads import ChatImageUploadError, MAX_CHAT_IMAGE_BYTES, validate_chat_image
+from app.image_request_contract import ImageRequestError
 from app.document_generator import (
     ActivityPlanDocumentRequest,
     ActivityPlanDocumentService,
@@ -74,12 +75,19 @@ class LoginRequest(BaseModel):
 class ChatImageAttachmentRequest(BaseModel):
     type: Literal["image"]
     id: str = Field(min_length=36, max_length=36)
+    purpose: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class AgentTaskRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4_000)
     conversation_id: str | None = None
-    attachments: list[ChatImageAttachmentRequest] = Field(default_factory=list, max_length=1)
+    attachments: list[ChatImageAttachmentRequest] = Field(default_factory=list, max_length=5)
+    @field_validator("attachments")
+    @classmethod
+    def unique_attachments(cls, values):
+        if len({value.id for value in values}) != len(values):
+            raise ValueError("duplicate_reference_id")
+        return values
 class RenameRequest(BaseModel): title: str = Field(min_length=1,max_length=80)
 class EnterpriseConfigRequest(BaseModel): payload: dict
 class KnowledgeTextRequest(BaseModel): name: str = Field(min_length=1,max_length=180); content: str = Field(min_length=1,max_length=100_000)
@@ -654,20 +662,46 @@ async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: R
     if not (agent_id not in CATALOG and payload.conversation_id) and not product_store.agent_enabled(principal.tenant_id, agent_id):
         raise HTTPException(404, "该智能体尚未为当前企业启用。")
     try:
+        from app.task_reference_images import selection, multi_file_field
+        import hashlib
+        selected = selection([item.id for item in payload.attachments],
+                             [item.purpose or f"参考图{i+1}" for i, item in enumerate(payload.attachments)])
+        hashes = {}
+        for attachment_id, _position, _purpose in selected:
+            record = product_store.chat_image_attachment(principal.tenant_id, principal.user_id, attachment_id)
+            if not record:
+                raise ValueError("参考图片不存在或无权访问。")
+            raw = storage_provider(settings).get(record["storage_key"])
+            _ext, mime, width, height = validate_chat_image(raw, record["mime_type"])
+            if (len(raw), mime, width, height) != (record["size_bytes"], record["mime_type"], record["width"], record["height"]):
+                raise ValueError("参考图片内容已变化，请重新上传。")
+            hashes[attachment_id] = hashlib.sha256(raw).hexdigest()
+        if len(selected) > 1:
+            multi_file_field(settings.image_provider_id, settings.image_model_id, len(selected))
         task = product_store.create_task(principal.tenant_id, principal.user_id, agent_id, payload.message, payload.conversation_id,
-                                         attachment_ids=[item.id for item in payload.attachments])
+                                         attachment_ids=[item.id for item in payload.attachments],
+                                         attachment_purposes=[item.purpose or f"参考图{i+1}" for i, item in enumerate(payload.attachments)],
+                                         _attachment_hashes=hashes)
+    except ImageRequestError as exc:
+        from app.image_request_contract import INPUT_ERRORS
+        return _error_response(request, 409, exc.code, INPUT_ERRORS[exc.code])
     except ValueError as exc:
         if str(exc) == "insufficient_credit":
             raise HTTPException(402, "积分不足，无法提交任务。") from exc
         raise HTTPException(409, str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    reused_submission = task.pop("_submission_reused", False)
+    if reused_submission:
+        return _public_task(product_store.task(task["id"], principal.tenant_id, principal.user_id) or task,
+                            include_diagnostic=principal.role == "enterprise_admin")
     if settings.task_queue == "redis":
         from app.task_queue import RedisTaskQueue
         RedisTaskQueue.from_settings(settings).enqueue(task["id"])
     else:
         asyncio.create_task(task_service.execute(task))
-    return _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
+    return _public_task(product_store.task(task["id"], principal.tenant_id, principal.user_id) or task,
+                        include_diagnostic=principal.role == "enterprise_admin")
 
 
 @app.get("/api/v1/agents/{agent_id}")
@@ -680,6 +714,16 @@ async def agent_metadata(agent_id: str, workbench_session: str | None = Cookie(d
     agent = next((a for a in product_store.agents(principal.tenant_id) if a["id"] == agent_id and a["enabled"]),None)
     if not agent:
         raise HTTPException(404,"该智能体暂不可用。")
+    if agent_id == "image-agent":
+        from app.task_reference_images import CONTRACT, MAX_REFERENCES, multi_file_field
+        try:
+            multi_file_field(settings.image_provider_id, settings.image_model_id, MAX_REFERENCES)
+            multi_status = "VERIFIED"
+        except ImageRequestError:
+            multi_status = "NOT_VERIFIED"
+        agent = {**agent, "reference_inputs": {"contract": CONTRACT, "max_count": MAX_REFERENCES,
+                 "multi_provider_status": multi_status, "multi_execution_allowed": multi_status == "VERIFIED",
+                 "reference_edit_output_count": 1}}
     return agent
 
 
@@ -786,9 +830,9 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
             if task["status"] in {"completed", "failed", "cancelled"}:
                 public = _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
                 terminal = {"status": public["status"], "error_code": public.get("error_code"), "message": public.get("user_message"), "diagnostic_id": public.get("diagnostic_id"), "final_response": public.get("final_response"), "conversation_id": public.get("conversation_id"), "generation": public.get("generation"), "assistant_message_id": public.get("assistant_message_id"), "structured_result": public.get("structured_result")}
-                terminal.update({key: public.get(key) for key in ("generations", "image_delivery", "illustration_briefs")})
+                terminal.update({key: public.get(key) for key in ("generations", "image_delivery", "illustration_briefs", "attachments", "reference_input_contract", "reference_dispatch_state")})
                 if task["status"] == "cancelled":
-                    yield f"event: cancelled\ndata: {json.dumps({'status': 'cancelled', 'task_id': task_id, 'message': 'Generation stopped'}, ensure_ascii=False)}\n\n"
+                    yield f"event: cancelled\ndata: {json.dumps({'status': 'cancelled', 'task_id': task_id, 'message': 'Generation stopped', 'attachments': public.get('attachments', [])}, ensure_ascii=False)}\n\n"
                     return
                 event = "complete" if task["status"] == "completed" else "error"
                 yield f"event: {event}\ndata: {json.dumps(jsonable_encoder(terminal), ensure_ascii=False)}\n\n"

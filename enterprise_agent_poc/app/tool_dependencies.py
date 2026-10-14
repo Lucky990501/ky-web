@@ -24,6 +24,7 @@ from uuid import uuid4
 CONTRACT = "required-tool-input-retry-v1"
 RECONSTRUCTION_CONTRACT = "required-tool-input-retry-v1.1"
 REFERENCE_RESULT_CONTRACT = "task-bound-reference-image-result-v1"
+MULTI_REFERENCE_RESULT_CONTRACT = "task-bound-reference-images-result-v2"
 RETRY_CATEGORIES = {"argument_validation_error", "recoverable_tool_input_error"}
 AUDIT_FIELDS = {
     "attempt_id", "tool_call_id", "execution_scope", "request_fingerprint",
@@ -92,17 +93,49 @@ def reference_image_dependency(tenant_id: str, task_id: str, attachment_id: str)
     return {**identity, "group_id": fingerprint(identity)}
 
 
+def reference_images_dependency(tenant_id: str, task_id: str, user_id: str, inputs: list[dict]) -> dict:
+    """Ordered authenticated inputs (2-5), independent of the ONE output."""
+    import re
+    if (not all(isinstance(v, str) and v for v in (tenant_id, task_id, user_id))
+            or not isinstance(inputs, list) or not 2 <= len(inputs) <= 5
+            or any(not isinstance(r, dict) or set(r) != {"id", "position", "purpose", "sha256"}
+                   or type(r["position"]) is not int or r["position"] != i
+                   or not isinstance(r["id"], str) or not r["id"]
+                   or not isinstance(r["purpose"], str) or not 1 <= len(r["purpose"]) <= 120
+                   or not isinstance(r["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", r["sha256"])
+                   for i, r in enumerate(inputs))
+            or len({r["id"] for r in inputs}) != len(inputs)):
+        raise ValueError("reference_inputs_invalid")
+    identity = {"contract": MULTI_REFERENCE_RESULT_CONTRACT, "tenant_id": tenant_id,
+                "task_id": task_id, "user_id": user_id, "inputs": deepcopy(inputs),
+                "inputs_sha256": fingerprint(inputs), "capability": "multi_reference_image_edit", "result_count": 1}
+    return {**identity, "group_id": fingerprint(identity)}
+
+
+def valid_reference_proof(proof):
+    if not isinstance(proof, dict):
+        return False
+    try:
+        if proof.get("contract") == MULTI_REFERENCE_RESULT_CONTRACT:
+            return proof == reference_images_dependency(proof.get("tenant_id"), proof.get("task_id"), proof.get("user_id"), proof.get("inputs"))
+        return (proof.get("contract") == REFERENCE_RESULT_CONTRACT
+                and all(isinstance(proof.get(k), str) and proof[k] for k in ("tenant_id", "task_id", "attachment_id"))
+                and proof == reference_image_dependency(proof["tenant_id"], proof["task_id"], proof["attachment_id"]))
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
 def _reference_dependency(call: dict, meta: dict, payload: dict) -> tuple[dict | None, bool]:
     proof = meta.get("image_dependency")
     if not isinstance(proof, dict) or call.get("server") != "platform" or call.get("tool") != "image_generation":
         return None, False
     identity = {key: proof.get(key) for key in ("contract", "tenant_id", "task_id", "attachment_id", "capability", "result_count")}
-    if (identity["contract"] != REFERENCE_RESULT_CONTRACT or identity["capability"] != "reference_image_edit"
-            or identity["result_count"] != 1
-            or any(not isinstance(identity[k], str) or not identity[k] for k in ("tenant_id", "task_id", "attachment_id"))
-            or proof.get("group_id") != fingerprint(identity)
+    if (not valid_reference_proof(proof)
             or meta.get("request_fingerprint") != call.get("request_fingerprint")):
         return None, False
+    identity = proof
+    multi = proof["contract"] == MULTI_REFERENCE_RESULT_CONTRACT
+    expected_ids = [r["id"] for r in proof["inputs"]] if multi else [proof["attachment_id"]]
     result_valid = False
     if meta.get("status") == "completed" and meta.get("provider_invoked") is True:
         items = payload.get("results")
@@ -114,7 +147,8 @@ def _reference_dependency(call: dict, meta: dict, payload: dict) -> tuple[dict |
             isinstance(key, str) and key.startswith(f"generated/{identity['tenant_id']}/")
             and "\\" not in key and not any(p in {"", ".", ".."} for p in key.split("/"))
             and expected and item.get("format") == expected[0] and key.endswith(expected[1])
-            and item.get("reference_images_used") == [identity["attachment_id"]]
+            and item.get("reference_images_used") == expected_ids
+            and (not multi or item.get("reference_manifest_sha256") == proof["inputs_sha256"])
             and all(type(item.get(k)) is int and item[k] > 0 for k in ("width", "height")))
     return deepcopy(proof), result_valid
 
@@ -432,6 +466,8 @@ def attempt_observation(arguments: object, result: object, *, scope: str,
                                 ignored_retry_argument_drift=list(meta.get("ignored_retry_argument_drift", [])),
                                 coupled_repairs=deepcopy(meta.get("coupled_repairs", [])))
         if accepted_contract and observed.get("failure_category") != "unverified_retry_receipt":
+            if meta.get("image_dependency") is not None and not valid_reference_proof(meta["image_dependency"]):
+                observed["failure_category"] = "invalid_reference_dependency"
             proof, result_valid = _reference_dependency({**observed, "server": server, "tool": tool}, meta, payload)
             if proof is not None:
                 observed.update(image_dependency=proof, result_contract_valid=result_valid)
@@ -476,13 +512,12 @@ def resolve_dependencies(observations: list[dict]) -> tuple[list[dict], list[dic
         if call.get("execution_scope"):
             key = (*key, attempt_id)
         proof = call.get("image_dependency")
-        task_image = bool(isinstance(proof, dict) and proof.get("contract") == REFERENCE_RESULT_CONTRACT
+        task_image = bool(valid_reference_proof(proof)
                           and call.get("execution_scope") and call.get("server") == "platform"
                           and call.get("tool") == "image_generation"
-                          and all(isinstance(proof.get(k), str) and proof[k] for k in ("tenant_id", "task_id", "attachment_id"))
-                          and proof == reference_image_dependency(proof.get("tenant_id"), proof.get("task_id"), proof.get("attachment_id")))
+                          )
         if task_image:
-            key = (scope, call["server"], call["tool"], REFERENCE_RESULT_CONTRACT, proof["group_id"])
+            key = (scope, call["server"], call["tool"], proof["contract"], proof["group_id"])
         if attempt_id in seen_attempts:
             call["lineage_error"] = "duplicate_attempt_identity"
         seen_attempts.add(attempt_id)

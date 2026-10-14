@@ -104,6 +104,7 @@ def _chat_image_attachment_view(item: dict) -> dict:
         "width": item["width"], "height": item["height"],
         "size_bytes": item["size_bytes"],
         "content_url": f"/api/v1/chat-images/{quote(attachment_id, safe='')}",
+        **{key: item[key] for key in ("position", "purpose", "content_sha256") if key in item},
     }
 
 
@@ -201,7 +202,14 @@ class ProductStore:
             generation_columns = {row["name"] for row in conn.execute("PRAGMA table_info(generations)").fetchall()}
             if "requested_size" not in generation_columns:
                 conn.execute("ALTER TABLE generations ADD COLUMN requested_size TEXT")
+            from app.task_reference_images import SQLITE_FIXTURE_SCHEMA
+            conn.executescript(SQLITE_FIXTURE_SCHEMA)
         self._seed_agent_catalog()
+
+    def task_chat_image_attachments(self, task_id: str, tenant_id: str) -> list[dict]:
+        from app.task_reference_images import bound
+        with self._store.connection() as conn:
+            return bound(conn, self._store.is_postgres, task_id, tenant_id)
 
     def create_chat_image_attachment(self, tenant_id: str, user_id: str, storage_key: str,
                                      filename: str, mime_type: str, size_bytes: int,
@@ -227,16 +235,19 @@ class ProductStore:
         return dict(row) if row else None
 
     def task_chat_image_attachment(self, task_id: str, tenant_id: str) -> dict | None:
-        with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT a.* FROM chat_image_attachments a JOIN tasks t ON t.id=a.task_id "
-                "WHERE t.id=? AND t.tenant_id=? AND t.agent_id='image-agent' AND a.tenant_id=t.tenant_id AND a.user_id=t.user_id",
-                (task_id, tenant_id),
-            ).fetchone()
-        return dict(row) if row else None
+        rows = self.task_chat_image_attachments(task_id, tenant_id)
+        # A scalar consumer must never silently discard additional inputs.
+        if len(rows) > 1:
+            raise ValueError("multi_reference_scalar_consumer")
+        return rows[0] if rows else None
 
     def remove_chat_image_attachment(self, tenant_id: str, user_id: str, attachment_id: str) -> str | None:
         with self._store.connection() as conn:
+            from app.task_reference_images import available
+            if available(conn, self._store.is_postgres) and conn.execute(
+                "SELECT 1 FROM task_reference_images WHERE attachment_id=? AND tenant_id=? AND user_id=?",
+                (attachment_id, tenant_id, user_id)).fetchone():
+                return None
             row = conn.execute(
                 "SELECT storage_key FROM chat_image_attachments WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",
                 (attachment_id, tenant_id, user_id),
@@ -436,16 +447,22 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, attachment_purposes: list[str] | None = None, _attachment_hashes: dict[str, str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
         if _release_operation_id and not _test_revision:
             raise PermissionError("Release ownership is only valid for controlled Runtime Test")
         attachment_ids = attachment_ids or []
-        if len(attachment_ids) > 1 or (attachment_ids and agent_id != "image-agent"):
-            raise ValueError("当前仅图片生成智能体支持一张参考图。")
+        from app.task_reference_images import selection, bind, confirmation, prior_confirmation
+        selected = selection(attachment_ids, attachment_purposes)
+        confirmation_hash = confirmation(tenant_id, user_id, text, conversation_id, selected, _attachment_hashes or {})
+        if attachment_ids and agent_id != "image-agent":
+            raise ValueError("仅图片生成智能体支持参考图。")
         with self._store.connection() as conn:
             context = None
             if attachment_ids and not self._store.is_postgres:
                 conn.execute("BEGIN IMMEDIATE")
+            prior = prior_confirmation(conn, self._store.is_postgres, tenant_id, user_id, selected, confirmation_hash)
+            if prior:
+                return prior
             if agent_id not in CATALOG:
                 if not self.execution_resolver:
                     raise LookupError("Execution resolver unavailable")
@@ -473,12 +490,7 @@ class ProductStore:
             task_id = str(uuid.uuid4())
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
             if attachment_ids:
-                claimed = conn.execute(
-                    "UPDATE chat_image_attachments SET task_id=? WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",
-                    (task_id, attachment_ids[0], tenant_id, user_id),
-                )
-                if claimed.rowcount != 1:
-                    raise ValueError("参考图片不存在、无权使用或已经发送。")
+                bind(conn, self._store.is_postgres, task_id, tenant_id, user_id, selected, _attachment_hashes or {}, confirmation_hash)
             conn.execute("INSERT INTO task_events(task_id,stage,message) VALUES (?, 'queued', '任务已进入队列')", (task_id,))
             self._insert_task_activity(conn, task_id, "queued", "started")
             if context:
@@ -800,7 +812,7 @@ class ProductStore:
                 result_json = json.dumps(
                     {"run_id": run_id, "assistant_message_id": assistant_message_id, "generation_id": generation_id,
                      "generation_ids": generation_ids, "image_delivery": evidence.get("image_delivery"),
-                     "image_details": [{"generation_id": identifier, **{key: image[key] for key in ("purpose", "dimension_match", "brand_logo_applied") if key in image}}
+                     "image_details": [{"generation_id": identifier, **{key: image[key] for key in ("purpose", "dimension_match", "brand_logo_applied", "reference_images_used", "reference_manifest_sha256") if key in image}}
                                        for identifier, image in zip(generation_ids, image_artifacts)],
                      "structured_result": structured_result},
                     ensure_ascii=False,
@@ -919,12 +931,9 @@ class ProductStore:
                     (tenant_id, user_id, conversation_id),
                 ).fetchall()
             ]
-            attachment_rows = conn.execute(
-                "SELECT a.id,a.task_id,a.filename,a.mime_type,a.size_bytes,a.width,a.height "
-                "FROM chat_image_attachments a JOIN tasks t ON t.id=a.task_id "
-                "WHERE t.conversation_id=? AND t.tenant_id=? AND t.user_id=? AND a.tenant_id=t.tenant_id AND a.user_id=t.user_id",
-                (conversation_id, tenant_id, user_id),
-            ).fetchall()
+            from app.task_reference_images import bound
+            attachments_by_task = {task["id"]: [_chat_image_attachment_view(r) for r in
+                bound(conn, self._store.is_postgres, task["id"], tenant_id)] for task in tasks}
             runs = conn.execute("SELECT run_id,status,created_at,completed_at,payload FROM run_traces WHERE conversation_id=? AND tenant_id=? ORDER BY created_at", (conversation_id, tenant_id)).fetchall()
         result = dict(conversation)
         agent = self._history_agent(result["id"], tenant_id, result["agent_id"])
@@ -935,13 +944,14 @@ class ProductStore:
         result["agent"] = agent
         result["project"] = {"id": result["id"], "name": display_title, "type": _project_type(agent)}
         result["tasks"] = tasks
+        for item in tasks:
+            item["attachments"] = attachments_by_task.get(item["id"], [])
         result["task_count"] = len(tasks)
         result["generations"] = generations
         result["image_count"] = len(generations)
         generations_by_task = {}
         for item in generations:
             generations_by_task.setdefault(item["task_id"], []).append(item)
-        attachments_by_task = {item["task_id"]: _chat_image_attachment_view(dict(item)) for item in attachment_rows}
         task_runs = {item["id"]: item.get("run_id") for item in tasks}
         trace_payloads = {
             item["run_id"]: json.loads(item["payload"])
@@ -978,7 +988,7 @@ class ProductStore:
             if task_id:
                 message["task_id"] = task_id
                 if message["role"] == "user" and task_id in attachments_by_task:
-                    message["attachments"] = [attachments_by_task[task_id]]
+                    message["attachments"] = attachments_by_task[task_id]
                 if message["role"] == "assistant" and task_id in generations_by_task:
                     message["generations"] = generations_by_task[task_id]
                     message["generation"] = generations_by_task[task_id][0]
@@ -987,7 +997,7 @@ class ProductStore:
                                 for item in call.get("artifacts", []) if isinstance(item, dict)}
                     for image in message["generations"]:
                         image.update({key: value for key, value in metadata.get(image["storage_key"], {}).items()
-                                      if key in {"purpose", "dimension_match", "brand_logo_applied"}})
+                                      if key in {"purpose", "dimension_match", "brand_logo_applied", "reference_images_used", "reference_manifest_sha256"}})
                     message["image_delivery"] = image_trace.get("image_delivery")
                 if message["role"] == "assistant":
                     payload = trace_payloads.get(task_runs.get(task_id), {})
@@ -1164,6 +1174,10 @@ class ProductStore:
                 ).fetchall()
         if not row: return None
         result = dict(row)
+        bindings = self.task_chat_image_attachments(task_id, tenant_id)
+        result["attachments"] = [_chat_image_attachment_view(r) for r in bindings]
+        result["reference_input_contract"] = "task-reference-images-v2" if len(bindings) > 1 else "task-reference-image-v1"
+        result["reference_dispatch_state"] = bindings[0].get("dispatch_state") if len(bindings) > 1 else None
         result_metadata = json.loads(result.pop("result_json") or "{}")
         result["assistant_message_id"] = result_metadata.get("assistant_message_id") if result["status"] == "completed" else None
         result["structured_result"] = result_metadata.get("structured_result") if result["status"] == "completed" else None

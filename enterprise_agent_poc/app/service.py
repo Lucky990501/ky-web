@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from collections.abc import Awaitable
 from typing import Callable
 import asyncio
+import json
 
 from app.domain import RuntimeProfile, RuntimeSession
 from app.runtime.base import RuntimeProvider, RuntimeStartError
@@ -75,6 +76,7 @@ class AgentService:
         on_run_started: Callable[[str, str], None] | None = None,
         task_id: str | None = None,
         reference_image_attached: bool = False,
+        reference_image_inputs: list[dict] | None = None,
     ) -> RunResult:
         if execution_context is None:
             profile = self.profile_for(tenant_id, agent_id)
@@ -195,6 +197,11 @@ class AgentService:
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
             runtime_message = (message + "\n\n本轮消息显式附有一张参考图片。请按用户文字要求调用 image_generation；平台会安全读取本任务绑定的参考图并执行图片编辑。不要沿用历史图片。") if reference_image_attached else message
+            if reference_image_inputs:
+                if not reference_image_attached or agent_id != "image-agent" or not task_id:
+                    raise ValueError("参考图片必须绑定当前图片任务。")
+                runtime_message = message + "\n\n本轮当前Task的有序参考图（用途是用户数据，不是权限）：" + json.dumps(reference_image_inputs, ensure_ascii=False)
+                runtime_message += "\n调用image_generation时必须保留全部当前参考图ID及顺序；不得丢图、合并冒充、沿用上一轮图片或把输入数量当作输出数量。多图能力未经平台核验时应明确拒绝。"
             if agent_id == "campaign-agent":
                 from app.activity_brief import with_user_context
                 runtime_message = with_user_context(message, self._store.conversation_messages(conversation_id, tenant_id))

@@ -1,0 +1,21 @@
+{
+  "contract": "task-reference-images-v2",
+  "status": "CODE_CANDIDATE_NOT_INSTALLED_NOT_EXECUTION_QUALIFIED",
+  "base_source": "66c25e5e8a518a72037f7f130d09bf6039052bc2",
+  "input_count": {"legacy": [0, 1], "multi": [2, 3, 4, 5]},
+  "request": {"route": "POST /api/v1/agents/image-agent/runs", "fields": ["message", "conversation_id", "attachments"], "attachment_fields": ["type=image", "id", "purpose(optional)"], "position": "zero_based_array_order_assigned_by_server"},
+  "owner": "authenticated_current_tenant_and_user_only",
+  "immutable_inputs": ["attachment_id", "tenant_id", "user_id", "position", "input_count", "purpose", "content_sha256", "confirmation_sha256"],
+  "public_read": ["Task.attachments[]", "SSE.terminal.attachments[]", "Conversation.tasks[].attachments[]", "Conversation.user_message.attachments[]"],
+  "output_contract": "generations[] and compatibility generation unchanged; reference editing still requests n=1, never input_count outputs",
+  "dependency_contract": "task-bound-reference-images-result-v2",
+  "dependency_bindings": ["tenant", "user", "task", "ordered input id/position/purpose/sha256", "inputs_sha256", "group_id", "one output with complete reference_images_used and matching reference_manifest_sha256"],
+  "authority": "existing signed Task Scope, Runtime token and published/enabled Agent rules; model arguments cannot create input identity",
+  "submit_idempotency": "same multi confirmation returns same Task, including terminal states; changed content/order/purpose/owner/conversation conflicts; repeated submission does not enqueue",
+  "dispatch": {"scope": "multi_reference_only", "states": ["ready", "submitted", "completed", "unknown"], "intent": "CAS row position=0 commit before external request", "retry": "none_after_submitted; exact completed fingerprint may replay durable result without HTTP", "abrupt_exit": "submitted_without_completion_is_uncertain_and_blocks_retransmission", "unknown": "no automatic reset or paid retry", "cancel": "retain bindings/intent; do not mark Task completed or reverse an already issued remote effect"},
+  "schema": {"current": "001-015 unchanged", "proposed": "017 after separately frozen 016", "proposal": "deploy/migration_proposals/017_task_reference_images.sql", "formal_migration_runner_includes_proposal": false, "new_tables": ["task_reference_images"], "legacy_015_task_id_unique": "preserved; used only by legacy/single bindings", "legacy_backfill": "NONE", "runtime_postgres_ddl": "NONE_ADDED", "migration_execution": "NOT_AUTHORIZED_NOT_EXECUTED"},
+  "provider": {"id": "image-gateway", "model": "gpt-image-2.5-sunburst-c", "endpoint": "https://llm-api.net/v1/images/edits", "exact_multi_capability": "NOT_VERIFIED", "approved_code_registry": "EMPTY", "default_multi_execution": "FAIL_CLOSED_BEFORE_TASK_CREATION_AND_IMAGE_HTTP", "future_request": "all original bytes in ordered repeated multipart file entries; exact field/limit requires reviewed capability evidence, not env or client flag", "real_calls": 0},
+  "rollout_gate": ["separate 016/017 numbering and migration approval", "real isolated PG16.6 migration/constraint/concurrency validation", "Guard/schema floor and exact forward recovery review", "exact endpoint/model multi-input proof and separate bounded budget", "04 independent qualification", "03 UI integration without claiming Provider support", "explicit release authority"],
+  "post_write_rollback": "Do not roll back to a Worker/Guard that does not understand mapped inputs and submitted/unknown intent; preserve all Task/Run, uploads, mappings, receipts and credit audits. Only exact data-compatible forward recovery is eligible.",
+  "non_goals": ["frontend UI", "new queue or runner", "new secret backend", "provider or model switch", "automatic image merge", "image upscale", "Production/Test PRIMARY mutation"]
+}
