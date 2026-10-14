@@ -27,11 +27,11 @@ import time
 import types
 from urllib.parse import unquote, urlsplit
 
-CONTRACT = "PRIMARY_TEST_D8A_894_BUSINESS_SUCCESSOR_V1"
+CONTRACT = "PRIMARY_TEST_D8A_894_BUSINESS_SUCCESSOR_V2"
 HOST = "iv-yew0uhfksgbw80bm48mv"
 ROOT = Path("/opt/enterprise-agent-workbench-test")
-CONTROL = Path("/etc/enterprise-agent-test-business-894-successor-v1")
-OP = ROOT / "release-evidence/business-894-successor-v1"
+CONTROL = Path("/etc/enterprise-agent-test-business-894-successor-v2")
+OP = ROOT / "release-evidence/business-894-successor-v2"
 SOURCE = "894bdd2a031725a0d0df3b95d6dfc26d08f0e4ab"
 TREE = "bb9317207372ad1a215eaeebb7a2b0151a35be4d"
 GIT_PARENT = "d11c2fb5ddb6203eb5cee23832fafec47a2781f0"
@@ -40,7 +40,11 @@ OLD_TREE = "6021a1f5017b92c3e5b785db1dd6bfcbb190d7d5"
 RID = "20261014-894bdd2-business-p0-test-v1"
 RELEASE = ROOT / "releases" / RID
 OLD_RELEASE = ROOT / "releases/20261008-d8a7814-wechat-personal-v1"
-PYTHON = ROOT / "shared/runtime/python311/bin/python"
+PYTHON = Path("/usr/bin/python3.10")
+APPLICATION_PYTHON = ROOT / "shared/runtime/python311/bin/python"
+RECOVERY_FILE = "existing_recovery_bound.py"
+CODE_FILES = ("entry.py", RECOVERY_FILE, "runtime_probe.py", "registry_extension.py", "verified_entry.py")
+BACKUP_ROOT = ROOT / "backups/business-894-successor-v2"
 PG = ROOT / "shared/runtime/postgresql-16.6/bin"
 REPO = ROOT / "shared/source/business-894-exact-v1"
 LOCK = Path("/run/lock/enterprise-agent-test-successor-v1.lock")
@@ -87,7 +91,7 @@ def native(path, *, readonly=True):
     path = Path(path)
     for ancestor in (path, *path.parents):
         info = ancestor.lstat()
-        need(not stat.S_ISLNK(info.st_mode) and info.st_uid == info.st_gid == 0
+        need(not stat.S_ISLNK(info.st_mode) and info.st_uid == 0 and info.st_gid in (0, 1000)
              and not info.st_mode & 0o022, "ROOT_ANCESTOR_TRUST")
     info = path.lstat()
     need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "REGULAR_SINGLE_LINK")
@@ -100,6 +104,16 @@ def pinned(path, expected):
 
 
 def run(argv, *, env=None, timeout=180, **kwargs):
+    # Shared Test runtimes/tools are owned by UID1000. Never execute their
+    # bytecode or ELF binaries with Root privileges. Root uses OS stdlib only.
+    program = Path(str(argv[0]))
+    if program.name == "git":
+        argv = ["/usr/bin/git", "--no-optional-locks", "-c", "core.fsmonitor=false",
+                "-c", "core.hooksPath=/dev/null", *argv[1:]]
+        env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "APP_ENV": "test",
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"}
+    if os.geteuid() == 0 and program.is_absolute() and program.is_relative_to(ROOT / "shared/runtime"):
+        argv = ["/usr/sbin/runuser", "-u", "lucky", "--", *argv]
     result = subprocess.run([str(x) for x in argv], capture_output=True,
                             timeout=timeout, env=env, **kwargs)
     need(result.returncode == 0, "COMMAND_FAILED:" + Path(str(argv[0])).name)
@@ -143,6 +157,13 @@ def trusted_python(value):
              and not info.st_mode & 0o022, "PYTHON_LOGICAL_ANCESTOR")
     native(real_python, readonly=False)
     need(sha(real_python) == value.get("python_sha256"), "PYTHON_PIN")
+    app = APPLICATION_PYTHON.resolve(strict=True)
+    need(str(app) == value.get("application_python_real_path")
+         and app.is_relative_to(ROOT / "shared/runtime")
+         and sha(app) == value.get("application_python_sha256"), "APPLICATION_PYTHON_PIN")
+    info = app.stat()
+    need((info.st_uid, info.st_gid) == (1000, 1000) and not info.st_mode & 0o022,
+         "APPLICATION_RUNTIME_UNPRIVILEGED_OWNER")
 
 
 def authority(action, clock=time.time):
@@ -158,7 +179,7 @@ def authority(action, clock=time.time):
          and value.get("environment") == "test" and value.get("production_authority") is False,
          "EXACT_SCOPE")
     need(value.get("operator") == "06_CODEX_AUTHORIZED_LUCKY_SUDO"
-         and value.get("actions") == ["install", "backup", "restore-rehearsal", "activate", "recover"],
+         and value.get("actions") == ["install", "registry", "backup", "restore-rehearsal", "activate", "recover"],
          "EXACT_EXECUTION_SCOPE")
     for field in ("owner_decision_reference", "technical_decision_reference"):
         need(isinstance(value.get(field), str) and len(value[field]) >= 8, "ACTUAL_DECISION_REFERENCE")
@@ -174,14 +195,40 @@ def authority(action, clock=time.time):
          "NO_RETRY_NO_PROVIDER_NO_MIGRATION")
     need(action in value["actions"], "ACTION_NOT_AUTHORIZED")
     pins = value.get("code_sha256", {})
-    need(set(pins) == {"entry.py", "existing_recovery_bound.py"}, "FIRST_BYTE_CODE_PIN_SET")
+    need(set(pins) == set(CODE_FILES), "FIRST_BYTE_CODE_PIN_SET")
     for name, pin in pins.items():
         pinned(CONTROL / name, pin)
     trusted_python(value)
+    need(value.get("registry_scope") == {
+        "slug": "wechat-official-account-writing", "version": "1.0.1",
+        "sha256": "6b37d4769cad4a8e0301a2b8c01fd90ca7ab8e0229c3e8df1e46d8a9d525a03b",
+        "registrar_user_id": USER, "admin": "EXISTING_FORMAL_INITIALIZER_TRANSACTION_ONLY",
+        "bindings": "UNCHANGED", "provider_budget": 0, "recovery": "KEEP_REGISTERED_PACKAGE_AND_BUSINESS_DATA"},
+        "EXACT_REGISTRY_ADMIN_SCOPE")
     need(value.get("restore_reserve_seconds") == 3600, "RESTORE_RESERVE")
     if action != "recover":
         need(value["expires_at"] - instant >= 3600, "NO_NEW_WORK_IN_RESTORE_RESERVE")
     return value
+
+
+def runtime_call(command, *args, payload=None):
+    """Only demoted processes may import application, psycopg/Redis/MCP libs."""
+    if (CONTROL / "runtime-binding.v1.json").exists():
+        doc = read(CONTROL / "runtime-binding.v1.json")
+    else:
+        native(CONTROL / "scope.approved.v1.json")
+        doc = read(CONTROL / "scope.approved.v1.json")
+    native(CONTROL / "runtime-binding.v1.json" if (CONTROL / "runtime-binding.v1.json").exists()
+           else CONTROL / "scope.approved.v1.json")
+    for name in CODE_FILES:
+        pinned(CONTROL / name, doc["code_sha256"][name])
+    app = APPLICATION_PYTHON.resolve(strict=True)
+    need(str(app) == doc["application_python_real_path"] and sha(app) == doc["application_python_sha256"],
+         "RUNTIME_PIN_BEFORE_DEMOTED_EXECUTION")
+    argv = [APPLICATION_PYTHON, "-I", "-B", CONTROL / "runtime_probe.py", command, *map(str, args)]
+    if os.geteuid() == 0: argv = ["/usr/sbin/runuser", "-u", "lucky", "--", *argv]
+    raw = run(argv, input=None if payload is None else json.dumps(payload).encode(), timeout=180)
+    return json.loads(raw)
 
 
 @contextmanager
@@ -224,7 +271,7 @@ def extract_function(path, expected, name, c, *, prefix=False):
 
 
 def formal(name, *, prefix=False):
-    c = types.SimpleNamespace(R=ROOT, P=CONTROL, REPO=REPO, PY=PYTHON, SOURCE=SOURCE,
+    c = types.SimpleNamespace(R=ROOT, P=CONTROL, REPO=REPO, PY=APPLICATION_PYTHON, SOURCE=SOURCE,
         TREE=TREE, RID=RID, RELEASE=RELEASE, OLD_RELEASE=OLD_RELEASE, need=need,
         sha=sha, run=run, hashlib=hashlib, source_identity=lambda: source_identity(RELEASE),
         before_install_mutation=lambda: authority("install"))
@@ -232,6 +279,7 @@ def formal(name, *, prefix=False):
 
 
 def old_guard():
+    need(os.geteuid() == 1000, "NO_PRIVILEGED_APPLICATION_IMPORT")
     pinned(OLD_GUARD, OLD_GUARD_PIN)
     for root in (OLD_GUARD.parent,
                  Path("/etc/enterprise-agent-test-successor-wechat-d8a-seeding-approval-v1"),
@@ -273,21 +321,13 @@ def old_state(topology=True):
     env_check(os.environ)
     need((ROOT / "current").resolve() == OLD_RELEASE, "EXACT_D8A_RUNTIME_PREDECESSOR")
     source_identity(OLD_RELEASE, OLD_SOURCE, OLD_TREE)
-    return old_guard().verify(topology=topology)
+    return runtime_call("old-state", int(topology))
 
 
 def snapshot():
     """Reuse sealed readonly catalog/row collector, no seeding module invocation."""
     env_check(os.environ)
-    import psycopg
-    with psycopg.connect(os.environ["ENTERPRISE_POC_DATABASE_URL"],
-                         options="-c default_transaction_read_only=on -c statement_timeout=10000") as db:
-        db.execute("SET TRANSACTION READ ONLY")
-        identity = db.execute("SELECT current_database(),current_user,inet_server_port(),current_setting('server_version')").fetchone()
-        need(identity == ("enterprise_agent_test", "enterprise_agent_test", 55432, "16.6"), "EXACT_TEST_PG_VERSION_ROLE")
-        need(db.execute("SELECT extversion FROM pg_extension WHERE extname='vector'").fetchone() == ("0.8.6",),
-             "EXACT_TEST_VECTOR_EXTENSION")
-    return old_guard().base.snapshot()
+    return runtime_call("snapshot")
 
 
 def row_pins(data):
@@ -373,14 +413,7 @@ def idle(schema, data):
     need(not any(row.get("status") in ("queued", "running", "processing", "cancelling")
                  for table in ("tasks", "knowledge_files", "knowledge_rebuild_jobs")
                  for row in data.get(table, [])), "ACTIVE_TASK_OR_PARSING_JOB")
-    from redis import Redis
-    client = Redis.from_url(os.environ["REDIS_URL"])
-    try:
-        for key in client.scan_iter():
-            if client.type(key) == b"list":
-                need(client.llen(key) == 0, "NONEMPTY_REDIS_QUEUE")
-    finally:
-        client.close()
+    need(runtime_call("idle")["status"] == "IDLE", "NONEMPTY_REDIS_QUEUE")
 
 
 def sealed_runtime():
@@ -393,16 +426,127 @@ def sealed_runtime():
     return binding, read(OP / "prepare.json")
 
 
+def registry_witness():
+    path = OP / "registry-witness.v2.json"
+    native(path)
+    doc = read(path)
+    need(doc.get("contract") == CONTRACT and doc.get("source") == SOURCE
+         and doc.get("tree") == TREE and doc.get("prepare_sha256") == sha(OP / "prepare.json")
+         and doc.get("temporary_admin_removed") is True, "REGISTRY_WITNESS_SCOPE")
+    need(registry_file_pins() == doc["registry_files"], "REGISTRY_FILE_DRIFT")
+    return doc
+
+
+def registry_file_pins():
+    root = ROOT / "data/application/skill-registry"
+    need(root.is_dir() and not root.is_symlink(), "REGISTRY_ROOT_TRUST")
+    result = {}
+    for path in root.rglob("*"):
+        info = path.lstat()
+        need(not stat.S_ISLNK(info.st_mode) and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+             and info.st_uid in (0, 1000) and not info.st_mode & 0o022, "REGISTRY_PATH_TRUST")
+        if path.is_file():
+            need(info.st_nlink == 1, "REGISTRY_SINGLE_LINK")
+            result[str(path)] = {"sha256": sha(path), "mode": stat.S_IMODE(info.st_mode),
+                                 "uid": info.st_uid, "gid": info.st_gid}
+    return result
+
+
+def active_witness():
+    if (OP / "registry-witness.v2.json").exists():
+        return registry_witness()["active_baseline"]
+    return read(OP / "prepare.json")
+
+
+def registry_register():
+    grant = authority("registry")
+    old_state(topology=False)
+    stopped()
+    need(not (OP / "REGISTRY_ATTEMPTED.json").exists(), "REGISTRY_NO_RETRY_QUERY_ONLY")
+    baseline = read(OP / "prepare.json")
+    schema, before = snapshot()
+    need(row_pins(before) == baseline["rows"], "REGISTRY_ORIGINAL_STATE_DRIFT")
+    need(registry_file_pins() == baseline["registry_files"], "REGISTRY_ORIGINAL_FILES_DRIFT")
+    record(OP / "REGISTRY_ATTEMPTED.json", {"source": SOURCE, "at": int(time.time()),
+                                            "scope_sha256": sha(CONTROL / "scope.approved.v1.json")})
+    proof = runtime_call("registry")
+    authority("registry")
+    schema, after = snapshot()
+    # Pure stdlib validator, already independently pinned; no app import as Root.
+    module = types.ModuleType("root_registry_delta_validator")
+    pinned(CONTROL / "registry_extension.py", grant["code_sha256"]["registry_extension.py"])
+    exec(compile((CONTROL / "registry_extension.py").read_bytes(), "registry-delta", "exec"), module.__dict__)
+    module.validate_delta(before, after, proof)
+    need(digest(schema) == baseline["schema_sha256"], "REGISTRY_NO_SCHEMA_CHANGE")
+    return write_registry_witness(grant, baseline, schema, after, proof, module)
+
+
+def write_registry_witness(grant, baseline, schema, after, proof, module):
+    registry_files = registry_file_pins()
+    module.validate_files(baseline["registry_files"], registry_files, proof,
+                          ROOT / "data/application/skill-registry",
+                          (RELEASE / "enterprise_agent_poc/skill_packages/wechat-official-account-writing/1.0.1.zip").read_bytes())
+    value = dict(baseline, rows=row_pins(after), credit_accounts=after.get("credit_accounts", []))
+    witness = {"contract": CONTRACT, "source": SOURCE, "tree": TREE,
+        "prepare_sha256": sha(OP / "prepare.json"), "registration": proof, "registry_files": registry_files,
+        "active_baseline": value, "temporary_admin_removed": True, "at": int(time.time())}
+    authority("registry")
+    record(OP / "registry-witness.v2.json", witness, mode=0o440)
+    os.chown(OP / "registry-witness.v2.json", 0, 1000)
+    return {"status": "EXACT_REGISTRY_ADDITION_WITNESSED_NOT_AGENT_RUNTIME_PUBLISHED",
+            "temporary_platform_admins": 0, "bindings": "UNCHANGED"}
+
+
+def registry_reconcile():
+    """Only read back the SAME attempted transaction; never re-import/grant.
+    A partial SQL rollback or conflicting filesystem remains blocked/preserved.
+    """
+    grant = authority("registry")
+    stopped()
+    source_identity(OLD_RELEASE, OLD_SOURCE, OLD_TREE)
+    need((ROOT / "current").resolve() == OLD_RELEASE, "REGISTRY_RECONCILE_BEFORE_ACTIVATION")
+    attempt = OP / "REGISTRY_ATTEMPTED.json"
+    native(attempt)
+    need(read(attempt)["scope_sha256"] == sha(CONTROL / "scope.approved.v1.json"), "REGISTRY_ORIGINAL_SCOPE")
+    if (OP / "registry-witness.v2.json").exists():
+        return {"status": "EXISTING_REGISTRY_WITNESS_VERIFIED", "witness": registry_witness()["at"]}
+    schema, after = snapshot()
+    baseline = read(OP / "prepare.json")
+    module = types.ModuleType("root_registry_reconcile")
+    pinned(CONTROL / "registry_extension.py", grant["code_sha256"]["registry_extension.py"])
+    exec(compile((CONTROL / "registry_extension.py").read_bytes(), "registry-reconcile", "exec"), module.__dict__)
+    skill = next(r for r in after["skills"] if r["slug"] == module.SLUG)
+    versions = [r for r in after["skill_versions"] if r["skill_id"] == skill["id"] and r["version"] == module.VERSION]
+    need(len(versions) == 1 and versions[0]["created_by"] == USER, "REGISTRY_COMMIT_NOT_VERIFIABLE_NO_RETRY")
+    packages = [r for r in after["skill_packages"] if r["skill_version_id"] == versions[0]["id"]]
+    need(len(packages) == 1, "REGISTRY_PACKAGE_COMMIT_NOT_VERIFIABLE")
+    proof = {"version": versions[0], "package": packages[0], "registrar_user_id": USER,
+             "admin_initialization": "PINNED_ORIGINAL_TRANSACTION_COMMITTED_READBACK",
+             "temporary_admin_removed": True, "bindings_changed": False,
+             "runtime_test": "NOT_EXECUTED", "provider_calls": 0, "reconciled": True}
+    before = {t: [r for r in rows if not (t == "skill_versions" and r == versions[0]
+              or t == "skill_packages" and r == packages[0])] for t, rows in after.items()}
+    need(row_pins(before) == baseline["rows"] and digest(schema) == baseline["schema_sha256"], "REGISTRY_RECONCILE_ORIGINAL_STATE")
+    module.validate_delta(before, after, proof)
+    authority("registry")
+    return write_registry_witness(grant, baseline, schema, after, proof, module)
+
+
 def runtime_check(role=None):
     env_check(os.environ)
     binding, witness = sealed_runtime()
-    need((ROOT / "current").resolve() == RELEASE, "CURRENT_SOURCE")
+    current = (ROOT / "current").resolve()
+    need(current in (RELEASE, OLD_RELEASE), "CURRENT_SOURCE")
+    if current == OLD_RELEASE:
+        source_identity(OLD_RELEASE, OLD_SOURCE, OLD_TREE)
+        result = old_state(topology=False)
+        return dict(result, role=role, source=OLD_SOURCE, tree=OLD_TREE, registry_preserved=True)
     source_identity(RELEASE)
     installed = {str(p.relative_to(RELEASE)): sha(p) for p in RELEASE.rglob("*") if p.is_file()}
     need(installed == witness["files"], "SOURCE_FILE_MAP")
     need(metadata_pins() == witness["metadata_pins"], "SECRET_SEEDING_OR_OLD_WITNESS_CHANGED")
     schema, data = snapshot()
-    status = data_guard(schema, data, witness)
+    status = data_guard(schema, data, active_witness())
     return {"status": "PASS", "source": SOURCE, "tree": TREE, "role": role,
             "data_guard": status, "secret_backend": "OPAQUE_REFERENCE_PRESERVED_NOT_USED",
             "seeding": "DISABLED_EXISTING_RECORDS_ONLY", "provider_authority": False}
@@ -415,7 +559,9 @@ def prepare():
     source_identity(REPO)
     parent = run(["/usr/bin/git", "-C", REPO, "rev-parse", "HEAD^"]).decode().strip()
     need(parent == GIT_PARENT, "REAL_GIT_PARENT")
-    old_files = old_guard().base.read(old_guard().BASE / "policy.v1.json")["files"]
+    old_policy = Path("/etc/enterprise-agent-test-successor-wechat-d8a-seeding-approval-v1/policy.v1.json")
+    pinned(old_policy, "f0cafe7bc1e85407da355febf1a855eb87c97036b5c0e094a250881381a9a028")
+    old_files = read(old_policy)["files"]
     git = ["/usr/bin/git", "-C", REPO]
     for name, expected in old_files.items():
         if name.startswith("enterprise_agent_poc/migrations/"):
@@ -442,12 +588,18 @@ def prepare():
         "predecessor_source": OLD_SOURCE, "predecessor_tree": OLD_TREE,
         "files": files, "schema_sha256": digest(schema), "rows": row_pins(data),
         "credit_accounts": data.get("credit_accounts", []), "metadata_pins": metadata_pins(),
+        "registry_files": registry_file_pins(),
         "seeding_action": "NONE", "secret_action": "NONE", "at": int(time.time())}
     record(OP / "prepare.json", witness, mode=0o440)
     os.chown(OP / "prepare.json", 0, 1000)
     record(CONTROL / "runtime-binding.v1.json", {"contract": CONTRACT, "source": SOURCE,
         "tree": TREE, "predecessor_source": OLD_SOURCE, "entry_sha256": sha(CONTROL / "entry.py"),
-        "prepare_sha256": sha(OP / "prepare.json"), "provider_authority": False}, mode=0o444)
+        "prepare_sha256": sha(OP / "prepare.json"), "provider_authority": False,
+        "code_sha256": grant["code_sha256"],
+        "python_real_path": grant["python_real_path"], "python_sha256": grant["python_sha256"],
+        "system_python_manifest_sha256": grant["system_python_manifest_sha256"],
+        "application_python_real_path": grant["application_python_real_path"],
+        "application_python_sha256": grant["application_python_sha256"]}, mode=0o444)
     return {"status": "PREPARED_NOT_TEST_PASS", "source": SOURCE, "tree": TREE}
 
 
@@ -488,13 +640,13 @@ def backup_gate():
          and proof.get("backup_members") == value.get("backup_members"), "BACKUP_PROOF_EXACT_SET")
     for name, member in value["backup_members"].items():
         path = Path(member["path"])
-        need(path.is_relative_to(ROOT / "backups/business-894-successor-v1"), "BACKUP_PATH_SCOPE")
+        need(path.is_relative_to(BACKUP_ROOT), "BACKUP_PATH_SCOPE")
         native(path)
         need(sha(path) == member["sha256"], "BACKUP_BYTES_CHANGED:" + name)
     # Restore actuator is existing exact Test recovery code, independently
     # approved/pinned. No arbitrary argv/script supplied by a candidate.
-    need(value.get("restore_entry") == str(CONTROL / "existing-recovery-bound.py"), "RESTORE_ENTRY_SCOPE")
-    pinned(CONTROL / "existing-recovery-bound.py", value["restore_entry_sha256"])
+    need(value.get("restore_entry") == str(CONTROL / RECOVERY_FILE), "RESTORE_ENTRY_SCOPE")
+    pinned(CONTROL / RECOVERY_FILE, value["restore_entry_sha256"])
     need(value.get("restore_entry_sha256") == grant.get("restore_entry_sha256"), "ROOT_RESTORE_CODE_PIN")
     return value
 
@@ -508,29 +660,14 @@ def health():
         item = dict(line.split("=", 1) for line in fields.splitlines())
         need(item["ActiveState"] == "active" and int(item["MainPID"]) > 0, "SERVICE_HEALTH:" + role)
         if role in ROLES:
-            need((Path("/proc") / item["MainPID"] / "cwd").resolve() == RELEASE / "enterprise_agent_poc",
+            need((Path("/proc") / item["MainPID"] / "cwd").resolve() == (ROOT / "current").resolve() / "enterprise_agent_poc",
                  "SERVICE_SOURCE:" + role)
         services[role] = item
     import urllib.request
     with urllib.request.urlopen("http://127.0.0.1:18100/api/health", timeout=5) as response:
         value = json.load(response)
     need(value.get("status") == "ok" and value.get("environment") == "test", "API_HEALTH")
-    import asyncio
-    from datetime import timedelta
-    async def mcp_ping():
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-        async with streamablehttp_client("http://127.0.0.1:18101/mcp", timeout=timedelta(seconds=10)) as (r, w, _):
-            async with ClientSession(r, w) as session:
-                await session.initialize(); await session.send_ping()
-    asyncio.run(mcp_ping())
-    from redis import Redis
-    client = Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
-    try:
-        need(any(row["cmd"].lower() in ("brpoplpush", "rpoplpush") for row in client.client_list()),
-             "WORKER_QUEUE_LOOP_NOT_PROVEN")
-    finally:
-        client.close()
+    runtime_call("health")
     return dict(result, services=services, knowledge=value.get("knowledge"),
                 knowledge_attribution="PRE_EXISTING_DEGRADED_NOT_KNOWLEDGE_FEATURE_PASS")
 
@@ -545,7 +682,10 @@ def recover():
     stopped()
     authority("recover")  # Fresh immediately before real restore mutation.
     record(OP / "RECOVER_ATTEMPTED.json", {"at": int(time.time()), "source": OLD_SOURCE})
-    run([PYTHON, "-I", "-B", CONTROL / "existing-recovery-bound.py", "restore-exact-d8a"], timeout=1800)
+    repair = (OP / "REHEARSAL_ATTEMPTED.json").exists() and not (OP / "actual-d8a-restore-report.json").exists()
+    need(not repair or not (OP / "ACTIVATE_ATTEMPTED.json").exists(), "NO_DATA_ROLLBACK_AFTER_ACTIVATION")
+    run([PYTHON, "-I", "-S", "-B", CONTROL / RECOVERY_FILE,
+         "repair-failed-rehearsal" if repair else "preserve-and-verify-d8a"], timeout=1800)
     need(metadata_pins() == read(OP / "prepare.json")["metadata_pins"], "RESTORED_SECRET_SEEDING")
     authority("recover")
     for path in drops().values():
@@ -556,6 +696,17 @@ def recover():
             need(not archive.exists() and path.read_text() == drop_text(path.parent.name.split("test-")[1].split(".")[0]),
                  "RECOVERY_DROPIN_CONFLICT")
             path.rename(archive)
+    for role, path in recovery_drops().items():
+        authority("recover")
+        raw = drop_text(role, recovery=True).encode()
+        if path.exists():
+            native(path)
+            need(path.read_bytes() == raw, "RECOVERY_DROPIN_EXISTS_DIFFERENT_BYTES")
+            continue
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+        fsync_dir(path.parent)
     authority("recover")
     formal("switch_pointer")(OLD_RELEASE)
     fsync_dir(ROOT)
@@ -565,7 +716,7 @@ def recover():
         formal("units")("start", role)
     actual = old_state(topology=True)
     schema, data = snapshot()
-    need(row_pins(data) == read(OP / "prepare.json")["rows"], "RESTORED_EXACT_D8A_DATA")
+    data_guard(schema, data, active_witness())
     record(OP / "RECOVERED.json", {"status": "EXACT_D8A_RESTORED", "result": actual,
                                   "source": OLD_SOURCE, "at": int(time.time())})
     return {"status": "EXACT_D8A_RESTORED", "source": OLD_SOURCE}
@@ -622,25 +773,58 @@ def backup_gate_for_recovery():
              and proof.get("backup_members") == value.get("backup_members")
              and proof.get("operation") == str(OP), "RECOVERY_RESTORE_PROOF")
     grant = authority("recover")
-    pinned(CONTROL / "existing-recovery-bound.py", grant.get("restore_entry_sha256"))
+    pinned(CONTROL / RECOVERY_FILE, grant.get("restore_entry_sha256"))
     need(value.get("restore_entry_sha256") == grant.get("restore_entry_sha256"), "RECOVERY_PIN")
     for member in value["backup_members"].values():
         path = Path(member["path"])
         native(path)
-        need(path.is_relative_to(ROOT / "backups/business-894-successor-v1")
+        need(path.is_relative_to(BACKUP_ROOT)
              and sha(path) == member["sha256"], "RECOVERY_BACKUP_PIN")
     return value
 
 
-def drop_text(role):
+def recovery_drops():
+    return {role: Path("/etc/systemd/system") / ("enterprise-agent-test-" + role + ".service.d") /
+            "zzzzzz-business-894-compatible-d8a-v2.conf" for role in ROLES}
+
+
+def drop_text(role, recovery=False):
     need(role in ROLES, "ROLE")
-    app = RELEASE / "enterprise_agent_poc"
+    app = (OLD_RELEASE if recovery else RELEASE) / "enterprise_agent_poc"
     return ("[Service]\nWorkingDirectory=" + str(app) + "\nEnvironment=PYTHONPATH=" + str(app)
             + "\nEnvironment=ENTERPRISE_POC_BOOTSTRAP_DEMO_DATA=false"
             + "\nEnvironment=ENTERPRISE_POC_WECHAT_NETWORK_ALLOWED=false"
             + "\nEnvironment=PYTHONDONTWRITEBYTECODE=1\nExecStartPre=\nExecStartPre=" + str(PYTHON)
-            + " -I -B " + str(CONTROL / "entry.py") + " runtime-check " + role
+            + " -I -S -B " + str(CONTROL / "verified_entry.py") + " runtime-check " + role
             + "\nExecStartPost=\n")
+
+
+def install_compatible_d8a_dropins():
+    for role, path in recovery_drops().items():
+        raw = drop_text(role, recovery=True).encode()
+        if path.exists():
+            need(path.read_bytes() == raw, "EXACT_RECOVERY_DROPIN_DRIFT")
+            continue
+        authority("restore-rehearsal")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+        fsync_dir(path.parent)
+    run(["/usr/bin/systemctl", "daemon-reload"])
+
+
+def quiesce_registry():
+    authority("registry")
+    need(not (OP / "QUIESCE_ATTEMPTED.json").exists(), "QUIESCE_ALREADY_ATTEMPTED")
+    old_state()
+    schema, data = snapshot()
+    idle(schema, data)
+    need(row_pins(data) == read(OP / "prepare.json")["rows"], "ORIGINAL_PRESTATE_CHANGED")
+    authority("registry")
+    record(OP / "QUIESCE_ATTEMPTED.json", {"source": OLD_SOURCE, "at": int(time.time()), "phase": "BEFORE_REGISTRY"})
+    formal("units")("stop", "worker", "api", "mcp")
+    stopped()
+    return {"status": "D8A_QUIESCENT_REGISTRY_TRANSACTION_REQUIRED"}
 
 
 def quiesce():
@@ -649,7 +833,7 @@ def quiesce():
     old_state()
     schema, data = snapshot()
     idle(schema, data)
-    need(row_pins(data) == read(OP / "prepare.json")["rows"], "PREPARED_STATE_CHANGED")
+    need(row_pins(data) == active_witness()["rows"], "PREPARED_STATE_CHANGED")
     need(all(not path.exists() for path in drops().values()), "DROPIN_EXISTS")
     registry_preflight()  # missing package must reject BEFORE any service stop
     record(OP / "QUIESCE_ATTEMPTED.json", {"source": SOURCE, "at": int(time.time())})
@@ -659,21 +843,15 @@ def quiesce():
 
 
 def registry_preflight():
-    """Existing formal readonly Registry verifier; never auto import/publish or
+    """Existing formal readonly verify_bootstrap runs in the demoted probe;
+    never auto import/publish or
     pretend package validation is Agent Runtime Test. Separate scope if absent.
     """
     env_check(os.environ)
     sealed_runtime()
     source_identity(RELEASE)
-    code = ("import sys,json;sys.path.insert(0," + repr(str(RELEASE / "enterprise_agent_poc")) + ");"
-            "from app.settings import settings;from app.store import POCStore;"
-            "from app.skill_registry import SkillRegistry;"
-            "result=SkillRegistry(POCStore(settings.database_url),"
-            "settings.data_dir/'skill-registry'," + repr(str(RELEASE / "enterprise_agent_poc/skill_packages"))
-            + ").verify_bootstrap();print(json.dumps({'status':result['status'],'mode':result['mode']}))")
     try:
-        raw = run(["/usr/sbin/runuser", "-u", "lucky", "--", PYTHON, "-I", "-B", "-c", code])
-        result = json.loads(raw)
+        result = runtime_call("registry-check")
         need(result.get("status") == "ok" and result.get("mode") == "reuse", "REGISTRY_REUSE_REQUIRED")
     except Exception:
         raise Blocked("EXACT_894_REGISTRY_READONLY_PREFLIGHT_FAILED_NO_AUTO_BOOTSTRAP") from None
@@ -690,8 +868,9 @@ def rehearse():
     need(not (OP / "REHEARSAL_ATTEMPTED.json").exists(), "REHEARSAL_NO_RETRY")
     pinned(CONTROL / "existing_recovery_bound.py", grant["restore_entry_sha256"])
     record(OP / "REHEARSAL_ATTEMPTED.json", {"source": OLD_SOURCE, "at": int(time.time())})
-    run([PYTHON, "-I", "-B", CONTROL / "existing_recovery_bound.py", "rehearse-exact-d8a"], timeout=1800)
+    run([PYTHON, "-I", "-S", "-B", CONTROL / RECOVERY_FILE, "rehearse-exact-d8a"], timeout=1800)
     authority("restore-rehearsal")
+    install_compatible_d8a_dropins()
     formal("units")("reset-failed", *ROLES)
     for role in ROLES:
         formal("units")("start", role)
@@ -736,6 +915,14 @@ def activate():
     authority("activate")
     record(OP / "ACTIVATE_ATTEMPTED.json", {"source": SOURCE, "at": int(time.time())})
     try:
+        # The trial's compatible d8a drop-ins are preserved as audit, not
+        # left lexicographically after the active 894 drop-in.
+        for role, path in recovery_drops().items():
+            authority("activate")
+            need(path.is_file() and path.read_text() == drop_text(role, recovery=True), "D8A_TRIAL_DROPIN_REQUIRED")
+            destination = OP / (role + ".trial-d8a-dropin.conf")
+            need(not destination.exists(), "TRIAL_DROPIN_AUDIT_COLLISION")
+            path.rename(destination)
         for role, path in drops().items():
             authority("activate")
             raw = drop_text(role).encode()
@@ -768,7 +955,7 @@ def main():
     if command == "runtime-check":
         need(len(sys.argv) == 3, "ROLE_REQUIRED")
         return runtime_check(sys.argv[2])
-    need(command in ("prepare", "registry-check", "quiesce", "backup", "rehearse", "activate", "recover",
+    need(command in ("prepare", "registry", "registry-reconcile", "registry-check", "quiesce-registry", "quiesce", "backup", "rehearse", "activate", "recover",
                      "resume-unchanged", "health", "query"), "COMMAND")
     with locked():
         if command == "query":
@@ -781,9 +968,11 @@ def main():
         if command == "backup":
             grant = authority("backup")
             pinned(CONTROL / "existing_recovery_bound.py", grant["restore_entry_sha256"])
-            run([PYTHON, "-I", "-B", CONTROL / "existing_recovery_bound.py", "capture"], timeout=1800)
+            run([PYTHON, "-I", "-S", "-B", CONTROL / RECOVERY_FILE, "capture"], timeout=1800)
             return {"status": "ENCRYPTED_BACKUP_CAPTURED_RESTORE_NOT_PROVEN"}
-        return {"prepare": prepare, "quiesce": quiesce, "rehearse": rehearse,
+        return {"prepare": prepare, "registry": registry_register, "registry-reconcile": registry_reconcile,
+                "quiesce-registry": quiesce_registry,
+                "quiesce": quiesce, "rehearse": rehearse,
                 "activate": activate, "recover": recover, "resume-unchanged": resume_unchanged}[command]()
 
 

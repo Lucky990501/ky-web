@@ -18,8 +18,8 @@ import time
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path("/opt/enterprise-agent-workbench-test")
-CONTROL = Path("/etc/enterprise-agent-test-business-894-successor-v1")
-BACKUP = ROOT / "backups/business-894-successor-v1"
+CONTROL = Path("/etc/enterprise-agent-test-business-894-successor-v2")
+BACKUP = ROOT / "backups/business-894-successor-v2"
 DATA_ROOTS = (ROOT / "data/application", ROOT / "data/object-storage")
 
 
@@ -33,7 +33,7 @@ def load():
     exec(compile(path.read_bytes(), str(path), "exec"), c.__dict__)
     c.context()
     c.authority({"capture": "backup", "rehearse-exact-d8a": "restore-rehearsal",
-                 "restore-exact-d8a": "recover"}[sys.argv[1]])
+                 "preserve-and-verify-d8a": "recover", "repair-failed-rehearsal": "recover"}[sys.argv[1]])
     c.env_check(os.environ)
     return c
 
@@ -97,15 +97,10 @@ def capture(c):
     c.need(not BACKUP.exists(), "BACKUP_EXISTS_NO_RETRY")
     BACKUP.mkdir(mode=0o700)
     schema, data = c.snapshot()
-    witness = c.read(c.OP / "prepare.json")
+    witness = c.active_witness()
     c.need(c.row_pins(data) == witness["rows"] and c.digest(schema) == witness["schema_sha256"],
            "QUIESCENT_PREDECESSOR_CHANGED")
-    from redis import Redis
-    client = Redis.from_url(os.environ["REDIS_URL"])
-    try:
-        redis = redis_dump(c, client)
-    finally:
-        client.close()
+    redis = c.runtime_call("redis-dump")
     database = c.run([c.PG / "pg_dump", "--format=custom", "--no-owner", "--no-acl"], env=pg_env(), timeout=180)
     c.need(len(database) <= 512 * 1024 * 1024, "DATABASE_RESOURCE_LIMIT")
     members = {"database": member(c, "database.dump", database),
@@ -156,10 +151,24 @@ def restore_files(c, raw, rehearsal=False):
         c.fsync_dir(ROOT / "data")
 
 
-def restore(c, rehearsal=False):
+def restore(c, rehearsal=False, repair=False):
     action = "restore-rehearsal" if rehearsal else "recover"
     prefix = "pre-rehearsal" if rehearsal else "pre-recovery"
     c.authority(action); c.stopped()
+    if not rehearsal and not repair:
+        # Normal exact d8a recovery is Source/config only. Schema is unchanged;
+        # preserve newly registered1.0.1 and ALL accepted business test data.
+        schema, data = c.snapshot()
+        c.data_guard(schema, data, c.active_witness())
+        c.registry_witness()
+        c.record(c.OP / "DATA_PRESERVED.json", {"status": "BUSINESS_AND_REGISTRY_PRESERVED",
+            "row_pins": c.row_pins(data), "schema_sha256": c.digest(schema),
+            "registry_version": "1.0.1", "at": int(time.time())})
+        return {"status": "BUSINESS_AND_REGISTRY_PRESERVED"}
+    if repair:
+        c.need((c.OP / "REHEARSAL_ATTEMPTED.json").exists()
+               and not (c.OP / "ACTIVATE_ATTEMPTED.json").exists()
+               and not (c.OP / "actual-d8a-restore-report.json").exists(), "REPAIR_ONLY_FAILED_PREACTIVATION_REHEARSAL")
     plain, fresh = decrypt_members(c, rehearsal=rehearsal)
     # Keep new test DB rows encrypted as audit, never silently erase them.
     member(c, prefix + ".database.dump", c.run([c.PG / "pg_dump", "--format=custom", "--no-owner", "--no-acl"],
@@ -170,29 +179,14 @@ def restore(c, rehearsal=False):
     c.run([c.PG / "pg_restore", "--clean", "--if-exists", "--single-transaction", "--exit-on-error",
            "--no-owner", "--no-acl", "--dbname=enterprise_agent_test"],
           input=plain["database"], env=pg_env(), timeout=180)
-    from redis import Redis
-    client = Redis.from_url(os.environ["REDIS_URL"])
-    try:
-        # Exact isolated DB0 only; preserve post-test Redis as encrypted audit.
-        member(c, prefix + ".redis.json", json.dumps(redis_dump(c, client)).encode())
-        c.authority(action)
-        pipeline = client.pipeline(transaction=True)
-        pipeline.flushdb()
-        now = int(time.time() * 1000)
-        for row in json.loads(plain["redis"]):
-            ttl = 0 if row["expires_at_ms"] is None else row["expires_at_ms"] - now
-            if ttl > 0 or row["expires_at_ms"] is None:
-                pipeline.restore(base64.b64decode(row["key"]), max(ttl, 0), base64.b64decode(row["dump"]), replace=False)
-        pipeline.execute()
-        actual = redis_dump(c, client)
-        expected = [row for row in json.loads(plain["redis"])
-                    if row["expires_at_ms"] is None or row["expires_at_ms"] > int(time.time() * 1000)]
-        # Exact persistent keys; naturally elapsed TTLs are not resurrected.
-        c.need([(r["key"], r["dump"]) for r in actual if r["expires_at_ms"] is None]
-               == [(r["key"], r["dump"]) for r in expected if r["expires_at_ms"] is None],
-               "ACTUAL_RESTORED_REDIS")
-    finally:
-        client.close()
+    member(c, prefix + ".redis.json", json.dumps(c.runtime_call("redis-dump")).encode())
+    c.authority(action)
+    c.runtime_call("redis-restore-repair" if repair else "redis-restore-rehearsal", payload=json.loads(plain["redis"]))
+    actual = c.runtime_call("redis-dump")
+    expected = json.loads(plain["redis"])
+    c.need([(r["key"], r["dump"]) for r in actual if r["expires_at_ms"] is None]
+           == [(r["key"], r["dump"]) for r in expected if r["expires_at_ms"] is None],
+           "ACTUAL_RESTORED_REDIS")
     c.authority(action)
     restore_files(c, plain["files"], rehearsal=rehearsal)
     schema, data = c.snapshot()
@@ -207,8 +201,9 @@ import sys
 if __name__ == "__main__":
     try:
         c = load()
-        c.need(len(sys.argv) == 2 and sys.argv[1] in ("capture", "rehearse-exact-d8a", "restore-exact-d8a"), "EXACT_BACKUP_COMMAND")
-        print(json.dumps(capture(c) if sys.argv[1] == "capture" else restore(c, sys.argv[1] == "rehearse-exact-d8a"), sort_keys=True))
+        c.need(len(sys.argv) == 2 and sys.argv[1] in ("capture", "rehearse-exact-d8a", "preserve-and-verify-d8a", "repair-failed-rehearsal"), "EXACT_BACKUP_COMMAND")
+        print(json.dumps(capture(c) if sys.argv[1] == "capture" else restore(c,
+            sys.argv[1] == "rehearse-exact-d8a", sys.argv[1] == "repair-failed-rehearsal"), sort_keys=True))
     except Exception as error:
         print(json.dumps({"status": "BACKUP_OR_RESTORE_BLOCKED_PRESERVE_SCENE",
                           "category": str(error) if "c" in globals() and isinstance(error, c.Blocked) else type(error).__name__}))

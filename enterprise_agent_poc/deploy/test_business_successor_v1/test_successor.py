@@ -29,20 +29,24 @@ def c():
 @pytest.fixture
 def authority_fixture(c, monkeypatch, tmp_path):
     control = tmp_path / "control"; control.mkdir()
-    (control / "entry.py").write_bytes((HERE / "entry.py").read_bytes())
-    (control / "existing_recovery_bound.py").write_bytes((HERE / "existing_recovery_bound.py").read_bytes())
+    for name in c.CODE_FILES:
+        (control / name).write_bytes((HERE / name).read_bytes())
     python = tmp_path / "python"; python.write_bytes(b"trusted-runtime")
     value = {"contract": c.CONTRACT, "host": c.HOST, "source": c.SOURCE, "tree": c.TREE,
              "git_parent": c.GIT_PARENT, "runtime_predecessor_source": c.OLD_SOURCE,
              "runtime_predecessor_tree": c.OLD_TREE, "environment": "test", "production_authority": False,
              "operator": "06_CODEX_AUTHORIZED_LUCKY_SUDO",
-             "actions": ["install", "backup", "restore-rehearsal", "activate", "recover"],
+             "actions": ["install", "registry", "backup", "restore-rehearsal", "activate", "recover"],
              "owner_decision_reference": "ISOLATED_FAKE_NO_AUTHORITY",
              "technical_decision_reference": "ISOLATED_FAKE_NO_AUTHORITY", "issued_at": 1, "expires_at": 14401,
              "revoked": False, "automatic_retry": False, "provider_budget": 0,
              "migration_action": "NONE", "restore_exact_test_data": True,
-             "code_sha256": {name: c.sha(control / name) for name in ("entry.py", "existing_recovery_bound.py")},
-             "python_sha256": c.sha(python), "python_real_path": str(python), "restore_reserve_seconds": 3600}
+             "code_sha256": {name: c.sha(control / name) for name in c.CODE_FILES},
+             "python_sha256": c.sha(python), "python_real_path": str(python), "restore_reserve_seconds": 3600,
+             "registry_scope": {"slug": "wechat-official-account-writing", "version": "1.0.1",
+                 "sha256": "6b37d4769cad4a8e0301a2b8c01fd90ca7ab8e0229c3e8df1e46d8a9d525a03b",
+                 "registrar_user_id": c.USER, "admin": "EXISTING_FORMAL_INITIALIZER_TRANSACTION_ONLY",
+                 "bindings": "UNCHANGED", "provider_budget": 0, "recovery": "KEEP_REGISTERED_PACKAGE_AND_BUSINESS_DATA"}}
     monkeypatch.setattr(c, "CONTROL", control); monkeypatch.setattr(c, "PYTHON", python)
     # Test files owned UID1000 cannot be real Root authority; trust IO is stubbed
     # explicitly, while all consumer fields / reads / mutation-order assertions run.
@@ -329,6 +333,9 @@ def activation_fixture(c, monkeypatch, tmp_path):
     c.record(op / "QUIESCE_ATTEMPTED.json", {"fixture": True})
     monkeypatch.setattr(c, "OP", op)
     monkeypatch.setattr(c, "ROOT", tmp_path)
+    recovery_paths = {role: tmp_path / (role + ".d8a-trial.conf") for role in c.ROLES}
+    for role, path in recovery_paths.items(): path.write_text(c.drop_text(role, recovery=True))
+    monkeypatch.setattr(c, "recovery_drops", lambda: recovery_paths)
     role_paths = {role: tmp_path / (role + ".conf") for role in c.ROLES}
     monkeypatch.setattr(c, "drops", lambda: role_paths)
     calls = []
