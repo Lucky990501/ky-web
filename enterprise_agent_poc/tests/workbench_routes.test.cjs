@@ -37,6 +37,13 @@ test('gallery prefers ordered generations without scalar duplication and rejects
 test('partial delivery warning is authoritative and never invents failed purposes',()=>{
   const h=harness();const html=h.run("imageDeliveryHtml({status:'partial',generated:1,failed:1})");assert.ok(html.includes('已完成 1 张，失败 1 张'));assert.ok(html.includes('不会自动重试'));assert.ok(!html.includes('反面'));
 });
+test('actual image geometry mismatch is explicitly labelled without claiming requested pixels',()=>{
+  const h=harness();
+  h.run("imageMismatch={id:'mismatch',task_id:'t',content_url:'/api/v1/storage/generated/fixture/m.png',width:1024,height:1024,requested_size:'864x1536',dimension_match:false}");
+  const html=h.run('messageGenerationHtml(imageMismatch)');
+  assert.match(html,/实际 1024 × 1024px/);assert.match(html,/请求 864x1536/);
+  assert.match(html,/实际尺寸与请求不一致/);
+});
 test('result URL validation rejects scripts, external hosts, traversal and internal files',()=>{
   const h=harness();for(const url of ['javascript:alert(1)','https://evil.invalid/a.png','/opt/a.png','/api/v1/storage/generated/%2e%2e/a','/api/v1/storage/generated/../a'])assert.equal(h.run(`authorizedImageUrl({content_url:${JSON.stringify(url)}})`),'');
 });
@@ -48,6 +55,12 @@ test('reference staging is bounded and submit contract remains single-image fail
 });
 test('illustration briefs accept only formal execution contract and supported ratios',()=>{
   const h=harness();h.run("brief={purpose:'会场示意图',prompt:'可信方案',aspect_ratio:'16:9',execution:'requires_separate_image_agent_task_and_budget'}");assert.equal(h.run('validIllustrationBriefs([brief]).length'),1);assert.equal(h.run("validIllustrationBriefs([{...brief,execution:'auto'}]).length"),0);assert.equal(h.run("validIllustrationBriefs([{...brief,aspect_ratio:'0:0'}]).length"),0);
+});
+test('actual conversation history without inline structured_result still fetches illustration Task',()=>{
+  const h=harness('/agents/campaign-agent');
+  h.run("document.main._conversationContext={owner:principalSnapshot()};document.main.querySelectorAll=()=>[{dataset:{assistantMessageId:'task:history-brief:assistant'}}]");
+  h.run("hydrateIllustrationBriefs(document.main,[{id:'task:history-brief:assistant',task_id:'history-brief',role:'assistant',content:'已保存的正式方案'}],[{id:'history-brief',assistant_message_id:'task:history-brief:assistant',status:'completed'}])");
+  assert.ok(h.pending.some(item=>item.url==='/api/v1/tasks/history-brief'),'real conversation_detail omits inline structured_result; recover authoritative Task instead of dropping briefs');
 });
 test('illustration entry reuses one existing run flow after explicit confirmation, no batch API',()=>{
   const component=source.slice(source.indexOf('function mountIllustrationBriefs'),source.indexOf('function mountWechatArticle'));

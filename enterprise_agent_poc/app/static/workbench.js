@@ -423,7 +423,9 @@ const messageGenerationHtml = generation => {
   const raw=authorizedImageUrl(generation);if(!raw)return '';const url=escapeHtml(raw),purpose=redactResultPaths(generation.purpose||'已生成图片');
   const w=generation.width,h=generation.height,known=Number.isInteger(w)&&w>0&&Number.isInteger(h)&&h>0;
   const gcd=(a,b)=>b?gcd(b,a%b):a,divisor=known?gcd(w,h):1;
-  return `<section class="message-generation" data-result-image="${escapeHtml(generation.id||'')}"><div class="message-generation-label">${icon('image',16)}${escapeHtml(purpose)}</div>${image({...generation,content_url:raw},purpose)}<p class="image-result-dimensions">${known?`实际 ${w} × ${h}px · ${w/divisor}:${h/divisor}`:'实际尺寸未记录'}${generation.requested_size?` · 请求 ${escapeHtml(redactResultPaths(generation.requested_size))}`:''}</p><div class="message-generation-actions"><button class="button secondary" type="button" data-open-message-generation="${url}">${icon('expand',15)}查看大图</button><a class="button secondary" href="${url}" download>${icon('download',15)}下载</a></div></section>`;
+  const requested=/^(\d+)x(\d+)$/.exec(generation.requested_size||'');
+  const mismatch=generation.dimension_match===false||known&&requested&&(w!==Number(requested[1])||h!==Number(requested[2]));
+  return `<section class="message-generation" data-result-image="${escapeHtml(generation.id||'')}"><div class="message-generation-label">${icon('image',16)}${escapeHtml(purpose)}</div>${image({...generation,content_url:raw},purpose)}<p class="image-result-dimensions">${known?`实际 ${w} × ${h}px · ${w/divisor}:${h/divisor}`:'实际尺寸未记录'}${generation.requested_size?` · 请求 ${escapeHtml(redactResultPaths(generation.requested_size))}`:''}${mismatch?' · <span role="status">实际尺寸与请求不一致，保留原图；不会自动放大或重试。</span>':''}</p><div class="message-generation-actions"><button class="button secondary" type="button" data-open-message-generation="${url}">${icon('expand',15)}查看大图</button><a class="button secondary" href="${url}" download>${icon('download',15)}下载</a></div></section>`;
 };
 const userMessageAttachmentHtml=attachments=>(attachments||[]).filter(item=>item?.type==='image'&&authorizedImageUrl(item)).map(item=>`<span class="chat-user-attachment"><img src="${escapeHtml(authorizedImageUrl(item))}" alt="${escapeHtml(item.filename||'参考图片')}" loading="lazy"><span>${escapeHtml(item.filename||'参考图片')}</span></span>`).join('');
 const markdownInlineHtml = value => {
@@ -1212,10 +1214,10 @@ function mountIllustrationBriefs(main,article,briefs,messageId){
 function hydrateIllustrationBriefs(main,history,tasks){
   const owner=main._conversationContext?.owner;
   for(const message of history){
-    if(message.role!=='assistant'||!activityPlanResultIsValid(message.structured_result))continue;
+    if(message.role!=='assistant'||!message.id)continue;
     const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===message.id);if(!article)continue;
     const task=tasks.find(item=>item.assistant_message_id===message.id||message.task_id&&item.id===message.task_id);
-    if(task?.illustration_briefs){mountIllustrationBriefs(main,article,task.illustration_briefs,message.id);continue;}
+    if(task?.status==='completed'&&activityPlanResultIsValid(task.structured_result)&&task.illustration_briefs){mountIllustrationBriefs(main,article,task.illustration_briefs,message.id);continue;}
     const taskId=message.task_id||task?.id;if(!taskId)continue;
     api(`/api/v1/tasks/${encodeURIComponent(taskId)}`,{cache:'no-store'}).then(result=>{
       if(main.isConnected===false||!principalIsCurrent(owner))return;verifyRecoveredTask(main,taskId,result);
