@@ -28,6 +28,12 @@ test('generic direct refresh routes request dynamic metadata and do not render C
   assert.ok(!h.document.main.innerHTML.includes('活动策划'));
 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
+test('incremental QA: dimension-only partial is not misreported as a failed image generation',()=>{
+  const h=harness();const html=h.run("imageDeliveryHtml({status:'partial',requested:1,generated:1,failed:0,provider_attempts:1})");assert.ok(!html.includes('部分图片未生成'));assert.ok(!html.includes('失败 0 张'));assert.match(html,/未完全符合请求/);
+});
+test('incremental QA: real mismatch and applied-logo flags are explicit without inventing legacy flags',()=>{
+  const h=harness();h.run("g={id:'g',task_id:'t',content_url:'/api/v1/storage/generated/fixture/a.png',width:1254,height:1254,requested_size:'1024x1024',dimension_match:false,brand_logo_applied:true}");const html=h.run('messageGenerationHtml(g)');assert.match(html,/实际尺寸与请求不一致/);assert.match(html,/原始品牌 Logo 已叠加/);assert.ok(!h.run('messageGenerationHtml({...g,dimension_match:undefined,brand_logo_applied:undefined})').includes('原始品牌 Logo 已叠加'));
+});
 test('gallery prefers ordered generations without scalar duplication and rejects other Task artifacts',()=>{
   const h=harness(),images=[1,2,3].map(id=>({id:`g-${id}`,task_id:'t',content_url:`/api/v1/storage/generated/fixture/${id}.png`,purpose:id===1?'正面（封面+封底）':'反面（内页三折）',width:1536,height:1024}));
   h.run(`result=${JSON.stringify({generations:images,generation:images[0]})}`);
@@ -48,6 +54,12 @@ test('reference staging is bounded and submit contract remains single-image fail
 });
 test('illustration briefs accept only formal execution contract and supported ratios',()=>{
   const h=harness();h.run("brief={purpose:'会场示意图',prompt:'可信方案',aspect_ratio:'16:9',execution:'requires_separate_image_agent_task_and_budget'}");assert.equal(h.run('validIllustrationBriefs([brief]).length'),1);assert.equal(h.run("validIllustrationBriefs([{...brief,execution:'auto'}]).length"),0);assert.equal(h.run("validIllustrationBriefs([{...brief,aspect_ratio:'0:0'}]).length"),0);
+});
+test('incremental QA: actual history without inline structured_result fetches authoritative illustration Task',()=>{
+  const h=harness('/agents/campaign-agent');
+  h.run("document.main._conversationContext={owner:principalSnapshot()};document.main.querySelectorAll=()=>[{dataset:{assistantMessageId:'task:history-brief:assistant'}}]");
+  h.run("hydrateIllustrationBriefs(document.main,[{id:'task:history-brief:assistant',task_id:'history-brief',role:'assistant',content:'已保存的正式方案'}],[{id:'history-brief',assistant_message_id:'task:history-brief:assistant',status:'completed'}])");
+  assert.ok(h.pending.some(item=>item.url==='/api/v1/tasks/history-brief'));
 });
 test('illustration entry reuses one existing run flow after explicit confirmation, no batch API',()=>{
   const component=source.slice(source.indexOf('function mountIllustrationBriefs'),source.indexOf('function mountWechatArticle'));

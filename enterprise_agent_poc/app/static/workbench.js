@@ -414,7 +414,12 @@ const resultGenerations = (result,taskId='') => {
   const ids=new Set();return items.filter(item=>item?.id&&item.task_id&&(!taskId||item.task_id===taskId)&&(!item.tenant_id||item.tenant_id===me?.tenant_id)&&(!item.user_id||item.user_id===me?.user_id)&&authorizedImageUrl(item)&&!ids.has(item.id)&&ids.add(item.id));
 };
 const redactResultPaths = value => String(value||'').replace(/(?:(?:(?:https?:)?\/\/[^\s/<>"']+)?\/api\/v1\/storage\/generated\/|\/(?:opt|workspace|runtime-data|var|home|tmp|srv)\/|\b(?:runtime-data|workspace)\/|file:[\\/]{2,3}|(?<![a-z0-9])[a-z]:[\\/])[^\s<>"'，。；、）)\]]*/gi,'[图片或文件请使用结果卡片]');
-const imageDeliveryHtml = delivery => delivery?.status==='partial'||Number(delivery?.failed)>0?`<p class="image-delivery-warning" role="status">部分图片未生成：已完成 ${Number.isInteger(delivery.generated)?delivery.generated:'部分'} 张，失败 ${Number.isInteger(delivery.failed)?delivery.failed:'部分'} 张。已完成的图片仍可查看和下载；不会自动重试。</p>`:'';
+const imageDeliveryHtml = delivery => {
+  if(!delivery)return '';
+  if(Number(delivery.failed)>0)return `<p class="image-delivery-warning" role="status">部分图片未生成：已完成 ${Number.isInteger(delivery.generated)?delivery.generated:'部分'} 张，失败 ${Number.isInteger(delivery.failed)?delivery.failed:'部分'} 张。已完成的图片仍可查看和下载；不会自动重试。</p>`;
+  return delivery.status==='partial'?'<p class="image-delivery-warning" role="status">图片结果未完全符合请求，请核对尺寸与下方提示。已保留真实生成结果，不会自动重试。</p>':'';
+};
+const imageResultStatusHtml = generation => `${generation.dimension_match===false?'<p class="image-delivery-warning" role="status">实际尺寸与请求不一致；展示原始生成图片，未进行放大。</p>':''}${generation.brand_logo_applied===true?'<p class="image-result-dimensions">原始品牌 Logo 已叠加</p>':''}`;
 const messageGalleryHtml = result => {
   const items=resultGenerations(result);return `${imageDeliveryHtml(result?.image_delivery)}${items.length?`<section class="message-image-gallery" aria-label="已生成 ${items.length} 张图片">${items.map(messageGenerationHtml).join('')}</section>`:''}`;
 };
@@ -423,7 +428,7 @@ const messageGenerationHtml = generation => {
   const raw=authorizedImageUrl(generation);if(!raw)return '';const url=escapeHtml(raw),purpose=redactResultPaths(generation.purpose||'已生成图片');
   const w=generation.width,h=generation.height,known=Number.isInteger(w)&&w>0&&Number.isInteger(h)&&h>0;
   const gcd=(a,b)=>b?gcd(b,a%b):a,divisor=known?gcd(w,h):1;
-  return `<section class="message-generation" data-result-image="${escapeHtml(generation.id||'')}"><div class="message-generation-label">${icon('image',16)}${escapeHtml(purpose)}</div>${image({...generation,content_url:raw},purpose)}<p class="image-result-dimensions">${known?`实际 ${w} × ${h}px · ${w/divisor}:${h/divisor}`:'实际尺寸未记录'}${generation.requested_size?` · 请求 ${escapeHtml(redactResultPaths(generation.requested_size))}`:''}</p><div class="message-generation-actions"><button class="button secondary" type="button" data-open-message-generation="${url}">${icon('expand',15)}查看大图</button><a class="button secondary" href="${url}" download>${icon('download',15)}下载</a></div></section>`;
+  return `<section class="message-generation" data-result-image="${escapeHtml(generation.id||'')}"><div class="message-generation-label">${icon('image',16)}${escapeHtml(purpose)}</div>${image({...generation,content_url:raw},purpose)}<p class="image-result-dimensions">${known?`实际 ${w} × ${h}px · ${w/divisor}:${h/divisor}`:'实际尺寸未记录'}${generation.requested_size?` · 请求 ${escapeHtml(redactResultPaths(generation.requested_size))}`:''}</p>${imageResultStatusHtml(generation)}<div class="message-generation-actions"><button class="button secondary" type="button" data-open-message-generation="${url}">${icon('expand',15)}查看大图</button><a class="button secondary" href="${url}" download>${icon('download',15)}下载</a></div></section>`;
 };
 const userMessageAttachmentHtml=attachments=>(attachments||[]).filter(item=>item?.type==='image'&&authorizedImageUrl(item)).map(item=>`<span class="chat-user-attachment"><img src="${escapeHtml(authorizedImageUrl(item))}" alt="${escapeHtml(item.filename||'参考图片')}" loading="lazy"><span>${escapeHtml(item.filename||'参考图片')}</span></span>`).join('');
 const markdownInlineHtml = value => {
@@ -1212,10 +1217,10 @@ function mountIllustrationBriefs(main,article,briefs,messageId){
 function hydrateIllustrationBriefs(main,history,tasks){
   const owner=main._conversationContext?.owner;
   for(const message of history){
-    if(message.role!=='assistant'||!activityPlanResultIsValid(message.structured_result))continue;
+    if(message.role!=='assistant'||!message.id)continue;
     const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===message.id);if(!article)continue;
     const task=tasks.find(item=>item.assistant_message_id===message.id||message.task_id&&item.id===message.task_id);
-    if(task?.illustration_briefs){mountIllustrationBriefs(main,article,task.illustration_briefs,message.id);continue;}
+    if(task?.status==='completed'&&activityPlanResultIsValid(task.structured_result)&&task.illustration_briefs){mountIllustrationBriefs(main,article,task.illustration_briefs,message.id);continue;}
     const taskId=message.task_id||task?.id;if(!taskId)continue;
     api(`/api/v1/tasks/${encodeURIComponent(taskId)}`,{cache:'no-store'}).then(result=>{
       if(main.isConnected===false||!principalIsCurrent(owner))return;verifyRecoveredTask(main,taskId,result);
