@@ -9,6 +9,7 @@ from app.agent_catalog import CATALOG
 from app.product_store import ProductStore, ResultPersistenceError, TaskCancellationRequested
 from app.service import AgentRunError, AgentService, GenerationCancelled
 from app.storage import storage_provider
+from app.image_request_contract import ImageRequestError
 
 
 class TaskService:
@@ -106,6 +107,8 @@ class TaskService:
                 if attachments:
                     execution_options.update(task_id=task_id, reference_image_attached=True)
                     if len(attachments) > 1:
+                        from app.task_reference_images import multi_file_field
+                        multi_file_field(self._agents._settings.image_provider_id, self._agents._settings.image_model_id, len(attachments))
                         execution_options["reference_image_inputs"] = [
                             {"id": r["id"], "position": r["position"], "purpose": r["purpose"]} for r in attachments]
             self._store.add_task_activity(task_id, tenant_id, "context_loading", "completed")
@@ -153,6 +156,9 @@ class TaskService:
                 run_id = (self._store.task_for_worker(task_id) or {}).get("run_id")
                 if run_id:
                     self._agents.mark_persistence_failed(run_id, tenant_id, exc.stage)
+            elif isinstance(exc, ImageRequestError):
+                from app.image_request_contract import INPUT_ERRORS
+                code, message = exc.code, INPUT_ERRORS[exc.code]
             elif isinstance(exc, AgentRunError):
                 code = exc.error_code
                 from app.image_request_contract import INPUT_ERRORS

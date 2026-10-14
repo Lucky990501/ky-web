@@ -24,15 +24,16 @@ from app import task_reference_images as refs
 from app.tool_dependencies import reference_images_dependency, attempt_observation, resolve_dependencies, fingerprint
 
 
-def uploaded(env, count=2):
+def uploaded(env, count=2, *, distinct=False):
     client, store, product, settings, owner = env
     raw = picture()
-    ids = [client.post('/api/v1/chat-images', files={'file': (f'input-{i}.png', raw, 'image/png')}).json()['id'] for i in range(count)]
-    return ids, {identifier: hashlib.sha256(raw).hexdigest() for identifier in ids}, raw
+    source_bytes = [picture(size=(16+i, 12+i)) if distinct else raw for i in range(count)]
+    ids = [client.post('/api/v1/chat-images', files={'file': (f'input-{i}.png', source_bytes[i], 'image/png')}).json()['id'] for i in range(count)]
+    return ids, {identifier: hashlib.sha256(content).hexdigest() for identifier, content in zip(ids, source_bytes)}, source_bytes if distinct else raw
 
 
-def task_for(env, count=2):
-    ids, hashes, raw = uploaded(env, count)
+def task_for(env, count=2, *, distinct=False):
+    ids, hashes, raw = uploaded(env, count, distinct=distinct)
     _, _, product, _, owner = env
     task = product.create_task('tenant-a', owner['id'], 'image-agent', 'combine current references', None,
         attachment_ids=ids, attachment_purposes=[f'用途{i+1}' for i in range(count)], _attachment_hashes=hashes)
@@ -204,9 +205,9 @@ def test_unmigrated_pg_fails_closed_without_runtime_ddl():
     assert calls == ["SELECT to_regclass('task_reference_images') AS name"]
 
 
-def gateway(env, monkeypatch, *, supported=True, timeout=False, count=3):
+def gateway(env, monkeypatch, *, supported=True, timeout=False, count=3, distinct=False):
     _, store, product, settings, _ = env
-    task, ids, raw = task_for(env, count)
+    task, ids, raw = task_for(env, count, distinct=distinct)
     product.set_task(task['id'], 'tenant-a', 'running', 'generating', 'fixture')
     if supported:
         fixture_capability(monkeypatch, settings)
@@ -221,7 +222,7 @@ def gateway(env, monkeypatch, *, supported=True, timeout=False, count=3):
         async def post(self, url, **kwargs):
             calls.append((url, kwargs))
             if timeout: raise TimeoutError('isolated response lost')
-            return SimpleNamespace(status_code=200, headers={}, json=lambda: {'data': [{'b64_json': base64.b64encode(raw).decode()}]})
+            return SimpleNamespace(status_code=200, headers={}, json=lambda: {'data': [{'b64_json': base64.b64encode(raw[0] if distinct else raw).decode()}]})
     monkeypatch.setenv(settings.image_api_key_env, 'isolated-placeholder-not-a-real-key')
     monkeypatch.setattr('httpx.AsyncClient', Client)
     args = (token, 'combine current inputs', [], '1:1')
@@ -325,6 +326,35 @@ def test_unverified_provider_failure_retains_current_task_dependency_not_success
         asyncio.run(service.image_generation(*args, execution_scope=scope))
     assert rejected.value.tool_dependency['image_dependency']['task_id'] == task['id']
     assert rejected.value.tool_dependency['provider_invoked'] is False and calls == []
+
+
+def test_five_distinct_original_images_are_not_replaced_by_copies_of_first(chat_image_env, monkeypatch):
+    service, args, scope, calls, _, ids, original_bytes = gateway(chat_image_env, monkeypatch, count=5, distinct=True)
+    assert len(set(original_bytes)) == 5
+    result = asyncio.run(service.image_generation(*args, execution_scope=scope))
+    assert [file[1] for _, file in calls[0][1]['files']] == original_bytes
+    assert result['results'][0]['reference_images_used'] == ids and len(calls) == 1
+
+
+def test_worker_rechecks_unverified_capability_before_any_model_turn(chat_image_env):
+    from app.product_service import TaskService
+    _, store, product, settings, owner = chat_image_env
+    task, _, _ = task_for(chat_image_env)
+    class Agents:
+        _settings = settings
+        _store = store
+        calls = 0
+        async def run(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError('must not start model')
+    agents = Agents()
+    asyncio.run(TaskService(product, agents).execute(task))
+    assert agents.calls == 0
+    view = product.task(task['id'], 'tenant-a', owner['id'])
+    assert view['status'] == 'failed' and view['error_code'] == 'multi_reference_provider_not_verified'
+    assert view['run_id'] is None and len(view['attachments']) == 2
+    with store.connection() as conn:
+        assert conn.execute('SELECT count(*) AS n FROM credit_transactions').fetchone()['n'] == 0
 
 
 @pytest.mark.parametrize('damage', ['none', 'missing_input', 'order', 'manifest_hash', 'group_hash', 'wrong_output_count'])
