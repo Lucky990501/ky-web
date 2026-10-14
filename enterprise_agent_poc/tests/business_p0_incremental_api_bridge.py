@@ -170,7 +170,10 @@ def summary():
         credits = [dict(row) for row in conn.execute('SELECT task_id,amount FROM credit_transactions').fetchall()]
     return {'mode': 'ACTUAL_ASGI_TASKSERVICE_MCP_SQLITE_WITH_PROVIDER_STUBS', 'tasks': task_records,
             'generation_records': generations, 'credit_transactions': credits,
-            'stub_image_requests': http_observations, 'runtime_stub_turns': runtime_turns,
+            'stub_image_requests': http_observations,
+            'image_runtime_stub_turns': runtime_turns,
+            'activity_runtime_stub_turns': len(activity_runtime.options),
+            'runtime_stub_turns': runtime_turns + len(activity_runtime.options),
             'tool_rejections': tool_rejections,
             'queue_boundary_accepts': queue_accepts, 'real_provider_calls': 0, 'production_changes': 0,
             'formal_runtime_test': 'NOT_EXECUTED', 'native_or_pg': 'NOT_EXECUTED'}
