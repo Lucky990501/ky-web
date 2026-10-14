@@ -141,6 +141,23 @@ are retained separately. Other test names are not removed or relabelled.
 
 ## Acceptance and remaining hard gates
 
+### R1 post-Owner-query freshness successor
+
+Within the existing global release lock and per-mutation guard, authorization
+checks the protected grant both before and after the potentially slow Owner
+GET. The post-GET check follows Owner identity/exact-plan validation and reads
+the same trusted grant again, then checks the current window and machine/
+operation revocation markers. No network request follows that final check.
+Recovery/activation semantics, Operation journals and UNKNOWN handling do not
+change. The two original 01 race assertions are retained without weakening.
+
+This closes revocation **during** the Owner lookup, not arbitrary concurrent
+Root writes after the final check. A separate writer that ignores the existing
+global lock could still revoke between the last filesystem check and a syscall;
+the controller cannot atomically combine an external marker write, a clock and
+an os.replace. Actual revocation-writer/shared-lock interaction remains a real
+06 acceptance condition, not a component-test PASS or a new emergency waiver.
+
 Local tests exercise real child exit, local files, Git import, Linux flock,
 SIGKILL, durable UNKNOWN state, exact recovery and valid new data preservation.
 RPC/systemd/GitHub behavior in these tests uses labelled isolated substitutes;

@@ -191,17 +191,27 @@ class LinuxAdapter:
         if check is not None:
             check()
 
-    def authorize(self, plan, grant, recovery=False):
+    def _fresh_authority(self, plan, grant, recovery):
+        # Read the protected grant before the final local time/marker checks:
+        # grant_read may itself do slow Tooling/runtime integrity I/O.
         fresh = grant_read()
-        require(fresh == grant and not (CONTROL / "REVOKED").exists(), "machine_revoked_or_changed")
-        require(not (self.op_root / ("RECOVERY_REVOKED" if recovery else "PUBLISH_REVOKED")).exists(),
-                "operation_revoked")
+        require(fresh == grant, "machine_revoked_or_changed")
         if recovery:
             require(plan["recovery_authorized"] is True and self.now() < plan["windows"]["recover_until"]
                     <= grant["expires_at"], "recovery_authority_expired")
         else:
             verify_plan(plan, grant, self.now())
-        verify_owner(plan, grant, owner_event(plan, grant), self.now(), recovery=recovery)
+        require(not (CONTROL / "REVOKED").exists(), "machine_revoked_or_changed")
+        require(not (self.op_root / ("RECOVERY_REVOKED" if recovery else "PUBLISH_REVOKED")).exists(),
+                "operation_revoked")
+
+    def authorize(self, plan, grant, recovery=False):
+        self._fresh_authority(plan, grant, recovery)
+        event = owner_event(plan, grant)
+        verify_owner(plan, grant, event, self.now(), recovery=recovery)
+        # Never return cached pre-GET authority to the per-mutation guard. No
+        # network lookup or other slow work follows this fresh local check.
+        self._fresh_authority(plan, grant, recovery)
 
     def git(self, *args):
         return run(["/usr/bin/git", "--no-pager", "-c", "core.hooksPath=/dev/null",
