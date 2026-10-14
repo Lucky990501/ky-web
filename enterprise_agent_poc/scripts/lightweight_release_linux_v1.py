@@ -192,6 +192,7 @@ class LinuxAdapter:
         # Same builder allowlist; all archive bytes/modes map to exact Git blobs.
         sys.path.insert(0, str(self.tooling))
         from scripts.build_release import ALLOWED, STATIC_VERSION_PLACEHOLDERS
+        from app.bundled_skills import forbidden_path, secret_content
         records = self.git("ls-tree", "-r", "-z", release["source"]).split(b"\0")
         selected = {}
         for record in records:
@@ -205,6 +206,7 @@ class LinuxAdapter:
         require(set(selected) == set(files), "git_selected_inventory")
         for name, (mode, oid) in selected.items():
             data = self.git("cat-file", "blob", oid)
+            require(not forbidden_path(name) and not secret_content(data), "forbidden_or_secret_source_file")
             if name == "enterprise_agent_poc/app/static/index.html":
                 for kind, placeholder in STATIC_VERSION_PLACEHOLDERS.items():
                     asset = "workbench.js" if kind == "javascript" else "workbench.css"

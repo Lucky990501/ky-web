@@ -27,6 +27,7 @@ HOST = "iv-yekqs6ez9cnu262hhsg0"
 HASH = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
+MAX_UNPACKED_BYTES = 128 * 1024 * 1024
 EVIDENCE = (
     "candidate_regression", "source_installation", "pg_transactions",
     "pg_concurrency", "pg_permissions", "task_run_ownership",
@@ -86,7 +87,8 @@ def member_path(value):
     require(isinstance(value, str) and value == path.as_posix() and not path.is_absolute()
             and path.parts and path.parts[0] == "enterprise_agent_poc"
             and not any(p in {".", ".."} for p in path.parts)
-            and "\\" not in value and "\x00" not in value, "archive_member_path")
+            and "\\" not in value and "\x00" not in value
+            and len(value) <= 240 and len(path.parts) <= 12, "archive_member_path")
     return path
 
 
@@ -106,7 +108,7 @@ def inspect_package(archive_bytes, raw_manifest, expected):
     selected = manifest["selected_files"]
     require(isinstance(selected, list) and len(selected) == len(set(selected))
             and len(selected) == manifest["selected_file_count"], "file_inventory")
-    files, directories = {}, set()
+    files, directories, unpacked = {}, set(), 0
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
         for info in tar:
             name = info.name.rstrip("/") if info.isdir() else info.name
@@ -118,6 +120,9 @@ def inspect_package(archive_bytes, raw_manifest, expected):
                 continue
             require(info.isfile() and info.mode in {0o644, 0o755}
                     and 0 <= info.size <= 32 * 1024 * 1024, "member_type_mode_size")
+            # Enforce before allocating/decompressing, not after a gzip bomb.
+            require(unpacked + info.size <= MAX_UNPACKED_BYTES and len(files) < 512, "unpacked_limit")
+            unpacked += info.size
             handle = tar.extractfile(info)
             require(handle is not None, "member_read")
             data = handle.read()
@@ -127,7 +132,7 @@ def inspect_package(archive_bytes, raw_manifest, expected):
                 if str(parent) != ".":
                     directories.add(str(parent))
     require(set(files) == set(selected) and len(files) <= 512, "members_match_manifest")
-    require(sum(len(v["data"]) for v in files.values()) <= 128 * 1024 * 1024, "unpacked_limit")
+    require(unpacked <= MAX_UNPACKED_BYTES, "unpacked_limit")
     return manifest, files, directories
 
 

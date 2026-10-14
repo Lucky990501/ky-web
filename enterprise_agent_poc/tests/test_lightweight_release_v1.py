@@ -394,3 +394,11 @@ def test_three_fixture_cycles_are_not_production_acceptance(tmp_path):
         c.execute(p, g, j)
         results.append(c.status(j)["status"])
     assert results == ["COMMITTED"] * 3  # labelled Fixture in report, NOT the enablement gate
+
+
+def test_unpacked_budget_rejects_before_reading_next_member(monkeypatch):
+    monkeypatch.setattr(m, "MAX_UNPACKED_BYTES", 9)
+    a, r, i = package({"enterprise_agent_poc/app/static/a.js": b"12345",
+                       "enterprise_agent_poc/app/static/b.js": b"12345"})
+    with pytest.raises(m.Blocked, match="unpacked_limit"):
+        m.inspect_package(a, r, i)
