@@ -107,6 +107,38 @@ is added. The `.candidate` systemd file is not loaded or started. Initial Root
 adoption/installation needs formal authorization; this development instruction
 does not grant it. The grant cannot assert invented Owner IDs, dates or cycles.
 
+## R1–R4 security successor to immutable 90d38ab
+
+- Recovery rechecks the SAME authority after slow preflight, after durable
+  RESTORING intent, before each actual service/pointer mutation, and before
+  certifying RESTORED. Forward activation uses the same existing guard hook.
+- Exclusive writes prepare/fsync hidden bytes before publishing a hard link;
+  the directory is synced while the object still has two links. A single-link
+  final record is therefore backed by already synced data/name. Interrupted
+  transients remain evidence; unconfirmed chains report UNKNOWN, never success.
+  Successful transient unlink is not history cleanup. All final drop-in/pointer
+  replaces sync their parent directories. COMMIT_PREPARED is query/reconcile
+  only, not a final successful publication.
+- Direct Linux Python entry now refuses before importing any repository module.
+  RPC and systemd both use the source-only entry with system Python -I -B -S,
+  independent manifest digest and independently verified entry bytes. It reuses
+  the unchanged V3 protected-source loader primitives after complete Tooling
+  SHA/Git/permission capture. Repository/runtime imports use captured raw
+  sources; candidate .pyc/.pyo and unpinned runtime modules are rejected.
+  INSTALL_BOUND_MANIFEST_SHA256_REQUIRED is intentionally non-executable: only
+  separately approved installation may replace it with a real approved digest.
+  The formal manifest also requires the actual approved runtime closure; no
+  off-line temporary/runtime hash is represented as a Production pin.
+- The selected ciphertext must match BOTH the aggregate and independent
+  protected restore proof, its exact proof SHA, Schema015, full database scope,
+  source/restore environment IDs, captured/restored times and validity. Both
+  proofs remain in the independent Root report store; the client cannot issue
+  qualifications or substitute another ciphertext's proof. No database rewind.
+
+The producer fixture used by the original backup-positive/negative tests gains
+these required fields; assertions are unchanged. Original 01 probes/reports
+are retained separately. Other test names are not removed or relabelled.
+
 ## Acceptance and remaining hard gates
 
 Local tests exercise real child exit, local files, Git import, Linux flock,

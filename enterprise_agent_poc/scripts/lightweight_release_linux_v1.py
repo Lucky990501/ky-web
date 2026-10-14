@@ -7,6 +7,12 @@ candidate's bootstrap or qualifies itself. Existing V3 remains untouched.
 """
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # Direct script invocation is not the privileged entry. Reject BEFORE any
+    # repository import (including unchecked-hash bytecode and cache creation).
+    print('{"status":"BLOCKED","check":"real_root_host_verified_source_entry_required"}')
+    raise SystemExit(2)
+
 import argparse
 import base64
 import contextlib
@@ -24,7 +30,7 @@ import urllib.request
 from lightweight_release_v1 import (
     BASE, CONTROL, HOST, LOCK, Blocked, Controller, Journal, canonical,
     durable_new, inspect_package, ordinary_diff, operation, read_nofollow,
-    require, sha, trusted, verify_evidence, verify_owner, verify_plan, owner_body, HASH,
+    require, sha, trusted, verify_evidence, verify_owner, verify_plan, owner_body, HASH, sync_directory, verify_backup_binding,
 )
 
 SERVICES = tuple(f"enterprise-agent-{role}.service" for role in ("api", "mcp", "worker"))
@@ -69,6 +75,12 @@ def qualified_reports(plan, reports):
         trusted(path)
         require(path.stat().st_mode & 0o777 == 0o400
                 and read_nofollow(path) == reports[digest], "independent_qualified_report_required")
+    digest = plan["backup"]["restore_report_sha256"]
+    require(HASH.fullmatch(digest), "qualified_restore_digest")
+    path = store / f"{digest}.json"
+    trusted(path)
+    require(path.stat().st_mode & 0o777 == 0o400 and read_nofollow(path) == reports[digest],
+            "independent_restore_proof_required")
 
 
 def run(argv, *, env=None, timeout=60):
@@ -164,6 +176,20 @@ class LinuxAdapter:
 
     def now(self):
         return int(time.time())
+
+    @contextlib.contextmanager
+    def mutation_guard(self, callback):
+        prior = getattr(self, "_mutation_check", None)
+        self._mutation_check = callback
+        try:
+            yield
+        finally:
+            self._mutation_check = prior
+
+    def before_mutation(self):
+        check = getattr(self, "_mutation_check", None)
+        if check is not None:
+            check()
 
     def authorize(self, plan, grant, recovery=False):
         fresh = grant_read()
@@ -305,7 +331,14 @@ class LinuxAdapter:
         self.installed(plan["predecessor"])
         self.health(plan["predecessor"])
         self.snapshot(require_idle=True)
-        backup = plan["backup"]
+        self.backup_preflight(plan)
+
+    def backup_preflight(self, plan):
+        store = BASE / "shared/release-qualifications/ordinary-v1/reports"
+        item = plan["evidence"]["production_backup_restore"]
+        reports = {digest: read_nofollow(trusted(store / f"{digest}.json")) for digest in
+                   (item["sha256"], plan["backup"]["restore_report_sha256"])}
+        backup = verify_backup_binding(plan, reports, self.now())
         path = BASE / "backups" / backup["relative_path"]
         require(".." not in Path(backup["relative_path"]).parts and path.is_relative_to(BASE / "backups"), "backup_path")
         trusted(path)
@@ -336,13 +369,21 @@ class LinuxAdapter:
                     f"Environment=ENTERPRISE_POC_DATA_DIR={BASE}/shared/runtime-data\nExecStart=\n"
                     f"ExecStart={executable}\n").encode()
             temp = dropin.parent / "release.lightweight-v1.pending"
+            self.before_mutation()
             durable_new(temp, data, 0o644)
+            self.before_mutation()
             os.replace(temp, dropin)
+            sync_directory(dropin.parent)
         temp_link = BASE / "release-current.lightweight-v1.pending"
         require(not temp_link.exists() and not temp_link.is_symlink(), "pointer_temp_exists")
+        self.before_mutation()
         temp_link.symlink_to(target)
+        self.before_mutation()
         os.replace(temp_link, BASE / "release-current")
+        sync_directory(BASE)
+        self.before_mutation()
         run(["/usr/bin/systemctl", "daemon-reload"])
+        self.before_mutation()
         run(["/usr/bin/systemctl", "restart", SERVICES[1], SERVICES[0], SERVICES[2]], timeout=120)
 
     def health(self, release):
@@ -374,6 +415,7 @@ class LinuxAdapter:
         require((BASE / "release-current").resolve(strict=True)
                 in {self.target(plan["candidate"]), self.target(plan["predecessor"])}, "recovery_unknown_pointer")
         self.data_preserved(plan, snapshot)
+        self.backup_preflight(plan)
 
 
 def submit(payload, grant):
@@ -457,6 +499,9 @@ def main():
     if args.action == "run":
         reports = {item["sha256"]: read_nofollow(root / "inputs" / f"{item['sha256']}.json")
                    for item in plan["evidence"].values()}
+        proof = plan["backup"]["restore_report_sha256"]
+        require(HASH.fullmatch(proof), "restore_proof_filename")
+        reports[proof] = read_nofollow(root / "inputs" / f"{proof}.json")
         verify_evidence(plan, reports, int(time.time()))
         qualified_reports(plan, reports)
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(InterruptedError()))
@@ -464,7 +509,7 @@ def main():
         controller.execute(plan, grant, journal)
     elif args.action == "recover-if-needed":
         rows = journal.read()
-        if rows and rows[-1]["phase"] in {"ACTIVATING", "ACTIVATED", "FAILURE_AFTER_ACTIVATION"}:
+        if rows and rows[-1]["phase"] in {"ACTIVATING", "ACTIVATED", "FAILURE_AFTER_ACTIVATION", "COMMIT_PREPARED"}:
             controller.recover(plan, grant, journal)
     print(json.dumps(controller.status(journal)))
 

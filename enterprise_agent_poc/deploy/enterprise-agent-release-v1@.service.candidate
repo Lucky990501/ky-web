@@ -12,8 +12,8 @@ EnvironmentFile=/opt/enterprise-agent-workbench/shared/enterprise-agent.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LW_RELEASE_SYSTEMD=1
 Environment=ENTERPRISE_POC_DATA_DIR=/opt/enterprise-agent-workbench/shared/runtime-data
-ExecStart=/opt/enterprise-agent-workbench/venv/bin/python scripts/lightweight_release_linux_v1.py run %i
-ExecStopPost=/opt/enterprise-agent-workbench/venv/bin/python scripts/lightweight_release_linux_v1.py recover-if-needed %i
+ExecStart=/usr/bin/python3 -I -B -S scripts/lightweight_release_verified_entry_v1.py --pin-manifest /opt/enterprise-agent-workbench/shared/lightweight-release-v1/first-execution.json --independently-approved-pin-sha256 INSTALL_BOUND_MANIFEST_SHA256_REQUIRED -- run %i
+ExecStopPost=/usr/bin/python3 -I -B -S scripts/lightweight_release_verified_entry_v1.py --pin-manifest /opt/enterprise-agent-workbench/shared/lightweight-release-v1/first-execution.json --independently-approved-pin-sha256 INSTALL_BOUND_MANIFEST_SHA256_REQUIRED -- recover-if-needed %i
 TimeoutStartSec=900
 TimeoutStopSec=600
 CPUQuota=200%

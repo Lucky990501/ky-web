@@ -283,7 +283,28 @@ def evidence(plan, mode="CURRENT"):
                                   "applicability": {"unchanged_nonstatic_bytes": True,
                                      "dependency_change": False, "schema_change": False,
                                      "exact_predecessor": plan["predecessor"]}}
-    return reports
+    # Typed isolated restore fixture, never Production evidence. Required new
+    # backup/proof fields preserve the original test assertions, not fake PASS.
+    plan["backup"] = {"relative_path": "fixture.enc", "ciphertext_sha256": "a"*64,
+                      "captured_at": NOW-20, "valid_until": NOW+1000,
+                      "restore_environment_id": "independent-test-fixture-only",
+                      "schema": "015", "scope": "ALL_PRODUCTION_DATABASE_TABLES"}
+    bindings = {"ciphertext_sha256": "a"*64, "schema": "015", "scope": plan["backup"]["scope"],
+                "source_environment_id": plan["host"], "restore_environment_id": plan["backup"]["restore_environment_id"],
+                "backup_captured_at": NOW-20, "data_preserved": True, "counts_and_hashes_verified": True}
+    raw = m.canonical({"purpose": "FULL_DATABASE_RESTORE_VALIDATION", "source": plan["candidate"]["source"],
+                       "status": "PASS", "bindings": bindings, "restored_at": NOW-15, "valid_until": NOW+1000})
+    digest = m.sha(raw)
+    plan["backup"]["restore_report_sha256"] = digest
+    reports[digest] = raw
+    item = plan["evidence"]["production_backup_restore"]
+    report = json.loads(reports[item["sha256"]])
+    report.update(environment="REAL_ENCRYPTED_BACKUP_RESTORE", measurements={**bindings,
+                  "restore_report_sha256": digest, "restored_at": NOW-15, "valid_until": NOW+1000})
+    raw = m.canonical(report)
+    item["sha256"] = m.sha(raw)
+    reports[item["sha256"]] = raw
+    return {item["sha256"]: reports[item["sha256"]] for item in plan["evidence"].values()} | {digest: reports[digest]}
 
 
 def test_all18_and_origin_preserved():

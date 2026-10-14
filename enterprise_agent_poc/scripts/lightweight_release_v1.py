@@ -8,6 +8,7 @@ Owner event. Terminal receipts cannot be promoted from fixture to Production.
 from __future__ import annotations
 
 import datetime as dt
+import contextlib
 import hashlib
 import io
 import json
@@ -207,6 +208,38 @@ def verify_evidence(plan, reports, now):
                 "unchanged_nonstatic_bytes": True, "dependency_change": False,
                 "schema_change": False, "exact_predecessor": plan["predecessor"]}, "reuse_applicability")
         require(item["valid_until"] - report["created_at"] <= 7 * 86400, "evidence_max_age")
+    verify_backup_binding(plan, reports, now)
+
+
+def verify_backup_binding(plan, reports, now):
+    """Bind the protected aggregate AND independent restore proof to chosen bytes."""
+    b = plan.get("backup", {})
+    require(set(b) == {"relative_path", "ciphertext_sha256", "captured_at", "valid_until",
+                       "restore_report_sha256", "restore_environment_id", "schema", "scope"}, "backup_binding_fields")
+    require(HASH.fullmatch(b["ciphertext_sha256"]) and HASH.fullmatch(b["restore_report_sha256"]), "backup_proof_hash")
+    item = plan["evidence"]["production_backup_restore"]
+    report = json.loads(reports[item["sha256"]])
+    require(report["environment"] == "REAL_ENCRYPTED_BACKUP_RESTORE", "backup_proof_environment")
+    raw = reports.get(b["restore_report_sha256"])
+    require(raw is not None and sha(raw) == b["restore_report_sha256"], "exact_restore_proof_required")
+    proof = json.loads(raw)
+    expected = {"ciphertext_sha256": b["ciphertext_sha256"], "schema": plan["schema"],
+                "scope": "ALL_PRODUCTION_DATABASE_TABLES", "source_environment_id": plan["host"],
+                "restore_environment_id": b["restore_environment_id"],
+                "backup_captured_at": b["captured_at"], "data_preserved": True,
+                "counts_and_hashes_verified": True}
+    require(b["schema"] == plan["schema"] == "015" and b["scope"] == expected["scope"]
+            and bool(b["restore_environment_id"]) and b["restore_environment_id"] != plan["host"], "backup_schema_scope")
+    require(proof.get("purpose") == "FULL_DATABASE_RESTORE_VALIDATION" and proof.get("status") == "PASS"
+            and proof.get("source") == plan["candidate"]["source"]
+            and proof.get("bindings") == expected, "restore_proof_object_scope")
+    require(report.get("measurements") == {**expected, "restore_report_sha256": b["restore_report_sha256"],
+                                           "restored_at": proof["restored_at"], "valid_until": proof["valid_until"]},
+            "backup_aggregate_object_scope")
+    require(b["captured_at"] <= proof["restored_at"] <= report["created_at"] <= now
+            <= b["valid_until"] <= proof["valid_until"] <= item["valid_until"]
+            and proof["valid_until"] - b["captured_at"] <= 86400, "backup_proof_actual_validity")
+    return b
 
 
 def owner_body(plan):
@@ -248,13 +281,26 @@ def read_nofollow(path, limit=128 * 1024 * 1024):
 
 
 def durable_new(path, data, mode=0o600):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    path = Path(path)
+    if path.exists() or path.is_symlink():
+        raise FileExistsError("exclusive_target_exists")
+    pending = path.parent / f".pending-{path.name}-{uuid.uuid4()}"
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
         f.flush()
         os.fsync(f.fileno())
+    # Publish only synced bytes, exclusively. Keep both names until the final
+    # directory entry is durable; nlink=2 is intentionally unreadable as final.
+    os.link(pending, path, follow_symlinks=False)
+    sync_directory(path.parent)
+    pending.unlink()  # only this successful writer's transient link, not history
+    sync_directory(path.parent)
+
+
+def sync_directory(path):
     if os.name == "posix":
-        fd = os.open(Path(path).parent, os.O_RDONLY | os.O_DIRECTORY)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             os.fsync(fd)
         finally:
@@ -282,6 +328,7 @@ class Journal:
         previous = sha(read_nofollow(self.root / f"{len(rows)-1:04}.json")) if rows else "0" * 64
         row = {"phase": phase, "at": int(time.time()), "previous_sha256": previous, **facts}
         durable_new(self.root / f"{len(rows):04}.json", canonical(row))
+        require(self.read()[-1] == row, "durable_event_readback")
         return row
 
 
@@ -312,10 +359,15 @@ class Controller:
                 # An exception can happen after a partial drop-in/pointer mutation.
                 switched = True
                 try:
-                    self.a.activate(plan["candidate"])
+                    self.a.authorize(plan, grant)
+                    guard = getattr(self.a, "mutation_guard", None)
+                    with guard(lambda: self.a.authorize(plan, grant)) if guard else contextlib.nullcontext():
+                        self.a.activate(plan["candidate"])
                     journal.add("ACTIVATED")
                     self.a.health(plan["candidate"])
                     self.a.data_preserved(plan, snapshot)
+                    self.a.authorize(plan, grant)
+                    journal.add("COMMIT_PREPARED", source=plan["candidate"]["source"])
                     self.a.authorize(plan, grant)
                     journal.add("COMMITTED", source=plan["candidate"]["source"],
                                 predecessor=plan["predecessor"], health="PASS")
@@ -332,10 +384,15 @@ class Controller:
         try:
             self.a.authorize(plan, grant, recovery=True)
             self.a.recovery_preflight(plan, snapshot)
+            self.a.authorize(plan, grant, recovery=True)
             journal.add("RESTORING", target=plan["predecessor"])
-            self.a.activate(plan["predecessor"])
+            self.a.authorize(plan, grant, recovery=True)
+            guard = getattr(self.a, "mutation_guard", None)
+            with guard(lambda: self.a.authorize(plan, grant, recovery=True)) if guard else contextlib.nullcontext():
+                self.a.activate(plan["predecessor"])
             self.a.health(plan["predecessor"])
             self.a.data_preserved(plan, snapshot)
+            self.a.authorize(plan, grant, recovery=True)
             journal.add("RESTORED", source=plan["predecessor"]["source"], health="PASS")
         except BaseException as exc:
             journal.add("RECOVERY_BLOCKED", reason=type(exc).__name__)
@@ -344,14 +401,17 @@ class Controller:
     def recover(self, plan, grant, journal):
         rows = journal.read()
         require(rows and rows[0]["plan_sha256"] == sha(canonical(plan)), "recovery_plan_binding")
-        require(rows[-1]["phase"] in {"ACTIVATING", "ACTIVATED", "FAILURE_AFTER_ACTIVATION", "COMMITTED"},
+        require(rows[-1]["phase"] in {"ACTIVATING", "ACTIVATED", "FAILURE_AFTER_ACTIVATION", "COMMIT_PREPARED", "COMMITTED"},
                 "unknown_or_recovery_attempt_consumed")
         snapshot = next(r["snapshot"] for r in rows if r["phase"] == "SNAPSHOT")
         with self.a.lock():
             self._recover_locked(plan, grant, journal, snapshot)
 
     def status(self, journal):
-        rows = journal.read()
+        try:
+            rows = journal.read()
+        except (Blocked, OSError, ValueError, KeyError):
+            return {"status": "UNKNOWN_INCOMPLETE_QUERY_ONLY", "check": "unconfirmed_journal"}
         if not rows:
             return {"status": "NOT_STARTED"}
         phase = rows[-1]["phase"]

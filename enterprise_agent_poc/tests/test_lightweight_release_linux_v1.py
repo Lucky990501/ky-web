@@ -150,7 +150,7 @@ def test_full_broker_input_commit_and_single_start_without_production(monkeypatc
     assert receipt["status"] == "SUBMITTED_QUERY_SAME_OPERATION_ONLY"
     assert len(starts) == 1 and starts[0][0] == "/usr/bin/systemctl"
     assert (root / "INPUTS_COMMITTED.json").exists()
-    assert len(list((root / "inputs").iterdir())) == 21
+    assert len(list((root / "inputs").iterdir())) == 22  # 18 aggregates + independent restore proof + three artifacts
     with pytest.raises(FileExistsError):
         linux.submit(payload, g)
     assert len(starts) == 1

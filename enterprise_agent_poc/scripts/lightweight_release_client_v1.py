@@ -67,6 +67,10 @@ def main():
             raw = (args.reports / f"{item['sha256']}.json").read_bytes()
             require(sha(raw) == item["sha256"], "local_report_hash")
             reports[item["sha256"]] = base64.b64encode(raw).decode()
+        proof = plan["backup"]["restore_report_sha256"]
+        raw = (args.reports / f"{proof}.json").read_bytes()
+        require(sha(raw) == proof, "local_restore_proof_hash")
+        reports[proof] = base64.b64encode(raw).decode()
         archive, manifest = args.archive.read_bytes(), args.manifest.read_bytes()
         bundle = args.source_bundle.read_bytes()
         require(sha(archive) == plan["candidate"]["archive_sha256"]
