@@ -11,7 +11,7 @@ Contract PRIMARY_TEST_D8A_894_BUSINESS_SUCCESSOR_V2.
 Test iv-yew0uhfksgbw80bm48mv / 115.190.56.61; existing lucky/sudo actor;
 root /opt/enterprise-agent-workbench-test; enterprise-agent-test.slice.
 CONTROL /etc/enterprise-agent-test-business-894-successor-v2.
-OP /opt/enterprise-agent-workbench-test/release-evidence/business-894-successor-v2.
+OP /etc/enterprise-agent-test-business-894-successor-v2/operation.
 BACKUP /opt/enterprise-agent-workbench-test/backups/business-894-successor-v2.
 Application /opt/enterprise-agent-workbench-test/releases/20261014-894bdd2-business-p0-test-v1.
 Keep all d8a/de29 seals, witnesses, package1.0.0 and Agent bindings.
@@ -33,7 +33,13 @@ Package publication is NOT Agent Revision Runtime Test/Publish.
 
 External scope.approved.v1.json root:root/0444 has actual Owner AND technical
 references, times/revocation, Source/Tree/code/runtime pins, exact registry_scope
-and actions. This code never issues approval. Existing authorized06 Root channel
+and actions. It MUST additionally bind operation_path to the Root-protected OP
+above and lock_path to /run/lock/enterprise-agent-test-successor-v1.lock.
+Old0fcc Pins/path may not be silently reused; this precise two-path successor
+and the Owner's explicit path-fix instruction are recorded via the existing
+06 authorized channel, with exact successor Git bytes/new Pins/new OP and real
+decision references. No technical window begins before the actual Root record.
+This code never issues approval. Existing authorized06 Root channel
 records the actual decision, not an invented ID, signature or approved=True.
 Window <=4h, last3600s reserved; expired/revoked authority refuses ALL mutations.
 Provider budget0. Approval expressly includes use of existing Test GPG key
@@ -57,6 +63,18 @@ Shared Python3.11, PG ELF and app/psycopg/Redis/MCP are demoted to lucky UID/GID
 physical runtime separately pinned. Never chown shared runtime or execute it Root.
 Runtime binding0444 and prepare/Registry witnesses root:lucky0440/parent0750
 grant no mutation authority; they support the unprivileged exact service guard.
+The OP is an exclusive Root-owned child of the new Root-owned CONTROL chain,
+not a child of lucky-owned release-evidence. No shared parent is chowned or
+treated as Root-trusted. The original evidence hierarchy remains untouched.
+
+Only the precise global lock above accepts /run/lock as Root:Root/1777 sticky.
+The existing lock must be Root:Root/0644, regular, single-link and present;
+never create a replacement lock. All other ancestors retain the strict rule.
+Open with O_NOFOLLOW/O_CLOEXEC/O_NONBLOCK, compare pre/opened/current file
+dev/ino/owner/mode/nlink before AND after nonblocking flock. Every publisher
+continues to contend on the SAME existing inode. Trusted Root can still unlink
+Root objects outside the contract; ordinary users cannot under this sticky
+directory. No generic writable-ancestor exception or second lock is introduced.
 
 Reuse formal entry SHA
 5f91603551e38119a294de7ecdce457ef19d557e902c1af0cfc2726f49af6b9e:

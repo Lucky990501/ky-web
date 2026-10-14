@@ -31,7 +31,7 @@ CONTRACT = "PRIMARY_TEST_D8A_894_BUSINESS_SUCCESSOR_V2"
 HOST = "iv-yew0uhfksgbw80bm48mv"
 ROOT = Path("/opt/enterprise-agent-workbench-test")
 CONTROL = Path("/etc/enterprise-agent-test-business-894-successor-v2")
-OP = ROOT / "release-evidence/business-894-successor-v2"
+OP = CONTROL / "operation"
 SOURCE = "894bdd2a031725a0d0df3b95d6dfc26d08f0e4ab"
 TREE = "bb9317207372ad1a215eaeebb7a2b0151a35be4d"
 GIT_PARENT = "d11c2fb5ddb6203eb5cee23832fafec47a2781f0"
@@ -91,10 +91,22 @@ def native(path, *, readonly=True):
     path = Path(path)
     for ancestor in (path, *path.parents):
         info = ancestor.lstat()
-        need(not stat.S_ISLNK(info.st_mode) and info.st_uid == 0 and info.st_gid in (0, 1000)
-             and not info.st_mode & 0o022, "ROOT_ANCESTOR_TRUST")
+        need(not stat.S_ISLNK(info.st_mode) and info.st_uid == 0 and info.st_gid in (0, 1000),
+             "ROOT_ANCESTOR_TRUST")
+        if (path == LOCK == Path("/run/lock/enterprise-agent-test-successor-v1.lock")
+                and ancestor == Path("/run/lock")):
+            # This ONE existing global lock, not a general evidence/code path.
+            # Sticky + Root ownership prevents an ordinary user unlinking or
+            # replacing its Root-owned inode. Never chmod the system directory.
+            need(stat.S_ISDIR(info.st_mode) and (info.st_uid, info.st_gid) == (0, 0)
+                 and stat.S_IMODE(info.st_mode) == 0o1777, "EXACT_ROOT_STICKY_LOCK_PARENT")
+        else:
+            need(not info.st_mode & 0o022, "ROOT_ANCESTOR_TRUST")
     info = path.lstat()
     need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "REGULAR_SINGLE_LINK")
+    if path == Path("/run/lock/enterprise-agent-test-successor-v1.lock"):
+        need((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0, 0, 0o644),
+             "EXACT_ROOT_GLOBAL_LOCK_FILE")
     need(not readonly or not info.st_mode & 0o222, "READONLY_RECORD")
 
 
@@ -178,6 +190,8 @@ def authority(action, clock=time.time):
          and value.get("runtime_predecessor_tree") == OLD_TREE
          and value.get("environment") == "test" and value.get("production_authority") is False,
          "EXACT_SCOPE")
+    need(value.get("operation_path") == str(OP) and value.get("lock_path") == str(LOCK),
+         "EXACT_PROTECTED_OPERATION_AND_SHARED_LOCK_BINDING")
     need(value.get("operator") == "06_CODEX_AUTHORIZED_LUCKY_SUDO"
          and value.get("actions") == ["install", "registry", "backup", "restore-rehearsal", "activate", "recover"],
          "EXACT_EXECUTION_SCOPE")
@@ -234,9 +248,20 @@ def runtime_call(command, *args, payload=None):
 @contextmanager
 def locked():
     native(LOCK, readonly=False)
-    fd = os.open(LOCK, os.O_RDWR | os.O_NOFOLLOW)
+    before = LOCK.lstat()
+    fd = os.open(LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     try:
+        def same_inode():
+            opened = os.fstat(fd)
+            current = LOCK.lstat()
+            fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink")
+            need(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
+                 and all(getattr(before, field) == getattr(opened, field) == getattr(current, field)
+                         for field in fields), "GLOBAL_LOCK_OPENED_INODE_CHANGED")
+        same_inode()
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        native(LOCK, readonly=False)
+        same_inode()  # reject name/inode replacement during acquisition too
         yield
     finally:
         os.close(fd)

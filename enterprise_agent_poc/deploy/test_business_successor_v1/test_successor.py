@@ -39,6 +39,7 @@ def authority_fixture(c, monkeypatch, tmp_path):
              "actions": ["install", "registry", "backup", "restore-rehearsal", "activate", "recover"],
              "owner_decision_reference": "ISOLATED_FAKE_NO_AUTHORITY",
              "technical_decision_reference": "ISOLATED_FAKE_NO_AUTHORITY", "issued_at": 1, "expires_at": 14401,
+             "operation_path": str(c.OP), "lock_path": str(c.LOCK),
              "revoked": False, "automatic_retry": False, "provider_budget": 0,
              "migration_action": "NONE", "restore_exact_test_data": True,
              "code_sha256": {name: c.sha(control / name) for name in c.CODE_FILES},
