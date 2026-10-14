@@ -1,0 +1,69 @@
+{
+  "contract_id": "ORDINARY_RELEASE_MACHINE_EXECUTION_V1",
+  "status": "IMPLEMENTATION_CANDIDATE_NOT_ADOPTED_NOT_INSTALLED",
+  "production_enabled": false,
+  "design_basis": {
+    "thread": "01a0af20-ce3a-7e81-8ad7-666f4adee982",
+    "approved_design_message": "01a13605-5a0e-70c1-9f7c-4f3a89a65b04",
+    "implementation_baseline_source": "d9063ee43bc65e821457221ad824f5dde84fe408"
+  },
+  "fast_lane": "STATIC_UI_COMPATIBLE",
+  "unclassified_or_nonstatic_change": "REJECT_TO_EXISTING_SPECIAL_RELEASE_WORKFLOW",
+  "prompt_revision_changes": "EXISTING_RUNTIME_TEST_REVISION_PUBLISH_WORKFLOW_REQUIRED_NOT_IMPLEMENTED_BY_THIS_BROKER",
+  "machine_authority": {
+    "host": "iv-yekqs6ez9cnu262hhsg0",
+    "maximum_lifetime_days": 30,
+    "unrestricted_root_shell": false,
+    "root_tty_per_ordinary_version": false,
+    "separate_one_time_policy_and_exact_tooling_install_approval_required": true,
+    "forced_ssh_command": "sudo -n /opt/enterprise-agent-workbench/shared/lightweight-release-v1/tooling/enterprise_agent_poc/scripts/lightweight_release_linux_v1.py rpc",
+    "machine_identity": "DEDICATED_UNPRIVILEGED_SSH_PRINCIPAL_TO_BE_BOUND_DURING_APPROVED_INSTALL",
+    "sudo_command_scope": "EXACT_BROKER_RPC_ONLY_NO_SETENV_NO_SHELL_NO_WILDCARD_COMMAND",
+    "credential": "GITHUB_GET_ONLY_PERMISSION_VERIFIED_AT_ONE_TIME_ADOPTION_NOT_OWNER_SIGNING_CREDENTIAL",
+    "revocation": "ROOT_PROTECTED_MACHINE_AND_OPERATION_MARKERS"
+  },
+  "ordinary_owner_decision": {
+    "count": 1,
+    "source": "INDEPENDENT_GITHUB_COMMENT_READ_BACK",
+    "bindings": ["plan_sha256", "operation_id", "owner_numeric_id", "owner_login", "issue_url", "created_at", "unedited_body"],
+    "deployment_and_exact_recovery_scopes": "DISTINCT_WINDOWS_IN_SAME_IMMUTABLE_PLAN"
+  },
+  "windows": {
+    "publish_seconds_max": 900,
+    "separate_recovery_reserve_seconds_min": 600,
+    "expired_or_revoked_publish": "NO_NEW_ACTIVATION",
+    "recovery": "ONLY_VALID_UNREVOKED_EXACT_RECOVERY_AUTHORITY_NO_EMERGENCY_BYPASS"
+  },
+  "evidence": {
+    "count": 18,
+    "reuse_max_age_days": 7,
+    "reuse_allowed": ["pg_transactions", "pg_concurrency", "pg_permissions", "task_run_ownership", "orphan_task_pagination", "exact_predecessor_compatibility", "pre_commit_failure_recovery", "post_commit_runtime_recovery"],
+    "reuse_proof": "ORIGINAL_SOURCE_REPORT_HASH_TIME_ENVIRONMENT_AND_ACTUAL_GIT_NONSTATIC_EQUIVALENCE",
+    "current_required": ["candidate_regression", "source_installation", "tenant_user_isolation", "api_sse_history", "runtime_startup_health", "production_schema015", "production_backup_restore", "artifact_backup_integrity", "business_data_preserved", "release_lock_audit"],
+    "production_schema": "FRESH_READONLY_SCHEMA015_LEDGER_CHECKSUM_ZERO_PENDING",
+    "backup": "EXACT_ENCRYPTED_BACKUP_HASH_AND_INDEPENDENT_RECOVERY_PROOF_VALIDITY",
+    "fixtures": "NEVER_PRODUCTION_QUALIFICATION",
+    "independent_report_store": "/opt/enterprise-agent-workbench/shared/release-qualifications/ordinary-v1/reports",
+    "client_self_qualification": false,
+    "actual_approved_report_producer_binding": "REQUIRED_BEFORE_PILOT_NOT_INSTALLED_OR_PROVEN"
+  },
+  "side_effects": {
+    "schema_migration": "NONE",
+    "controller_business_database_writes": 0,
+    "provider_business_smoke_tasks": 0,
+    "unchanged_api_startup_embedding_probe": "SEPARATE_EXPLICIT_BUDGET_IN_MACHINE_ADOPTION_REQUIRED_ACTIVATION_AND_POSSIBLE_RESTORE",
+    "nginx_config_changes": 0,
+    "immutable_artifacts_and_append_only_audit": true,
+    "retry": false,
+    "disconnect": "QUERY_SAME_OPERATION_SERVER_SYSTEMD_JOB_CONTINUES"
+  },
+  "enablement": {
+    "pilot": "THREE_EXACT_OWNER_APPROVED_PLANS_ONLY",
+    "required_consecutive_real_releases": 3,
+    "fixture_cycles_count": 0,
+    "exact_restore_rehearsal_required": true,
+    "final_formal_enablement_approval_required": true,
+    "target_minutes_after_owner_confirmation": [5, 15],
+    "target_status": "NOT_YET_MEASURED_IN_PRODUCTION"
+  }
+}

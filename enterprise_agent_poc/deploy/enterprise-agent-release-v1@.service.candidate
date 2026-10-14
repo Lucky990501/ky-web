@@ -1,0 +1,33 @@
+# Candidate only. Requires independent policy / exact Tooling installation.
+[Unit]
+Description=Bounded ordinary release V1 %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/enterprise-agent-workbench/shared/lightweight-release-v1/tooling/enterprise_agent_poc
+EnvironmentFile=/opt/enterprise-agent-workbench/shared/enterprise-agent.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LW_RELEASE_SYSTEMD=1
+Environment=ENTERPRISE_POC_DATA_DIR=/opt/enterprise-agent-workbench/shared/runtime-data
+ExecStart=/opt/enterprise-agent-workbench/venv/bin/python scripts/lightweight_release_linux_v1.py run %i
+ExecStopPost=/opt/enterprise-agent-workbench/venv/bin/python scripts/lightweight_release_linux_v1.py recover-if-needed %i
+TimeoutStartSec=900
+TimeoutStopSec=600
+CPUQuota=200%
+MemoryMax=512M
+TasksMax=64
+Restart=no
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/enterprise-agent-workbench/releases /opt/enterprise-agent-workbench/shared/lightweight-release-v1/operations /opt/enterprise-agent-workbench/release-current /opt/enterprise-agent-workbench /etc/systemd/system/enterprise-agent-api.service.d /etc/systemd/system/enterprise-agent-mcp.service.d /etc/systemd/system/enterprise-agent-worker.service.d /run/lock
+ReadOnlyPaths=/opt/enterprise-agent-workbench/shared/enterprise-agent.env /opt/enterprise-agent-workbench/shared/runtime-data /opt/enterprise-agent-workbench/shared/release-state /opt/enterprise-agent-workbench/shared/release-qualifications /opt/enterprise-agent-workbench/shared/lightweight-release-v1/tooling /opt/enterprise-agent-workbench/shared/lightweight-release-v1/source.git /opt/enterprise-agent-workbench/shared/lightweight-release-v1/machine-grant.json /opt/enterprise-agent-workbench/backups /opt/enterprise-agent-workbench/venv
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
