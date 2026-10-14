@@ -30,7 +30,8 @@ from app.store import POCStore
 FIXTURES = Path(__file__).parent / "fixtures"
 PRODUCTION_P0 = json.loads((FIXTURES / "activity_plan_production_p0.json").read_text(encoding="utf-8"))
 PRODUCTION_REQUEST = PRODUCTION_P0["input_text"]
-SEMANTIC_REQUEST = "请生成完整详细的国庆节活动方案"
+CONFIRMED_BRIEF = "\n活动内容：社区共读；时间：2026年10月20日；地点：社区活动室；对象：家长和孩子。"
+SEMANTIC_REQUEST = "请生成完整详细的国庆节活动方案" + CONFIRMED_BRIEF
 
 
 def plan() -> dict:
@@ -85,7 +86,7 @@ def collect(provider: ScriptedProvider, message: str, agent_id: str = "campaign-
 
 
 def full_request() -> str:
-    return "请给社区教师节设计完整活动方案，包含主题、时间、地点、宣发、执行和邀约"
+    return "请给社区教师节设计完整活动方案，包含主题、时间、地点、宣发、执行和邀约" + CONFIRMED_BRIEF
 
 
 ORDINARY_FULL_REQUESTS = [
@@ -110,6 +111,9 @@ ORDINARY_FULL_REQUESTS = [
 ])
 def test_ordinary_full_plan_creation_routes_to_structured_generation(message):
     assert is_full_activity_plan("campaign-agent", message)
+    # Current product prerequisites are explicit; retain the original intent
+    # samples and test their incomplete-input behavior in test_agent_quality_p0.
+    message += CONFIRMED_BRIEF
     source = plan()
     provider = ScriptedProvider([json.dumps(source, ensure_ascii=False)])
     turn = collect(provider, message)[-1].turn
@@ -509,7 +513,7 @@ def test_rg10_rg11_message_association_and_sse_compatibility(tmp_path, monkeypat
     first = product.create_task("tenant-a", member["id"], "campaign-agent", "给我想5个社区教师节活动标题", None)
     asyncio.run(service.execute(first))
     first_saved = product.task(first["id"], "tenant-a", member["id"])
-    second = product.create_task("tenant-a", member["id"], "campaign-agent", message_request, first_saved["conversation_id"])
+    second = product.create_task("tenant-a", member["id"], "campaign-agent", message_request + CONFIRMED_BRIEF, first_saved["conversation_id"])
     asyncio.run(service.execute(second))
     second_saved = product.task(second["id"], "tenant-a", member["id"])
     assert first_saved["structured_result"] is None
@@ -594,7 +598,7 @@ def test_semantic_failure_after_one_retry_completes_without_exportable_result(tm
     source["invitation_copy"] = "工作人员将进行一对一跟进。"
     runtime = ScriptedProvider([json.dumps(source, ensure_ascii=False)] * 2)
     service = TaskService(product, AgentService(store, runtime, Settings.from_env()))
-    task = product.create_task("tenant-a", member["id"], "campaign-agent", ORDINARY_FULL_REQUESTS[0], None)
+    task = product.create_task("tenant-a", member["id"], "campaign-agent", ORDINARY_FULL_REQUESTS[0] + CONFIRMED_BRIEF, None)
     asyncio.run(service.execute(task))
     saved = product.task(task["id"], "tenant-a", member["id"])
     trace = store.run_trace(saved["run_id"], "tenant-a")["payload"]

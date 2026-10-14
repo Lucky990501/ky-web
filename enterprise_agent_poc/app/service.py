@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Awaitable
 from typing import Callable
 import asyncio
@@ -167,7 +167,7 @@ class AgentService:
                     existing["runtime_thread_id"],
                     developer_instructions=agent.instructions,
                     recovery_context=recovery_context,
-                    **({"task_id": task_id} if reference_image_attached else {}),
+                    **({"task_id": task_id} if agent_id == "image-agent" and task_id else {}),
                 )
                 if session.thread_id != existing["runtime_thread_id"]:
                     if not self._store.replace_conversation_thread(
@@ -177,7 +177,7 @@ class AgentService:
             else:
                 session = await self._runtime.create_session(
                     profile, agent.instructions,
-                    **({"task_id": task_id} if reference_image_attached else {}),
+                    **({"task_id": task_id} if agent_id == "image-agent" and task_id else {}),
                 )
                 if execution_context:
                     with self._store.connection() as conn:
@@ -195,11 +195,19 @@ class AgentService:
             trace = {**baseline, "codex_thread_id": session.thread_id, "lifecycle_events": self._startup_events(profile)}
             self._store.log_event(conversation_id, "turn.started", {"run_id": run_id, "profile_id": profile.id, "thread_id": session.thread_id})
             runtime_message = (message + "\n\n本轮消息显式附有一张参考图片。请按用户文字要求调用 image_generation；平台会安全读取本任务绑定的参考图并执行图片编辑。不要沿用历史图片。") if reference_image_attached else message
+            if agent_id == "campaign-agent":
+                from app.activity_brief import with_user_context
+                runtime_message = with_user_context(message, self._store.conversation_messages(conversation_id, tenant_id))
             turn = await self._run_turn(
                 session, runtime_message, on_visible_delta, cancellation_requested,
                 on_execution_activity,
                 grounding_enabled=grounding_enabled,
             )
+            # Opt-in only through the exact successor Skill binding. Existing
+            # productized/published snapshots are never silently rewritten.
+            if agent.slug == "wechat-official-account-writing" and profile.skill_manifest.get("wechat-official-account-writing") == "1.0.1":
+                from app.wechat_article_format import render_wechat_article
+                turn = replace(turn, text=render_wechat_article(turn.text))
             trace = self._completed_trace(trace, turn, agent.allows_image_generation)
             if execution_context:
                 for tool in profile.required_tools:
@@ -219,6 +227,12 @@ class AgentService:
             if (not trace["required_tool_calls_completed"]
                     and not (turn.grounding_telemetry and not turn.grounding_telemetry["final_pass"])):
                 missing = ", ".join(name for name, item in trace["required_tool_calls"].items() if not item["satisfied"])
+                from app.image_request_contract import INPUT_ERRORS
+                image_error = next((item.get("image_input_error") for item in reversed(trace["mcp_calls"])
+                                    if item.get("tool") == "image_generation" and item.get("image_input_error") in INPUT_ERRORS), None)
+                if image_error and not trace["required_tool_calls"].get("image_generation", {}).get("satisfied", True):
+                    raise AgentRunError(INPUT_ERRORS[image_error], run_id=run_id, conversation_id=conversation_id,
+                                        error_code=image_error, failure_stage="image_input_validation")
                 raise AgentRunError(
                     f"必需工具依赖未完成：{missing}。",
                     run_id=run_id,
@@ -367,7 +381,7 @@ class AgentService:
             # Do not persist private source material or tool argument summaries.
             # These fields suffice for dependency checks and artifact ownership.
             safe_keys = {"server", "tool", "status", "duration_ms", "dependency_id",
-                         "result_is_error", "artifact", "retrieval_observation"} | AUDIT_FIELDS
+                         "result_is_error", "artifact", "artifacts", "image_delivery", "image_input_error", "retrieval_observation"} | AUDIT_FIELDS
             calls = [{key: value for key, value in call.items() if key in safe_keys} for call in calls]
         calls, logical_dependencies, required_status = resolve_dependencies(calls)
         trace["mcp_calls"] = calls
@@ -390,6 +404,14 @@ class AgentService:
         trace["latency_ms"] = turn.latency_ms
         trace["error"] = AgentService._safe_error(turn.error) if turn.error else None
         trace["final_result"] = turn.text
+        deliveries = [call["image_delivery"] for call in calls if isinstance(call.get("image_delivery"), dict)]
+        if requires_image_generation and deliveries:
+            trace["image_delivery"] = deliveries[-1]
+            if deliveries[-1].get("status") == "partial":
+                trace["final_result"] = (
+                    f"本次请求{deliveries[-1].get('requested')}张，已生成{deliveries[-1].get('generated')}张。"
+                    "部分图片未完成或实际尺寸与请求不符；请检查每张图片的实际像素，不能视为全部要求已完成。"
+                )
         trace["structured_result"] = turn.structured_result
         trace["structured_result_diagnostic"] = turn.structured_diagnostic
         trace["structured_attempt_trace"] = list(turn.structured_attempt_trace)

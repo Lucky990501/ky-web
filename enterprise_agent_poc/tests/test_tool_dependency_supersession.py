@@ -25,9 +25,9 @@ from app.tool_dependencies import (
 from test_run_trace import FakeRuntime, product_task_fixture
 
 
-def jpeg_fixture() -> bytes:
+def jpeg_fixture(size=(2,2)) -> bytes:
     output = io.BytesIO()
-    Image.new("RGB", (2, 2), (30, 60, 90)).save(output, format="JPEG")
+    Image.new("RGB", size, (30, 60, 90)).save(output, format="JPEG")
     return output.getvalue()
 
 
@@ -137,7 +137,7 @@ def replay(tmp_path, monkeypatch, mode="correction"):
 
         async def post(self, url, *, headers, json):
             assert url == "https://llm-api.net/v1/images/generations"
-            assert json["size"] in {"1024x1024", "1024x1536"}
+            assert json["size"] in {"1024x1024", "1024x1280"}
             assert json["model"] == "gpt-image-2.5-sunburst-c"
             assert json["provider"] == {"sort": "success_rate"}
             assert json["n"] == 1
@@ -146,7 +146,7 @@ def replay(tmp_path, monkeypatch, mode="correction"):
             runtime.gateway_calls += 1
             runtime.provider_payloads.append(dict(json))
             return httpx.Response(200, headers={"x-request-id": "stub-request"}, json={
-                "data": [{"b64_json": base64.b64encode(jpeg_fixture()).decode("ascii")}],
+                "data": [{"b64_json": base64.b64encode(jpeg_fixture(tuple(map(int,json["size"].split("x"))))).decode("ascii")}],
             })
 
     monkeypatch.setattr(httpx, "AsyncClient", GatewayStub)
@@ -209,7 +209,7 @@ def test_V11_01_receipt_declares_retry_contract(tmp_path, monkeypatch):
     assert first["repairable_fields"] == ["aspect_ratio"]
     assert first["coupled_repairs"] == [{
         "field": "aspect_ratio", "from": "3:4",
-        "allowed_values": ["1:1", "9:16", "16:9", "4:5"],
+        "allowed_values": ["1:1", "9:16", "16:9", "4:5", "3:2", "2:3"],
         "coupled_text_fields": ["prompt"],
     }]
     ledger, retry, principal, args = _ledger_receipt()

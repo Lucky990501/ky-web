@@ -1,0 +1,12 @@
+{
+  "status": "PREPARED_NOT_REAL_MODEL_EXECUTED",
+  "agent": "copywriting-agent",
+  "provider_calls": 0,
+  "cases": [
+    {"id":"EDU_ADMISSION","input":"面向考虑学习规划服务的家长，写一段招生文案。没有价格、升学数据或优惠政策可用。","check":"明确判断、选择标准及行动；不编造效果，不制造焦虑。"},
+    {"id":"EDU_EVENT","input":"写一段亲子阅读活动宣传，目标是让家长理解共同阅读的价值；不提供日期、权益或报名安排。","check":"自然口语、可执行建议；不补具体安排和赠品。"},
+    {"id":"EDU_BRAND","input":"品牌理念是帮助学生形成自主学习习惯，请写一段品牌介绍。没有创始人经历和案例。","check":"有对比和取舍，不虚构创业故事、客户反馈或成果。"},
+    {"id":"EDU_CONVERSION","input":"把前面的品牌文案改写成专业简洁风格，让家长预约了解服务；不要用名人腔或夸张承诺。","check":"保持上下文、事实与用户风格；清楚CTA，不冒充真实人物。"}
+  ],
+  "real_evaluation_gate": "separate Test-only Source/Tenant/Agent/Provider budget authorization"
+}

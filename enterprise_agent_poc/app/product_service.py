@@ -101,6 +101,7 @@ class TaskService:
                     message_id=f"task:{task_id}:user",
                 )
             if task["agent_id"] == "image-agent":
+                execution_options["task_id"] = task_id
                 attachment = self._store.task_chat_image_attachment(task_id, tenant_id)
                 if attachment:
                     execution_options.update(task_id=task_id, reference_image_attached=True)
@@ -151,7 +152,10 @@ class TaskService:
                     self._agents.mark_persistence_failed(run_id, tenant_id, exc.stage)
             elif isinstance(exc, AgentRunError):
                 code = exc.error_code
-                if code == "required_tool_dependency_error":
+                from app.image_request_contract import INPUT_ERRORS
+                if code in INPUT_ERRORS:
+                    message = INPUT_ERRORS[code]
+                elif code == "required_tool_dependency_error":
                     message = "必需企业工具在有限尝试后仍未完成，任务未被标记为成功。"
                 elif code == "empty_final_response":
                     message = "运行已结束，但没有收到可保存的最终正文。"
@@ -219,6 +223,15 @@ class TaskService:
     def _persist_result(self, task: dict, trace: dict) -> dict:
         current = self._store.task_for_worker(task["id"])
         payload = dict(trace["payload"])
+        image_artifacts = []
+        dependencies = payload.get("logical_tool_dependencies")
+        active_ids = {item["active_attempt_id"] for item in dependencies if item.get("satisfied")} if dependencies else None
+        for call in payload.get("mcp_calls", []):
+            if call.get("tool") != "image_generation" or not AgentService._call_completed(call) or (active_ids is not None and call.get("attempt_id") not in active_ids):
+                continue
+            for artifact_item in call.get("artifacts") or ([call["artifact"]] if isinstance(call.get("artifact"), dict) else []):
+                if isinstance(artifact_item, dict) and artifact_item.get("storage_key") not in {item.get("storage_key") for item in image_artifacts}:
+                    image_artifacts.append(dict(artifact_item))
         storage_key = self._image_storage_key(trace)
         artifact = next((call.get("artifact") for call in reversed(trace["payload"].get("mcp_calls", []))
                          if call.get("tool") == "image_generation" and isinstance(call.get("artifact"), dict)
@@ -245,6 +258,25 @@ class TaskService:
             except Exception as exc:
                 raise ResultPersistenceError("artifact_verification") from exc
             payload["artifact_available"] = True
+            # Verify every result, including replay after a persistence error.
+            # Never run Provider again to fill a missing persisted object.
+            if image_artifacts:
+                for image in image_artifacts:
+                    key = image.get("storage_key")
+                    if not isinstance(key, str) or not key.startswith(f"generated/{task['tenant_id']}/") or "\\" in key or any(part in {"", ".", ".."} for part in key.split("/")):
+                        raise ResultPersistenceError("artifact_association")
+                    if len(image_artifacts) == 1 and not image.get("requested_size"):
+                        # Preserve the pre-metadata, single-image recovery
+                        # contract. New batch/current Provider objects are all
+                        # decoded and verified; legacy bytes are not rewritten.
+                        image["width"], image["height"] = image_width, image_height
+                        continue
+                    try:
+                        with Image.open(io.BytesIO(storage_provider(self._agents._settings).get(key))) as picture:
+                            image["width"], image["height"] = picture.size
+                            picture.verify()
+                    except Exception as exc:
+                        raise ResultPersistenceError("artifact_verification") from exc
         else:
             image_width = image_height = None
         return self._store.complete_task_success(
@@ -257,4 +289,5 @@ class TaskService:
             image_width=image_width,
             image_height=image_height,
             image_requested_size=artifact.get("requested_size"),
+            image_artifacts=image_artifacts or None,
         )

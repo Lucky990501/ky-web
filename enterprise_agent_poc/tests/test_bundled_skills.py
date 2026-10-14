@@ -32,6 +32,7 @@ EXPECTED_BUNDLED_SKILL_VERSIONS = {
     ("poster-design", "1.0.0"),
     ("social-copywriting", "1.0.0"),
     ("wechat-official-account-writing", "1.0.0"),
+    ("wechat-official-account-writing", "1.0.1"),
 }
 EXPECTED_DEFAULT_BINDINGS = {
     ("campaign-agent", "event-campaign-plan", "1.0.1"),

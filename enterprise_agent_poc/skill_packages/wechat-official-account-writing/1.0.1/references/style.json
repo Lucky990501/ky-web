@@ -1,0 +1,14 @@
+{
+  "source": "wechat-html-draft/references/style.md and assets/article-template.html",
+  "body_selector": "article",
+  "body_color": "#3E3E3E",
+  "accent_color": "#FFCA00",
+  "caption_color": "#A0A0A0",
+  "font_family": "Optima-Regular,PingFangTC-light,PingFang SC,Microsoft YaHei,sans-serif",
+  "font_size": 16,
+  "line_height": 1.6,
+  "letter_spacing": 0.544,
+  "paragraph_spacing": 18,
+  "section_spacing": 38,
+  "caption_size": 12
+}

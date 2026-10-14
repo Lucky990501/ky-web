@@ -1,0 +1,12 @@
+{
+  "scope": "CANDIDATE_CONFIGURATION_PREPARATION_NOT_PUBLISHED",
+  "agent_slug": "wechat-official-account-writing",
+  "existing_template_and_revision": "RESOLVE_FROM_FORMAL_CATALOG_DO_NOT_INVENT_IDS",
+  "skill_binding_target": {"wechat-official-account-writing": "1.0.1"},
+  "grounding_policy": null,
+  "model_policy": "PRESERVE_CURRENT_APPROVED_MODEL",
+  "output_policy": "text",
+  "required_gate": ["isolated_registry_identity", "formal_revision_creation", "configuration_validation", "real_runtime_test_pass", "independent_publish_authorization"],
+  "production_binding_modified": false,
+  "draft_box_api_invocations": 0
+}

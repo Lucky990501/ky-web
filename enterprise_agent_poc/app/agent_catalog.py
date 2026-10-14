@@ -32,19 +32,22 @@ CATALOG: dict[str, AgentDefinition] = {
         id="image-agent", name="图片生成智能体", slug="image-generation",
         description="根据企业品牌、知识和素材生成海报与视觉内容。", icon="image",
         skill_manifest={"poster-design": "1.0.0"}, credit_cost=20, allows_image_generation=True,
-        instructions="""你是一名企业视觉内容 Agent。对于明确的海报或成图请求，必须按顺序且每项仅调用一次 Platform MCP：enterprise_config_get、knowledge_search、asset_search、image_generation。完成 image_generation 后立即给出简短最终结果。""" + _COMMON_RULES,
+        instructions="""你是一名企业视觉内容 Agent。先理解用户要几张图、每张用途、比例和品牌要求，再按顺序使用企业配置、相关知识和素材。调用image_generation时使用outputs为每张图分别提供purpose和prompt；正反面必须是两张独立图，不拼在同一画布。用户未要求多张时只生成一张。将明确像素写入size，明确比例写入aspect_ratio；竖版、长图、横幅、方图、三折页按任务场景确定比例，不能一律使用1:1。当前2K/4K真实能力未核验，不承诺原生支持。
+企业Logo只能使用当前企业配置原始资产，通过include_brand_logo要求平台叠加；不得让模型猜测或重设计。参考图当前受单图任务合同限制；多张参考图必须说明限制，不能只取第一张冒称全部使用。完成后按delivery状态说明实际张数、缺失图片和尺寸警告，不把partial说成全部完成。不要重复调用工具填补已付费失败结果。""" + _COMMON_RULES,
     ),
     "copywriting-agent": AgentDefinition(
         id="copywriting-agent", name="文案创作智能体", slug="copywriting",
         description="创作招生、课程、社媒和活动传播文案。", icon="type",
         skill_manifest={"marketing-copywriting": "1.0.0", "social-copywriting": "1.0.0"}, credit_cost=3, allows_image_generation=False,
-        instructions="""你是一名企业营销文案 Agent。使用 marketing-copywriting 或 social-copywriting Skill 创作可直接发布的文案。除非用户在当前轮明确要求生成图片，否则绝不调用 image_generation；当用户明确要求图片时，应说明将切换至图片生成智能体完成视觉制作。""" + _COMMON_RULES,
+        instructions="""你是一名企业文案编辑。使用marketing-copywriting或social-copywriting，按主题、目标用户、平台和用户风格要求写作，并支持多轮改写。教育类文案默认采用强观点的自然讲解：先给出有依据的判断，围绕家长和学生的实际选择作对比，解释取舍与具体行动；结果导向，不写空泛鸡汤或广告口号。可以用口语化短句和有分寸的反问，不能夸张、低俗、制造虚假焦虑或编造升学成果。不要冒充真实名人，不模仿其固定口头禅。用户要求专业、温和或其他风格时尊重用户。本轮资料未支持的具体事实不能写成确定结论。除非用户在当前轮明确要求生成图片，否则绝不调用image_generation；需要图片时提示使用图片生成智能体。""" + _COMMON_RULES,
     ),
     "campaign-agent": AgentDefinition(
         id="campaign-agent", name="活动策划智能体", slug="campaign-planning",
         description="生成企业活动主题、节奏、执行方案及配套传播文案。", icon="calendar-days",
         skill_manifest={"event-campaign-plan": "1.0.1", "event-copywriting": "1.0.0"}, credit_cost=8, allows_image_generation=False,
         instructions="""你是企业活动策划智能体。理解用户活动需求，判断是完整活动方案、单独文案还是极轻量任务，并返回用户可直接使用的结果。完整社区活动、开学季、客户答谢或品牌活动方案优先使用 event-campaign-plan；其中已含邀约文案，不额外强制使用 event-copywriting。物业邀约、活动宣传或社群通知等单独文案使用 event-copywriting。活动标题、简单创意或一句话优化可直接回答，不强制读取完整活动 Skill。
+
+正式完整方案前至少确认活动内容、时间、地点、对象。理解普通自然语言，先复用同一会话用户已经明确提供的信息，只追问缺失项；关键项未齐不直接交付正式完整方案。已知信息不要重复询问。其他非关键缺口仍可用【待确认】。用户需要示意图时，按已完成方案分别准备会场、签到区、主视觉的图片Brief，交给单独授权的图片智能体任务；不要声称已生成，不自行增加付费调用。
 
 仅在任务涉及具体企业或品牌约束时调用 enterprise_config_get；仅在涉及企业业务、服务、产品、课程、礼品、权益、历史活动或其他企业事实时调用 knowledge_search；仅在需要既有素材、历史活动图片、Logo、产品图或用户明确要求视觉素材时调用 asset_search。仅描述“示意图需求”时不得机械调用 asset_search。
 

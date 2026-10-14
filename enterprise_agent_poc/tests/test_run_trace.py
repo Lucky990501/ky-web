@@ -15,7 +15,7 @@ from app.product_store import ProductStore, ResultPersistenceError
 
 
 class FakeRuntime:
-    async def create_session(self, profile, developer_instructions):
+    async def create_session(self, profile, developer_instructions, **_kwargs):
         return RuntimeSession(thread_id="thread-test-1", profile_id=profile.id)
 
     async def resume_session(self, profile, thread_id, **_kwargs):
@@ -45,7 +45,7 @@ class FailingStartupRuntime:
             {"event": "runtime_start_failed", "stage": "app_server"},
         )
 
-    async def create_session(self, profile, developer_instructions):
+    async def create_session(self, profile, developer_instructions, **_kwargs):
         raise RuntimeStartError("app_server")
 
     async def resume_session(self, profile, thread_id, **_kwargs):
@@ -101,7 +101,7 @@ class ToolRetryRuntime(FakeRuntime):
         return RuntimeTurn(thread_id=session.thread_id, text="非空最终正文", mcp_calls=tuple(calls), status="completed")
 
 
-def product_task_fixture(tmp_path, monkeypatch, agent_id: str, runtime):
+def product_task_fixture(tmp_path, monkeypatch, agent_id: str, runtime, *, input_text="执行真实任务"):
     monkeypatch.setenv("ENTERPRISE_POC_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("ENTERPRISE_POC_DATABASE_URL", f"sqlite:///{tmp_path / 'product.db'}")
     monkeypatch.setenv("ENTERPRISE_POC_OBJECT_STORAGE_DIR", str(tmp_path / "objects"))
@@ -111,7 +111,7 @@ def product_task_fixture(tmp_path, monkeypatch, agent_id: str, runtime):
     product.initialize()
     product.create_user("tenant-a", "member@tenant-a.test", "unused", "Tenant A Member", "member")
     user = product.user_by_email("member@tenant-a.test")
-    task = product.create_task("tenant-a", user["id"], agent_id, "执行真实任务", None)
+    task = product.create_task("tenant-a", user["id"], agent_id, input_text, None)
     agents = AgentService(store, runtime, Settings.from_env())
     return store, product, task, runtime, TaskService(product, agents)
 

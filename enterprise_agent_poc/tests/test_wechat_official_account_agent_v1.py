@@ -108,6 +108,35 @@ def test_draft_execution_context_keeps_grounding_disabled(execution):
     assert json.loads(snapshot["skill_manifest_snapshot"]) == {SLUG: SKILL_VERSION}
 
 
+def test_candidate_layout_skill_opt_in_uses_formal_test_context_without_publish(execution):
+    """Real resolver/TaskService, simulated text runtime; no real Runtime Test PASS."""
+    import asyncio
+    from app.domain import RuntimeTurn
+    from test_agent_productization import published_skill
+    draft = create_draft(execution.control, execution.actor)
+    revision = draft["versions"][0]
+    execution.control.bind_skills(draft["id"],revision["id"],
+        [published_skill(execution,slug=SLUG,version="1.0.1")],execution.actor)
+    execution.control.validate(draft["id"],revision["id"],execution.actor)
+    with execution.store.connection() as conn:
+        conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status,instance_id,agent_template_version_id,overrides_json) VALUES ('tenant-a',?,'configured',?,?,'{}')",
+                     (draft["id"],str(uuid4()),revision["id"]))
+    async def draft_text(session,message):
+        return RuntimeTurn(session.thread_id,"# 标题\n\n导语\n\n## 章节\n\n正文\n\n> 引用")
+    execution.runtime.run_turn = draft_text
+    task = execution.product.create_task("tenant-a",execution.actor,draft["id"],"排版文章",None,
+                                        _test_revision=revision["id"],_test_id=str(uuid4()))
+    asyncio.run(execution.tasks.execute(task))
+    saved = execution.product.task_for_worker(task["id"])
+    assert saved["status"] == "completed"
+    stored = execution.product.task(task["id"],"tenant-a",execution.actor)
+    assert 'id="article"' in stored["final_response"] and "#FFCA00" in stored["final_response"]
+    snapshot = context(execution,task)
+    assert json.loads(snapshot["skill_manifest_snapshot"]) == {SLUG:"1.0.1"}
+    assert profile(snapshot).grounding_policy == {"enabled":False}
+    assert execution.control.detail(draft["id"])["versions"][0]["status"] == "draft"
+
+
 def test_skill_quality_instructions_cover_requested_scenarios():
     skill = (BUNDLE / SLUG / SKILL_VERSION / "SKILL.md").read_text(encoding="utf-8")
     assert skill.startswith("---\nname: wechat-official-account-writing\ndescription:")

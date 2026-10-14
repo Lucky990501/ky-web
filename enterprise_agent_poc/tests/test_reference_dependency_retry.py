@@ -73,7 +73,8 @@ def execute_sequence(tmp_path, monkeypatch, sequence=('validation','400','succes
             posts.append(url)
             assert url=='https://llm-api.net/v1/images/'+('edits' if attached else 'generations')
             if attached:
-                assert kwargs['data']['size']=='1024x1024'
+                # Explicit Tool 4:5 is no longer overwritten by edits=1:1.
+                assert kwargs['data']['size']=='1024x1280'
                 assert kwargs['files']['image']==('reference.png',picture,'image/png')
             step=expected.pop(0)
             if step=='400':

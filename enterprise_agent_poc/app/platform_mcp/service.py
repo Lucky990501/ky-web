@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import hashlib
 import os
+import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -26,7 +28,9 @@ from app.product_store import ProductStore
 from app.knowledge import KnowledgeRetrievalService
 from app.settings import Settings
 from app.storage import storage_provider
-from app.store import POCStore
+from app.image_request_contract import image_plan, ImageRequestError
+from app.image_branding import overlay_brand_logo
+from app.brand_logo import BrandLogoService
 
 
 def _validated_image_metadata(content: bytes) -> tuple[str, str, str]:
@@ -108,7 +112,10 @@ class PlatformMCPService:
                                references: list[str], aspect_ratio: str,
                                *, retry_of: str | None = None,
                                execution_scope: str = "legacy-runtime",
-                               reference_images: list[str] | None = None) -> dict:
+                               reference_images: list[str] | None = None,
+                               size: str | None = None,
+                               outputs: list[dict] | None = None,
+                               include_brand_logo: bool = False) -> dict:
         principal = self._principal(bearer_token, "image:generate")
         submitted_args = {
             "prompt": prompt,
@@ -117,6 +124,11 @@ class PlatformMCPService:
         }
         if reference_images is not None:
             submitted_args["reference_images"] = reference_images
+        for key, value in (("size", size), ("outputs", outputs)):
+            if value is not None:
+                submitted_args[key] = value
+        if include_brand_logo:
+            submitted_args["include_brand_logo"] = True
         retry_audit = None
         if retry_of is not None:
             effective_args, retry_audit = self._retry_receipts.reconstruct(
@@ -133,6 +145,9 @@ class PlatformMCPService:
         references = effective_args["references"]
         aspect_ratio = effective_args["aspect_ratio"]
         reference_images = effective_args.get("reference_images") or []
+        size = effective_args.get("size")
+        outputs = effective_args.get("outputs")
+        include_brand_logo = effective_args.get("include_brand_logo", False)
         self._audit(principal.tenant_id, "image_generation", "started")
         if len(reference_images) > 1:
             raise ValueError("当前最多支持一张参考图片。")
@@ -144,12 +159,12 @@ class PlatformMCPService:
         if reference_images and (not attachment or reference_images != [attachment["id"]]):
             raise ValueError("参考图片与当前任务不匹配。")
         image_dependency = reference_image_dependency(principal.tenant_id, task_id, attachment["id"]) if attachment else None
-        if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5"}:
+        if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5", "3:2", "2:3"}:
             self._audit(principal.tenant_id, "image_generation", "failed")
             error = ToolInputValidationError(
-                "当前图片网关只允许 1:1、9:16、16:9、4:5 比例。",
+                "请选择1:1、9:16、16:9、4:5、3:2或2:3比例。",
                 repairable_fields=("aspect_ratio",),
-                allowed_values={"aspect_ratio": ("1:1", "9:16", "16:9", "4:5")},
+                allowed_values={"aspect_ratio": ("1:1", "9:16", "16:9", "4:5", "3:2", "2:3")},
                 coupled_text_fields={"aspect_ratio": ("prompt",)},
             )
             error.retry_receipt = self._retry_receipts.issue(
@@ -162,10 +177,23 @@ class PlatformMCPService:
             )
             error.image_dependency = image_dependency
             raise error
+        task = ProductStore(self._store).task_for_worker(task_id) if task_id else None
+        if task and (task["tenant_id"] != principal.tenant_id or task["agent_id"] != "image-agent"):
+            raise PermissionError("图片任务身份不匹配。")
+        user_text = task["input_text"] if task else prompt
+        plan = image_plan(user_text, prompt, aspect_ratio, size, outputs)
+        if attachment and len(plan) != 1:
+            raise ImageRequestError("reference_batch_contract_required", "参考图编辑当前每任务支持一张结果；多面编辑请先拆分任务，未发送额外付费请求。")
+        config = self._store.enterprise_config(principal.tenant_id)
+        omit_logo = bool(re.search(r"(?:不要|无需|不需要|不放|不加).{0,5}(?:logo|标志|标识)", user_text, re.I))
+        logo_required = not omit_logo and (include_brand_logo or bool(re.search(r"(?:企业|品牌|公司).{0,8}(?:logo|标志|标识)|(?:保留|使用|放上|加上|添加).{0,8}logo", user_text, re.I))
+            or bool(config.get("brand_logo") and re.search(r"企业|品牌|招生|宣传|海报|三折页", user_text)))
+        logo_bytes = None
+        if logo_required:
+            logo_bytes = BrandLogoService(storage_provider(self._settings), ProductStore(self._store)).current_bytes(principal.tenant_id, config)
         api_key = os.environ.get(self._settings.image_api_key_env)
         if not api_key:
             raise RuntimeError(f"未配置图片服务 API Key 环境变量：{self._settings.image_api_key_env}。")
-        size = {"1:1": "1024x1024", "9:16": "1024x1536", "16:9": "1536x1024", "4:5": "1024x1536"}[aspect_ratio]
         source_image = None
         if attachment:
             try:
@@ -175,98 +203,130 @@ class PlatformMCPService:
                     raise ValueError("Stored reference format changed")
             except Exception as exc:
                 raise RuntimeError("参考图片暂时无法读取，请重新上传。") from exc
-            size = "1024x1024"
         try:
             import httpx
         except ImportError as exc:  # pragma: no cover - environment dependency
             raise RuntimeError("未安装 httpx；请重新安装 POC 依赖。") from exc
         # References are tenant-scoped design metadata. Only this task's bound,
         # authenticated upload bytes can select edits; no external URL is fetched.
-        async with image_transport_guard("edits" if attachment else "generations"), httpx.AsyncClient(timeout=120) as client:
-            if attachment:
-                response = await client.post(
-                    "https://llm-api.net/v1/images/edits",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    data={"prompt": prompt, "model": self._settings.image_model_id,
-                          "n": "1", "size": size, "output_format": "jpeg"},
-                    files={"image": (attachment["filename"], source_image, attachment["mime_type"])},
-                )
-            else:
-                response = await client.post(
-                    "https://llm-api.net/v1/images/generations",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "prompt": prompt,
-                        "model": self._settings.image_model_id,
-                        "provider": {"sort": "success_rate"},
-                        "size": size,
-                        "n": 1,
-                        "output_format": "jpeg",
-                        "response_format": "b64_json",
-                    },
-                )
         audit = {"contract": RECONSTRUCTION_CONTRACT, "submitted_args": submitted_args,
                  "effective_args": effective_args, "ignored_retry_argument_drift": [], "coupled_repairs": [],
                  **(retry_audit or {}), "request_fingerprint": fingerprint(submitted_args)}
         if image_dependency is not None:
             audit["image_dependency"] = image_dependency
-        # A failed HTTP response is still an authenticated executed attempt.
-        # Preserve receipt reconstruction even when the body is not JSON. Never
-        # include provider response text, Authorization or signed URLs.
-        if response.status_code >= 400:
-            self._audit(principal.tenant_id, "image_generation", "failed")
-            raise ImageToolExecutionFailure(response.status_code, audit)
-        try:
-            gateway = response.json()
-        except ValueError as exc:
-            raise RuntimeError(f"图片网关返回非 JSON 响应（HTTP {response.status_code}）。") from exc
-        if not isinstance(gateway, dict):
-            raise RuntimeError(f"图片网关返回无效 JSON 结构（HTTP {response.status_code}）。")
-        request_id = gateway.get("request_id") or response.headers.get("x-request-id") or "unknown"
-        items = gateway.get("data")
-        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
-            raise RuntimeError("图片网关未返回 data[0]。")
-        data = items[0]
-        encoded = data.get("b64_json")
-        if not isinstance(encoded, str) or not encoded:
-            raise RuntimeError("图片网关未返回 b64_json。")
-        try:
-            image = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise RuntimeError("图片网关返回无效 b64_json。") from exc
-        if not image:
-            raise RuntimeError("图片网关返回空图片。")
-        actual_format, extension, mime_type = _validated_image_metadata(image)
-        with Image.open(io.BytesIO(image)) as generated_image:
-            actual_width, actual_height = generated_image.size
-        asset_id = request_id if request_id != "unknown" else uuid4().hex
-        try:
-            storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}{extension}"
-            storage_provider(self._settings).put(storage_key, image, mime_type)
-        except Exception as exc:
-            raise RuntimeError("图片已生成但平台持久化失败。") from exc
+        results, failures = [], []
+        async with httpx.AsyncClient(timeout=120) as client:
+            for item in plan:
+                item_prompt = item["prompt"]
+                if logo_required:
+                    item_prompt += "\n企业Logo由平台在右上角叠加原始资产；请在该处留白，不要绘制、猜测或重设计任何Logo。"
+                response = None
+                try:
+                    async with image_transport_guard("edits" if attachment else "generations"):
+                        if attachment:
+                            response = await client.post(
+                                "https://llm-api.net/v1/images/edits", headers={"Authorization": f"Bearer {api_key}"},
+                                data={"prompt": item_prompt, "model": self._settings.image_model_id,
+                                      "n": "1", "size": item["size"], "output_format": "jpeg"},
+                                files={"image": (attachment["filename"], source_image, attachment["mime_type"])})
+                        else:
+                            response = await client.post(
+                                "https://llm-api.net/v1/images/generations", headers={"Authorization": f"Bearer {api_key}"},
+                                json={"prompt": item_prompt, "model": self._settings.image_model_id,
+                                      "provider": {"sort": "success_rate"}, "size": item["size"], "n": 1,
+                                      "output_format": "jpeg", "response_format": "b64_json"})
+                    if response.status_code >= 400:
+                        raise ImageToolExecutionFailure(response.status_code, audit)
+                    try:
+                        gateway = response.json()
+                    except ValueError as exc:
+                        raise RuntimeError(f"图片网关返回非 JSON 响应（HTTP {response.status_code}）。") from exc
+                    if not isinstance(gateway, dict):
+                        raise RuntimeError("图片网关返回无效 JSON 结构。")
+                    data = gateway.get("data")
+                    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+                        raise RuntimeError("图片网关未返回 data[0]。")
+                    # Each separately planned request is n=1; never silently
+                    # ignore extra Provider results or mislabel a collaged side.
+                    if len(data) != 1:
+                        raise RuntimeError("图片网关返回张数与本次单图请求不一致。")
+                    encoded = data[0].get("b64_json")
+                    if not isinstance(encoded, str) or not encoded:
+                        raise RuntimeError("图片网关未返回 b64_json。")
+                    try:
+                        image = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise RuntimeError("图片网关返回无效 b64_json。") from exc
+                    if not image:
+                        raise RuntimeError("图片网关返回空图片。")
+                    actual_format, extension, mime_type = _validated_image_metadata(image)
+                    with Image.open(io.BytesIO(image)) as decoded:
+                        actual_width, actual_height = decoded.size
+                    storage = storage_provider(self._settings)
+                    provider_key = f"generated/{principal.tenant_id}/{uuid4().hex}{extension}"
+                    try:
+                        storage.put(provider_key, image, mime_type)
+                    except Exception as exc:
+                        raise RuntimeError("图片已生成但平台持久化失败。") from exc
+                    storage_key = provider_key
+                    if logo_bytes is not None:
+                        image = overlay_brand_logo(image, logo_bytes)
+                        actual_format, extension, mime_type = _validated_image_metadata(image)
+                        storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}{extension}"
+                        try:
+                            storage.put(storage_key, image, mime_type)
+                        except Exception as exc:
+                            raise RuntimeError("图片已生成但平台持久化失败。") from exc
+                    expected = tuple(map(int, item["size"].split("x")))
+                    dimension_match = (actual_width, actual_height) == expected
+                    request_id = gateway.get("request_id") or response.headers.get("x-request-id")
+                    results.append({
+                        "asset_id": request_id or uuid4().hex, "storage_key": storage_key,
+                        "url": f"/api/v1/storage/{storage_key}", "file_name": None,
+                        "format": actual_format, "size": item["size"], "requested_size": item["size"],
+                        "actual_size": f"{actual_width}x{actual_height}", "width": actual_width, "height": actual_height,
+                        "mime_type": mime_type, "request_id": request_id,
+                        "references_used": references, "reference_images_used": [attachment["id"]] if attachment else [],
+                        "index": item["index"], "purpose": item["purpose"], "requested_aspect_ratio": item["aspect_ratio"],
+                        "dimension_match": dimension_match, "warnings": [] if dimension_match else ["PROVIDER_DIMENSION_MISMATCH"],
+                        "original_storage_key": provider_key, "brand_logo_applied": logo_bytes is not None,
+                    })
+                    self._store.log_event(None, "image.request", {
+                        "tenant_id": principal.tenant_id, "task_id": task_id, "index": item["index"],
+                        "prompt_version": item["prompt_version"], "prompt_sha256": hashlib.sha256(item_prompt.encode()).hexdigest(),
+                        "requested_count": len(plan), "size": item["size"], "actual_width": actual_width, "actual_height": actual_height,
+                        "reference_ids": [attachment["id"]] if attachment else [], "provider_status": response.status_code,
+                    })
+                except Exception as exc:
+                    self._audit(principal.tenant_id, "image_generation", "failed")
+                    self._store.log_event(None, "image.request_failed", {
+                        "tenant_id": principal.tenant_id, "task_id": task_id, "index": item["index"],
+                        "prompt_version": item["prompt_version"], "prompt_sha256": hashlib.sha256(item_prompt.encode()).hexdigest(),
+                        "requested_count": len(plan), "size": item["size"],
+                        "reference_ids": [attachment["id"]] if attachment else [],
+                        "provider_status": response.status_code if response is not None else None,
+                        "error_type": type(exc).__name__,
+                    })
+                    if len(plan) == 1:
+                        raise
+                    failures.append({"index": item["index"], "purpose": item["purpose"],
+                                     "code": "image_provider_or_storage_error", "provider_status": response.status_code if response is not None else None})
+                    # No automatic paid retry. A provider quota/auth failure
+                    # stops the rest of the batch instead of consuming more.
+                    if response is not None and response.status_code in {401, 403, 429}:
+                        failures.extend({"index": other["index"], "purpose": other["purpose"], "code": "not_attempted_after_provider_rejection"}
+                                        for other in plan[item["index"]+1:])
+                        break
+        if not results:
+            raise RuntimeError("本次图片均未生成成功，未将任务标记为全部成功。")
+        delivery_complete = not failures and all(item["dimension_match"] for item in results)
         result = {
             "provider": self._settings.image_provider_id,
             "model": self._settings.image_model_id,
             "tenant_id_not_exposed": True,
-            "results": [
-                {
-                    "asset_id": asset_id,
-                    "storage_key": storage_key,
-                    "url": f"/api/v1/storage/{storage_key}",
-                    "file_name": None,
-                    "format": actual_format,
-                    "size": size,
-                    "requested_size": size,
-                    "actual_size": f"{actual_width}x{actual_height}",
-                    "width": actual_width,
-                    "height": actual_height,
-                    "mime_type": mime_type,
-                    "request_id": None if request_id == "unknown" else request_id,
-                    "references_used": references,
-                    "reference_images_used": [attachment["id"]] if attachment else [],
-                }
-            ],
+            "results": results, "failures": failures,
+            "delivery": {"requested": len(plan), "generated": len(results), "failed": len(failures),
+                         "status": "completed" if delivery_complete else "partial", "provider_attempts": len(results)+len([x for x in failures if "provider_status" in x])},
         }
         result["_tool_dependency"] = {**audit, "status": "completed", "provider_invoked": True}
         self._audit(principal.tenant_id, "image_generation", "completed")

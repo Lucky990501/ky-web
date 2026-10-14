@@ -248,7 +248,12 @@ def _public_task(task: dict, *, include_diagnostic: bool = False) -> dict:
         value["status"] = "cancelling"
     internal_code = str(value.get("error_code") or "")
     if value.get("status") == "failed":
-        if "timeout" in internal_code:
+        from app.image_request_contract import INPUT_ERRORS
+        if internal_code in INPUT_ERRORS:
+            # Only fixed platform messages, never Provider bodies or arbitrary
+            # exception strings. Preserve actionable input errors in GET/SSE.
+            value.update(error_code=internal_code, user_message=INPUT_ERRORS[internal_code])
+        elif "timeout" in internal_code:
             code = "TASK_TIMEOUT"
         elif internal_code in {"runtime_start_error", "worker_interrupted", "image_provider_error", "mcp_error"}:
             code = "SERVICE_TEMPORARILY_UNAVAILABLE"
@@ -256,8 +261,9 @@ def _public_task(task: dict, *, include_diagnostic: bool = False) -> dict:
             code = "INSTANCE_NOT_ENABLED"
         else:
             code = "TASK_FAILED"
-        value["error_code"] = code
-        value["user_message"] = _CUSTOMER_ERROR_MESSAGES[code]
+        if internal_code not in INPUT_ERRORS:
+            value["error_code"] = code
+            value["user_message"] = _CUSTOMER_ERROR_MESSAGES[code]
     if include_diagnostic:
         value["diagnostic_id"] = value.get("run_id") or value.get("id")
     value.pop("run_id", None)
@@ -780,6 +786,7 @@ async def stream_task_events(task_id: str, after: int = 0, workbench_session: st
             if task["status"] in {"completed", "failed", "cancelled"}:
                 public = _public_task(task, include_diagnostic=principal.role == "enterprise_admin")
                 terminal = {"status": public["status"], "error_code": public.get("error_code"), "message": public.get("user_message"), "diagnostic_id": public.get("diagnostic_id"), "final_response": public.get("final_response"), "conversation_id": public.get("conversation_id"), "generation": public.get("generation"), "assistant_message_id": public.get("assistant_message_id"), "structured_result": public.get("structured_result")}
+                terminal.update({key: public.get(key) for key in ("generations", "image_delivery", "illustration_briefs")})
                 if task["status"] == "cancelled":
                     yield f"event: cancelled\ndata: {json.dumps({'status': 'cancelled', 'task_id': task_id, 'message': 'Generation stopped'}, ensure_ascii=False)}\n\n"
                     return

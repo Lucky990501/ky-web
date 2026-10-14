@@ -17,6 +17,8 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations, CallToolResult, TextContent
 
 from app.platform_mcp.service import PlatformMCPService
+from app.image_request_contract import ImageRequestError
+from app.brand_logo import BrandLogoError
 from app.platform_mcp.image_diagnostics import ImageProviderUnavailable
 from app.security import RuntimeTokenIssuer
 from app.settings import settings
@@ -105,23 +107,44 @@ def create_mcp():
     @mcp.tool()
     async def image_generation(prompt: str, references: list[str], aspect_ratio: str,
                                ctx: Context = None, retry_of: str | None = None,
-                               reference_images: list[str] | None = None) -> dict[str, Any]:
+                               reference_images: list[str] | None = None,
+                               size: str | None = None,
+                               outputs: list[dict[str, str]] | None = None,
+                               include_brand_logo: bool = False) -> dict[str, Any]:
         """Generate an image via the platform Tool Gateway.
 
         For the SAME requirement's input correction, copy retry_of from the
         validation error. For a new independent image, omit retry_of.
+        size is explicit WxH pixels. outputs lists one {purpose,prompt} per
+        user-requested image (max5). Select the requested aspect_ratio exactly.
+        include_brand_logo composes the tenant original, never a model drawing.
+        Current reference contract accepts one reference and one result.
         """
         arguments = {"prompt": prompt, "references": references, "aspect_ratio": aspect_ratio}
         if reference_images is not None:
             arguments["reference_images"] = reference_images
+        for key, value in (("size", size), ("outputs", outputs)):
+            if value is not None:
+                arguments[key] = value
+        if include_brand_logo:
+            arguments["include_brand_logo"] = True
         bearer = _bearer_from_context(ctx)
         execution_scope = _execution_scope_from_context(ctx, bearer)
         try:
             return await service.image_generation(
                 bearer, prompt, references, aspect_ratio,
                 retry_of=retry_of, execution_scope=execution_scope,
-                reference_images=reference_images,
+                reference_images=reference_images, size=size, outputs=outputs,
+                include_brand_logo=include_brand_logo,
             )
+        except ImageRequestError as error:
+            failure = {"error_code": error.code, "message": str(error), "retryable": False, "provider_invoked": False}
+            return CallToolResult(isError=True, structuredContent=failure,
+                                  content=[TextContent(type="text", text=json.dumps(failure, ensure_ascii=False))])
+        except BrandLogoError as error:
+            failure = {"error_code": error.code, "message": "当前企业原始Logo缺失或不可用，请先上传有效透明PNG；未调用图片服务。", "provider_invoked": False}
+            return CallToolResult(isError=True, structuredContent=failure,
+                                  content=[TextContent(type="text", text=json.dumps(failure, ensure_ascii=False))])
         except ImageToolExecutionFailure as error:
             return CallToolResult(isError=True, structuredContent=error.payload,
                                   content=[TextContent(type="text", text=json.dumps(error.payload, ensure_ascii=False))])

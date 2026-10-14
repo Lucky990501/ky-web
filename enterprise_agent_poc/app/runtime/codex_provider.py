@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from app.domain import RuntimeProfile, RuntimeSession, RuntimeStreamEvent, RuntimeTurn, SandboxPolicy
+from app.activity_brief import assess_activity
 from app.activity_plan_runtime import (
     PLAN_SCHEMA, SAFE_FALLBACK, STRUCTURED_INSTRUCTION, chunk_validated_markdown, correction_prompt,
     is_full_activity_plan, merge_targeted_correction, parse_plan, render_markdown,
@@ -329,7 +330,8 @@ class CodexRuntimeProvider(RuntimeProvider):
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn:
         profile = self._profiles[session.profile_id]
         if (getattr(profile, "grounding_policy", None) and profile.grounding_policy.get("enabled") is True
-                or is_full_activity_plan(getattr(profile, "agent_id", ""), message)):
+                or is_full_activity_plan(getattr(profile, "agent_id", ""), message)
+                or getattr(profile, "agent_id", "") == "campaign-agent" and assess_activity(message) is not None):
             async for event in self.stream_turn(session, message):
                 if event.kind == "completed" and event.turn is not None:
                     return event.turn
@@ -405,12 +407,24 @@ class CodexRuntimeProvider(RuntimeProvider):
                     call["status"] = "failed"
                     call["result_is_error"] = True
                 if tool == "image_generation":
-                    artifact = self._image_artifact(tool_result)
-                    if artifact:
+                    artifacts = self._image_artifacts(tool_result)
+                    if artifacts:
                         # Persist only the platform-owned object key. The full
                         # tool result may contain provider metadata or URLs and
                         # remains outside the durable product trace.
-                        call["artifact"] = artifact
+                        call["artifact"] = artifacts[0]
+                        call["artifacts"] = artifacts
+                    value = getattr(tool_result, "structured_content", None)
+                    if value is None and isinstance(tool_result, dict):
+                        value = tool_result.get("structured_content", tool_result.get("structuredContent"))
+                    value = self._json_value(value)
+                    from app.image_request_contract import INPUT_ERRORS
+                    if isinstance(value, dict) and value.get("error_code") in INPUT_ERRORS:
+                        # Some SDK versions omit MCP isError. An allowlisted
+                        # platform preflight error can never count as success.
+                        call.update(status="failed", result_is_error=True, image_input_error=value["error_code"])
+                    if isinstance(value, dict) and isinstance(value.get("delivery"), dict):
+                        call["image_delivery"] = {key: value["delivery"].get(key) for key in ("requested", "generated", "failed", "status", "provider_attempts")}
                 if tool == "knowledge_search":
                     call["retrieval_observation"] = self._retrieval_observation(arguments, tool_result)
                 mcp_calls.append(call)
@@ -438,16 +452,22 @@ class CodexRuntimeProvider(RuntimeProvider):
     async def stream_turn(self, session: RuntimeSession, message: str) -> AsyncIterator[RuntimeStreamEvent]:
         """Stream public text for simple turns, validated Markdown for full plans."""
         profile = self._profiles[session.profile_id]
+        brief = assess_activity(message) if getattr(profile, "agent_id", "") == "campaign-agent" else None
+        if brief and not brief["ready"]:
+            yield RuntimeStreamEvent.visible_delta(brief["question"])
+            yield RuntimeStreamEvent.completed(RuntimeTurn(session.thread_id, brief["question"],
+                structured_result_status="needs_activity_details", structured_model_calls=0))
+            return
         if getattr(profile, "grounding_policy", None) and profile.grounding_policy.get("enabled") is True:
             async for event in self._grounded_stream_turn(session, profile, message):
                 yield event
             return
-        if not is_full_activity_plan(getattr(profile, "agent_id", ""), message):
+        if not (brief and brief["ready"]) and not is_full_activity_plan(getattr(profile, "agent_id", ""), message):
             async for event in self._stream_provider_turn(session, profile, message):
                 yield event
             return
 
-        first_prompt = message + "\n\n" + STRUCTURED_INSTRUCTION
+        first_prompt = (brief["source"] if brief else message) + "\n\n" + STRUCTURED_INSTRUCTION
         prompt = first_prompt
         original = None
         original_violations = []
@@ -862,16 +882,22 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     @classmethod
     def _image_artifact(cls, result: object) -> dict | None:
+        artifacts = cls._image_artifacts(result)
+        return artifacts[0] if artifacts else None
+
+    @classmethod
+    def _image_artifacts(cls, result: object) -> list[dict]:
         """Extract only platform-owned artifact identity and size metadata."""
         structured = getattr(result, "structured_content", None)
         if structured is None and isinstance(result, dict):
             structured = result.get("structured_content", result.get("structuredContent"))
         structured = cls._json_value(structured) or structured
         if not isinstance(structured, dict):
-            return None
+            return []
         records = structured.get("results")
         if not isinstance(records, list):
-            return None
+            return []
+        artifacts = []
         for record in records:
             if not isinstance(record, dict):
                 continue
@@ -890,8 +916,16 @@ class CodexRuntimeProvider(RuntimeProvider):
                 requested_size = record.get("requested_size")
                 if isinstance(requested_size, str) and re.fullmatch(r"\d{1,5}x\d{1,5}", requested_size):
                     artifact["requested_size"] = requested_size
-                return artifact
-        return None
+                for key in ("dimension_match", "brand_logo_applied"):
+                    if type(record.get(key)) is bool:
+                        artifact[key] = record[key]
+                if isinstance(record.get("purpose"), str):
+                    artifact["purpose"] = record["purpose"][:120]
+                original = record.get("original_storage_key")
+                if isinstance(original, str) and original.startswith("generated/") and "\\" not in original and all(part not in {"", ".", ".."} for part in original.split("/")):
+                    artifact["original_storage_key"] = original
+                artifacts.append(artifact)
+        return artifacts
 
     @classmethod
     def _retrieval_observation(cls, arguments: object, result: object) -> dict:
