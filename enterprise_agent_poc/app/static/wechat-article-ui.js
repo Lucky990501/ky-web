@@ -4,9 +4,18 @@
 (() => {
   'use strict';
   const SLUG = 'wechat-official-account-writing';
-  const tags = new Set('article section div p span h1 h2 h3 h4 h5 h6 strong b em i u s blockquote ul ol li br hr table thead tbody tr th td pre code'.split(' '));
+  const tags = new Set('article section div p span h1 h2 h3 h4 h5 h6 strong b em i u s blockquote ul ol li br hr table thead tbody tr th td pre code figure figcaption img'.split(' '));
   const discard = new Set('script style iframe object embed link base meta form input button textarea select svg math template noscript'.split(' '));
-  const properties = new Set('color background-color font-size font-weight font-style text-align text-decoration line-height letter-spacing margin margin-top margin-bottom margin-left margin-right padding padding-top padding-bottom padding-left padding-right border border-top border-bottom border-left border-right border-radius border-color border-width border-style'.split(' '));
+  const properties = new Set('color background-color font-family font-size font-weight font-style text-align text-decoration line-height letter-spacing margin margin-top margin-bottom margin-left margin-right padding padding-top padding-bottom padding-left padding-right border border-top border-bottom border-left border-right border-radius border-color border-width border-style width max-width height overflow-wrap'.split(' '));
+  for (const edge of ['top', 'bottom', 'left', 'right']) for (const detail of ['color', 'width', 'style']) properties.add(`border-${edge}-${detail}`);
+  function safeArticleImage(value) {
+    try {
+      const url = new URL(value, location.origin);
+      if (url.origin !== location.origin || url.search || url.hash || url.username || url.password) return '';
+      if (!/^\/api\/v1\/(?:storage\/(?:generated|assets)\/[A-Za-z0-9_./-]+|chat-images\/[A-Za-z0-9_-]+)$/.test(url.pathname) || value.includes('..') || value.includes('%') || value.includes('\\')) return '';
+      return url.href;
+    } catch { return ''; }
+  }
   function sanitizeArticle(html) {
     if (typeof html !== 'string' || !html.trim() || html.length > 256 * 1024) throw new Error('ARTICLE_INVALID');
     // Template is inert: resources/scripts are never inserted into the host DOM.
@@ -21,6 +30,9 @@
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
         const tag = node.localName.toLowerCase();
         if (discard.has(tag)) { node.remove(); continue; }
+        const imageSource = tag === 'img' ? safeArticleImage(node.getAttribute('src') || '') : '';
+        const imageAlt = tag === 'img' ? redactPaths(node.getAttribute('alt') || '文章图片').slice(0, 200) : '';
+        if (tag === 'img' && !imageSource) { node.replaceWith(document.createTextNode('[图片来源未验证，请在公众号后台手动上传]')); continue; }
         clean(node, depth + 1);
         if (!tags.has(tag)) { node.replaceWith(...node.childNodes); continue; }
         const style = node.style;
@@ -29,25 +41,82 @@
           const value = style.getPropertyValue(property).trim();
           // No URLs, CSS functions/escapes, custom props, positioning or overlays.
           const plain = value.replace(/\b(?:rgb|rgba|hsl|hsla)\([\d.,%\s+-]+\)/g, 'color');
-          if (properties.has(property) && /^[#a-zA-Z0-9.,%\s+-]+$/.test(plain) && value.length < 100) safe.push(`${property}:${value}`);
+          const font = property === 'font-family' && value.split(',').every(item => /^(?:Optima-Regular|PingFangTC-light|PingFang SC|Microsoft YaHei|sans-serif|system-ui)$/i.test(item.trim().replace(/^['"]|['"]$/g, '')));
+          const bounded = ![...value.matchAll(/(-?\d+(?:\.\d+)?)px/g)].some(match => Number(match[1]) < 0 || Number(match[1]) > 64);
+          if (property === 'font-size' && (!/^\d+(?:\.\d+)?px$/.test(value) || parseFloat(value) < 12 || parseFloat(value) > 32)) continue;
+          if (property === 'line-height' && (!/^\d+(?:\.\d+)?$/.test(value) || Number(value) < 1.4 || Number(value) > 2.4)) continue;
+          if (property === 'font-weight' && !/^(?:normal|bold|[1-9]00)$/.test(value)) continue;
+          if (property === 'letter-spacing' && (!/^\d+(?:\.\d+)?px$/.test(value) || parseFloat(value) > 3)) continue;
+          if (/^(?:margin|padding|border)/.test(property) && [...value.matchAll(/(-?\d+(?:\.\d+)?)(?:px|em|rem|%)/g)].some(match => Number(match[1]) < 0 || Number(match[1]) > 64)) continue;
+          if (properties.has(property) && (font || property !== 'font-family' && /^[#a-zA-Z0-9.,%\s+-]+$/.test(plain)) && value.length < 180 && bounded) safe.push(`${property}:${value}`);
         }
         for (const attribute of [...node.attributes]) node.removeAttribute(attribute.name);
         if (safe.length) node.setAttribute('style', safe.join(';'));
+        if (imageSource) { node.setAttribute('src', imageSource); node.setAttribute('alt', imageAlt); node.setAttribute('referrerpolicy', 'no-referrer'); }
       }
     };
     clean(template.content);
     return template.innerHTML;
   }
-  function previewDocument(html) {
+  function previewDocument(html, previewImages) {
     const safe = sanitizeArticle(html);
-    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'"><style>html{overflow-wrap:anywhere}body{box-sizing:border-box;max-width:680px;margin:0 auto;padding:24px 20px;color:#25334b;font:16px/1.8 system-ui,sans-serif}*{box-sizing:border-box;max-width:100%}h1,h2,h3{line-height:1.45}h1{font-size:24px}h2{font-size:20px}p{margin:0 0 16px}blockquote{margin:16px 0;padding:8px 16px;border-left:3px solid #315fe5;background:#f5f8ff}table{display:block;overflow:auto;border-collapse:collapse}td,th{padding:8px;border:1px solid #dce5f7}pre{white-space:pre-wrap}a{color:inherit}</style></head><body>${safe}</body></html>`;
+    const parsed = document.createElement('template'); parsed.innerHTML = safe;
+    if (previewImages) for (const node of parsed.content.querySelectorAll('img')) {
+      const raster = previewImages.get(node.getAttribute('src'));
+      if (typeof raster === 'string' && raster.length <= 14 * 1024 * 1024 && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(raster)) node.setAttribute('src', raster);
+      else node.replaceWith(document.createTextNode('[图片暂不可用，请在公众号后台手动上传]'));
+    }
+    const images = [...new Set([...parsed.content.querySelectorAll('img')].map(node => node.getAttribute('src')))];
+    const imagePolicy = images.length ? previewImages ? 'data:' : images.join(' ') : "'none'";
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src ${imagePolicy}; base-uri 'none'; form-action 'none'"><style>html{overflow-wrap:anywhere}body{box-sizing:border-box;max-width:680px;margin:0 auto;padding:24px 20px;color:#3E3E3E;font:16px/1.6 system-ui,sans-serif}*{box-sizing:border-box;max-width:100%}img{height:auto}table{display:block;overflow:auto;border-collapse:collapse}pre{white-space:pre-wrap}a{color:inherit}</style></head><body>${parsed.innerHTML}</body></html>`;
+  }
+  async function mountSafePreview(frame, result, isCurrent) {
+    const parsed = document.createElement('template'); parsed.innerHTML = sanitizeArticle(result.html);
+    const sources = [...new Set([...parsed.content.querySelectorAll('img')].map(node => node.getAttribute('src')))];
+    if (!sources.length) { frame.srcdoc = previewDocument(result.html); return; }
+    // Opaque sandbox cannot use SameSite=Lax cookies. Read authorized bytes in
+    // the host and decode/re-encode raster pixels for opaque preview only.
+    // Incoming HTML still cannot contain data/blob/file or arbitrary URLs;
+    // exported/clipboard HTML retains the authorized server address, not bytes.
+    const images = new Map(), controller = new AbortController();
+    frame.srcdoc = previewDocument(result.html, images);
+    const current = () => frame.isConnected && isCurrent();
+    const cleanup = () => { controller.abort(); clearTimeout(timer); observer.disconnect(); images.clear(); };
+    const observer = new MutationObserver(() => { if (!current()) cleanup(); });
+    observer.observe(document.documentElement, {childList: true, subtree: true});
+    const timer = setTimeout(() => controller.abort(), 10000);
+    for (const url of sources.slice(0, 12)) {
+      if (!current()) { cleanup(); return; }
+      try {
+        if (safeArticleImage(url) !== url) continue;
+        const response = await fetch(url, {method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal});
+        const type = (response.headers.get('content-type') || '').split(';')[0].trim();
+        if (!response.ok || !['image/png', 'image/jpeg', 'image/webp'].includes(type) || Number(response.headers.get('content-length')) > 10 * 1024 * 1024) { await response.body?.cancel(); continue; }
+        const reader = response.body.getReader(), parts = []; let size = 0;
+        while (true) { const {done, value} = await reader.read(); if (done) break; size += value.byteLength; if (size > 10 * 1024 * 1024) { await reader.cancel(); throw Error('IMAGE_TOO_LARGE'); } parts.push(value); }
+        if (!current()) { cleanup(); return; }
+        if (size) {
+          const bitmap = await createImageBitmap(new Blob(parts, {type}));
+          try {
+            if (bitmap.width > 4096 || bitmap.height > 4096 || bitmap.width * bitmap.height > 16777216) throw Error('IMAGE_TOO_LARGE');
+            if (!current()) { cleanup(); return; }
+            const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+            canvas.getContext('2d').drawImage(bitmap, 0, 0);
+            const raster = canvas.toDataURL('image/png'); canvas.width = canvas.height = 0;
+            if (raster.length <= 14 * 1024 * 1024) images.set(url, raster);
+          } finally { bitmap.close(); }
+        }
+      } catch { /* Explicit unavailable image placeholder, never fake success. */ }
+    }
+    clearTimeout(timer);
+    if (current()) frame.srcdoc = previewDocument(result.html, images); else cleanup();
   }
   function articleHtml(content, markdown) {
     const fenced = /^\s*```html\s*\n([\s\S]*?)\n```\s*$/i.exec(content);
     return fenced ? fenced[1] : /^\s*</.test(content) ? content : markdown(content);
   }
   const inlineDefaults = Object.freeze({
-    section: 'margin:0;padding:0;max-width:100%;overflow-wrap:anywhere;color:#25334b;font-size:16px;line-height:1.8;text-align:left',
+    section: 'margin:0;padding:0;max-width:100%;overflow-wrap:anywhere;color:#3E3E3E;font-family:Optima-Regular,PingFangTC-light,PingFang SC,Microsoft YaHei,sans-serif;font-size:16px;line-height:1.6;letter-spacing:0.544px;text-align:left',
     article: 'margin:0;padding:0', div: 'margin:0;padding:0',
     h1: 'font-size:24px;font-weight:700;line-height:1.5;margin:24px 0 16px',
     h2: 'font-size:20px;font-weight:700;line-height:1.5;margin:24px 0 12px',
@@ -55,10 +124,11 @@
     h4: 'font-size:16px;font-weight:700;line-height:1.6;margin:16px 0 8px',
     h5: 'font-size:16px;font-weight:700;line-height:1.6;margin:16px 0 8px',
     h6: 'font-size:16px;font-weight:700;line-height:1.6;margin:16px 0 8px',
-    p: 'font-size:16px;line-height:1.8;margin:0 0 16px',
+    p: 'font-size:16px;line-height:1.6;margin:0 0 18px',
     strong: 'font-weight:700', b: 'font-weight:700', em: 'font-style:italic', i: 'font-style:italic',
     u: 'text-decoration:underline', s: 'text-decoration:line-through',
-    blockquote: 'margin:16px 0;padding:8px 16px;border-left:3px solid #315fe5;background-color:#f5f8ff;line-height:1.8',
+    blockquote: 'margin:28px 0;padding:18px 20px;border-left:4px solid #FFCA00;background-color:#fffdf4;line-height:1.6',
+    figure: 'margin:28px 0', figcaption: 'font-size:12px;color:#A0A0A0;line-height:1.6;text-align:center', img: 'width:100%;height:auto',
     ul: 'margin:12px 0 16px;padding-left:24px;line-height:1.8',
     ol: 'margin:12px 0 16px;padding-left:24px;line-height:1.8', li: 'margin:0 0 8px',
     table: 'width:100%;border-collapse:collapse;font-size:14px;line-height:1.6',
@@ -118,13 +188,7 @@
       node.textContent = value + original.slice(cursor);
     }
     for (const node of safe.content.querySelectorAll('*')) {
-      const previous = node.style, kept = [];
-      for (const property of ['color', 'background-color', 'font-weight', 'font-style', 'text-align', 'text-decoration']) {
-        const value = previous.getPropertyValue(property); if (value) kept.push(`${property}:${value}`);
-      }
-      const size = previous.fontSize, height = previous.lineHeight;
-      if (/^\d+(?:\.\d+)?px$/.test(size) && parseFloat(size) >= 12 && parseFloat(size) <= 32) kept.push(`font-size:${size}`);
-      if (/^\d+(?:\.\d+)?$/.test(height) && Number(height) >= 1.4 && Number(height) <= 2.4) kept.push(`line-height:${height}`);
+      const previous = node.style, kept = [...previous].map(property => `${property}:${previous.getPropertyValue(property)}`);
       node.removeAttribute('style');
       const style = [inlineDefaults[node.localName], ...kept].filter(Boolean).join(';');
       if (style) node.setAttribute('style', style);
@@ -193,8 +257,8 @@
         const frame = document.createElement('iframe'); frame.className = 'wechat-inline-article';
         frame.title = '公众号文章正文'; frame.setAttribute('sandbox', ''); frame.setAttribute('referrerpolicy', 'no-referrer');
         frame.style.height = `${Math.min(640, Math.max(160, 48 + result.text.split('\n').length * 28 + Math.ceil(result.text.length / 32) * 12))}px`;
-        frame.srcdoc = previewDocument(result.html);
         body.replaceChildren(frame); body.classList.remove('chat-message-content-markdown'); body.classList.add('wechat-inline-message-content');
+        mountSafePreview(frame, result, current).catch(() => { if (current()) frame.srcdoc = previewDocument('<p>文章预览暂不可用，请重试。</p>'); });
         // The manual controls already provide safe rich/source/plain copying.
         // Keep regeneration, but remove the old raw model-source copy action.
         article.querySelector('[data-copy-response]')?.remove();
@@ -236,8 +300,8 @@
       if (!current() || document.querySelector('#wechat-article-preview')) return;
       const backdrop = document.createElement('div'); backdrop.className = 'dialog-backdrop'; backdrop.id = 'wechat-article-preview';
       backdrop.innerHTML = '<section class="wechat-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="wechat-preview-title"><button type="button" class="dialog-close" aria-label="关闭文章预览">×</button><header><h2 id="wechat-preview-title">文章排版预览</h2><p>安全正文预览，不是微信草稿。粘贴后请核对样式；图片需手动上传。</p></header><iframe title="公众号文章安全预览" sandbox="" referrerpolicy="no-referrer"></iframe><footer><button type="button" class="button secondary" data-preview-close>返回文章</button></footer></section>';
-      backdrop.querySelector('iframe').srcdoc = previewDocument(result.html);
       main.closest('#app').append(backdrop);
+      mountSafePreview(backdrop.querySelector('iframe'), result, () => current() && backdrop.isConnected).catch(() => { if (current() && backdrop.isConnected) backdrop.querySelector('iframe').srcdoc = previewDocument('<p>文章预览暂不可用，请重试。</p>'); });
       const close = modal(backdrop, preview); backdrop.querySelector('[data-preview-close]').onclick = close;
     };
     return Object.freeze({result});

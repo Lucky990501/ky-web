@@ -28,6 +28,31 @@ test('generic direct refresh routes request dynamic metadata and do not render C
   assert.ok(!h.document.main.innerHTML.includes('活动策划'));
 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
+test('gallery prefers ordered generations without scalar duplication and rejects other Task artifacts',()=>{
+  const h=harness(),images=[1,2,3].map(id=>({id:`g-${id}`,task_id:'t',content_url:`/api/v1/storage/generated/fixture/${id}.png`,purpose:id===1?'正面（封面+封底）':'反面（内页三折）',width:1536,height:1024}));
+  h.run(`result=${JSON.stringify({generations:images,generation:images[0]})}`);
+  const html=h.run('messageGalleryHtml(result)');assert.equal((html.match(/data-result-image=/g)||[]).length,3);assert.ok(html.indexOf('g-1')<html.indexOf('g-2'));assert.ok(html.includes('1536 × 1024px · 3:2'));assert.ok(html.includes('正面（封面+封底）'));assert.equal(h.run("resultGenerations(result,'other').length"),0);
+  assert.equal(h.run("resultGenerations({generations:[],generation:result.generation}).length"),0);
+});
+test('partial delivery warning is authoritative and never invents failed purposes',()=>{
+  const h=harness();const html=h.run("imageDeliveryHtml({status:'partial',generated:1,failed:1})");assert.ok(html.includes('已完成 1 张，失败 1 张'));assert.ok(html.includes('不会自动重试'));assert.ok(!html.includes('反面'));
+});
+test('result URL validation rejects scripts, external hosts, traversal and internal files',()=>{
+  const h=harness();for(const url of ['javascript:alert(1)','https://evil.invalid/a.png','/opt/a.png','/api/v1/storage/generated/%2e%2e/a','/api/v1/storage/generated/../a'])assert.equal(h.run(`authorizedImageUrl({content_url:${JSON.stringify(url)}})`),'');
+});
+test('display and response-copy redact known paths without deriving gallery from model URLs',()=>{
+  const h=harness();const html=h.run("messageHtml({role:'assistant',content:'正面 /api/v1/storage/generated/t/a.png；业务 https://example.com/business'},'')");assert.ok(!html.includes('/api/v1/storage/generated/'));assert.ok(html.includes('https://example.com/business'));assert.ok(!html.includes('data-result-image'));
+});
+test('reference staging is bounded and submit contract remains single-image fail closed',()=>{
+  assert.ok(source.includes('attachment.items.length+files.length>5'));assert.ok(source.includes("this.items.length>1?'blocked'"));assert.ok(source.includes('revision!==item.revision'));assert.ok(source.includes('principalIsCurrent(owner)'));assert.ok(source.includes('用途与顺序仅用于准备'));assert.ok(!source.includes('attachments.slice(0,1)'));
+});
+test('illustration briefs accept only formal execution contract and supported ratios',()=>{
+  const h=harness();h.run("brief={purpose:'会场示意图',prompt:'可信方案',aspect_ratio:'16:9',execution:'requires_separate_image_agent_task_and_budget'}");assert.equal(h.run('validIllustrationBriefs([brief]).length'),1);assert.equal(h.run("validIllustrationBriefs([{...brief,execution:'auto'}]).length"),0);assert.equal(h.run("validIllustrationBriefs([{...brief,aspect_ratio:'0:0'}]).length"),0);
+});
+test('illustration entry reuses one existing run flow after explicit confirmation, no batch API',()=>{
+  const component=source.slice(source.indexOf('function mountIllustrationBriefs'),source.indexOf('function mountWechatArticle'));
+  assert.ok(component.includes('确认创建 1 个生图任务'));assert.ok(component.includes('submitted||!current()'));assert.ok(component.includes("submitAgentTaskV2({preventDefault(){}},'image-agent',target)"));assert.ok(component.includes('data.credit_balance<agent.credit_cost'));assert.ok(!component.includes("method:'POST'"));
+});
 test('workspace advertises public Productized slug without changing Legacy references',async()=>{
   const h=harness('/workspace');const pending=h.run("render('workspace')");
   h.respond('/api/v1/workspace',{agents:[
@@ -253,7 +278,7 @@ test('P1 customer agent UX keeps shared greeting for image and copywriting, plus
   assert.ok(message.includes('data-regenerate'));
   assert.ok(message.includes('参考资料'));
   assert.ok(message.includes('品牌规范.pdf'));
-  const imageMessage=h.run("messageHtml({role:'assistant',content:'图片已生成',created_at:'2026-09-15T00:00:00',generation:{storage_key:'tenant-a/image.png'}})");
+  const imageMessage=h.run("messageHtml({role:'assistant',content:'图片已生成',created_at:'2026-09-15T00:00:00',generation:{id:'image-1',task_id:'task-1',storage_key:'tenant-a/image.png'}})");
   assert.ok(imageMessage.includes('message-generation-actions'));
   assert.ok(imageMessage.includes('data-open-message-generation'));
   const userMessage=h.run("messageHtml({role:'user',content:'请调整方案',created_at:'2026-09-15T00:00:00'})");
@@ -400,7 +425,7 @@ test('chat reference image composer is image-only and keeps one compact accessib
   assert.ok(css.includes('min-width:44px;min-height:44px'));
 });
 
-test('user history renders only the explicitly attached private image and prompt',()=>{
+test('user history renders all explicitly attached private images in contract order',()=>{
   const h=harness('/agents/image');
   const attachments=[{type:'image',id:'first',content_url:'/api/v1/chat-images/first',filename:'参考图.png'},
     {type:'image',id:'second',content_url:'/api/v1/chat-images/second',filename:'不应展示.png'}];
@@ -408,7 +433,7 @@ test('user history renders only the explicitly attached private image and prompt
   const html=h.run('messageHtml(historyMessage)');
   assert.ok(html.includes('/api/v1/chat-images/first'));
   assert.ok(html.includes('把背景换成未来都市'));
-  assert.ok(!html.includes('/api/v1/chat-images/second'));
+  assert.ok(html.indexOf('/api/v1/chat-images/first')<html.indexOf('/api/v1/chat-images/second'));
   assert.ok(!html.includes('storage_key'));
   const plain=h.run("messageHtml({role:'user',content:'普通文字消息'})");
   assert.ok(plain.includes('普通文字消息'));
@@ -421,7 +446,7 @@ test('chat image send uses only a ready current attachment and never changes pla
   assert.ok(source.includes("if(attachment?.record)attachment.consume()"));
   assert.ok(source.includes("if(attachment?.record){attachment.locked=true;attachment.render();}"));
   assert.ok(source.includes("attachment.status!=='idle'&&attachment.status!=='ready'"));
-  assert.ok(source.includes("attachment.consume=()=>{attachment.locked=false;clear(false);}"));
+  assert.ok(source.includes("attachment.items=[];render();"));
   assert.ok(source.includes("apiForm('/api/v1/chat-images',form)"));
   assert.ok(source.includes("api(`/api/v1/chat-images/${encodeURIComponent(record.id)}`,{method:'DELETE'})"));
 });
@@ -464,7 +489,7 @@ test('SSE and polling terminal completion both refresh stale project status',asy
 test('image completion reuses the result card only for the matching real generation task',()=>{
   for(const generationTaskId of ['image-task','unrelated-task']){
     const h=harness('/agents/image');
-    h.run(`liveImageState=createStreamingState();beginConversationRun(liveImageState,{taskId:'image-task',agentId:'image-agent',phase:ConversationRunPhase.RUNNING});liveImageNode={innerHTML:'',dataset:{},inserted:'',insertAdjacentHTML(position,html){this.inserted+=html;},removeAttribute(){},classList:{remove(){}},querySelector(){return null}};finishStreamTask(liveImageNode,liveImageState,{status:'completed',final_response:'图片已生成',generation:{task_id:'${generationTaskId}',storage_key:'generated/tenant-test/live.png'}},'image-agent',document.main,'需求')`);
+    h.run(`liveImageState=createStreamingState();beginConversationRun(liveImageState,{taskId:'image-task',agentId:'image-agent',phase:ConversationRunPhase.RUNNING});liveImageNode={innerHTML:'',dataset:{},inserted:'',insertAdjacentHTML(position,html){this.inserted+=html;},removeAttribute(){},classList:{remove(){}},querySelector(){return null}};finishStreamTask(liveImageNode,liveImageState,{status:'completed',final_response:'图片已生成',generation:{id:'generation-1',task_id:'${generationTaskId}',storage_key:'generated/tenant-test/live.png'}},'image-agent',document.main,'需求')`);
     assert.equal(h.run('liveImageNode.inserted.includes("message-generation")'),generationTaskId==='image-task');
     if(generationTaskId==='image-task')assert.ok(h.run('liveImageNode.inserted').includes('data-open-message-generation'));
   }

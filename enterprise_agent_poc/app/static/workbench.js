@@ -152,6 +152,7 @@ function conversationViewIsCurrent(main,state){
   return !state?.detached&&principalIsCurrent(state?.owner)&&main?.isConnected!==false&&(!state?.main||document.querySelector('#main')===state.main);
 }
 function detachConversationView(main){
+  main?._chatImage?.dispose?.();
   const state=main?._submittingState||main?.querySelector?.('#task-status')?._streamState;
   if(!state)return;
   state.detached=true;clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);
@@ -327,44 +328,55 @@ function mountOrphanTaskHistory(main,slot,options={}){
   load(true,saved?.pages||1);
   return {get agentId(){return state.agentId;},setAgent(agentId){if(options.agentId)return;state.agentId=agentId;savePointer();load(true);}};
 }
-const chatImageComposerFields=()=>`<div id="chat-image-attachment" class="chat-image-attachment" aria-live="polite"></div><input id="chat-image-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" hidden>`;
+const chatImageComposerFields=()=>`<div id="chat-image-attachment" class="chat-image-attachment" aria-live="polite"></div><input id="chat-image-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple hidden>`;
 const chatImageComposerButton=()=>`<button class="chat-image-add" id="chat-image-add" type="button" aria-label="添加参考图片" title="添加参考图片">${icon('plus',18)}</button>`;
 function bindChatImageComposer(main){
   const picker=main.querySelector('#chat-image-input'),slot=main.querySelector('#chat-image-attachment'),composer=main.querySelector('#composer');
   if(!picker||!slot||!composer)return;
-  const attachment={status:'idle',record:null,file:null,error:'',previewUrl:null,revision:0,locked:false};main._chatImage=attachment;
-  const releasePreview=()=>{if(attachment.previewUrl)URL.revokeObjectURL(attachment.previewUrl);attachment.previewUrl=null;};
-  const removeUploaded=record=>{if(record?.id)api(`/api/v1/chat-images/${encodeURIComponent(record.id)}`,{method:'DELETE'}).catch(()=>{});};
+  // UI staging supports five independent files. The frozen server request
+  // still accepts ONE: never silently truncate or invent a capability flag.
+  const owner=main._conversationContext?.owner||principalSnapshot();
+  const attachment={items:[],locked:false,error:'',get status(){return this.items.some(item=>item.status==='uploading')?'uploading':this.items.some(item=>item.status==='failed')?'failed':this.items.length>1?'blocked':this.items.length?'ready':'idle';},get record(){return this.items.length===1&&this.items[0].status==='ready'?this.items[0].record:null;}};main._chatImage=attachment;
+  let nextId=0,replacing=null;
+  const current=()=>main._chatImage===attachment&&main.isConnected!==false&&principalIsCurrent(owner);
+  const releasePreview=item=>{if(item.previewUrl)URL.revokeObjectURL(item.previewUrl);item.previewUrl=null;};
+  const removeUploaded=record=>{if(record?.id&&principalIsCurrent(owner))api(`/api/v1/chat-images/${encodeURIComponent(record.id)}`,{method:'DELETE'}).catch(()=>{});};
+  const remove=item=>{item.revision++;removeUploaded(item.record);releasePreview(item);attachment.items=attachment.items.filter(row=>row!==item);render();};
   const render=()=>{
-    if(main._chatImage!==attachment||main.querySelector('#chat-image-attachment')!==slot)return;
-    const {status,record,file,error,previewUrl}=attachment;
-    slot.innerHTML=status==='idle'?'':`<div class="chat-image-chip ${status==='failed'?'failed':''}">${previewUrl||record?.content_url?`<img src="${escapeHtml(previewUrl||record.content_url)}" alt="待发送的参考图片">`:icon('image',24)}<span><b>${escapeHtml(file?.name||record?.filename||'参考图片')}</b><small>${status==='uploading'?'正在上传…':status==='ready'?'已就绪':escapeHtml(error||'上传失败')}</small></span>${status==='failed'?'<button type="button" data-chat-image-retry aria-label="重试上传图片">重试</button>':''}<button type="button" data-chat-image-remove aria-label="删除参考图片">${icon('x',16)}</button></div>`;
-    const send=main.querySelector('#composer-submit');if(send&&send.type==='submit')send.disabled=status==='uploading'||status==='failed';
-    slot.querySelectorAll('button').forEach(button=>{button.disabled=attachment.locked;});
-    slot.querySelector('[data-chat-image-remove]')?.addEventListener('click',()=>clear(true));
-    slot.querySelector('[data-chat-image-retry]')?.addEventListener('click',()=>attachment.file&&selectFile(attachment.file));
+    if(!current()||main.querySelector('#chat-image-attachment')!==slot)return;
+slot.innerHTML=attachment.items.map((item,index)=>`<div class="chat-image-chip ${item.status==='failed'?'failed':''}" data-reference-key="${item.key}">${item.previewUrl||item.record?`<img src="${escapeHtml(item.previewUrl||authorizedImageUrl(item.record))}" alt="参考图片 ${index+1}">`:icon('image',24)}<span><b>${escapeHtml(item.file?.name||'参考图片')}</b><small>${item.status==='uploading'?'正在上传…':item.status==='ready'?'已上传':escapeHtml(item.error||'上传失败')}</small><label>用途（准备，尚未提交）<select data-reference-role><option value="reference">参考风格</option><option value="front">正面参考</option><option value="back">反面参考</option><option value="subject">主体参考</option></select></label></span><div class="reference-actions"><button type="button" data-reference-up aria-label="上移参考图片 ${index+1}" ${index===0?'disabled':''}>↑</button><button type="button" data-reference-down aria-label="下移参考图片 ${index+1}" ${index===attachment.items.length-1?'disabled':''}>↓</button><button type="button" data-reference-replace>替换</button>${item.status==='failed'?'<button type="button" data-chat-image-retry>重试</button>':''}<button type="button" data-chat-image-remove aria-label="删除参考图片 ${index+1}">${icon('x',16)}</button></div></div>`).join('')+(attachment.items.length||attachment.error?`<p class="reference-limit" role="status">${attachment.error?escapeHtml(attachment.error)+' ':''}可准备 1–5 张；当前服务端仅允许提交 1 张，2–5 张提交等待正式多参考图合同。用途与顺序仅用于准备，不会冒充后端生效。</p>`:'');
+    const send=main.querySelector('#composer-submit');if(send&&send.type==='submit')send.disabled=!['idle','ready'].includes(attachment.status);
+    slot.querySelectorAll('[data-reference-key]').forEach(row=>{
+      const item=attachment.items.find(item=>String(item.key)===row.dataset.referenceKey),index=attachment.items.indexOf(item);
+      row.querySelector('[data-reference-role]').value=item.role;row.querySelector('[data-reference-role]').onchange=event=>{if(!attachment.locked&&current())item.role=event.target.value;};
+      row.querySelector('[data-chat-image-remove]').onclick=()=>{if(!attachment.locked&&current())remove(item);};
+      row.querySelector('[data-reference-replace]').onclick=()=>{if(attachment.locked)return;replacing=item;picker.multiple=false;picker.click();};
+      for(const [selector,step] of [['[data-reference-up]',-1],['[data-reference-down]',1]])row.querySelector(selector).onclick=()=>{if(attachment.locked||!current())return;const other=index+step;if(other<0||other>=attachment.items.length)return;[attachment.items[index],attachment.items[other]]=[attachment.items[other],attachment.items[index]];render();};
+      row.querySelector('[data-chat-image-retry]')?.addEventListener('click',()=>upload(item,item.file));
+    });
+    slot.querySelectorAll('button,select').forEach(control=>{if(attachment.locked)control.disabled=true;});
     refreshIcons();
   };
-  const clear=deleteUpload=>{attachment.revision++;if(deleteUpload)removeUploaded(attachment.record);releasePreview();Object.assign(attachment,{status:'idle',record:null,file:null,error:''});picker.value='';render();};
-  const selectFile=async file=>{
-    if(!file||attachment.locked||main.querySelector('#task-status'))return;
-    const oldRecord=attachment.record;attachment.revision++;const revision=attachment.revision;removeUploaded(oldRecord);releasePreview();
-    Object.assign(attachment,{file,record:null,error:'',status:'uploading'});
-    if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>10*1024*1024||!file.size){attachment.status='failed';attachment.error='仅支持不超过 10MB 的 JPEG、PNG 或 WebP 图片。';render();return;}
-    attachment.previewUrl=URL.createObjectURL(file);render();
+  const upload=async(item,file)=>{
+    if(!file||attachment.locked||!current()||main.querySelector('#task-status'))return;
+    const revision=++item.revision,oldRecord=item.record;releasePreview(item);Object.assign(item,{file,error:'',status:'uploading'});
+    if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>10*1024*1024||!file.size){item.status='failed';item.error='仅支持不超过 10MB 的 JPEG、PNG 或 WebP 图片。';render();return;}
+    item.previewUrl=URL.createObjectURL(file);render();
     const form=new FormData();form.append('file',file,file.name||'参考图片');
     try{
       const record=await apiForm('/api/v1/chat-images',form);
-      if(revision!==attachment.revision||main._chatImage!==attachment){removeUploaded(record);return;}
-      attachment.record=record;attachment.status='ready';attachment.error='';releasePreview();render();
-    }catch(error){if(revision!==attachment.revision)return;attachment.status='failed';attachment.error=error.message||'上传失败，请重试。';render();}
+      if(revision!==item.revision||!current()||!attachment.items.includes(item)){removeUploaded(record);return;}
+      if(record?.type!=='image'||!record.id||!authorizedImageUrl(record)||record.status&&record.status!=='ready')throw Error('附件失效或响应不符合正式图片合同，请重新上传。');
+      removeUploaded(oldRecord);item.record=record;item.status='ready';item.error='';releasePreview(item);render();
+    }catch(error){if(revision!==item.revision||!current())return;item.status='failed';item.error=error.message||'上传失败，请重试。';releasePreview(item);render();}
   };
-  main.querySelector('#chat-image-add').onclick=()=>picker.click();
-  picker.onchange=()=>{if(picker.files?.length)selectFile(picker.files[0]);picker.value='';};
+  const add=files=>{if(attachment.locked||!current()||main.querySelector('#task-status'))return;if(attachment.items.length+files.length>5){attachment.error='最多准备 5 张参考图片；本次选择未加入。';render();return;}attachment.error='';for(const file of files){const item={key:++nextId,role:'reference',revision:0,record:null};attachment.items.push(item);upload(item,file);}};
+  main.querySelector('#chat-image-add').onclick=()=>{replacing=null;picker.multiple=true;picker.click();};
+  picker.onchange=()=>{const files=[...picker.files||[]];if(replacing&&files[0])upload(replacing,files[0]);else add(files);replacing=null;picker.multiple=true;picker.value='';};
   composer.addEventListener('dragover',event=>{if([...event.dataTransfer?.types||[]].includes('Files'))event.preventDefault();});
-  composer.addEventListener('drop',event=>{const files=[...event.dataTransfer?.files||[]];if(!files.length)return;event.preventDefault();if(files.length>1){attachment.status='failed';attachment.error='每次最多上传一张参考图片。';render();return;}selectFile(files[0]);});
-  composer.addEventListener('paste',event=>{const files=[...event.clipboardData?.files||[]];if(!files.length)return;event.preventDefault();if(files.length>1){attachment.status='failed';attachment.error='每次最多上传一张参考图片。';render();return;}selectFile(files[0]);});
-  attachment.consume=()=>{attachment.locked=false;clear(false);};
+  for(const kind of ['drop','paste'])composer.addEventListener(kind,event=>{const files=[...(kind==='drop'?event.dataTransfer:event.clipboardData)?.files||[]];if(files.length){event.preventDefault();add(files);}});
+  attachment.consume=()=>{attachment.locked=false;for(const item of attachment.items){item.revision++;releasePreview(item);}attachment.items=[];render();};
+  attachment.dispose=()=>{for(const item of attachment.items){item.revision++;releasePreview(item);}};
   attachment.render=render;
   render();
 }
@@ -392,12 +404,28 @@ const agentGreetingHtml=agent=>{
   return `<div class="agent-greeting"><span class="agent-greeting-icon" aria-hidden="true">${icon(agent.icon||'bot',40)}</span><div class="agent-greeting-copy"><h1>你好，我是${escapeHtml(agent.name||'智能体')}</h1><p>${escapeHtml(agent.description||'')}</p><span class="agent-greeting-category">${escapeHtml(agentCategoryLabel(agent.category))}</span></div></div>`;
 };
 const taskReferencesHtml = references => {const knowledge=references?.knowledge||[];return knowledge.length?`<section class="result-references"><b>${icon('book-open',16)}参考资料</b><ul>${knowledge.map(item=>`<li>${escapeHtml(item.name)}</li>`).join('')}</ul></section>`:'';};
+const authorizedImageUrl = item => {
+  const raw=storageUrl(item);if(typeof raw!=='string'||!raw.startsWith('/api/v1/'))return '';
+  if(!/^\/api\/v1\/(?:storage|chat-images)\/[A-Za-z0-9_./%-]+$/.test(raw)||/%(?:2e|2f|5c|25)/i.test(raw)||raw.includes('..'))return '';
+  return raw;
+};
+const resultGenerations = (result,taskId='') => {
+  const items=Array.isArray(result?.generations)?result.generations:result?.generation?[result.generation]:[];
+  const ids=new Set();return items.filter(item=>item?.id&&item.task_id&&(!taskId||item.task_id===taskId)&&(!item.tenant_id||item.tenant_id===me?.tenant_id)&&(!item.user_id||item.user_id===me?.user_id)&&authorizedImageUrl(item)&&!ids.has(item.id)&&ids.add(item.id));
+};
+const redactResultPaths = value => String(value||'').replace(/(?:(?:(?:https?:)?\/\/[^\s/<>"']+)?\/api\/v1\/storage\/generated\/|\/(?:opt|workspace|runtime-data|var|home|tmp|srv)\/|\b(?:runtime-data|workspace)\/|file:[\\/]{2,3}|(?<![a-z0-9])[a-z]:[\\/])[^\s<>"'，。；、）)\]]*/gi,'[图片或文件请使用结果卡片]');
+const imageDeliveryHtml = delivery => delivery?.status==='partial'||Number(delivery?.failed)>0?`<p class="image-delivery-warning" role="status">部分图片未生成：已完成 ${Number.isInteger(delivery.generated)?delivery.generated:'部分'} 张，失败 ${Number.isInteger(delivery.failed)?delivery.failed:'部分'} 张。已完成的图片仍可查看和下载；不会自动重试。</p>`:'';
+const messageGalleryHtml = result => {
+  const items=resultGenerations(result);return `${imageDeliveryHtml(result?.image_delivery)}${items.length?`<section class="message-image-gallery" aria-label="已生成 ${items.length} 张图片">${items.map(messageGenerationHtml).join('')}</section>`:''}`;
+};
 const messageGenerationHtml = generation => {
   if(!generation)return '';
-  const url=escapeHtml(storageUrl(generation));
-  return `<section class="message-generation"><div class="message-generation-label">${icon('image',16)}已生成图片</div>${image(generation,'本次生成图片')}<div class="message-generation-actions"><button class="button secondary" type="button" data-open-message-generation="${url}">${icon('expand',15)}查看大图</button><a class="button secondary" href="${url}" download>${icon('download',15)}下载</a></div></section>`;
+  const raw=authorizedImageUrl(generation);if(!raw)return '';const url=escapeHtml(raw),purpose=redactResultPaths(generation.purpose||'已生成图片');
+  const w=generation.width,h=generation.height,known=Number.isInteger(w)&&w>0&&Number.isInteger(h)&&h>0;
+  const gcd=(a,b)=>b?gcd(b,a%b):a,divisor=known?gcd(w,h):1;
+  return `<section class="message-generation" data-result-image="${escapeHtml(generation.id||'')}"><div class="message-generation-label">${icon('image',16)}${escapeHtml(purpose)}</div>${image({...generation,content_url:raw},purpose)}<p class="image-result-dimensions">${known?`实际 ${w} × ${h}px · ${w/divisor}:${h/divisor}`:'实际尺寸未记录'}${generation.requested_size?` · 请求 ${escapeHtml(redactResultPaths(generation.requested_size))}`:''}</p><div class="message-generation-actions"><button class="button secondary" type="button" data-open-message-generation="${url}">${icon('expand',15)}查看大图</button><a class="button secondary" href="${url}" download>${icon('download',15)}下载</a></div></section>`;
 };
-const userMessageAttachmentHtml=attachments=>(attachments||[]).filter(item=>item?.type==='image'&&item.content_url).slice(0,1).map(item=>`<span class="chat-user-attachment"><img src="${escapeHtml(item.content_url)}" alt="${escapeHtml(item.filename||'参考图片')}" loading="lazy"><span>${escapeHtml(item.filename||'参考图片')}</span></span>`).join('');
+const userMessageAttachmentHtml=attachments=>(attachments||[]).filter(item=>item?.type==='image'&&authorizedImageUrl(item)).map(item=>`<span class="chat-user-attachment"><img src="${escapeHtml(authorizedImageUrl(item))}" alt="${escapeHtml(item.filename||'参考图片')}" loading="lazy"><span>${escapeHtml(item.filename||'参考图片')}</span></span>`).join('');
 const markdownInlineHtml = value => {
   let html=escapeHtml(String(value||''));
   html=html.replace(/`([^`]+)`/g,'<code>$1</code>');
@@ -477,11 +505,11 @@ function documentResultHtml(messageId){
   return `<section class="document-result document-result-ready" aria-label="Word 文档已生成"><p class="document-result-success"><i data-lucide="circle-check" width="18" height="18" aria-hidden="true"></i>已整理成正式 Word 活动方案。</p><a class="document-download-link" href="${url}" download="${filename}" data-document-download="${id}">下载《${filename.replace(/\.docx$/i,'')}》</a><a class="document-file-card" href="${url}" download="${filename}" data-document-download="${id}" aria-label="下载 Word 文档 ${filename}"><span class="document-file-icon" aria-hidden="true"><i data-lucide="file-text" width="22" height="22"></i></span><span class="document-file-details"><strong>${filename}</strong><small>Word 文档 · DOCX</small></span><i data-lucide="download" width="18" height="18" aria-hidden="true"></i></a>${entry.error?`<p class="document-action-error" role="alert">${escapeHtml(entry.error)}</p>`:''}</section>`;
 }
 const documentResultSlotHtml=messageId=>activityPlanDocuments.has(messageId)?`<div class="document-result-slot" data-document-result-slot="${escapeHtml(messageId)}">${documentResultHtml(messageId)}</div>`:'';
-const messageActionsHtml=(content,sourcePrompt='',messageId='')=>`${button('复制','copy','secondary',`data-copy-response="${escapeHtml(content)}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}${documentActionHtml(messageId)}`;
+const messageActionsHtml=(content,sourcePrompt='',messageId='')=>`${button('复制','copy','secondary',`data-copy-response="${escapeHtml(redactResultPaths(content))}"`)}${sourcePrompt?button('重新生成','refresh-cw','secondary',`data-regenerate="${escapeHtml(sourcePrompt)}"`):''}${documentActionHtml(messageId)}`;
 const messageHtml = (item, sourcePrompt='',agentId='') => {
   const isUser=item.role==='user';
   if(!isUser&&agentId==='campaign-agent')rememberActivityPlanResult(item.id,item.structured_result);
-  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}" ${!isUser&&item.id?`data-assistant-message-id="${escapeHtml(item.id)}"`:''}><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?`${userMessageAttachmentHtml(item.attachments)}${escapeHtml(item.content).replace(/\n/g,'<br>')}`:markdownHtml(item.content)}</div>${!isUser?`<div class="message-actions">${messageActionsHtml(item.content,sourcePrompt,agentId==='campaign-agent'?item.id:'')}</div>${agentId==='campaign-agent'?documentResultSlotHtml(item.id):''}${taskReferencesHtml(item.references)}`:''}${messageGenerationHtml(item.generation)}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
+  return `<article class="chat-message ${isUser?'chat-message-user':'chat-message-assistant'}" ${!isUser&&item.id?`data-assistant-message-id="${escapeHtml(item.id)}"`:''}><b>${isUser?'你':'智能体'}</b><div class="chat-message-content ${isUser?'chat-message-content-user':'chat-message-content-markdown'}">${isUser?`${userMessageAttachmentHtml(item.attachments)}${escapeHtml(item.content).replace(/\n/g,'<br>')}`:markdownHtml(redactResultPaths(item.content))}</div>${!isUser?`<div class="message-actions">${messageActionsHtml(item.content,sourcePrompt,agentId==='campaign-agent'?item.id:'')}</div>${agentId==='campaign-agent'?documentResultSlotHtml(item.id):''}${taskReferencesHtml(item.references)}${messageGalleryHtml(item)}`:''}<small>${escapeHtml(formatHistoryTime(item.created_at))}</small></article>`;
 };
 function syncActivityPlanAction(main,messageId){
   const article=[...(main?.querySelectorAll?.('[data-assistant-message-id]')||[])].find(node=>node.dataset.assistantMessageId===messageId);
@@ -593,8 +621,8 @@ const createStreamingState = () => ({lastSequence:0,pending:new Map(),text:'',di
 const streamingActionsHtml = (content,sourcePrompt='',messageId='') => messageActionsHtml(content,sourcePrompt,messageId);
 const streamingThinkingHtml = () => `<details class="thinking-summary" data-thinking open><summary><span data-thinking-title>正在思考 · 不足 1 秒</span></summary><ol data-thinking-list hidden></ol></details>`;
 const streamingMessageHtml = status => `<article class="chat-message chat-message-assistant streaming-message" id="task-status" aria-live="polite" aria-busy="true">${streamingThinkingHtml(status)}<div class="chat-message-content chat-message-content-markdown" data-stream-content><div data-stream-stable></div><div data-stream-active><p class="streaming-placeholder">${escapeHtml(status)}</p></div></div><div class="message-actions" data-stream-actions hidden></div><div data-stream-document-result></div><div class="streaming-status" data-stream-status>${icon('loader-circle',15)}<span>${escapeHtml(status)}</span></div></article>`;
-const streamingFinalContentHtml = (content,sourcePrompt='',messageId='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(content)}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt,messageId)}</div>${documentResultSlotHtml(messageId)}`;
-const streamingFailureHtml = (partial,message,diagnosticId='') => `<section class="task-failure streaming-failure" role="alert">${partial?`<div class="streaming-partial"><small>部分回复（未保存）</small><div class="chat-message-content chat-message-content-markdown">${markdownHtml(partial)}</div></div>`:''}<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>${partial?'生成已中断。你可以保留这段内容，或重新尝试。':'你可以把原需求放回输入框，检查后再次提交。'}</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button></section>`;
+const streamingFinalContentHtml = (content,sourcePrompt='',messageId='') => `<div class="chat-message-content chat-message-content-markdown" data-stream-content>${markdownHtml(redactResultPaths(content))}</div><div class="message-actions">${streamingActionsHtml(content,sourcePrompt,messageId)}</div>${documentResultSlotHtml(messageId)}`;
+const streamingFailureHtml = (partial,message,diagnosticId='') => `<section class="task-failure streaming-failure" role="alert">${partial?`<div class="streaming-partial"><small>部分回复（未保存）</small><div class="chat-message-content chat-message-content-markdown">${markdownHtml(redactResultPaths(partial))}</div></div>`:''}<b>${icon('circle-alert')} ${escapeHtml(message||customerErrorMessages.TASK_FAILED)}</b><p>${partial?'生成已中断。你可以保留这段内容，或重新尝试。':'你可以把原需求放回输入框，检查后再次提交。'}</p>${diagnosticId?`<small>诊断 ID：${escapeHtml(diagnosticId)}</small>`:''}<button class="button secondary" type="button">${icon('refresh-cw')}重新尝试</button></section>`;
 function acceptStreamingDelta(state,payload){
   const sequence=Number(payload?.sequence),text=typeof payload?.text==='string'?payload.text:'';
   if(!Number.isInteger(sequence)||sequence<1||!text||sequence<=state.lastSequence||state.pending.has(sequence))return false;
@@ -696,7 +724,7 @@ function updateComposerRunState(main,state){
   const readonly=main?._conversationContext&&(main._conversationContext.canRun===false||main._conversationContext.taskOnly);
   if(input)input.disabled=Boolean(readonly)||run.phase===ConversationRunPhase.SUBMITTING||stopping||draining;
   if(submit){
-    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining||(!running&&(readonly||['uploading','failed'].includes(main?._chatImage?.status)));
+    submit.disabled=run.phase===ConversationRunPhase.SUBMITTING||stopping||draining||(!running&&(readonly||['uploading','failed','blocked'].includes(main?._chatImage?.status)));
     submit.type=running||stopping?'button':'submit';
     submit.classList?.toggle?.('composer-stop-button',running||stopping);
     submit.setAttribute?.('aria-label',stopping?'正在停止生成':running?'停止生成':draining?'正在显示回复':'发送消息');
@@ -780,11 +808,11 @@ function renderStreamingActive(active,state,parts,activeKey){
 }
 function renderStreamingMessage(node,state){
   if(!node||state.error)return;
-  consumeStreamingVisualBuffer(state);watchStreamingFollow(state);const follow=syncStreamingFollow(state),content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null,parts=streamingMarkdownParts(state.displayText);
+  consumeStreamingVisualBuffer(state);watchStreamingFollow(state);const follow=syncStreamingFollow(state),content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null,parts=streamingMarkdownParts(redactResultPaths(state.displayText));
   const stable=content&&typeof content.querySelector==='function'?content.querySelector('[data-stream-stable]'):null,active=content&&typeof content.querySelector==='function'?content.querySelector('[data-stream-active]'):null;
   const activeKey=parts.active||!state.displayText?`${parts.active}\u0000${state.status}`:parts.active;
   if(stable&&active){if(state.renderedStable!==parts.stable){stable.innerHTML=parts.stable?markdownHtml(parts.stable):'';state.renderedStable=parts.stable;}renderStreamingActive(active,state,parts,activeKey);}
-  else if(content)content.innerHTML=streamingActiveHtml(state.displayText,state.status);
+  else if(content)content.innerHTML=streamingActiveHtml(redactResultPaths(state.displayText),state.status);
   if(status){status.hidden=Boolean(state.displayText);if(!status.hidden){const label=status.querySelector('span');if(label)label.textContent=state.status;}}
   renderThinkingSummary(node,state);state.lastRenderAt=Date.now();scrollStreamToBottom(follow,state);
 }
@@ -798,13 +826,14 @@ function completeStreamingMessage(node,state,sourcePrompt,main){
   if(!node)return;
   clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);state.completed=true;state.displayText=state.text;const follow=syncStreamingFollow(state),finalResponse=state.finalResponse??state.text,content=typeof node.querySelector==='function'?node.querySelector('[data-stream-content]'):null,actions=typeof node.querySelector==='function'?node.querySelector('[data-stream-actions]'):null,status=typeof node.querySelector==='function'?node.querySelector('[data-stream-status]'):null;
   if(content&&actions){
-    content.querySelector?.('[data-stream-caret]')?.remove?.();content.innerHTML=markdownHtml(finalResponse);
+    content.querySelector?.('[data-stream-caret]')?.remove?.();content.innerHTML=markdownHtml(redactResultPaths(finalResponse));
     if(status)status.hidden=true;actions.hidden=false;actions.innerHTML=streamingActionsHtml(finalResponse,sourcePrompt,state.assistantMessageId);
     const result=node.querySelector?.('[data-stream-document-result]');if(result)result.innerHTML=documentResultSlotHtml(state.assistantMessageId);
   }else node.innerHTML=streamingFinalContentHtml(finalResponse,sourcePrompt,state.assistantMessageId);
   if(state.assistantMessageId&&node.dataset)node.dataset.assistantMessageId=state.assistantMessageId;
   mountWechatArticle(main,node,finalResponse,state.assistantMessageId);
-  if(state.generation&&!node.querySelector?.('.message-generation'))node.insertAdjacentHTML?.('beforeend',messageGenerationHtml(state.generation));
+  if(!node.querySelector?.('.message-image-gallery'))node.insertAdjacentHTML?.('beforeend',messageGalleryHtml({generations:state.generations||[],image_delivery:state.imageDelivery}));
+  mountIllustrationBriefs(main,node,state.illustrationBriefs,state.assistantMessageId);
   node.removeAttribute('aria-busy');node.removeAttribute('id');node.classList.remove('streaming-message');bindConversationActions(main);refreshIcons();scrollStreamToBottom(follow,state,true);state.completedAt??=Date.now();renderThinkingSummary(node,state);stopWatchingStreamingFollow(state);
 }
 function cancelStreamingMessage(node,state,main){
@@ -824,6 +853,7 @@ function replaceTaskFailure(node,message,retryText,diagnosticId='',main=null){
   const card=document.createElement('section');card.innerHTML=streamingFailureHtml(partial,message,diagnosticId);
   const failure=card.firstElementChild;node.replaceWith(failure);failure.querySelector('button').onclick=()=>{const input=document.querySelector('#prompt');if(!input)return;input.value=retryText;input.focus();};refreshIcons();
   if(node._streamState)settleConversationRun(main,node._streamState,'error');
+  return failure;
 }
 async function agentWorkspaceV2(main, agentId) {
   const selectedId=activeConversationId,selectedTaskId=activeTaskId,owner=main._owner||principalSnapshot();
@@ -854,10 +884,10 @@ async function agentWorkspaceV2(main, agentId) {
   main._conversationContext.canRun=canRun;
   if(!canRun&&!detail&&!selectedTask){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
   agent={name:'历史任务（智能体不可用）',icon:'bot',...agent,...detail?.agent,enabled:canRun};
-  const taskHistory=selectedTask&&!detail?[{id:`task:${selectedTask.id}:user`,role:'user',content:selectedTask.input_text||''},...selectedTask.status==='completed'&&selectedTask.assistant_message_id?[{id:selectedTask.assistant_message_id,role:'assistant',content:selectedTask.final_response||'',structured_result:selectedTask.structured_result,generation:selectedTask.generation}]:[]]:[];
-  const history=detail?.messages||taskHistory,attachedIds=new Set(history.map(item=>item.generation?.id).filter(Boolean));
+  const taskHistory=selectedTask&&!detail?[{id:`task:${selectedTask.id}:user`,role:'user',content:selectedTask.input_text||''},...selectedTask.status==='completed'&&selectedTask.assistant_message_id?[{id:selectedTask.assistant_message_id,role:'assistant',content:selectedTask.final_response||'',structured_result:selectedTask.structured_result,generation:selectedTask.generation,generations:selectedTask.generations,image_delivery:selectedTask.image_delivery}]:[]]:[];
+  const history=detail?.messages||taskHistory,attachedIds=new Set(history.flatMap(item=>resultGenerations(item).map(image=>image.id)));
   const remainingImages=(detail?.generations||[]).filter(item=>!attachedIds.has(item.id));
-  const historicalImages=remainingImages.length?`<section class="conversation-artifacts"><h3>${icon('images',18)}本项目生成图片 <span>${remainingImages.length}</span></h3><div>${remainingImages.map(item=>image(item,detail?.project?.name||'历史生成图片')).join('')}</div></section>`:'';
+  const historicalImages=remainingImages.length?`<section class="conversation-artifacts"><h3>${icon('images',18)}本项目生成图片 <span>${remainingImages.length}</span></h3>${messageGalleryHtml({generations:remainingImages})}</section>`:'';
   const historyMarkup=history.length?`${history.map((item,index)=>messageHtml(item,item.role==='assistant'?[...history.slice(0,index)].reverse().find(previous=>previous.role==='user')?.content||'':'',agentId)).join('')}${historicalImages}`:agentGreetingHtml(agent);
   main.innerHTML=`<div class="creation-layout chatgpt-conversation-layout"><aside class="conversation-rail">${agentConversationRailHtml(conversations,activeConversationId)}</aside><section class="creation-main"><div id="chat-body" class="chat-body" aria-live="polite">${agentId==='image-agent'?`<div class="conversation-result-status" data-conversation-result-status>${imageConversationStatusHtml(conversations.find(item=>item.id===activeConversationId))}</div>`:''}${historyMarkup}</div><form class="composer" id="composer"><textarea id="prompt" required placeholder="${escapeHtml(agentPlaceholder(agentId))}"></textarea><div><span>${detail?'继续在当前项目里提出修改，系统会保留上文。':'可按需使用企业资料与品牌素材。'}</span><p class="composer-run-feedback" id="composer-run-feedback" role="status"></p><button class="button primary" id="composer-submit" type="submit" aria-label="发送消息" title="发送">${icon('send')}</button></div></form></section><aside class="creation-right"><section class="panel"><h3>当前智能体</h3><p><b>${escapeHtml(agent.name)}</b></p><p class="muted">${escapeHtml(agent.description||'协助完成业务创作。')}</p></section><section class="panel"><h3>${detail?'当前项目':'本次执行'}</h3><p><b>${escapeHtml(detail?.project?.name||'新建项目')}</b></p><p class="muted">${detail?`最近保存：${escapeHtml(formatHistoryTime(detail.tasks?.at(-1)?.completed_at||detail.created_at))}`:'直接描述你的业务需求即可。'}</p></section></aside></div>`;
   if(agentId==='image-agent'){
@@ -867,6 +897,7 @@ async function agentWorkspaceV2(main, agentId) {
     bindChatImageComposer(main);
   }
   main._wechatArticleContext={agent,route:agentId,userId:me?.user_id,tenantId:me?.tenant_id};
+  if(agentId==='campaign-agent')hydrateIllustrationBriefs(main,history,detail?.tasks||[selectedTask].filter(Boolean));
   if(agent.slug==='wechat-official-account-writing')for(const item of history){
     if(item.role!=='assistant')continue;
     const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===item.id);
@@ -908,9 +939,10 @@ function streamPayload(event){try{return JSON.parse(event.data||'{}');}catch{ret
 function finishStreamTask(node,state,done,agentId,main,retryText){
   if(!conversationViewIsCurrent(main,state)||state?.run?.terminal==='cancelled'||state?.networkComplete||state?.completed)return;
   if(done.status==='cancelled'){cancelStreamingMessage(node,state,main);return;}
-  if(done.status!=='completed'){applyStreamingEvent(state,'error',done);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);return;}
+  if(done.status!=='completed'){applyStreamingEvent(state,'error',done);const failure=replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);failure?.insertAdjacentHTML('beforeend',messageGalleryHtml({generations:resultGenerations(done,state.run?.taskId),image_delivery:done.image_delivery}));bindConversationActions(main);refreshIcons();return;}
   state.assistantMessageId=typeof done.assistant_message_id==='string'?done.assistant_message_id:'';
-  if(agentId==='image-agent'&&state.run?.taskId&&done.generation?.task_id===state.run.taskId)state.generation=done.generation;
+  if(agentId==='image-agent'){state.generations=resultGenerations(done,state.run?.taskId);state.generation=state.generations[0];state.imageDelivery=done.image_delivery;}
+  if(agentId==='campaign-agent'&&activityPlanResultIsValid(done.structured_result))state.illustrationBriefs=done.illustration_briefs;
   if(agentId==='campaign-agent'&&rememberActivityPlanResult(state.assistantMessageId,done.structured_result)){
     state.planMode='full';
     for(const activity of state.activities)activity.label=activityDisplayLabel(activity.stage,activity.status,state.planMode);
@@ -932,7 +964,7 @@ function streamTask(taskId,agentId,main,retryText,node,state){
   source.addEventListener('delta',event=>{if(current()&&applyStreamingEvent(state,'delta',streamPayload(event)))scheduleStreamingRender(node,state);});
   source.addEventListener('complete',event=>finish(()=>finishStreamTask(node,state,streamPayload(event),agentId,main,retryText)));
   source.addEventListener('cancelled',event=>finish(()=>cancelStreamingMessage(node,state,main,streamPayload(event))));
-  source.addEventListener('error',event=>{const failure=streamPayload(event);if(failure.message){finish(()=>{rememberAcceptedTask(main,agentId,{id:taskId,conversation_id:failure.conversation_id||state.run?.conversationId,status:failure.status||'failed'});applyStreamingEvent(state,'error',failure);replaceTaskFailure(node,state.error,retryText,state.diagnosticId,main);});return;}fallback();});
+  source.addEventListener('error',event=>{const failure=streamPayload(event);if(failure.message){finish(()=>{rememberAcceptedTask(main,agentId,{id:taskId,conversation_id:failure.conversation_id||state.run?.conversationId,status:failure.status||'failed'});finishStreamTask(node,state,{...failure,status:failure.status||'failed'},agentId,main,retryText);});return;}fallback();});
   source.onerror=fallback;
 }
 async function pollAgentTaskV2(taskId,agentId,main,retryText,node=document.querySelector('#task-status'),state=node?node._streamState:createStreamingState()){
@@ -1001,6 +1033,7 @@ function restoreConversationTerminalStatus(main,detail){
   api(`/api/v1/tasks/${encodeURIComponent(task.id)}`,{cache:'no-store'}).then(current=>{
     if(main.isConnected===false||!principalIsCurrent(main._conversationContext?.owner))return;verifyRecoveredTask(main,task.id,current);
     const status=main.querySelector('[data-terminal-status-text]');if(status&&current.status==='failed')status.textContent=current.user_message||current.message||customerErrorMessages.TASK_FAILED;
+    const terminal=main.querySelector('[data-terminal-task]'),displayed=new Set([...main.querySelectorAll('[data-result-image]')].map(node=>node.dataset.resultImage));if(terminal&&!terminal.querySelector('.message-image-gallery'))terminal.insertAdjacentHTML('beforeend',messageGalleryHtml({generations:resultGenerations(current,task.id).filter(item=>!displayed.has(item.id)),image_delivery:current.image_delivery}));bindConversationActions(main);refreshIcons();
   }).catch(error=>{const status=main.querySelector('[data-terminal-status-text]');if(status&&main.isConnected!==false)status.textContent=error.message||'暂时无法读取任务状态，请刷新重试。';});
 }
 async function showTaskDetails(main,taskId,trigger){
@@ -1144,6 +1177,52 @@ async function billing(main){const [data, gens]=await Promise.all([api('/api/v1/
 async function profile(main){const workspaceData=await api('/api/v1/workspace');const enterpriseName=workspaceData.brand_name||workspaceData.tenant_name||me.tenant_id;main.innerHTML=`${header('个人中心','管理个人信息与账号安全','user-round')}<div class="profile-layout"><section class="profile-card"><div class="profile-card-heading"><div><h2>基本资料</h2><p>完善个人资料，便于团队协作</p></div><button class="button secondary" disabled title="个人资料编辑 API 尚未接入">${icon('pencil')}编辑资料</button></div><div class="profile-identity"><span class="profile-avatar">${escapeHtml((me.display_name||'我')[0])}</span><div><h2>${escapeHtml(me.display_name)}</h2><span class="role-badge">${roleName(me.role)}</span><p>${escapeHtml(enterpriseName)}</p></div></div><dl class="profile-list"><div><dt>${icon('user-round')}姓名</dt><dd>${escapeHtml(me.display_name)}</dd></div>${me.email?`<div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd></div>`:''}<div><dt>${icon('building-2')}所属企业</dt><dd>${escapeHtml(enterpriseName)}</dd></div><div><dt>${icon('users')}角色</dt><dd>${roleName(me.role)}</dd></div></dl></section><section class="profile-card" id="security"><div class="profile-card-heading"><div><h2>账号安全</h2><p>保护你的登录账号与数据</p></div></div><dl class="profile-list security-list"><div><dt>${icon('lock-keyhole')}登录密码</dt><dd>********</dd><button class="button secondary" disabled title="修改密码 API 尚未接入">修改密码</button></div>${me.email?`<div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd><span class="binding-status">${icon('check-circle',16)}已绑定</span></div>`:''}</dl><p class="backend-dependency">资料编辑、手机号和密码修改将在普通产品账号 API 接入后开放；企业、角色、权限与积分始终只读。</p></section></div>`;refreshIcons();}
 
 async function profileV2(main){const owner=main._owner||principalSnapshot(),workspaceData=await api('/api/v1/workspace',{cache:'no-store'});if(main.isConnected===false||!principalIsCurrent(owner))return;applyEnterpriseBrand(workspaceData,'workspace',owner);const enterpriseName=companyDisplayName();main.innerHTML=`${header('个人中心','管理个人信息与账号安全','user-round')}<p class="page-feedback" role="status" aria-live="polite"></p><div class="profile-layout"><section class="profile-card"><div class="profile-card-heading"><div><h2>基本资料</h2><p>完善个人资料，便于团队协作</p></div><button class="button secondary" id="edit-profile">${icon('pencil')}编辑资料</button></div><div class="profile-identity">${avatarMarkup('profile-avatar','当前头像')}<div><h2>${escapeHtml(me.display_name)}</h2><span class="role-badge">${roleName(me.role)}</span><p data-company-name>${escapeHtml(enterpriseName)}</p></div></div><dl class="profile-list"><div><dt>${icon('user-round')}姓名</dt><dd>${escapeHtml(me.display_name)}</dd></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd></div><div><dt>${icon('building-2')}所属企业</dt><dd data-company-name>${escapeHtml(enterpriseName)}</dd></div><div><dt>${icon('users')}角色</dt><dd>${roleName(me.role)}</dd></div></dl></section><section class="profile-card" id="security"><div class="profile-card-heading"><div><h2>账号安全</h2><p>保护你的登录账号与数据</p></div></div><dl class="profile-list security-list"><div><dt>${icon('lock-keyhole')}登录密码</dt><dd>********</dd><button class="button secondary" id="change-password">修改密码</button></div><div><dt>${icon('mail')}邮箱</dt><dd>${escapeHtml(me.email)}</dd><span class="binding-status">${icon('check-circle',16)}已绑定</span></div></dl><p class="backend-dependency">企业、角色、权限与积分保持只读。</p></section></div>`;main.querySelector('#edit-profile').onclick=()=>openProfileEditor();main.querySelector('#change-password').onclick=()=>openPasswordEditor(main);refreshIcons();}
+function validIllustrationBriefs(briefs){
+  return Array.isArray(briefs)&&briefs.length<=12?briefs.filter(item=>item&&item.execution==='requires_separate_image_agent_task_and_budget'&&typeof item.purpose==='string'&&item.purpose.trim()&&typeof item.prompt==='string'&&item.prompt.trim()&&item.prompt.length<=10000&&/^(?:1:1|16:9|9:16|3:2|2:3|4:5)$/.test(item.aspect_ratio)):[];
+}
+function mountIllustrationBriefs(main,article,briefs,messageId){
+  const items=validIllustrationBriefs(briefs),owner=main?._conversationContext?.owner;
+  if(!items.length||!article||!messageId||!principalIsCurrent(owner)||article.querySelector('[data-illustration-briefs]'))return;
+  const current=()=>main.isConnected!==false&&article.isConnected!==false&&document.querySelector('#main')===main&&principalIsCurrent(owner)&&article.dataset.assistantMessageId===messageId;
+  const slot=document.createElement('section');slot.dataset.illustrationBriefs='true';slot.className='illustration-briefs';
+  slot.innerHTML=`<h3>活动示意图（可选）</h3><p>每次仅创建一张独立图片任务，会使用生图积分。示意图不代表真实现场。</p><label>选择示意图<select data-illustration-choice>${items.map((item,index)=>`<option value="${index}">${escapeHtml(redactResultPaths(item.purpose))} · ${item.aspect_ratio}</option>`).join('')}</select></label><button type="button" class="button secondary" data-illustration-review>查看费用并确认</button><p role="status" data-illustration-feedback></p>`;article.append(slot);
+  const trigger=slot.querySelector('[data-illustration-review]'),feedback=slot.querySelector('[data-illustration-feedback]');let busy=false;
+  trigger.onclick=async()=>{
+    if(!current()||busy||document.querySelector('#illustration-confirm'))return;busy=true;trigger.disabled=true;
+    try{
+      const agent=await api('/api/v1/agents/image-agent',{cache:'no-store'});if(!current())return;
+      if(agent?.id!=='image-agent'||agent.enabled!==true||!Number.isFinite(agent.credit_cost)||agent.credit_cost<0)throw Error('生图资格或费用未确认，暂不能创建任务。');
+      const data=await api('/api/v1/workspace',{cache:'no-store'});if(!current())return;
+      if(!Number.isFinite(data.credit_balance)||data.credit_balance<agent.credit_cost)throw Error('当前可用积分不足，未创建生图任务。');
+      const brief=items[Number(slot.querySelector('[data-illustration-choice]').value)];if(!brief)return;
+      const backdrop=document.createElement('div');backdrop.id='illustration-confirm';backdrop.className='dialog-backdrop';
+      backdrop.innerHTML=`<section class="profile-editor" role="dialog" aria-modal="true" aria-labelledby="illustration-confirm-title"><button type="button" class="dialog-close" aria-label="取消示意图生成">×</button><h2 id="illustration-confirm-title">确认创建示意图</h2><p>${escapeHtml(redactResultPaths(brief.purpose))} · ${brief.aspect_ratio}</p><p>将创建 1 个独立生图任务，展示费用为 ${agent.credit_cost} 积分／次，具体扣减按现有服务端规则。不会自动生成其他示意图或自动重试。</p><p role="status" data-illustration-submit-status></p><button type="button" class="button primary" data-illustration-confirm>确认创建 1 个生图任务</button></section>`;
+      app.append(backdrop);const close=bindModalDialog(backdrop,trigger);let submitted=false;
+      backdrop.querySelector('[data-illustration-confirm]').onclick=async event=>{
+        if(submitted||!current())return;submitted=true;event.currentTarget.disabled=true;
+        close();await selectAgentConversation('image-agent',null,{newProject:true});
+        const target=document.querySelector('#main');if(!principalIsCurrent(owner)||target?._conversationContext?.agentId!=='image-agent'||target._conversationContext.canRun!==true)return;
+        const prompt=target.querySelector('#prompt');if(!prompt)return;prompt.value=`${brief.prompt}\n用途：${brief.purpose}；图片比例：${brief.aspect_ratio}。只生成这一张示意图。`;
+        await submitAgentTaskV2({preventDefault(){}},'image-agent',target);
+      };
+    }catch(error){if(current())feedback.textContent=error.message||'无法确认生图资格，请稍后再试。';}
+    finally{busy=false;if(current())trigger.disabled=false;}
+  };
+}
+function hydrateIllustrationBriefs(main,history,tasks){
+  const owner=main._conversationContext?.owner;
+  for(const message of history){
+    if(message.role!=='assistant'||!activityPlanResultIsValid(message.structured_result))continue;
+    const article=[...main.querySelectorAll('[data-assistant-message-id]')].find(node=>node.dataset.assistantMessageId===message.id);if(!article)continue;
+    const task=tasks.find(item=>item.assistant_message_id===message.id||message.task_id&&item.id===message.task_id);
+    if(task?.illustration_briefs){mountIllustrationBriefs(main,article,task.illustration_briefs,message.id);continue;}
+    const taskId=message.task_id||task?.id;if(!taskId)continue;
+    api(`/api/v1/tasks/${encodeURIComponent(taskId)}`,{cache:'no-store'}).then(result=>{
+      if(main.isConnected===false||!principalIsCurrent(owner))return;verifyRecoveredTask(main,taskId,result);
+      if(result.status==='completed'&&result.assistant_message_id===message.id&&activityPlanResultIsValid(result.structured_result))mountIllustrationBriefs(main,article,result.illustration_briefs,message.id);
+    }).catch(()=>{if(article.isConnected&&principalIsCurrent(owner))article.insertAdjacentHTML('beforeend','<p class="muted" role="status">示意图建议暂时无法读取；未创建生图任务。</p>');});
+  }
+}
 function mountWechatArticle(main,article,content,messageId){
   const context=main?._wechatArticleContext;
   if(!context||context.agent.slug!=='wechat-official-account-writing'||!article)return;

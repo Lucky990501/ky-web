@@ -42,7 +42,7 @@ test('active workbench path uses manual exporter and enforces current user/tenan
 });
 test('manual exporter reuses sanitizer and cannot use a draft adapter or endpoint',()=>{
   const manual=source.slice(source.indexOf('const inlineDefaults'),source.indexOf('window.WorkbenchWechatArticle ='));
-  assert.ok(manual.includes('sanitizeArticle(raw)'));assert.ok(manual.includes('previewDocument(result.html)'));
+  assert.ok(manual.includes('sanitizeArticle(raw)'));assert.ok(manual.includes('mountSafePreview(frame, result, current)'));
   assert.ok(!manual.includes('fetch('));assert.ok(!manual.includes('/api/'));assert.ok(!manual.includes('createDraft'));
   assert.ok(!manual.includes('localStorage'));assert.ok(!manual.includes('sessionStorage'));
 });
@@ -62,7 +62,8 @@ test('reviewed formatter remains shared and downloads re-sanitize before making 
 test('ported component exports manual functions only, with no dormant draft API or fake success',()=>{
   assert.deepEqual(Object.keys(ui()),['mountManual','buildManualExport','copyManualExport','downloadManualExport','hasArticleHtml','sanitizeArticle','previewDocument']);
   assert.ok(!source.includes('pendingAdapter'));assert.ok(!source.includes('createDraft'));assert.ok(!source.includes('草稿已创建'));
-  assert.ok(!source.includes('/api/'));assert.ok(!source.includes('fetch('));
+  assert.ok(!source.includes('/api/'));assert.ok(source.includes("fetch(url, {method: 'GET', credentials: 'same-origin'"));
+  assert.ok(source.includes('safeArticleImage(url) !== url'));assert.ok(source.includes('bitmap.close()'));assert.ok(source.includes("canvas.toDataURL('image/png')"));
 });
 test('index keeps release JS/CSS placeholders and loads exact content-versioned component before workbench',()=>{
   const index=fs.readFileSync(path.join(__dirname,'../app/static/index.html'),'utf8');
