@@ -1,7 +1,7 @@
 # 894 successor: minimal Test-only Text request gate
 
-This is an OFF-by-default local development candidate, **not deployment-ready**.
-Parent: `894bdd2a031725a0d0df3b95d6dfc26d08f0e4ab`.
+This is an OFF-by-default Test-only deployment candidate, **not installed**.
+Direct parent: `c2dbb92d5f2b63aab4149462d08e9875829f2286` (based on exact894).
 Production d906, running Test894, Skills, Publish contracts and migrations are
 unchanged. No real Provider requests were authorized or performed here.
 
@@ -34,9 +34,11 @@ restore an older counter, select a different ledger or Operation to replenish.
 
 Upstream is fixed to `https://api.deepseek.com/responses`, model V4 Pro, high
 effort. HTTP transport retries and redirects are disabled; SDK provider request
-and stream retry settings are both zero. Any later SDK retry still has to pass
-the same counter; configuring zero is not claimed as real CLI verification.
-The raw HTTP body is hashed, not persisted or logged; attempts retain Task/Run,
+and stream retry settings are both zero. Installed openai-codex 0.147.0 was
+executed against the real gate and mocked upstream: HTTP500 and broken SSE
+each produced exactly one request, one reservation, and a terminal error.
+Any explicit correction/review or Worker retry still shares the same counter.
+The final capped HTTP envelope is hashed, not persisted or logged; attempts retain Task/Run,
 slot, time and request hash. There is no refund, automatic reset, billing
 system, public allowlist API, Agent publish bypass or business DB migration.
 
@@ -46,27 +48,71 @@ no WeChat dispatch, credential or network permission is introduced.
 Embedding must remain local-hash. Existing disabled-provider recovery settings
 remain unchanged when the new flag is absent/false.
 
-## Remaining blocking input contract
+## Complete finite-text input and cost bound (2026-10-15 successor)
 
-`FIRST_FAILURE_POINT=CODEX_RESPONSES_INPUT_1024_BOUND_NOT_PROVEN`.
+The prior 1024/512 diagnostic ceiling is superseded by the Owner's bounded
+business-test authorization. No history, instructions or tools are removed.
+The final request includes an explicit `max_output_tokens`, default/maximum
+8192; a smaller explicit cap is retained. Per the official Responses contract,
+this limit includes reasoning AND visible output. It is not a visible-only cap.
 
-The prior accepted single diagnostic call proved a conservative 1024-token
-bound for **one string input**, no history/instructions/tools, using official
-high-effort single-user framing (563 framed UTF-8 bytes for 22 input bytes).
-Only that narrow shape is admitted here: input UTF-8 bytes +541 <=1024 and
-output, including reasoning, <=512. No text or content is silently truncated.
+Only a finite stateless text envelope is admitted: complete system/developer/
+user/assistant messages and text parts, plain reasoning, function-call JSON
+objects and tool results, apply_patch custom call text, instructions, tools,
+and output-format schema. All other allowed control/metadata fields are also
+included in the bound, not treated as free. Unknown top-level fields, unknown
+input types, external history/item references, encrypted reasoning, nonempty
+reasoning summaries/annotations, image/file inputs and malformed call arguments
+fail before reservation or HTTP. Provider-ignored namespace/web_search tool
+definitions may pass, but their entire serialized bytes are still counted;
+web_search_call history is refused. This does not add tool execution rights.
 
-Codex Responses message arrays, tool definitions/results, system/developer
-instructions, previous-response references and unfamiliar fields do NOT have
-a proved bound under that diagnostic contract. The gate rejects them with
-`test_text_gate_input_bound_not_proven` before reserving/sending. Tests explicitly
-prove this rejection; they are **not proof of a usable ordinary Agent E2E**.
-Do not deploy/enable this candidate for the remaining two real requests until
-the actual SDK request shape has a trustworthy <=1024 input bound. Do not solve
-this by deleting instructions/tools, dropping conversation history, guessing a
-token conversion, expanding the budget or pretending a string request is an
-actual Agent request. Full native SDK egress/retry behavior is also not yet
-qualified; no paid call should be used to discover these preflight failures.
+Let J be the ASCII-escaped JSON byte length of the ENTIRE FINAL request,
+U the total of input items + content parts + top-level tools, and A the number
+of top-level keys in decoded function-call argument objects. The bound is:
+
+```
+input_tokens_upper = 4096 + 4*J + 256*U + 128*A
+cny_upper = (input_tokens_upper*1.32 + max_output_tokens*3.96) * 10 / 1_000_000
+admit only cny_upper <= 5 and input_tokens_upper + max_output_tokens <= 1048576
+```
+
+Derivation, not a text-tokenizer heuristic: official V4-Pro-0813 encoder
+`encoding/encoding_dsv4.py` at model repository commit
+`72e1d3230f6c080a530b0a1d46f8eb4602340597` (SHA256
+`abc0d26120250dda0ae077dc64aa28836026e61e970854aaeb792445e6a0dde6`)
+renders bounded role/transition/invoke/result wrappers (<256 UTF-8 bytes per
+item/part/tool) and DSML parameter wrappers (<128 per decoded key). Its single
+high-effort prefix, BOS, tools instruction and response-format instruction
+together fit 4096 bytes. Message merging/sorting/dropping does not duplicate
+content. All variable strings, tool schemas, names, schema values and nested
+argument values occur in J; ASCII escaping dominates their UTF-8 byte lengths.
+The 4*J allowance also dominates JSON reserialization, separators and retained
+field copies. No unbounded retrieval, multimodal expansion or opaque context is
+accepted. For this byte-level BPE (empty normalizer, non-expanding Split +
+ByteLevel), initial symbols are at most UTF-8 bytes; merges only reduce count.
+Thus complete rendered bytes, including wrappers, bound tokens. This is an
+intentionally loose ceiling, NOT an exact token prediction or an empirical
+characters/token ratio. Raw/ASCII envelopes are also limited to 256 KiB;
+budget rejection may occur well before that limit. Never truncate to fit.
+
+Official references (checked 2026-10-15):
+
+- https://api-docs.deepseek.com/api/create-response/ (full input, reasoning cap)
+- https://api-docs.deepseek.com/guides/responses_api/ (stateless conversion,
+  supported/ignored fields; no server-side history is admitted)
+- https://api-docs.deepseek.com/quick_start/pricing/ (peak cache-miss input
+  $1.32/M, output $3.96/M; no cache/discount assumption)
+- https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/blob/72e1d3230f6c080a530b0a1d46f8eb4602340597/encoding/encoding_dsv4.py
+
+The 10 CNY/USD factor is a conservative conversion ceiling, not an observed FX
+rate. With the same two atomic slots and every slot <=5 CNY, aggregate upper
+bound is <=10 CNY without extending/resetting the existing private ledger.
+Failures consume full slots. This is not a Provider invoice hard cap. Before
+separately authorized Test deployment, verify the served model/version, price
+ceiling and conversion ceiling still apply; changed contracts must fail review.
+Unknown shapes fail closed rather than claiming a bound. No paid request was
+used to qualify the input shape, cap or retry behavior.
 
 ## Local operator interface (future separately authorized Test control only)
 
@@ -102,8 +148,11 @@ counter contention and restart readback, signed contexts, a real loopback HTTP
 handler and mocked external HTTP. They test normal/failure/timeout/retry calls,
 quota exhaustion, loss/corruption/revocation, ownership and current Run binding,
 new/resumed/audit Task propagation, inherited credential masking and Image deny.
-The SDK process itself is a labelled double. This is not real PG/Redis Worker,
-Native, provider or live Test evidence. No Production/Test PRIMARY mutation,
+SDK-specific integration tests also launch the actual installed CLI via its
+Python SDK against the actual loopback gate and mocked httpx upstream. The
+provider configuration is generated by the real Runtime manager; only MCP
+transport is omitted in this labelled wire/retry diagnostic. This is not real
+PG/Redis Worker, MCP/Native, provider or live Test evidence. No Production/Test PRIMARY mutation,
 Root operation, Source switch, actual Task creation or Provider call occurred.
 
 The selected inherited activity integration case
@@ -111,11 +160,16 @@ The selected inherited activity integration case
 also fails with the same timeout on untouched exact894. Keep its raw failure;
 do not count it as passed, skip it, or repair unrelated activity business here.
 
-Local final run: 37 new gate cases PASS; inherited selected cases 129 PASS,
-1 FAIL; combined 166 PASS / 1 FAIL / 0 ERROR / 0 SKIP (167 unique cases).
-The one failure independently reproduces on untouched894 with no gate code.
-The failed input-bound qualification is deliberately represented by explicit
-pre-request rejection tests, not mislabeled as successful Agent execution.
+Previous immutable candidate evidence: 37 gate cases PASS; inherited selected
+cases 129 PASS / 1 FAIL; combined 166 PASS / 1 FAIL / 0 ERROR / 0 SKIP.
+The failure independently reproduces on untouched894 with no gate code. It is
+not repaired, hidden, skipped or included in the current targeted PASS count.
+Current targeted tests: 56 PASS / 0 FAIL / 0 ERROR / 0 SKIP, including two actual
+SDK/CLI-to-gate wire diagnostics. No unrelated full QA rerun.
 
-`READY_FOR_MINIMAL_TEST_GATE_DEPLOYMENT=false` until the input/SDK boundary is
-closed and a separate exact Test installation is authorized.
+`READY_FOR_MINIMAL_TEST_GATE_DEPLOYMENT=true` means code-level gate qualification
+only. Exact Test successor/config installation, one persistent shared ledger,
+accepted Task allowlisting before consumption, current SDK parity and the
+remaining <=2 real Text attempts still require separate operator authorization.
+It does not authorize deployment, a successful business E2E, or two new calls
+in addition to any attempts already spent in this same Operation.

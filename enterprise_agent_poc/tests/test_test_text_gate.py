@@ -175,11 +175,11 @@ def test_unproven_or_over_budget_input_rejected_before_send(fixture,monkeypatch,
     body=json.loads(request())
     if mutation=='model': body['model']='other'
     elif mutation=='reasoning': body['reasoning']={'effort':'low'}
-    elif mutation=='tools': body['tools']=[{'type':'function','name':'example'}]
-    elif mutation=='instructions': body['instructions']='system material'
-    elif mutation=='output': body['max_output_tokens']=513
-    elif mutation=='input': body['input']='x'*484
-    else: body['input']=[{'role':'user','content':'SDK-shaped input, not proven token framing'}]
+    elif mutation=='tools': body['tools']=[{'type':'remote_unknown_tool','name':'example'}]
+    elif mutation=='instructions': body['instructions']={'file_id':'unknown-remote-material'}
+    elif mutation=='output': body['max_output_tokens']=8193
+    elif mutation=='input': body['input']='x'*100000
+    else: body['input']=[{'type':'item_reference','id':'unknown-server-history'}]
     async def run():
         _,token=await gate.bind(p,task['id'])
         with pytest.raises(TestTextGateDenied): await gate.forward(token,json.dumps(body).encode())
@@ -256,10 +256,125 @@ def test_lost_counter_cannot_reinitialize_same_operation(fixture):
 
 def test_token_boundary_and_output_budget():
     body=json.loads(request())
-    body['input']='x'*483
+    body['input']='x'*20000
     assert TestTextGate.bounded_payload(json.dumps(body).encode())['max_output_tokens']==512
-    body['input']+='x'
-    with pytest.raises(TestTextGateDenied): TestTextGate.bounded_payload(json.dumps(body).encode())
+    bound=TestTextGate.request_bound(body)
+    assert bound['input_tokens_upper']>20000>1024
+    from decimal import Decimal
+    assert Decimal(bound['two_slot_cny_upper'])<=10
+    body['input']='x'*100000
+    with pytest.raises(TestTextGateDenied,match='cost_exceeded'):
+        TestTextGate.bounded_payload(json.dumps(body).encode())
+
+
+def full_request():
+    body=json.loads(request())
+    body.update(instructions='System instructions '*1000,reasoning={'effort':'high','summary':'auto'},
+                input=[{'role':role,'content':[{'type':'input_text','text':role+' 中文 history'}]}
+                       for role in ('system','developer','user')]+[
+                    {'type':'reasoning','content':[{'type':'reasoning_text','text':'prior reasoning'}],'summary':[]},
+                    {'type':'function_call','call_id':'call-1','name':'knowledge_search',
+                     'arguments':json.dumps({'query':'unique fact','count':2,'nested':{'a':['中',1]}})},
+                    {'type':'function_call_output','call_id':'call-1','output':'local knowledge result'},
+                    {'role':'assistant','content':[{'type':'output_text','text':'prior answer','annotations':[]}]},
+                    {'role':'user','content':'Now revise using all facts.'}],
+                tools=[{'type':'function','name':'knowledge_search','description':'search',
+                        'parameters':{'type':'object','properties':{'query':{'type':'string'}}}}],
+                text={'format':{'type':'json_schema','name':'answer',
+                                'schema':{'type':'object','properties':{'body':{'type':'string'}}}}})
+    return body
+
+
+def test_complete_history_tools_system_schema_bound_and_final_cap():
+    body=full_request()
+    body.pop('max_output_tokens')
+    result=TestTextGate.bounded_payload(json.dumps(body).encode())
+    assert result['input']==body['input'] and result['tools']==body['tools']
+    assert result['instructions']==body['instructions'] and result['max_output_tokens']==8192
+    bound=TestTextGate.request_bound(result)
+    assert bound['input_tokens_upper']>len(json.dumps(result).encode())
+    for field in ('instructions','tools','input','text'):
+        smaller=dict(result)
+        smaller[field]=[] if field in {'input','tools'} else '' if field=='instructions' else {}
+        assert TestTextGate.request_bound(smaller)['input_tokens_upper']<bound['input_tokens_upper']
+
+
+@pytest.mark.parametrize('opaque',[
+    {'type':'message','role':'user','content':[{'type':'input_image','image_url':'https://example.invalid/image'}]},
+    {'type':'message','role':'user','content':[{'type':'input_file','file_id':'remote'}]},
+    {'type':'reasoning','encrypted_content':'opaque'},
+    {'type':'web_search_call','id':'remote-search'},
+    {'type':'function_call','call_id':'1','name':'search','arguments':'not-json'},
+    {'type':'function_call','call_id':'1','name':'search','arguments':'[]'},
+    {'type':'unknown_future_input','content':'cannot price'},
+])
+def test_unbounded_context_rejected_before_reservation(fixture,monkeypatch,opaque):
+    _,_,task,budget,gate,profile=fixture
+    calls=stub_http(monkeypatch)
+    body=full_request()
+    body['input'].append(opaque)
+    async def run():
+        _,token=await gate.bind(profile,task['id'])
+        with pytest.raises(TestTextGateDenied,match='bound_not_proven'):
+            await gate.forward(token,json.dumps(body).encode())
+        await gate.close()
+    asyncio.run(run())
+    assert calls==[]
+    with budget.connect() as c: assert c.execute('SELECT spent FROM budget').fetchone()[0]==0
+
+
+def test_full_envelopes_keep_shared_two_request_ledger(fixture,monkeypatch):
+    _,_,task,budget,gate,profile=fixture
+    calls=stub_http(monkeypatch,500)
+    body=full_request()
+    async def run():
+        _,token=await gate.bind(profile,task['id'])
+        for _ in range(2):
+            assert (await gate.forward(token,json.dumps(body).encode()))[0]==500
+        with pytest.raises(TestTextGateDenied,match='exhausted'):
+            await gate.forward(token,json.dumps(body).encode())
+        await gate.close()
+    asyncio.run(run())
+    assert len(calls)==2
+    from decimal import Decimal
+    cost=sum(Decimal(TestTextGate.request_bound(json.loads(r.content))['cny_upper']) for r in calls)
+    assert cost<=10
+    with budget.connect() as c:
+        assert c.execute('SELECT spent FROM budget').fetchone()[0]==2
+        import hashlib
+        assert c.execute('SELECT request_sha FROM attempts WHERE slot=1').fetchone()[0]==hashlib.sha256(calls[0].content).hexdigest()
+
+
+@pytest.mark.parametrize('fault',['long_system','tools','many_messages','output','context','remote_history','nan'])
+def test_full_request_budget_overages_never_spend_or_send(fixture,monkeypatch,fault):
+    _,_,task,budget,gate,profile=fixture
+    calls=stub_http(monkeypatch)
+    body=full_request()
+    if fault=='long_system': body['instructions']='x'*100000
+    elif fault=='tools': body['tools'][0]['description']='x'*100000
+    elif fault=='many_messages': body['input']=[{'role':'user','content':''}]*1200
+    elif fault=='output': body['max_output_tokens']=8193
+    elif fault=='context': body['input']=[{'role':'user','content':''}]*3000
+    elif fault=='remote_history': body['previous_response_id']='opaque-context'
+    else: body['tools'][0]['parameters']['value']=float('nan')
+    async def run():
+        _,token=await gate.bind(profile,task['id'])
+        with pytest.raises((TestTextGateDenied,ValueError)):
+            await gate.forward(token,json.dumps(body).encode())
+        await gate.close()
+    asyncio.run(run())
+    assert calls==[]
+    with budget.connect() as c: assert c.execute('SELECT spent FROM budget').fetchone()[0]==0
+
+
+def test_dense_dsml_arguments_and_unicode_are_counted():
+    body=full_request()
+    original=TestTextGate.request_bound(body)['input_tokens_upper']
+    call=next(i for i in body['input'] if i.get('type')=='function_call')
+    call['arguments']=json.dumps({str(i):'中\n\t"😀' for i in range(100)})
+    bound=TestTextGate.request_bound(body)
+    assert bound['input_tokens_upper']>original+128*90
+    assert TestTextGate.bounded_payload(json.dumps(body,ensure_ascii=False).encode())['input']==body['input']
 
 
 def test_reservation_survives_interruption_before_http_start(fixture,monkeypatch):

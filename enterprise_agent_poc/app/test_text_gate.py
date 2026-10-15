@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -18,6 +19,16 @@ from uuid import UUID, uuid4
 
 from app.security import RuntimePrincipal, RuntimeTokenIssuer
 from app.store import POCStore
+
+
+# Peak cache-miss/output USD per million (official DeepSeek pricing, 2026-10-15).
+# 10 CNY/USD is a deliberately conservative conversion ceiling, not a live FX quote.
+# Two durable slots, each <= 5 CNY: no extra currency ledger/reset is necessary.
+INPUT_USD_PER_MILLION = Decimal('1.32')
+OUTPUT_USD_PER_MILLION = Decimal('3.96')
+CNY_PER_USD_CEILING = Decimal('10')
+MAX_OUTPUT_TOKENS = 8192  # Responses cap includes reasoning, not just visible output.
+MAX_REQUEST_BYTES = 262144
 
 
 class TestTextGateDenied(PermissionError):
@@ -207,19 +218,104 @@ class TestTextGate:
     @staticmethod
     def bounded_payload(raw):
         p = json.loads(raw)
-        require(p.get("model") == "deepseek-v4-pro" and p.get("reasoning") == {"effort":"high"},
+        require(isinstance(p,dict) and p.get("model") == "deepseek-v4-pro"
+                and isinstance(p.get("reasoning"),dict) and p['reasoning'].get('effort') == 'high'
+                and set(p['reasoning']) <= {'effort','summary'},
                 "test_text_gate_model")
-        output = p.get("max_output_tokens",512)
-        require(type(output) is int and 0 < output <= 512 and isinstance(p.get("input"),str)
-                and not any(p.get(k) for k in ("tools","instructions","previous_response_id","conversation")),
-                "test_text_gate_input_bound_not_proven")
-        require(set(p) <= {"model","input","reasoning","max_output_tokens","stream","store","metadata"},
-                "test_text_gate_input_bound_not_proven")
-        # Same official single-user/high-effort framing proof as accepted smoke:
-        # 563 framed bytes for its 22-byte input; BPE merges never increase bytes.
-        require(len(p["input"].encode())+541 <= 1024, "test_text_gate_input_1024_exceeded")
+        output = p.get('max_output_tokens',MAX_OUTPUT_TOKENS)
+        require(type(output) is int and 0 < output <= MAX_OUTPUT_TOKENS, 'test_text_gate_output_exceeded')
         p["max_output_tokens"] = output
+        TestTextGate.request_bound(p)
         return p
+
+    @staticmethod
+    def request_bound(p):
+        """Bound the FINAL finite text envelope, not a user's text token estimate.
+
+        Proof/scope: deploy/MINIMAL_TEST_TEXT_REQUEST_GATE_V1.md. ASCII JSON
+        dominates UTF-8 content/JSON rendering; 4x covers retained/copied fields,
+        4096 covers high-effort/tools/format framing, 256 per item/part/tool
+        covers role/transition/invoke/result wrappers; 128 per decoded argument
+        covers DSML parameter wrappers. BPE cannot exceed rendered UTF-8 bytes.
+        Opaque/remote/multimodal/unknown input is refused, never guessed.
+        """
+        allowed = {'model','input','instructions','tools','tool_choice','parallel_tool_calls',
+                   'reasoning','max_output_tokens','stream','store','metadata','include',
+                   'prompt_cache_key','text','client_metadata'}
+        require(set(p) <= allowed, 'test_text_gate_input_bound_not_proven')
+        require(p.get('instructions') is None or isinstance(p['instructions'],str),
+                'test_text_gate_input_bound_not_proven')
+        items = p.get('input',[])
+        if isinstance(items,str):
+            items = [{'role':'user','content':items}]
+        require(isinstance(items,list) and (items or p.get('instructions')),
+                'test_text_gate_input_bound_not_proven')
+        units, arguments = len(items), 0
+
+        def text_parts(value, types):
+            if isinstance(value,str):
+                return 0
+            require(isinstance(value,list), 'test_text_gate_input_bound_not_proven')
+            for part in value:
+                require(isinstance(part,dict) and part.get('type') in types
+                        and isinstance(part.get('text'),str)
+                        and set(part) <= {'type','text','annotations'}, 'test_text_gate_input_bound_not_proven')
+                require(not part.get('annotations'), 'test_text_gate_input_bound_not_proven')
+            return len(value)
+
+        for item in items:
+            require(isinstance(item,dict), 'test_text_gate_input_bound_not_proven')
+            kind = item.get('type','message' if 'role' in item else None)
+            common = {'type','id','status'}
+            if kind == 'message':
+                require(set(item) <= common|{'role','content'} and item.get('role') in
+                        {'system','developer','user','assistant'}, 'test_text_gate_input_bound_not_proven')
+                units += text_parts(item.get('content'), {'input_text','output_text'})
+            elif kind == 'function_call':
+                require(set(item) <= common|{'call_id','name','arguments'}
+                        and all(isinstance(item.get(k),str) for k in ('call_id','name','arguments')),
+                        'test_text_gate_input_bound_not_proven')
+                try:
+                    args = json.loads(item['arguments'])
+                except (ValueError,TypeError):
+                    raise TestTextGateDenied('test_text_gate_input_bound_not_proven') from None
+                require(isinstance(args,dict), 'test_text_gate_input_bound_not_proven')
+                arguments += len(args)
+            elif kind in {'function_call_output','custom_tool_call_output'}:
+                require(set(item) <= common|{'call_id','output'} and isinstance(item.get('call_id'),str),
+                        'test_text_gate_input_bound_not_proven')
+                units += text_parts(item.get('output'), {'input_text','output_text'})
+            elif kind == 'custom_tool_call':
+                require(set(item) <= common|{'call_id','name','input'} and item.get('name') == 'apply_patch'
+                        and isinstance(item.get('input'),str) and isinstance(item.get('call_id'),str),
+                        'test_text_gate_input_bound_not_proven')
+            elif kind == 'reasoning':
+                require(set(item) <= common|{'content','summary'} and not item.get('summary'),
+                        'test_text_gate_input_bound_not_proven')
+                units += text_parts(item.get('content',[]), {'reasoning_text'})
+            else:
+                raise TestTextGateDenied('test_text_gate_input_bound_not_proven')
+
+        tools = p.get('tools',[])
+        require(isinstance(tools,list), 'test_text_gate_input_bound_not_proven')
+        for tool in tools:
+            require(isinstance(tool,dict) and tool.get('type') in {'function','custom','namespace','web_search'},
+                    'test_text_gate_input_bound_not_proven')
+            if tool['type'] == 'custom':
+                require(tool.get('name') == 'apply_patch', 'test_text_gate_input_bound_not_proven')
+            # namespace and web_search definitions are ignored by this exact
+            # stateless provider protocol, but ALL their bytes are still charged
+            # in the bound. No web_search_call/history or remote input admitted.
+        units += len(tools)
+        encoded = json.dumps(p,ensure_ascii=True,allow_nan=False).encode('ascii')
+        require(len(encoded) <= MAX_REQUEST_BYTES, 'test_text_gate_request_too_large')
+        input_bound = 4096 + 4*len(encoded) + 256*units + 128*arguments
+        output = p['max_output_tokens']
+        require(input_bound + output <= 1048576, 'test_text_gate_context_exceeded')
+        cny = (input_bound*INPUT_USD_PER_MILLION + output*OUTPUT_USD_PER_MILLION)*CNY_PER_USD_CEILING/1000000
+        require(cny <= Decimal('5'), 'test_text_gate_cost_exceeded')
+        return {'input_tokens_upper':input_bound,'output_tokens_upper':output,
+                'cny_upper':str(cny),'two_slot_cny_upper':str(2*cny)}
 
     async def forward(self, credential, raw):
         principal = self.issuer.verify(credential, "test-text:request")
@@ -232,11 +328,14 @@ class TestTextGate:
         import httpx
         key = os.environ.get(self.settings.codex_api_key_env)
         require(bool(key), "test_text_gate_credential_missing")
-        self.budget.reserve(task, raw)
+        # Recheck and hash exactly what will be sent, including injected cap.
+        self.request_bound(payload)
+        wire = json.dumps(payload,ensure_ascii=True,allow_nan=False).encode()
+        self.budget.reserve(task, wire)
         async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0),
                                      trust_env=False, follow_redirects=False, timeout=120) as client:
-            response = await client.post("https://api.deepseek.com/responses",json=payload,
-                                         headers={"Authorization":f"Bearer {key}"})
+            response = await client.post("https://api.deepseek.com/responses",content=wire,
+                                         headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"})
         return response.status_code, response.headers.get("content-type","application/json"), response.content
 
     async def _handle(self, reader, writer):
@@ -250,7 +349,7 @@ class TestTextGate:
             require(len(headers) == len(pairs) and 'transfer-encoding' not in headers,
                     "test_text_gate_http_framing")
             length = int(headers['content-length'])
-            require(0 < length <= 32768 and headers.get('authorization','').startswith('Bearer '),
+            require(0 < length <= MAX_REQUEST_BYTES and headers.get('authorization','').startswith('Bearer '),
                     "test_text_gate_http_request")
             raw = await asyncio.wait_for(reader.readexactly(length),10)
             status,kind,body = await self.forward(headers['authorization'][7:],raw)
