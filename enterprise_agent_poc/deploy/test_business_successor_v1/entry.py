@@ -12,6 +12,7 @@ import base64
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -236,9 +237,14 @@ def authority(action, clock=time.time):
     return value
 
 
-def runtime_call(command, *args, payload=None):
+def runtime_call(command, *args, payload=None, binding_path=None):
     """Only demoted processes may import application, psycopg/Redis/MCP libs."""
-    if (CONTROL / "runtime-binding.v1.json").exists():
+    if binding_path is not None:
+        need(binding_path == CONTINUATION_GRANT and command in ("old-state", "snapshot", "idle"),
+             "CONTINUATION_READONLY_RUNTIME_ONLY")
+        native(binding_path)
+        doc = read(binding_path)
+    elif (CONTROL / "runtime-binding.v1.json").exists():
         doc = read(CONTROL / "runtime-binding.v1.json")
     else:
         native(CONTROL / "scope.approved.v1.json")
@@ -508,11 +514,12 @@ def data_guard(schema, data, witness):
     return "EXACT_BASELINE_PRESERVED_BOUNDED_TEST_ROWS_ONLY"
 
 
-def idle(schema, data):
+def idle(schema, data, binding_path=None):
     need(not any(row.get("status") in ("queued", "running", "processing", "cancelling")
                  for table in ("tasks", "knowledge_files", "knowledge_rebuild_jobs")
                  for row in data.get(table, [])), "ACTIVE_TASK_OR_PARSING_JOB")
-    need(runtime_call("idle")["status"] == "IDLE", "NONEMPTY_REDIS_QUEUE")
+    queue = runtime_call("idle") if binding_path is None else runtime_call("idle", binding_path=binding_path)
+    need(queue["status"] == "IDLE", "NONEMPTY_REDIS_QUEUE")
 
 
 def sealed_runtime():
@@ -702,6 +709,234 @@ def prepare():
         "application_python_real_path": grant["application_python_real_path"],
         "application_python_sha256": grant["application_python_sha256"]}, mode=0o444)
     return {"status": "PREPARED_NOT_TEST_PASS", "source": SOURCE, "tree": TREE}
+
+
+
+# Exact already-created Git metadata; no regeneration/repair is permitted.
+PARTIAL_GIT_PINS = {
+    "FETCH_HEAD": "92d3262f00c884a1084f2a28e26040eba8dc3287520a4eb5b1786cc800369f8f",
+    "HEAD": "6d8eb39bf68619917fa04f67a72d1df8937c7035c047f849f84d8a4d32045efb",
+    "config": "114ab8ca0d56e8ddb15bb0061ac9a2ff2193de6f4703a910100fae178bf66a88",
+    "description": "85ab6c163d43a17ea9cf7788308bca1466f1b0a8d1cc92e26e9bf63da4062aee",
+    "hooks/applypatch-msg.sample": "0223497a0b8b033aa58a3a521b8629869386cf7ab0e2f101963d328aa62193f7",
+    "hooks/commit-msg.sample": "1f74d5e9292979b573ebd59741d46cb93ff391acdd083d340b94370753d92437",
+    "hooks/fsmonitor-watchman.sample": "f3c0228d8e827f1c5260ac59fdd92c3d425c46e54711ef713c5a54ae0a4db2b4",
+    "hooks/post-update.sample": "81765af2daef323061dcbc5e61fc16481cb74b3bac9ad8a174b186523586f6c5",
+    "hooks/pre-applypatch.sample": "e15c5b469ea3e0a695bea6f2c82bcf8e62821074939ddd85b77e0007ff165475",
+    "hooks/pre-commit.sample": "f9af7d95eb1231ecf2eba9770fedfa8d4797a12b02d7240e98d568201251244a",
+    "hooks/pre-merge-commit.sample": "d3825a70337940ebbd0a5c072984e13245920cdf8898bd225c8d27a6dfc9cb53",
+    "hooks/pre-push.sample": "ecce9c7e04d3f5dd9d8ada81753dd1d549a9634b26770042b58dda00217d086a",
+    "hooks/pre-rebase.sample": "4febce867790052338076f4e66cc47efb14879d18097d1d61c8261859eaaa7b3",
+    "hooks/pre-receive.sample": "a4c3d2b9c7bb3fd8d1441c31bd4ee71a595d66b44fcf49ddb310252320169989",
+    "hooks/prepare-commit-msg.sample": "e9ddcaa4189fddd25ed97fc8c789eca7b6ca16390b2392ae3276f0c8e1aa4619",
+    "hooks/push-to-checkout.sample": "a53d0741798b287c6dd7afa64aee473f305e65d3f49463bb9d7408ec3b12bf5f",
+    "hooks/update.sample": "8d5f2fa83e103cf08b57eaa67521df9194f45cbdbcb37da52ad586097a14d106",
+    "index": "04c5a77b2189d3c040d4cb4d8d891aa910c5f694a7e9ddbb7b9cbdd61c57557b",
+    "info/exclude": "6671fe83b7a07c8932ee89164d1f2793b2318058eb8b98dc5c06ee0a5a3b0ec1",
+    "logs/HEAD": "5371189960fc6a68ec6268dcc9f8414f97d8b781b1c6f16ca0efc295f32e0246",
+    "objects/pack/pack-c6322d545809e9127ed9a705b4e374dd6bf3c134.idx": "00f7c64a28df6ae716259cdf41d721e40c98fc0a53e3a2cd8416d81ecf076067",
+    "objects/pack/pack-c6322d545809e9127ed9a705b4e374dd6bf3c134.pack": "8909f94d7a47669c929981d49140366096767024c343fe8b19e141e0c05282e1"
+}
+PARTIAL_GIT_DIRS = frozenset(["branches","hooks","info","logs","objects","objects/info","objects/pack","refs","refs/heads","refs/tags"])
+CONTINUATION_GRANT = CONTROL / "partial-prepare-continuation.approved.v1.json"
+CONTINUATION_CLAIM = CONTROL / "partial-prepare-continuation-claimed.v1.json"
+ORIGINAL_PARTIAL_RECORDS = {
+    "operation/ATTEMPTED.json": "46847ceaec6e165e074872384336d9257f035d0eaa99a205f770851a56e8b120",
+    "scope.approved.v1.json": "8ef7052dafe9e9e54e86e0dabd7d126879f056986bb6e2c02092b63052f66b7b",
+    "single-prepare-reauthorization-claimed.v1.json": "f6caf929ad514dac296d8964fff7a6e13b229d900d7b106cc6b0cff224b3fde1",
+    "single-prepare-reauthorization-result.v1.json": "31d123e786f32660d453192ef4a7e45f89889e108efd07c5c58e9ada7e85402e",
+    "single-prepare-reauthorization.approved.v1.json": "987c1b92c69e9e9a2f5fc7fa69caf0bebeaa7a84df5edb8696eb9fd64d3c68de"
+}
+
+
+def exact_partial_tree(root, files, directories):
+    """Read only: exact path set, bytes, ownership, mode and link closure."""
+    for parent in root.parents:
+        info = parent.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, 1000)
+             and not info.st_mode & 0o022, "PARTIAL_ANCESTOR_TRUST")
+    actual = {}
+    for path in (root, *root.rglob("*")):
+        name = str(path.relative_to(root))
+        info = path.lstat()
+        need((info.st_uid, info.st_gid) == (1000, 1000), "PARTIAL_OWNER")
+        if name == "." or name in directories:
+            need(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o555,
+                 "PARTIAL_DIRECTORY_TRUST")
+        else:
+            need(name in files and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                 and stat.S_IMODE(info.st_mode) == files[name]["mode"], "PARTIAL_FILE_SET_OR_TRUST")
+            need(sha(path) == files[name]["sha256"], "PARTIAL_FILE_BYTES:" + name)
+        actual[name] = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid,
+                        "gid": info.st_gid, "sha256": files.get(name, {}).get("sha256")}
+    need(set(actual) == {".", *files, *directories}, "PARTIAL_PATH_SET_INCOMPLETE")
+    return actual
+
+
+def partial_staging_bytes():
+    """Verify existing formal prefix and Git binding; never call either writer."""
+    metadata = ROOT / "shared/source-identities" / RID
+    git_files = {name: {"sha256": pin, "mode": 0o555 if name.startswith("hooks/") else 0o444}
+                 for name, pin in PARTIAL_GIT_PINS.items()}
+    git_map = exact_partial_tree(metadata, git_files, PARTIAL_GIT_DIRS)
+    pointer = (RELEASE / ".git").lstat()
+    need(stat.S_ISREG(pointer.st_mode) and pointer.st_nlink == 1
+         and (pointer.st_uid, pointer.st_gid, stat.S_IMODE(pointer.st_mode)) == (1000, 1000, 0o444),
+         "PARTIAL_GIT_POINTER_TRUST")
+    need((RELEASE / ".git").read_text() == "gitdir: " + str(metadata) + "\n", "PARTIAL_GIT_POINTER")
+    source_identity(REPO)
+    git = ["/usr/bin/git", "-c", "safe.directory=" + str(REPO), "-C", REPO]
+    need(run(git + ["rev-parse", "HEAD^"]).decode().strip() == GIT_PARENT, "REAL_GIT_PARENT")
+    entries = []
+    for item in run(git + ["ls-tree", "-rz", "--full-tree", SOURCE]).split(b"\0"):
+        if not item: continue
+        meta, name = item.split(b"\t", 1); mode, kind, oid = meta.split()
+        name = name.decode()
+        need(kind == b"blob" and mode in (b"100644", b"100755") and name != ".git"
+             and not name.startswith("/") and ".." not in name.split("/"), "PARTIAL_GIT_ENTRY")
+        entries.append((name, mode, oid))
+    batch = io.BytesIO(run(git + ["cat-file", "--batch"], input=b"\n".join(x[2] for x in entries) + b"\n"))
+    files, dirs = {}, set()
+    for name, mode, oid in entries:
+        header = batch.readline().split()
+        need(len(header) == 3 and header[:2] == [oid, b"blob"], "PARTIAL_GIT_BLOB_HEADER")
+        raw = batch.read(int(header[2]))
+        need(len(raw) == int(header[2]) and batch.read(1) == b"\n", "PARTIAL_GIT_BLOB_LENGTH")
+        files[name] = {"sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o555 if mode == b"100755" else 0o444}
+        dirs.update(str(p) for p in Path(name).parents if str(p) != ".")
+    need(not batch.read(), "PARTIAL_GIT_BATCH_TRAILING")
+    files[".git"] = {"sha256": "22ca92edbfd8fe9d82d60186b9c4ee90959e1dbc7ae1817cc27d99bfb76c83c4", "mode": 0o444}
+    file_map = exact_partial_tree(RELEASE, files, dirs)
+    source_identity(RELEASE)
+    # Strict object verification on the exact, immutable, pinned metadata above.
+    run(["/usr/bin/git", "-c", "safe.directory=" + str(RELEASE), "-C", RELEASE, "fsck", "--full", "--strict"], timeout=180)
+    policy = Path("/etc/enterprise-agent-test-successor-wechat-d8a-seeding-approval-v1/policy.v1.json")
+    pinned(policy, "f0cafe7bc1e85407da355febf1a855eb87c97036b5c0e094a250881381a9a028")
+    for name, pin in read(policy)["files"].items():
+        if name.startswith("enterprise_agent_poc/migrations/"):
+            need(files.get(name, {}).get("sha256") == pin, "NO_MIGRATION_BYTE_CHANGE")
+    archive_sha = hashlib.sha256(run(git + ["archive", "--format=tar", SOURCE])).hexdigest()
+    return {"files": {name: value["sha256"] for name, value in files.items()},
+            "release_file_count": len(files), "git_metadata_entries": len(git_map) - 1,
+            "source_archive_sha256": archive_sha,
+            "staging_sha256": digest({"release": file_map, "git_metadata": git_map})}
+
+
+def continuation_preflight(binding_path=None):
+    """No grant claim or write. Used before requesting the new exact grant."""
+    env_check(os.environ)
+    need((ROOT / "current").resolve() == OLD_RELEASE, "PARTIAL_EXACT_D8A_RUNTIME")
+    source_identity(OLD_RELEASE, OLD_SOURCE, OLD_TREE)
+    runtime_call("old-state", 1, binding_path=binding_path)
+    native(OP / "ATTEMPTED.json")
+    need({p.name for p in OP.iterdir()} == {"ATTEMPTED.json"}
+         and not (CONTROL / "runtime-binding.v1.json").exists()
+         and not CONTINUATION_CLAIM.exists(), "PARTIAL_ONLY_TWO_RECEIPTS_MISSING_NO_RETRY")
+    need(not any(p.exists() or p.is_symlink() for p in (*drops().values(), *recovery_drops().values())),
+         "PARTIAL_NO_SERVICE_MUTATION")
+    history = {}
+    for name, pin in ORIGINAL_PARTIAL_RECORDS.items():
+        path = CONTROL / name
+        pinned(path, pin)
+        history[name] = pin
+    attempt = read(OP / "ATTEMPTED.json")
+    need(attempt == {"action": "prepare", "source": SOURCE, "at": 1792027622}, "ORIGINAL_PARTIAL_ATTEMPT")
+    result = read(CONTROL / "single-prepare-reauthorization-result.v1.json")
+    need(result["exit_code"] == 2 and result["candidate_status"] == "VERIFIED_ENTRY_BLOCKED",
+         "ORIGINAL_PARTIAL_FAILURE")
+    staging = partial_staging_bytes()
+    metadata = metadata_pins()
+    schema, data = runtime_call("snapshot", binding_path=binding_path)
+    idle(schema, data, binding_path=binding_path)
+    dep = json.loads(run([APPLICATION_PYTHON, "-I", "-B", ROOT / "tmp/dependency_snapshot.py"],
+                        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1")))
+    need(dep["sha256"] == DEP, "DEPENDENCY_SNAPSHOT")
+    registry = registry_file_pins()
+    witness = {"source": SOURCE, "tree": TREE, "git_parent": GIT_PARENT,
+        "predecessor_source": OLD_SOURCE, "predecessor_tree": OLD_TREE,
+        "files": staging["files"], "schema_sha256": digest(schema), "rows": row_pins(data),
+        "credit_accounts": data.get("credit_accounts", []), "metadata_pins": metadata,
+        "registry_files": registry, "seeding_action": "NONE", "secret_action": "NONE"}
+    binding = {"operation": str(OP), "application_source": SOURCE, "application_tree": TREE,
+        "predecessor_source": OLD_SOURCE, "predecessor_tree": OLD_TREE,
+        "staging_sha256": staging["staging_sha256"], "source_archive_sha256": staging["source_archive_sha256"],
+        "metadata_sha256": digest(metadata), "schema_sha256": digest(schema),
+        "rows_sha256": digest(witness["rows"]), "registry_sha256": digest(registry),
+        "dependency_sha256": DEP, "original_records": history}
+    return {"status": "PARTIAL_PREPARE_READONLY_PREFLIGHT_PASS", "binding": binding,
+            "preflight_sha256": digest(binding), "witness": witness,
+            "release_file_count": staging["release_file_count"],
+            "git_metadata_entries": staging["git_metadata_entries"], "metadata_count": len(metadata)}
+
+
+def continuation_authority(preflight_sha256=None, clock=time.time):
+    """Consume no old scope: only a genuinely new external limited decision."""
+    native(CONTINUATION_GRANT)
+    value = read(CONTINUATION_GRANT)
+    instant = clock()
+    need(value.get("kind") == "EXACT_894_PARTIAL_PREPARE_METADATA_CONTINUATION_V1"
+         and value.get("status") == "APPROVED_SINGLE_USE" and value.get("contract") == CONTRACT
+         and value.get("action") == "complete-prepare-metadata-only"
+         and value.get("host") == HOST and value.get("environment") == "test"
+         and value.get("application_source") == SOURCE and value.get("application_tree") == TREE
+         and value.get("operation_path") == str(OP) and value.get("release_path") == str(RELEASE)
+         and value.get("runtime_predecessor_source") == OLD_SOURCE
+         and value.get("runtime_predecessor_tree") == OLD_TREE, "CONTINUATION_EXACT_SCOPE")
+    need(value.get("attempts") == 1 and value.get("automatic_retry") is False
+         and value.get("manual_retry") is False and value.get("production_authority") is False
+         and value.get("provider_budget") == 0 and value.get("migration_action") == "NONE"
+         and value.get("write_paths") == [str(CONTINUATION_CLAIM), str(OP / "prepare.json"),
+                                         str(CONTROL / "runtime-binding.v1.json")], "CONTINUATION_ONLY_METADATA")
+    need(type(value.get("issued_at")) is int and type(value.get("expires_at")) is int
+         and value["issued_at"] <= instant < value["expires_at"]
+         and 0 < value["expires_at"] - value["issued_at"] <= 1800, "CONTINUATION_AUTHORITY_EXPIRED")
+    need(value.get("revoked") is False and not (CONTROL / "REVOKED").exists()
+         and not (CONTROL / "CONTINUATION_REVOKED").exists(), "CONTINUATION_AUTHORITY_REVOKED")
+    need(value.get("operator") == "06_CODEX_AUTHORIZED_LUCKY_SUDO"
+         and all(isinstance(value.get(k), str) and len(value[k]) >= 8 for k in
+                 ("owner_decision_reference", "technical_decision_reference")), "CONTINUATION_REAL_DECISIONS")
+    need(all(isinstance(value.get(k), str) and len(value[k]) == 40
+             and all(ch in "0123456789abcdef" for ch in value[k])
+             for k in ("tooling_source", "tooling_tree")), "CONTINUATION_TOOLING_IDENTITY")
+    need(value.get("original_records") == ORIGINAL_PARTIAL_RECORDS, "CONTINUATION_ORIGINAL_RECORDS")
+    need(set(value.get("code_sha256", {})) == set(CODE_FILES), "CONTINUATION_COMPLETE_CODE_PINS")
+    for name, pin in value["code_sha256"].items(): pinned(CONTROL / name, pin)
+    trusted_python(value)
+    if preflight_sha256 is not None:
+        need(value.get("preflight_sha256") == preflight_sha256, "CONTINUATION_PREFLIGHT_BINDING")
+    return value
+
+
+def continue_prepare():
+    """Under main's original global lock; exactly 1 claim + 2 missing receipts."""
+    grant = continuation_authority()
+    proof = continuation_preflight(binding_path=CONTINUATION_GRANT)
+    grant = continuation_authority(proof["preflight_sha256"])
+    need(not CONTINUATION_CLAIM.exists(), "CONTINUATION_ALREADY_ATTEMPTED_QUERY_ONLY")
+    record(CONTINUATION_CLAIM, {"action": "complete-prepare-metadata-only",
+        "grant_sha256": sha(CONTINUATION_GRANT), "preflight_sha256": proof["preflight_sha256"],
+        "original_attempt_sha256": ORIGINAL_PARTIAL_RECORDS["operation/ATTEMPTED.json"],
+        "at": int(time.time()), "retry_permitted": False}, mode=0o444)
+    # Claim first; interruption may leave partial receipts, NEVER a retry/PASS.
+    grant = continuation_authority(proof["preflight_sha256"])
+    witness = dict(proof["witness"], at=int(time.time()),
+        completion_kind="ORIGINAL_PARTIAL_PREPARE_METADATA_ONLY",
+        original_attempt_sha256=ORIGINAL_PARTIAL_RECORDS["operation/ATTEMPTED.json"],
+        original_attempt_at=1792027622, prestate_captured_at=int(time.time()),
+        continuation_claim_sha256=sha(CONTINUATION_CLAIM))
+    record(OP / "prepare.json", witness, mode=0o440)
+    os.chown(OP / "prepare.json", 0, 1000)
+    grant = continuation_authority(proof["preflight_sha256"])
+    record(CONTROL / "runtime-binding.v1.json", {"contract": CONTRACT, "source": SOURCE,
+        "tree": TREE, "predecessor_source": OLD_SOURCE, "entry_sha256": sha(CONTROL / "entry.py"),
+        "prepare_sha256": sha(OP / "prepare.json"), "provider_authority": False,
+        **{name: grant[name] for name in ("code_sha256", "python_real_path", "python_sha256",
+            "system_python_manifest_sha256", "application_python_real_path", "application_python_sha256")}}, mode=0o444)
+    binding, actual = sealed_runtime()
+    need(actual == witness and binding["prepare_sha256"] == sha(OP / "prepare.json"), "CONTINUATION_RECEIPT_READBACK")
+    for name, pin in ORIGINAL_PARTIAL_RECORDS.items(): pinned(CONTROL / name, pin)
+    return {"status": "PREPARED_NOT_TEST_PASS", "source": SOURCE, "tree": TREE,
+            "metadata_only_continuation": True, "retry_permitted": False}
 
 
 def drops():
@@ -1056,12 +1291,13 @@ def main():
     if command == "runtime-check":
         need(len(sys.argv) == 3, "ROLE_REQUIRED")
         return runtime_check(sys.argv[2])
-    need(command in ("prepare", "registry", "registry-reconcile", "registry-check", "quiesce-registry", "quiesce", "backup", "rehearse", "activate", "recover",
+    need(command in ("prepare", "continue-prepare", "registry", "registry-reconcile", "registry-check", "quiesce-registry", "quiesce", "backup", "rehearse", "activate", "recover",
                      "resume-unchanged", "health", "query"), "COMMAND")
     with locked():
         if command == "query":
             return {"source": SOURCE, "records": [p.name for p in OP.glob("*.json")],
-                    "current": str((ROOT / "current").resolve()), "retry_permitted": False}
+                    "current": str((ROOT / "current").resolve()), "retry_permitted": False,
+                    "continuation_claim_exists": CONTINUATION_CLAIM.exists()}
         if command == "health":
             return health()
         if command == "registry-check":
@@ -1071,7 +1307,7 @@ def main():
             pinned(CONTROL / "existing_recovery_bound.py", grant["restore_entry_sha256"])
             run([PYTHON, "-I", "-S", "-B", CONTROL / RECOVERY_FILE, "capture"], timeout=1800)
             return {"status": "ENCRYPTED_BACKUP_CAPTURED_RESTORE_NOT_PROVEN"}
-        return {"prepare": prepare, "registry": registry_register, "registry-reconcile": registry_reconcile,
+        return {"prepare": prepare, "continue-prepare": continue_prepare, "registry": registry_register, "registry-reconcile": registry_reconcile,
                 "quiesce-registry": quiesce_registry,
                 "quiesce": quiesce, "rehearse": rehearse,
                 "activate": activate, "recover": recover, "resume-unchanged": resume_unchanged}[command]()

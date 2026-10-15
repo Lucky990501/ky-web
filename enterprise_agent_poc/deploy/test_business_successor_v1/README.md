@@ -147,13 +147,63 @@ checked, not guessed from a filename. metadata_pins returns only metadata/Hash
 after complete PASS. Prepare checks it before creating any new staging/attempt
 and checks unchanged readback before producing prepare.json.
 
-This change does NOT retry a consumed authorization or add a Partial Prepare
-continuation entry. Existing OP/RELEASE still fail NO_RETRY_OR_OVERWRITE. Preserve
-all prior staging, claims and reports. Before any new single authorization,06
-must have complete readonly metadata PASS and an actually approved legal way
-to finish the existing partial staging without replaying installation. Absent
-that entry, report the exact continuation blocker; do not treat this metadata
-fix as permission to delete/reinstall/overwrite or manufacture a new grant.
+The frozen6229 metadata-only fix did not add a Partial Prepare entry. Its
+consumed attempt and staging remain unchanged. The bounded successor below
+adds only the approved original-Operation metadata completion, not a replay.
+
+## Exact original Partial Prepare continuation (V5)
+
+Read-only function: entry.continuation_preflight(), using the existing sealed
+Test environment and UID1000 read-only Guard. No authority or claim is created.
+Independently verify its Git bytes/Pins BEFORE loading it. Before new Tooling
+installation, the exact in-memory successor's read-only functions can use the
+still-installed835 probe. This is not permission to execute unverified code.
+
+It requires exactly the original OP with only ATTEMPTED.json, no prepare/runtime
+binding/continuation claim/drop-ins, live d8a Source/Tree/Guard, idle PG tasks and
+Redis queues, unchanged Migration/dependencies and the complete107 metadata
+inventory. Original attempt, parent scope, consumed grant/claim/failure hashes
+are exact constants; old expiry is provenance only, NOT new mutation authority.
+Every Release member/path/Hash/mode/owner/link is compared to894 Git objects;
+the32 Git metadata entries are independently pinned/trust-checked, followed by
+strict Git object verification. No existing prefix or add_git_binding writer
+is called. Extra, missing, linked, writable or changed objects reject. The
+archive is hashed in memory; no new package is built, extracted or installed.
+
+06 supplies, via the existing trusted Root decision channel, one new protected
+partial-prepare-continuation.approved.v1.json under CONTROL. This module is only
+a consumer, never an issuer. Exact kind/action/Source/Tree/Operation/old records,
+new Tooling Source/Tree/five Code Pins and interpreter/stdlib pins, real Owner
+and technical references, bounded preflight_sha256, max1800s, revocation,
+single-attempt/no-retry/no-Provider/no-Production are mandatory. Root must
+independently verify the Tooling commit/tree against all Git blobs before its
+first byte (including verified_entry.py); a candidate cannot authorize itself.
+No old grant is reused or extended. Preserve all historical scope/code evidence
+when using the existing authorized versioned Tooling/pin installation channel.
+
+Under the SAME existing global lock, the actual restricted entry is:
+/usr/bin/python3.10 -I -S -B CONTROL/verified_entry.py continue-prepare
+(CONTROL is the exact protected path above, not an arbitrary parameter.)
+The new grant is separately checked by verified_entry BEFORE candidate compile;
+continuation_authority rechecks exact scope/Pins/time/revocation after the slow
+read-only preflight and immediately before each receipt mutation.
+
+The only allowed writes, all O_EXCL/NOFOLLOW/fsync/readback, are:
+1. CONTROL/partial-prepare-continuation-claimed.v1.json (root:root/0444).
+2. Original OP/prepare.json (root:lucky/0440).
+3. CONTROL/runtime-binding.v1.json (root:root/0444).
+No RELEASE, Git, ATTEMPTED, Secret, Registry, DB, unit or pointer is modified.
+The prepared witness records the actual new prestate capture/continuation time
+separately from original_attempt_at; never backdate it. Runtime binding matches
+new five Code Pins and the actual prepared-witness hash. Success is only
+PREPARED_NOT_TEST_PASS. A crash after claim or either receipt means query ONLY;
+no auto-completion/retry or false PASS. A later phase still needs its own valid
+maintenance scope/Pins; this grant never authorizes Registry/backup/activation.
+
+The global lock serializes legitimate release actors, not arbitrary writes by
+trusted Root or UID1000 owners who could chmod their files. Complete checks bind
+the sampled state; no mechanism here claims hostile-writer atomicity. Subsequent
+quiescence/Registry stages retain their exact prepared-row/file drift rejection.
 
 ## Evidence boundary
 

@@ -28,7 +28,9 @@ def protected(path):
 def verify(command):
     if not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode:
         raise RuntimeError('SYSTEM_PYTHON_ISOLATED_STDLIB_ONLY_REQUIRED')
-    name = 'runtime-binding.v1.json' if command == 'runtime-check' else 'scope.approved.v1.json'
+    name = ('partial-prepare-continuation.approved.v1.json' if command == 'continue-prepare' or
+            (command == 'query' and (CONTROL/'partial-prepare-continuation.approved.v1.json').exists()) else
+            'runtime-binding.v1.json' if command == 'runtime-check' else 'scope.approved.v1.json')
     protected(CONTROL / name)
     value = json.loads((CONTROL / name).read_bytes())
     if command not in ('runtime-check', 'query'):
