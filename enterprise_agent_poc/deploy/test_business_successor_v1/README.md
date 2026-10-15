@@ -126,6 +126,35 @@ NEVER grant/import again, repair partial files or invent success. SQL rollback/
 partial files/conflicts remain BLOCKED/preserved. Safe early resume-unchanged
 only if actual original guard accepts and authority still valid.
 
+## Current Secret metadata reference correction (835 successor)
+
+The actual d8a KEY_FILE contract and all three Root systemd d8a drop-ins use
+shared/credentials/wechat-tenant-secret-d8a-seeding-approval-v1.key. The shorter
+wechat-tenant-secret-d8a-v1.key was an incorrect Tooling constant, not proof
+that a real old credential was retired. It must NOT be recreated/linked/copied.
+KEY now pins the actual UID/GID1000:1000/0600 single-link key; the original
+encrypted record is still pinned and compared with the unchanged Root current
+Witness. GPG continues in-file use of the same existing Test key, never a value
+on stdout or a Production credential. Historical d8a files are not modified.
+
+metadata_inventory is a bounded readonly collection of ALL required file and
+directory issues. It includes current d8a declaration, three actual drop-ins,
+current/recovery/Seeding documents and existing environment references. Missing
+directories no longer silently disappear from enumeration. Every file and
+ancestor retains allowed owner/no-link/no-group-world-write checks; key/cipher
+remain0600. Runtime path references and the old encrypted-record Witness are
+checked, not guessed from a filename. metadata_pins returns only metadata/Hash
+after complete PASS. Prepare checks it before creating any new staging/attempt
+and checks unchanged readback before producing prepare.json.
+
+This change does NOT retry a consumed authorization or add a Partial Prepare
+continuation entry. Existing OP/RELEASE still fail NO_RETRY_OR_OVERWRITE. Preserve
+all prior staging, claims and reports. Before any new single authorization,06
+must have complete readonly metadata PASS and an actually approved legal way
+to finish the existing partial staging without replaying installation. Absent
+that entry, report the exact continuation blocker; do not treat this metadata
+fix as permission to delete/reinstall/overwrite or manufacture a new grant.
+
 ## Evidence boundary
 
 Engineering/disaster-recovery fixtures include actual Registry SQL/files,

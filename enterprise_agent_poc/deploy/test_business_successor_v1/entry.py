@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import shlex
 import socket
 import stat
 import subprocess
@@ -53,8 +54,18 @@ FORMAL_PIN = "5f91603551e38119a294de7ecdce457ef19d557e902c1af0cfc2726f49af6b9e"
 DCA = Path("/etc/enterprise-agent-test-successor-wechat-dca-v1/entry.py")
 OLD_GUARD = Path("/etc/enterprise-agent-test-wechat-persistent-config-v1/primary_guard.py")
 OLD_GUARD_PIN = "5ba582e45b55e35aaeae83d5de995db00853ae83df45f0dab58d7d361c0c2c47"
-KEY = ROOT / "shared/credentials/wechat-tenant-secret-d8a-v1.key"
+KEY = ROOT / "shared/credentials/wechat-tenant-secret-d8a-seeding-approval-v1.key"
 SECRET = ROOT / "data/application/tenant-secrets/test/9a68955cf97b027ae79a199d77750e8ea218486f4e3505cfaf8dd1d259d32476.fernet"
+SECRET_KEY_ENV = "ENTERPRISE_POC_TENANT_SECRET_KEY_FILE"
+METADATA_DIRECTORIES = (
+    Path("/etc/enterprise-agent-test-wechat-persistent-config-v1"),
+    Path("/etc/enterprise-agent-test-wechat-persistent-config-recovery-v1"),
+    Path("/etc/enterprise-agent-test-tenant-seeding-v1"),
+    Path("/etc/enterprise-agent-test-successor-wechat-d8a-seeding-approval-v1"))
+SECRET_KEY_DECLARATION = METADATA_DIRECTORIES[-1] / "common.py"
+CURRENT_SECRET_WITNESS = METADATA_DIRECTORIES[0] / "current-state-witness.v1.json"
+SECRET_KEY_DROPINS = tuple(Path("/etc/systemd/system") / ("enterprise-agent-test-" + role + ".service.d") /
+    "zz-wechat-personal-d8a-seeding-approval-v1.conf" for role in ("api", "mcp", "worker"))
 TENANT = "internal-test-staging-v1"
 USER = "integrated-test-user-v1"
 ROLES = ("mcp", "api", "worker")
@@ -359,21 +370,84 @@ def row_pins(data):
     return {name: sorted(digest(row) for row in rows) for name, rows in data.items()}
 
 
+def metadata_inventory():
+    """Bounded complete preflight: collect ALL missing/unsafe references.
+    Only paths/stat/hash are returned, never config/credential contents.
+    Nothing is optional merely because a legacy directory is missing.
+    """
+    paths = {KEY, SECRET, SECRET_KEY_DECLARATION, CURRENT_SECRET_WITNESS, *SECRET_KEY_DROPINS,
+             ROOT / "shared/config/test-environment.env", ROOT / "shared/credentials/test-environment.secrets.env"}
+    paths.update(METADATA_DIRECTORIES[0] / name for name in (
+        "approval.v1.json", "policy.v1.json", "terminal-task-witness.v1.json",
+        "primary_guard.py", "wechat_persistent_config_guard.py", "scripts/receipt_row_canonicalization.py"))
+    result, issues = {}, []
+    def issue(path, code): issues.append({"path": str(path), "code": code})
+    def ancestry(path):
+        for parent in path.parents:
+            info = parent.lstat()
+            need(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                 and info.st_uid in (0, 1000) and not info.st_mode & 0o022,
+                 "TEST_REFERENCE_ANCESTOR")
+    for directory in METADATA_DIRECTORIES:
+        try:
+            info = directory.lstat()
+            need(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                 and info.st_uid == 0 and not info.st_mode & 0o022, "METADATA_DIRECTORY_TRUST")
+            ancestry(directory)
+            paths.update(path for path in directory.rglob("*") if path.is_file() or path.is_symlink())
+        except FileNotFoundError: issue(directory, "REQUIRED_METADATA_DIRECTORY_MISSING")
+        except (OSError, Blocked): issue(directory, "REQUIRED_METADATA_DIRECTORY_UNTRUSTED")
+    for path in sorted(paths):
+        try:
+            info = path.lstat()
+            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in (0, 1000)
+                 and not info.st_mode & 0o022, "TEST_REFERENCE_PATH")
+            ancestry(path)
+            if path in (KEY, SECRET):
+                need((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (1000, 1000, 0o600),
+                     "CURRENT_SECRET_FILE_PROTECTION")
+            if path in SECRET_KEY_DROPINS or path == SECRET_KEY_DECLARATION:
+                native(path, readonly=False)
+            result[str(path)] = dict(sha256=sha(path), mode=stat.S_IMODE(info.st_mode),
+                                    uid=info.st_uid, gid=info.st_gid, size=info.st_size)
+        except FileNotFoundError: issue(path, "REQUIRED_METADATA_PATH_MISSING")
+        except (OSError, Blocked): issue(path, "REQUIRED_METADATA_PATH_UNTRUSTED")
+    if str(SECRET_KEY_DECLARATION) in result:
+        try:
+            tree = ast.parse(SECRET_KEY_DECLARATION.read_bytes())
+            values = [n.value for n in tree.body if isinstance(n, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == "KEY_FILE" for t in n.targets)]
+            expected = ast.parse("R / " + repr(str(KEY.relative_to(ROOT))), mode="eval").body
+            need(len(values) == 1 and ast.dump(values[0]) == ast.dump(expected), "D8A_KEY_FILE_CONTRACT")
+        except (SyntaxError, OSError, Blocked): issue(SECRET_KEY_DECLARATION, "D8A_KEY_FILE_CONTRACT_MISMATCH")
+    for path in SECRET_KEY_DROPINS:
+        if str(path) not in result: continue
+        try:
+            refs = [token.split("=", 1)[1] for line in path.read_text().splitlines()
+                    if line.strip().startswith("Environment=")
+                    for token in shlex.split(line.strip().split("=", 1)[1])
+                    if token.startswith(SECRET_KEY_ENV + "=")]
+            need(refs == [str(KEY)], "CURRENT_SERVICE_SECRET_REFERENCE")
+        except (ValueError, OSError, Blocked): issue(path, "CURRENT_SERVICE_SECRET_REFERENCE_MISMATCH")
+    if str(CURRENT_SECRET_WITNESS) in result and str(SECRET) in result:
+        try:
+            native(CURRENT_SECRET_WITNESS)
+            expected = read(CURRENT_SECRET_WITNESS)["encrypted_secret_record"]
+            actual = result[str(SECRET)]
+            need(expected["path"] == str(SECRET) and expected["sha256"] == actual["sha256"]
+                 and expected["size"] == actual["size"], "CURRENT_ENCRYPTED_SECRET_WITNESS")
+        except (KeyError, ValueError, OSError, Blocked):
+            issue(SECRET, "CURRENT_ENCRYPTED_SECRET_WITNESS_MISMATCH")
+    if SECRET_KEY_ENV in os.environ and os.environ[SECRET_KEY_ENV] != str(KEY):
+        issue(KEY, "CURRENT_PROCESS_SECRET_REFERENCE_MISMATCH")
+    return {"status": "PASS" if not issues else "BLOCKED", "files": result,
+            "issues": issues, "key_file": str(KEY), "ciphertext": str(SECRET)}
+
+
 def metadata_pins():
-    paths = [KEY, SECRET, ROOT / "shared/config/test-environment.env",
-             ROOT / "shared/credentials/test-environment.secrets.env"]
-    for directory in (Path("/etc/enterprise-agent-test-wechat-persistent-config-v1"),
-                      Path("/etc/enterprise-agent-test-wechat-persistent-config-recovery-v1"),
-                      Path("/etc/enterprise-agent-test-tenant-seeding-v1")):
-        paths.extend(path for path in directory.rglob("*") if path.is_file())
-    result = {}
-    for path in sorted(set(paths)):
-        info = path.lstat()
-        need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in (0, 1000)
-             and not info.st_mode & 0o022, "TEST_REFERENCE_PATH")
-        result[str(path)] = dict(sha256=sha(path), mode=stat.S_IMODE(info.st_mode),
-                                uid=info.st_uid, gid=info.st_gid, size=info.st_size)
-    return result
+    report = metadata_inventory()
+    need(report["status"] == "PASS", "REQUIRED_METADATA_REFERENCES_BLOCKED:" + json.dumps(report["issues"], sort_keys=True))
+    return report["files"]
 
 
 def data_guard(schema, data, witness):
@@ -580,6 +654,7 @@ def runtime_check(role=None):
 def prepare():
     authority("install")
     old_state()
+    metadata = metadata_pins()  # read-only closure BEFORE any new staging/attempt
     need(not OP.exists() and not RELEASE.exists(), "NO_RETRY_OR_OVERWRITE")
     source_identity(REPO)
     parent = run(["/usr/bin/git", "-C", REPO, "rev-parse", "HEAD^"]).decode().strip()
@@ -609,10 +684,11 @@ def prepare():
     extract_function(DCA, dca_pin, "add_git_binding", c)()
     need(not any(RELEASE.rglob("*.pyc")), "UNLISTED_SOURCE_CACHE")
     files[".git"] = sha(RELEASE / ".git")
+    need(metadata_pins() == metadata, "METADATA_CHANGED_DURING_PREPARE")
     witness = {"source": SOURCE, "tree": TREE, "git_parent": GIT_PARENT,
         "predecessor_source": OLD_SOURCE, "predecessor_tree": OLD_TREE,
         "files": files, "schema_sha256": digest(schema), "rows": row_pins(data),
-        "credit_accounts": data.get("credit_accounts", []), "metadata_pins": metadata_pins(),
+        "credit_accounts": data.get("credit_accounts", []), "metadata_pins": metadata,
         "registry_files": registry_file_pins(),
         "seeding_action": "NONE", "secret_action": "NONE", "at": int(time.time())}
     record(OP / "prepare.json", witness, mode=0o440)
