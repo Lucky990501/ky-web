@@ -88,6 +88,8 @@ class TaskService:
 
             agent = self._store.task_definition(task)
             execution_options = {}
+            if getattr(getattr(self._agents, "_settings", None), "test_text_gate_enabled", False):
+                execution_options["task_id"] = task_id
             if self._store.execution_resolver and task["agent_id"] not in CATALOG:
                 with self._store._store.connection() as conn:
                     context = self._store.execution_resolver.task_context(conn, task)

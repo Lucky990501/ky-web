@@ -15,6 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # are also the contract used by the deployment verifier to catch a systemd or
 # shell environment accidentally overriding the release environment file.
 RUNTIME_CONFIG_ENV_NAMES = (
+    "ENTERPRISE_POC_TEST_TEXT_GATE_ENABLED",
+    "ENTERPRISE_POC_TEST_TEXT_GATE_STATE",
     "APP_ENV",
     "ENTERPRISE_POC_DATABASE_URL",
     "ENTERPRISE_POC_MCP_URL",
@@ -119,6 +121,8 @@ class Settings:
     agent_runtime_test_allowed_template_slugs: tuple[str, ...] = ()
     agent_runtime_test_tenant_id: str | None = None
     task_queue_namespace: str = "enterprise-agent"
+    test_text_gate_enabled: bool = False
+    test_text_gate_state: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -131,6 +135,9 @@ class Settings:
             database_raw_path = Path(database_url.removeprefix("sqlite:///"))
             database_path = database_raw_path if database_raw_path.is_absolute() else PROJECT_ROOT / database_raw_path
         return cls(
+            test_text_gate_enabled=os.environ.get("ENTERPRISE_POC_TEST_TEXT_GATE_ENABLED", "false").lower() == "true",
+            test_text_gate_state=Path(os.environ["ENTERPRISE_POC_TEST_TEXT_GATE_STATE"]).absolute()
+                if os.environ.get("ENTERPRISE_POC_TEST_TEXT_GATE_STATE") else None,
             agent_runtime_test_production_enabled=os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_PRODUCTION_ENABLED", "false").lower() == "true",
             agent_runtime_test_allowed_tenant_ids=tuple(x.strip() for x in os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TENANT_IDS", "").split(",") if x.strip()),
             agent_runtime_test_allowed_template_slugs=tuple(x.strip() for x in os.environ.get("ENTERPRISE_POC_AGENT_RUNTIME_TEST_ALLOWED_TEMPLATE_SLUGS", "").split(",") if x.strip()),

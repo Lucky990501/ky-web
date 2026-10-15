@@ -116,6 +116,8 @@ class PlatformMCPService:
                                size: str | None = None,
                                outputs: list[dict] | None = None,
                                include_brand_logo: bool = False) -> dict:
+        if getattr(self._settings, "test_text_gate_enabled", False):
+            raise PermissionError("test_text_gate_image_disabled")
         principal = self._principal(bearer_token, "image:generate")
         submitted_args = {
             "prompt": prompt,
