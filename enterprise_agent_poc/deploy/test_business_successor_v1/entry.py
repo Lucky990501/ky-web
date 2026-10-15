@@ -749,7 +749,7 @@ ORIGINAL_PARTIAL_RECORDS = {
 }
 
 
-def exact_partial_tree(root, files, directories):
+def exact_partial_tree(root, files, directories, member_owner=(1000, 1000)):
     """Read only: exact path set, bytes, ownership, mode and link closure."""
     for parent in root.parents:
         info = parent.lstat()
@@ -759,7 +759,8 @@ def exact_partial_tree(root, files, directories):
     for path in (root, *root.rglob("*")):
         name = str(path.relative_to(root))
         info = path.lstat()
-        need((info.st_uid, info.st_gid) == (1000, 1000), "PARTIAL_OWNER")
+        owner = (1000, 1000) if name in (".", ".git") else member_owner
+        need((info.st_uid, info.st_gid) == owner, "PARTIAL_OWNER")
         if name == "." or name in directories:
             need(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o555,
                  "PARTIAL_DIRECTORY_TRUST")
@@ -775,6 +776,10 @@ def exact_partial_tree(root, files, directories):
 
 def partial_staging_bytes():
     """Verify existing formal prefix and Git binding; never call either writer."""
+    # The pinned Root formal prefix extracts members as Root. DCA chowns
+    # only RELEASE/.git and Git metadata to lucky, not application members.
+    pinned(FORMAL, FORMAL_PIN)
+    pinned(DCA, read(CONTROL / "scope.approved.v1.json")["dca_entry_sha256"])
     metadata = ROOT / "shared/source-identities" / RID
     git_files = {name: {"sha256": pin, "mode": 0o555 if name.startswith("hooks/") else 0o444}
                  for name, pin in PARTIAL_GIT_PINS.items()}
@@ -806,7 +811,7 @@ def partial_staging_bytes():
         dirs.update(str(p) for p in Path(name).parents if str(p) != ".")
     need(not batch.read(), "PARTIAL_GIT_BATCH_TRAILING")
     files[".git"] = {"sha256": "22ca92edbfd8fe9d82d60186b9c4ee90959e1dbc7ae1817cc27d99bfb76c83c4", "mode": 0o444}
-    file_map = exact_partial_tree(RELEASE, files, dirs)
+    file_map = exact_partial_tree(RELEASE, files, dirs, member_owner=(0, 0))
     source_identity(RELEASE)
     # Strict object verification on the exact, immutable, pinned metadata above.
     run(["/usr/bin/git", "-c", "safe.directory=" + str(RELEASE), "-C", RELEASE, "fsck", "--full", "--strict"], timeout=180)

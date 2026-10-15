@@ -165,6 +165,9 @@ Redis queues, unchanged Migration/dependencies and the complete107 metadata
 inventory. Original attempt, parent scope, consumed grant/claim/failure hashes
 are exact constants; old expiry is provenance only, NOT new mutation authority.
 Every Release member/path/Hash/mode/owner/link is compared to894 Git objects;
+the pinned Root formal prefix leaves application members root:root, while DCA
+chowns only the top RELEASE/.git/Git metadata to1000:1000; each is checked
+exactly, never accepted by a generic0-or1000 owner exception. No chown occurs.
 the32 Git metadata entries are independently pinned/trust-checked, followed by
 strict Git object verification. No existing prefix or add_git_binding writer
 is called. Extra, missing, linked, writable or changed objects reject. The

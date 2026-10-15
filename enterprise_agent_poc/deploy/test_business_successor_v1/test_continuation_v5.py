@@ -143,6 +143,19 @@ def test_actual_private_tree_complete_byte_map(c,private_tree):
     assert set(c.exact_partial_tree(root,files,set()))=={'.','original.txt'}
 
 
+def test_root_extracted_release_members_are_exact_not_arbitrary_allowed_owners(c,private_tree,monkeypatch):
+    root,files=private_tree;real=Path.lstat
+    def stat_owner(path):
+        s=real(path)
+        if path==root/'original.txt':
+            return types.SimpleNamespace(st_mode=s.st_mode,st_uid=0,st_gid=0,st_nlink=s.st_nlink)
+        return s
+    monkeypatch.setattr(Path,'lstat',stat_owner)
+    assert c.exact_partial_tree(root,files,set(),member_owner=(0,0))
+    with pytest.raises(c.Blocked,match='PARTIAL_OWNER'):
+        c.exact_partial_tree(root,files,set(),member_owner=(1000,1000))
+
+
 @pytest.mark.parametrize('bad',['bytes','missing','extra','mode','symlink','hardlink','empty-dir'])
 def test_incomplete_or_corrupt_staging_never_accepted(c,private_tree,bad):
     root,files=private_tree;p=root/'original.txt';root.chmod(0o755)
