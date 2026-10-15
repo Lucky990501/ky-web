@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import types
 
@@ -127,6 +128,44 @@ def redis_restore(c, values, repair=False):
     finally: client.close()
 
 
+def pg_restore_contract(c):
+    """Existing Test maintainer verifies catalogs READ ONLY; never restores as admin."""
+    import psycopg
+    from psycopg.rows import dict_row
+    helper = compiled("exact_pg_restore_contract", HERE / "existing_recovery_bound.py")
+    c.env_check(os.environ)
+    options = "-c default_transaction_read_only=on -c statement_timeout=10000"
+    with psycopg.connect(os.environ["ENTERPRISE_POC_DATABASE_URL"], row_factory=dict_row, options=options) as db:
+        db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        identity = db.execute("SELECT current_database() AS database,current_user AS role,inet_server_port() AS port,current_setting('server_version') AS version").fetchone()
+        c.need((identity["database"], identity["role"], identity["port"], identity["version"]) ==
+               ("enterprise_agent_test", "enterprise_agent_test", 55432, "16.6"), "EXACT_TEST_RESTORE_BUSINESS_IDENTITY")
+        catalog = helper.pg_contract_catalog(db)
+        can_create = db.execute("SELECT has_schema_privilege(current_user,'public','CREATE')").fetchone()
+        can_create = next(iter(can_create.values()))
+    key = c.ROOT / "shared/credentials/postgresql-admin-password"
+    for path in (key, *key.parents):
+        info = path.lstat()
+        c.need(not stat.S_ISLNK(info.st_mode) and info.st_uid in (0, 1000)
+               and not info.st_mode & 0o022, "EXISTING_TEST_MAINTENANCE_CREDENTIAL_TRUST")
+    info = key.lstat()
+    c.need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600,
+           "EXISTING_TEST_MAINTENANCE_CREDENTIAL_PROTECTION")
+    # Existing formal Test maintainer only; no Production credential or new role.
+    with psycopg.connect(host="127.0.0.1", port=55432, dbname="enterprise_agent_test",
+            user="eaw_test_admin", password=key.read_text().strip(), row_factory=dict_row, options=options) as db:
+        db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        actor = db.execute("SELECT current_user AS role,current_database() AS database,inet_server_port() AS port").fetchone()
+        c.need(tuple(actor.values()) == ("eaw_test_admin", "enterprise_agent_test", 55432), "EXACT_EXISTING_MAINTENANCE_VERIFIER")
+        maintenance_catalog = helper.pg_contract_catalog(db)
+    c.need(catalog == maintenance_catalog, "MAINTENANCE_READONLY_CATALOG_MISMATCH")
+    return helper.validate_pg_contract(c, {"mode": helper.PG_RESTORE_MODE,
+        "database": identity["database"], "version": identity["version"], "port": identity["port"],
+        "business_executor": "enterprise_agent_test", "maintenance_verifier": "eaw_test_admin",
+        "maintenance_readonly": True, "maintenance_catalog_match": True,
+        "business_public_create": bool(can_create), "catalog": catalog})
+
+
 def main():
     c = compiled("exact_test_entry", HERE / "entry.py")
     if os.geteuid() != 1000 or Path(sys.executable).resolve() != c.APPLICATION_PYTHON.resolve():
@@ -143,6 +182,7 @@ def main():
     if command == "redis-dump": return redis_dump(c)
     if command == "redis-restore-rehearsal": return redis_restore(c, json.load(sys.stdin))
     if command == "redis-restore-repair": return redis_restore(c, json.load(sys.stdin), repair=True)
+    if command == "pg-restore-contract": return pg_restore_contract(c)
     if command == "idle":
         from redis import Redis
         client = Redis.from_url(os.environ["REDIS_URL"])

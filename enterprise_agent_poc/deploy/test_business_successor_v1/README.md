@@ -210,6 +210,62 @@ quiescence/Registry stages retain their exact prepared-row/file drift rejection.
 
 ## Evidence boundary
 
+## Exact vector-preserving restore successor (V6)
+
+The selected eabb restore ran all pg_restore --clean TOC entries as the ordinary
+enterprise_agent_test role. The actual archive includes vector EXTENSION and
+its COMMENT; vector0.8.6 is owned by eaw_test_admin and requires elevated rights.
+Do not elevate the business role, run business restore as superuser, or claim
+that old eabb Pins/authority approve this changed restoration contract.
+
+V6 adopts only PRESERVE_VERIFIED_VECTOR_0_8_6_BUSINESS_ROLE_V1. The existing
+protected Test maintainer independently reads catalogs in a READ ONLY transaction
+using its existing Test credential file; it never writes to the live DB. The
+ordinary business role remains the actual dump/restore executor. Capture records
+the exact extension/schema/Owner/ACL/function/type/constraint/index/sequence and
+role/membership contract. Only verified vector0.8.6/public/eaw_test_admin and
+plpgsql1.0/pg_catalog/eaw_test_admin are accepted. Public Schema is preserved;
+unsupported schemas, nondefault object/default ACLs, extra extension/high-right
+TOC entries or non-business restore owners reject BEFORE real restore.
+
+Every TOC entry is classified. Only the exact vector EXTENSION/COMMENT entries
+are omitted from the business list; all294 actual ordinary entries remain.
+The immutable list and report bind raw/custom dump, encrypted selected backup,
+list SHA, restore mode and actual postrestore contract. Normal flags retain
+--clean/--if-exists/--single-transaction/--exit-on-error/--no-owner/--no-acl;
+no Schema or extension DROP/CREATE is run in the live restoration. Full schema,
+Owner/ACL/sequence/extension/role catalog equality is mandatory before and after,
+in addition to the unchanged original full row/schema checks. A different
+extension, archive, Role or catalog cannot use this preservation contract.
+
+GPG uses --no-options and a0700, effective-UID-owned BACKUP/gnupg profile under
+the already protected backup hierarchy. It must not implicitly create/use
+/root/.gnupg or ordinary-user config as Root. The selected Test key stays in-file
+and unchanged. Two extra Root audit files per actual physical restore are the
+prefix.business-restore.list (0444) and prefix.pg-restore-verified.json (0400).
+They do not grant authority. No old backup or evidence is overwritten.
+
+Before06 actual use, the existing trusted channel must bind new exact Tooling
+Source/Tree, the two changed Code Pins (helper/probe), restore_entry_sha256 and
+explicit pg_restore_mode to a genuinely new versioned maintenance decision.
+The runtime-binding Code Pins also need a separately audited exact successor,
+keeping its original prepare_sha256 and preserving the original eabb binding
+and Scope byte-for-byte. First-byte installation checks remain unchanged.
+Do not silently edit old records, repeat Prepare or reuse a consumed grant.
+No new issuer/platform/Runtime is supplied. The original final3600s recovery
+reserve and actual Owner/Root deadlines still apply; no implied extension.
+
+Only isolated real PG recovery fixtures were run for V6. Existing HBA allows
+business login only to enterprise_agent_test, so isolated DB authentication used
+the existing maintainer then SET ROLE enterprise_agent_test; current_user was
+verified nonsuperuser. Formal live restore keeps direct business login. HBA,
+roles and current d8a data/services were not changed. The first fixture's login
+failure and second fixture's completed restore/final read-only verification
+are retained. This proves SQL restore behavior, not native service-restart,
+full stopped-d8a rehearsal, future selected-backup restoration or Test Native.
+
+## Historical fixture evidence boundary
+
 Engineering/disaster-recovery fixtures include actual Registry SQL/files,
 NOT Test Native qualification. Real PG16.6 restore/systemd switch/restart and
 06 runtime acceptance remain NOT_EXECUTED. Live admin0/exact scope not issued.
