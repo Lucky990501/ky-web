@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -268,6 +269,30 @@ class ProductStore:
                     if agent.id not in seedable_ids:
                         continue
                     conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status) VALUES (?,?,'enabled') ON CONFLICT(tenant_id,agent_id) DO NOTHING", (tenant["id"], agent.id))
+
+    def knowledge_embedding_schema(self, conn=None) -> dict:
+        """Inspect the existing schema without changing it or its migration identity."""
+        if conn is None:
+            with self._store.connection() as connection:
+                return self.knowledge_embedding_schema(connection)
+        row = conn.execute(
+            "SELECT t.typname AS type,a.atttypmod AS dimension FROM pg_attribute a "
+            "JOIN pg_type t ON t.oid=a.atttypid "
+            "WHERE a.attrelid=to_regclass('public.knowledge_chunks') "
+            "AND a.attname='embedding' AND NOT a.attisdropped"
+        ).fetchone()
+        dimension_column = conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema='public' "
+            "AND table_name='knowledge_chunks' AND column_name='embedding_dimension'"
+        ).fetchone() is not None
+        return {"type":row["type"] if row else None, "dimension":row["dimension"] if row else None,
+                "dimension_column":dimension_column}
+
+    def require_knowledge_embedding_dimension(self, dimension: int, conn=None) -> dict:
+        schema = self.knowledge_embedding_schema(conn)
+        if schema["type"] != "vector" or schema["dimension"] != dimension or dimension < 1:
+            raise RuntimeError("KNOWLEDGE_EMBEDDING_SCHEMA_DIMENSION_MISMATCH")
+        return schema
 
     def ensure_pgvector_schema(self, dimension: int) -> None:
         """Migrate legacy JSON embeddings only after a formal Provider is configured."""
@@ -1439,12 +1464,28 @@ class ProductStore:
 
     def replace_knowledge_chunks(self, tenant_id: str, file_id: str, chunks: list[dict]) -> None:
         with self._store.connection() as conn:
+            file = conn.execute("SELECT knowledge_base_id FROM knowledge_files WHERE id=? AND tenant_id=?", (file_id, tenant_id)).fetchone()
+            if file is None or any(chunk.get("knowledge_base_id") != file["knowledge_base_id"] for chunk in chunks):
+                raise ValueError("KNOWLEDGE_FILE_OWNERSHIP_MISMATCH")
+            schema = self.knowledge_embedding_schema(conn) if self._store.is_postgres else None
+            for chunk in chunks:
+                vector = chunk.get("embedding")
+                if schema and (schema["type"] != "vector" or not isinstance(vector,list)
+                               or not vector or len(vector) != schema["dimension"]
+                               or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) for v in vector)):
+                    raise ValueError("KNOWLEDGE_EMBEDDING_SCHEMA_DIMENSION_MISMATCH")
             conn.execute("DELETE FROM knowledge_chunks WHERE tenant_id=? AND file_id=?", (tenant_id, file_id))
             for chunk in chunks:
                 vector = chunk.get("embedding")
                 embedding = "[" + ",".join(f"{value:.10g}" for value in vector) + "]" if self._store.is_postgres and vector else json.dumps(vector)
                 if self._store.is_postgres:
-                    conn.execute("INSERT INTO knowledge_chunks(id,tenant_id,knowledge_base_id,file_id,content,title,section,page_number,chunk_index,embedding,embedding_provider,embedding_model,embedding_dimension,embedding_version,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), tenant_id, chunk.get("knowledge_base_id"), file_id, chunk["content"], chunk.get("title"), chunk.get("section"), chunk.get("page_number"), chunk["chunk_index"], embedding, chunk.get("embedding_provider"), chunk.get("embedding_model"), len(vector or []), chunk.get("embedding_version"), json.dumps(chunk.get("metadata", {}), ensure_ascii=False)))
+                    # Migration004–015 stores dimension in vector(N), not a
+                    # separate column. Retain compatibility with deployments
+                    # that already have the optional legacy dimension column.
+                    dimension_field = ",embedding_dimension" if schema["dimension_column"] else ""
+                    dimension_placeholder = ",?" if schema["dimension_column"] else ""
+                    values = (str(uuid.uuid4()), tenant_id, chunk.get("knowledge_base_id"), file_id, chunk["content"], chunk.get("title"), chunk.get("section"), chunk.get("page_number"), chunk["chunk_index"], embedding, chunk.get("embedding_provider"), chunk.get("embedding_model"), chunk.get("embedding_version"), json.dumps(chunk.get("metadata", {}), ensure_ascii=False))
+                    conn.execute("INSERT INTO knowledge_chunks(id,tenant_id,knowledge_base_id,file_id,content,title,section,page_number,chunk_index,embedding,embedding_provider,embedding_model,embedding_version,metadata" + dimension_field + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?" + dimension_placeholder + ")", values + ((len(vector),) if schema["dimension_column"] else ()))
                 else:
                     conn.execute("INSERT INTO knowledge_chunks(id,tenant_id,knowledge_base_id,file_id,content,title,section,page_number,chunk_index,embedding,embedding_provider,embedding_model,embedding_version,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), tenant_id, chunk.get("knowledge_base_id"), file_id, chunk["content"], chunk.get("title"), chunk.get("section"), chunk.get("page_number"), chunk["chunk_index"], embedding, chunk.get("embedding_provider"), chunk.get("embedding_model"), chunk.get("embedding_version"), json.dumps(chunk.get("metadata", {}), ensure_ascii=False)))
 
