@@ -48,7 +48,7 @@ def fixture(tmp_path,monkeypatch):
     store=POCStore(s.database_url); store.initialize(); ProductStore(store).initialize()
     member,operator,agent,revision=[str(uuid4()) for _ in range(4)]
     with store.connection() as c:
-        c.execute('INSERT INTO tenants VALUES(?,?,?)',('zhiy-e-intelligence','isolated fixture',None))
+        c.execute('INSERT INTO tenants VALUES(?,?,?)',('zhiy-e-intelligence','isolated fixture','ISOLATED-NOT-A-CREDENTIAL-'+str(uuid4())))
         for user,role in ((member,'member'),(operator,'enterprise_admin')):
             c.execute('INSERT INTO users(id,tenant_id,email,password_hash,display_name,role) VALUES(?,?,?,?,?,?)',
                 (user,'zhiy-e-intelligence',user+'@example.invalid','NOT_REAL','isolated fixture',role))
