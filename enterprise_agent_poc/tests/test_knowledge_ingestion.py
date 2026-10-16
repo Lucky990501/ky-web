@@ -214,7 +214,10 @@ def test_runtime_config_verifier_parses_and_compares_without_exposing_values(tmp
     same = compare(expected, {"APP_ENV": "production", "EMBEDDING_MODEL": "embedding-v1"})
     changed = compare(expected, {"APP_ENV": "production", "EMBEDDING_MODEL": "embedding-v2"})
 
-    assert same["fields"][0]["expected_configured"] is True
+    fields = {field['name']: field for field in same['fields']}
+    assert set(fields) == set(RUNTIME_CONFIG_ENV_NAMES)
+    assert fields['APP_ENV']['expected_configured'] is True
+    assert fields['APP_ENV']['runtime_configured'] is True
     assert same["matches"] is True
     assert changed["matches"] is False
     assert "embedding-v1" not in str(changed)
