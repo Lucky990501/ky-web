@@ -94,6 +94,8 @@ def test_actual_frozen_consumer_rejects_each_new_record_format(
         record.pop("state_contract")
         record.update(schema_version=1, candidate=candidate, predecessor=copy.deepcopy(old.PREDECESSOR),
                       binding_sha256=old.digest(value))
+    records["policy"].update(replacements=copy.deepcopy(old.P0_REPLACEMENTS),
+                             accepted_risks=copy.deepcopy(old.P0_RISKS))
     historical_evidence = records["evidence"]
     historical_evidence.update(replacements=copy.deepcopy(old.P0_REPLACEMENTS),
                                uncovered_risks=copy.deepcopy(old.P0_RISKS))
