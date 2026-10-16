@@ -81,6 +81,10 @@ def test_actual_frozen_consumer_rejects_each_new_record_format(
         value.pop(field)
     value.update(schema_version=3, contract_id=old.P0_CONTRACT,
                  recovery_contract=old.P0_CONTRACT, qualification_profile=old.P0_CONTRACT)
+    # The positive control belongs to the actual7dc/562 historical contract,
+    # never the current d906 deployment or recovery authority.
+    value.update(business_base_source=old.P0_SOURCE, business_base_tree=old.P0_TREE,
+                 exact_predecessor=copy.deepcopy(old.PREDECESSOR))
     value["successor"]["parent_source_commit"] = old.P0_SOURCE
     old.validate(value)  # Control proves the historical V3 path is exercised.
     candidate = copy.deepcopy(stateful["candidate"])
@@ -88,11 +92,21 @@ def test_actual_frozen_consumer_rejects_each_new_record_format(
     records = {name: copy.deepcopy(stateful[name]) for name in ("policy", "deployment", "evidence")}
     for record in records.values():
         record.pop("state_contract")
-        record.update(schema_version=1, candidate=candidate, binding_sha256=old.digest(value))
+        record.update(schema_version=1, candidate=candidate, predecessor=copy.deepcopy(old.PREDECESSOR),
+                      binding_sha256=old.digest(value))
+    historical_evidence = records["evidence"]
+    historical_evidence.update(replacements=copy.deepcopy(old.P0_REPLACEMENTS),
+                               uncovered_risks=copy.deepcopy(old.P0_RISKS))
+    historical_evidence["checks"]["exact_562_compatibility"] = historical_evidence["checks"].pop("exact_d906_compatibility")
     # The historical control must retain its own exact PG16.6 contract,
     # rather than borrowing the successor's Production16.14 fixture.
     for name, check in records["evidence"]["checks"].items():
         check["evidence_kind"] = old.P0_CHECKS[name]
+        facts = check["measurements"]
+        if "predecessor_source" in facts:
+            facts["predecessor_source"] = old.PREDECESSOR["source_commit"]
+        if "predecessor_archive_sha256" in facts:
+            facts["predecessor_archive_sha256"] = old.PREDECESSOR["archive_sha256"]
         if name in old.P0_PG_CHECKS:
             check["measurements"]["postgres_version"] = "16.6"
 

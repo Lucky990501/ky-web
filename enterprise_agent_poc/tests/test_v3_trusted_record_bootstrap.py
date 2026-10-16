@@ -21,6 +21,14 @@ from scripts import schema015_successor_binding as binding
 from scripts.runtime_policy_rollout import Rollout, Image
 from test_p0_lightweight_release_contract import controlled
 from test_schema015_successor_binding import pair
+from test_v3_state_frozen_reader_rejection import frozen_readers
+
+
+@pytest.fixture
+def historical_artifact_binding(frozen_readers, monkeypatch):
+    # Only the historical archive-inspection tests consume the captured7dc
+    # contract. Current consumers and the real d906 restore target stay intact.
+    monkeypatch.setattr(tool, "binding", frozen_readers["schema015_successor_binding"])
 
 
 def raw(value):
@@ -347,7 +355,7 @@ def test_tool_has_no_install_switch_or_root_base_override():
     assert "INSTALL_AND_SWITCH" not in script
 
 
-def test_genuine_7dc_archive_all_files_and_seven_pins_not_a_new_build(artifact):
+def test_genuine_7dc_archive_all_files_and_seven_pins_not_a_new_build(artifact, historical_artifact_binding):
     archive, manifest_raw, _ = artifact
     repo = Path(os.environ["V3_BOOTSTRAP_GIT_REPOSITORY"])
     reader = tool.git_reader(repo, tool.EXACT["source_commit"], tool.EXACT["source_tree"], tool.EXACT["parent_source_commit"])
@@ -360,7 +368,7 @@ def test_genuine_7dc_archive_all_files_and_seven_pins_not_a_new_build(artifact):
 
 
 @pytest.mark.parametrize("fault", ["manifest", "archive", "source_bytes", "executable_mode"])
-def test_actual_artifact_identity_drift_rejected(artifact, tmp_path, fault):
+def test_actual_artifact_identity_drift_rejected(artifact, tmp_path, fault, historical_artifact_binding):
     archive, manifest_raw, _ = artifact
     reader = tool.git_reader(Path(os.environ["V3_BOOTSTRAP_GIT_REPOSITORY"]), tool.EXACT["source_commit"],
                              tool.EXACT["source_tree"], tool.EXACT["parent_source_commit"])

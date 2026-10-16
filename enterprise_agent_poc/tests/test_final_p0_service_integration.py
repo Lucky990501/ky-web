@@ -14,7 +14,7 @@ from app.document_generator import ActivityPlanDocumentService
 from app.product_service import TaskService
 from app.service import AgentService
 from app.storage import LocalStorage
-from test_activity_plan_runtime import ScriptedProvider, PRODUCTION_P0, PRODUCTION_REQUEST, full_request, plan
+from test_activity_plan_runtime import ScriptedProvider, PRODUCTION_P0, PRODUCTION_REQUEST, CONFIRMED_BRIEF, full_request, plan
 from test_history import history_env, login
 from test_task_history_ownership import counts
 
@@ -49,7 +49,9 @@ def integrated(env, monkeypatch, message, response):
 def test_full_plan_running_history_detach_duplicate_and_word_are_one_run(history_env, monkeypatch, production_request):
     env = history_env
     content = PRODUCTION_P0["scripted_plan"] if production_request else plan()
-    message = PRODUCTION_REQUEST if production_request else full_request()
+    # This test starts at final generation. Missing-information interview is
+    # covered separately; reuse the existing explicitly confirmed test brief.
+    message = PRODUCTION_REQUEST + CONFIRMED_BRIEF if production_request else full_request()
     provider, service, task = integrated(env, monkeypatch, message, json.dumps(content, ensure_ascii=False))
     monkeypatch.setattr(main, "document_service", ActivityPlanDocumentService(LocalStorage(env.settings.object_storage_dir)))
 
