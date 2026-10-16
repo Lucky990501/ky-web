@@ -207,16 +207,23 @@ class Issuer:
                      and all(int(x.get('failures','0'))==int(x.get('errors','0'))==0 for x in suites), 'RAW_JUNIT_FAILURE:'+name)
                 skipped=sum(int(x.get('skipped','0')) for x in suites)
                 need(skipped==r['raw_skipped'],'RAW_SKIP_COUNT:'+name)
+                passed=sum(int(x.get('tests','0'))-int(x.get('failures','0'))-int(x.get('errors','0'))-int(x.get('skipped','0')) for x in suites)
+                need(passed>0 and passed==r['assertions'],'RAW_PASSED_COUNT:'+name)
             else:
                 data=parse(original)
                 need(data.get('fixture') is self.fixture and data.get('failures')==data.get('errors')==0
                      and data.get('source_commit')==r['source_commit']
                      and data.get('source_tree')==r['source_tree']
-                     and type(data.get('assertions')) is int and data['assertions']>0,'RAW_NATIVE_MEASUREMENT:'+name)
+                     and type(data.get('assertions')) is int and data['assertions']==r['assertions']>0
+                     and data.get('skipped',0)==r['raw_skipped'],'RAW_NATIVE_MEASUREMENT:'+name)
             need(r['raw_skipped']==0 or bool(r['resolved_skip_receipts']),'RAW_SKIPS_REQUIRE_CLOSURE:'+name)
             for receipt in r['resolved_skip_receipts']:
                 closure=self.read(Path(receipt['path']))
-                need(sha(closure)==receipt['sha256'] and parse(closure)['status']=='RESOLVED','SKIP_CLOSURE:'+name)
+                resolution=parse(closure)
+                need(sha(closure)==receipt['sha256'] and resolution['status']=='RESOLVED'
+                     and resolution['fixture'] is self.fixture
+                     and resolution['source_commit']==r['source_commit']
+                     and resolution['check']==name,'SKIP_CLOSURE:'+name)
             hashes[name]=sha(raw)
         return hashes
 

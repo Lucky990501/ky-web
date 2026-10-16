@@ -141,13 +141,17 @@ def test_duplicate_json_and_0400_refused(packet):
     save(path,p);path.chmod(0o400)
     assert 'PROTECTED_FILE' in run(packet,'review')[1]
 
-@pytest.mark.parametrize('case',['missing','failure','hash','expired','raw_failure','fake_kind','wrong_source'])
+@pytest.mark.parametrize('case',['missing','failure','hash','expired','raw_failure','fake_kind','wrong_source','raw_no_assertions','raw_count_mismatch','raw_skip_mismatch'])
 def test_bad_real_evidence_stops_before_release_or_claim(packet,case):
     capture(packet)
     path=Path(packet[2]['report_paths']['full_pytest']);r=json.loads(path.read_bytes())
     if case=='missing':path.unlink()
-    elif case=='raw_failure':
-        raw=Path(r['raw_path']);v=json.loads(raw.read_bytes());v['failures']=1
+    elif case in {'raw_failure','raw_no_assertions','raw_count_mismatch','raw_skip_mismatch'}:
+        raw=Path(r['raw_path']);v=json.loads(raw.read_bytes())
+        if case=='raw_failure':v['failures']=1
+        if case=='raw_no_assertions':v['assertions']=0
+        if case=='raw_count_mismatch':v['assertions']=2
+        if case=='raw_skip_mismatch':v['skipped']=1
         r['raw_sha256']=save(raw,v);save(path,r)
     else:
         if case=='failure':r['failures']=1
