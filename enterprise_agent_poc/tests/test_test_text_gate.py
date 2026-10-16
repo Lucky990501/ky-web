@@ -12,6 +12,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from app.agent_productization import AgentProductization
 from app.domain import RuntimeProfile
 from app.product_store import ProductStore
 from app.security import RuntimeTokenIssuer
@@ -46,9 +47,11 @@ def fixture(tmp_path,monkeypatch):
         image_provider_id='image-gateway',image_model_id='gpt-image-2.5-sunburst-c',embedding_provider='local-hash',
         test_text_gate_enabled=True,test_text_gate_state=tmp_path/'budget.sqlite')
     store=POCStore(s.database_url); store.initialize(); ProductStore(store).initialize()
+    AgentProductization(store,'test').initialize()
     member,operator,agent,revision=[str(uuid4()) for _ in range(4)]
     with store.connection() as c:
         c.execute('INSERT INTO tenants VALUES(?,?,?)',('zhiy-e-intelligence','isolated fixture','ISOLATED-NOT-A-CREDENTIAL-'+str(uuid4())))
+        c.execute('INSERT INTO enterprise_configs(tenant_id,payload) VALUES(?,?)',('zhiy-e-intelligence','{}'))
         for user,role in ((member,'member'),(operator,'enterprise_admin')):
             c.execute('INSERT INTO users(id,tenant_id,email,password_hash,display_name,role) VALUES(?,?,?,?,?,?)',
                 (user,'zhiy-e-intelligence',user+'@example.invalid','NOT_REAL','isolated fixture',role))
