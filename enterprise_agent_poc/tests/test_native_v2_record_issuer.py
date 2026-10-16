@@ -73,7 +73,7 @@ def run(packet,action,ack=True,live=False):
                 except OSError:break
                 if not data:break
                 output+=data
-                match=re.search(rb'TYPE EXACTLY: ([^\r\n]+)',output)
+                match=re.search(rb'TYPE EXACTLY: ([^\r\n]+)\r?\n',output)
                 if match and not sent:
                     challenge=match.group(1)
                     assert challenge.startswith(b'FIXTURE-'), 'Never automate actual human confirmation'
@@ -181,7 +181,7 @@ def test_time_replay_and_lock_before_human_release(packet,case):
     assert len(list(qualify(packet).iterdir()))==(1 if case=='existing_record' else 0)
 
 def test_withdrawal_preserves_original_and_blocks_replay(packet):
-    capture(packet);assert run(packet,'seal')[0]==0
+    capture(packet);code,text=run(packet,'seal');assert code==0,text
     before=next(qualify(packet).glob('*.approval.v1.json')).read_bytes()
     assert run(packet,'seal')[0]==2
     assert run(packet,'revoke')[0]==0
@@ -190,7 +190,7 @@ def test_withdrawal_preserves_original_and_blocks_replay(packet):
     assert run(packet,'root')[0]==2 and run(packet,'seal')[0]==2
 
 def test_native_frozen_consumer_rejects_fixture_record_schema(packet,monkeypatch):
-    capture(packet);assert run(packet,'seal')[0]==0
+    capture(packet);code,text=run(packet,'seal');assert code==0,text
     from scripts import schema015_successor_binding as frozen
     c=packet[2]['candidate'];root=packet[0]/'releases'/c['release_id']/'enterprise_agent_poc';root.mkdir(parents=True)
     manifest={'release_id':c['release_id'],'archive_sha256':c['archive_sha256']}
