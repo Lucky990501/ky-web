@@ -171,14 +171,14 @@ class Issuer:
         return v,raw
 
     def confirm(self,role,detail,expires):
-        with open('/dev/tty','r+',encoding='utf-8') as tty:
-            need(os.isatty(tty.fileno()),'CONTROLLING_TTY_REQUIRED')
+        with open('/dev/tty','r',encoding='utf-8') as tty_in, open('/dev/tty','w',encoding='utf-8') as tty:
+            need(os.isatty(tty.fileno()) and os.isatty(tty_in.fileno()),'CONTROLLING_TTY_REQUIRED')
             prefix='FIXTURE-' if self.fixture else ''
             challenge=prefix+role.upper()+' '+self.pin+' '+sha(enc(detail))
             tty.write('Lucky personally verifies independent '+role+' authority and unrevoked scope.\n'
                       'This entry only captures/seals; it never switches services or calls Providers.\n'
                       +self.request_raw.decode()+'\n'+enc(detail).decode()+'\nTYPE EXACTLY: '+challenge+'\n> ')
-            tty.flush();need(tty.readline().rstrip('\r\n')==challenge,'HUMAN_NOT_CONFIRMED')
+            tty.flush();need(tty_in.readline().rstrip('\r\n')==challenge,'HUMAN_NOT_CONFIRMED')
             now=int(time.time());need(now<expires,'DECISION_EXPIRED_WHILE_WAITING')
             original=enc({'role':role,'confirmation':challenge,'review':detail,'request':self.p}).decode()
             return {'kind':FIXTURE if self.fixture else 'ACTUAL_NATIVE_V2_HUMAN_DECISION',
@@ -252,6 +252,8 @@ class Issuer:
              ('seal.claim.json','seal.failed.json','seal.complete.json','release.json')),'SEAL_ALREADY_ATTEMPTED_NO_REPLAY')
         owner,owner_raw=self.valid('owner');root,root_raw=self.valid('root')
         if not self.fixture:self.binding=self.artifact()
+        self.ancestors(self.qual)
+        need(not any(os.path.lexists(self.qual/(self.rid+s)) for s in ('.approval.v1.json','.evidence.v1.json')),'EXISTING_RECORD_NO_OVERWRITE')
         need(root['owner_sha256']==sha(owner_raw),'INDEPENDENT_OWNER_ROOT_BINDING')
         need(int(time.time())+self.p['remaining_work_seconds']+3600<root['maintenance_expires_at'],'RECOVERY_TIME_RESERVED')
         reports=self.reports()
@@ -263,8 +265,8 @@ class Issuer:
         release=self.confirm('release',{'authority':'PRODUCTION_RELEASE_AUTHORITY','scope':'exact candidate switch and exact d906 runtime recovery; no DB rewind',
                      'owner_sha256':sha(owner_raw),'root_sha256':sha(root_raw),'actual_report_sha256':reports,
                      'evidence_sha256':sha(enc(evidence))},root['maintenance_expires_at'])
-        self.valid('owner');self.valid('root');need(self.reports()==reports,'REPORT_DRIFT_DURING_HUMAN_REVIEW')
         self.put(self.audit/'release.json',release)
+        self.valid('owner');self.valid('root');need(self.reports()==reports,'REPORT_DRIFT_DURING_HUMAN_REVIEW')
         approval={'schema_version':1,'scope':FIXTURE if self.fixture else 'SCHEMA015_EXACT_PAIR_RELEASE_RECOVERY',
                   'issuer_uid':0,'audit_id':release['source_reference'],'issued_at':release['issued_at'],
                   'expires_at':root['maintenance_expires_at'],'binding_sha256':self.p['binding_sha256'],

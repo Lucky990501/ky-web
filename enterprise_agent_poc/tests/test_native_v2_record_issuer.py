@@ -88,8 +88,8 @@ def run(packet,action,ack=True,live=False):
 def audit(packet):return packet[0]/'shared/release-state/native-v2-manual-issuance'/packet[2]['candidate']['release_id']
 def qualify(packet):return packet[0]/'shared/release-qualifications'
 def capture(packet):
-    assert run(packet,'owner')[0]==0
-    assert run(packet,'root')[0]==0
+    code,text=run(packet,'owner');assert code==0,text
+    code,text=run(packet,'root');assert code==0,text
 
 def test_fixture_complete_final_cli_and_independent_decisions(packet):
     assert run(packet,'review')[0]==0
@@ -161,7 +161,7 @@ def test_bad_real_evidence_stops_before_release_or_claim(packet,case):
     assert not (audit(packet)/'seal.claim.json').exists()
     assert list(qualify(packet).iterdir())==[]
 
-@pytest.mark.parametrize('case',['owner_expired','root_expired','recovery_short','failed_claim','lock_busy'])
+@pytest.mark.parametrize('case',['owner_expired','root_expired','recovery_short','failed_claim','lock_busy','existing_record'])
 def test_time_replay_and_lock_before_human_release(packet,case):
     capture(packet)
     if case in ('owner_expired','root_expired'):
@@ -170,6 +170,7 @@ def test_time_replay_and_lock_before_human_release(packet,case):
     if case=='recovery_short':
         p=audit(packet)/'root.json';d=json.loads(p.read_bytes());d['maintenance_expires_at']=int(time.time())+3700;save(p,d)
     if case=='failed_claim':save(audit(packet)/'seal.claim.json',{'old_failed':True})
+    if case=='existing_record':save(qualify(packet)/(packet[2]['candidate']['release_id']+'.approval.v1.json'),{'old':True})
     lock=None
     if case=='lock_busy':
         lock=(packet[0]/'release.lock').open('rb');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -177,7 +178,7 @@ def test_time_replay_and_lock_before_human_release(packet,case):
     finally:
         if lock:lock.close()
     assert not (audit(packet)/'release.json').exists()
-    assert list(qualify(packet).iterdir())==[]
+    assert len(list(qualify(packet).iterdir()))==(1 if case=='existing_record' else 0)
 
 def test_withdrawal_preserves_original_and_blocks_replay(packet):
     capture(packet);assert run(packet,'seal')[0]==0
