@@ -167,7 +167,7 @@ class AgentService:
                     existing["runtime_thread_id"],
                     developer_instructions=agent.instructions,
                     recovery_context=recovery_context,
-                    **({"task_id": task_id} if agent_id == "image-agent" and task_id else {}),
+                    **({"task_id": task_id} if task_id and (agent_id == "image-agent" or getattr(self._settings, "test_text_gate_enabled", False)) else {}),
                 )
                 if session.thread_id != existing["runtime_thread_id"]:
                     if not self._store.replace_conversation_thread(
@@ -177,7 +177,7 @@ class AgentService:
             else:
                 session = await self._runtime.create_session(
                     profile, agent.instructions,
-                    **({"task_id": task_id} if agent_id == "image-agent" and task_id else {}),
+                    **({"task_id": task_id} if task_id and (agent_id == "image-agent" or getattr(self._settings, "test_text_gate_enabled", False)) else {}),
                 )
                 if execution_context:
                     with self._store.connection() as conn:

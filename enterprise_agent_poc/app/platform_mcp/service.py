@@ -4,6 +4,7 @@ import base64
 import binascii
 import io
 import hashlib
+import json
 import os
 import re
 import time
@@ -116,6 +117,11 @@ class PlatformMCPService:
                                size: str | None = None,
                                outputs: list[dict] | None = None,
                                include_brand_logo: bool = False) -> dict:
+        pilot_gate = None
+        if getattr(self._settings, "test_text_gate_enabled", False):
+            from app.test_text_gate import TestTextGate, require
+            require(retry_of is None and not reference_images, "pilot_image_retry_or_edit_denied")
+            pilot_gate = TestTextGate(self._settings, self._tokens)
         principal = self._principal(bearer_token, "image:generate")
         submitted_args = {
             "prompt": prompt,
@@ -215,7 +221,9 @@ class PlatformMCPService:
         if image_dependency is not None:
             audit["image_dependency"] = image_dependency
         results, failures = [], []
-        async with httpx.AsyncClient(timeout=120) as client:
+        transport_options = ({"transport": httpx.AsyncHTTPTransport(retries=0),
+                              "trust_env": False, "follow_redirects": False} if pilot_gate else {})
+        async with httpx.AsyncClient(timeout=120, **transport_options) as client:
             for item in plan:
                 item_prompt = item["prompt"]
                 if logo_required:
@@ -229,6 +237,17 @@ class PlatformMCPService:
                                 data={"prompt": item_prompt, "model": self._settings.image_model_id,
                                       "n": "1", "size": item["size"], "output_format": "jpeg"},
                                 files={"image": (attachment["filename"], source_image, attachment["mime_type"])})
+                        elif pilot_gate:
+                            payload = {"prompt": item_prompt, "model": self._settings.image_model_id,
+                                       "provider": {"sort": "success_rate"}, "size": item["size"], "n": 1,
+                                       "output_format": "jpeg", "response_format": "b64_json"}
+                            wire = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode()
+                            pilot_gate.reserve_image(principal.tenant_id, task_id, principal.agent_id,
+                                                     wire, item=item["index"])
+                            response = await client.post(
+                                "https://llm-api.net/v1/images/generations", content=wire,
+                                headers={"Authorization": f"Bearer {api_key}",
+                                         "Content-Type": "application/json"})
                         else:
                             response = await client.post(
                                 "https://llm-api.net/v1/images/generations", headers={"Authorization": f"Bearer {api_key}"},

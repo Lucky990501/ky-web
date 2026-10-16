@@ -52,6 +52,10 @@ class CodexRuntimeManager:
         self._instances: dict[str, _Instance] = {}
         self._startup_events: dict[str, list[dict]] = {}
         self._lock = asyncio.Lock()
+        self._test_gate = None
+        if getattr(settings, "test_text_gate_enabled", False):
+            from app.test_text_gate import TestTextGate
+            self._test_gate = TestTextGate(settings, token_issuer)
 
     def _start_event(self, profile: RuntimeProfile, event: str, **details: str) -> None:
         self._startup_events.setdefault(profile.id, []).append({"event": event, **details})
@@ -64,8 +68,11 @@ class CodexRuntimeManager:
         root = self._settings.data_dir / "runtime" / profile.tenant_id / profile.agent_id / profile.id
         return root / "codex-home", root / "workspace"
 
-    def _prepare_profile(self, profile: RuntimeProfile) -> tuple[Path, Path, str, int]:
+    def _prepare_profile(self, profile: RuntimeProfile, *, task_id=None, gate_url=None) -> tuple[Path, Path, str, int]:
         codex_home, workspace = self._paths(profile)
+        if self._test_gate:
+            from app.test_text_gate import uuid
+            codex_home = codex_home / ("test-task-" + uuid(task_id))
         workspace.mkdir(parents=True, exist_ok=True)
         skills_dir = codex_home / "skills"
         self._deployment.deploy(profile.skill_manifest, skills_dir)
@@ -99,12 +106,14 @@ class CodexRuntimeManager:
                 "",
                 "[model_providers.deepseek]",
                 'name = "deepseek"',
-                f'base_url = "{self._settings.model_base_url}"',
+                f'base_url = "{gate_url or self._settings.model_base_url}"',
                 f'wire_api = "{self._settings.model_wire_api}"',
                 f'env_key = "{self._settings.codex_api_key_env}"',
                 "requires_openai_auth = false",
                 "",
             ]
+            if self._test_gate:
+                provider_lines += ['request_max_retries = 0', 'stream_max_retries = 0', '']
         (codex_home / "config.toml").write_text(
             "\n".join(
                 provider_lines + [
@@ -155,21 +164,29 @@ class CodexRuntimeManager:
             "minimal_client_version": "0.144.0",
         }
 
-    async def get(self, profile: RuntimeProfile):
+    async def get(self, profile: RuntimeProfile, *, task_id=None):
         async with self._lock:
+            gate_url = gate_credential = None
+            cache_key = profile.id
+            if self._test_gate:
+                gate_url, gate_credential = await self._test_gate.bind(profile, task_id)
+                cache_key += ":" + task_id
             self._startup_events[profile.id] = [{"event": "runtime_start_requested"}]
-            current = self._instances.get(profile.id)
+            current = self._instances.get(cache_key)
             if current and current.token_expires_at > int(time.time()) + 60:
                 current.last_active_at = time.monotonic()
                 self._start_event(profile, "app_server_ready")
                 return current.codex
             if current:
                 await current.codex.close()
-                del self._instances[profile.id]
+                del self._instances[cache_key]
             stage = "runtime_profile"
             try:
                 from openai_codex import AsyncCodex, CodexConfig
-                codex_home, workspace, token, token_expires_at = self._prepare_profile(profile)
+                if self._test_gate:
+                    codex_home, workspace, token, token_expires_at = self._prepare_profile(profile, task_id=task_id, gate_url=gate_url)
+                else:
+                    codex_home, workspace, token, token_expires_at = self._prepare_profile(profile)
                 stage = "provider_initialization"
                 api_key = os.environ.get(self._settings.codex_api_key_env)
                 if not api_key:
@@ -181,6 +198,13 @@ class CodexRuntimeManager:
                     # config.toml, the database, trace payloads, or source files.
                     self._settings.codex_api_key_env: api_key,
                 }
+                if self._test_gate:
+                    # SDK merges parent env. Mask inherited credentials, then
+                    # give it ONLY a short-lived local gate credential.
+                    env.update({k: "" for k in os.environ if any(s in k.upper() for s in
+                                ("KEY", "TOKEN", "SECRET", "PASSWORD", "PROXY"))})
+                    env.update(CODEX_HOME=str(codex_home), PLATFORM_MCP_TOKEN=token)
+                    env[self._settings.codex_api_key_env] = gate_credential
                 codex = AsyncCodex(CodexConfig(cwd=str(workspace), env=env))
                 self._start_event(profile, "runtime_process_created")
                 stage = "app_server"
@@ -197,7 +221,7 @@ class CodexRuntimeManager:
                 if profile.model_provider_id != "deepseek":
                     await codex.login_api_key(api_key)
                 self._start_event(profile, "app_server_ready")
-                self._instances[profile.id] = _Instance(
+                self._instances[cache_key] = _Instance(
                     codex=codex,
                     profile=profile,
                     last_active_at=time.monotonic(),
@@ -218,6 +242,8 @@ class CodexRuntimeManager:
             instances, self._instances = list(self._instances.values()), {}
         for instance in instances:
             await instance.codex.close()
+        if self._test_gate:
+            await self._test_gate.close()
 
 
 class CodexRuntimeProvider(RuntimeProvider):
@@ -227,6 +253,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         self._threads: dict[str, object] = {}
         self._active_turns: dict[str, object] = {}
         self._grounding_child_sessions: dict[str, RuntimeSession] = {}
+        self._task_ids: dict[str, str] = {}
 
     @staticmethod
     def _sandbox(policy: SandboxPolicy):
@@ -259,7 +286,7 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     async def create_session(self, profile: RuntimeProfile, developer_instructions: str,
                              *, task_id: str | None = None) -> RuntimeSession:
-        codex = await self._manager.get(profile)
+        codex = await self._manager.get(profile, **({"task_id": task_id} if getattr(self._manager, "_test_gate", None) else {}))
         self._manager._start_event(profile, "thread_start_requested")
         execution_scope = self._manager._token_issuer.issue_task_scope(profile.tenant_id, task_id) if task_id else uuid4().hex
         try:
@@ -277,6 +304,8 @@ class CodexRuntimeProvider(RuntimeProvider):
         self._manager._start_event(profile, "thread_started")
         self._profiles[profile.id] = profile
         self._threads[thread.id] = thread
+        if task_id:
+            self._task_ids[thread.id] = task_id
         return RuntimeSession(thread_id=thread.id, profile_id=profile.id)
 
     def startup_events(self, profile: RuntimeProfile) -> tuple[dict, ...]:
@@ -290,7 +319,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         recovery_context: str | None = None,
         *, task_id: str | None = None,
     ) -> RuntimeSession:
-        codex = await self._manager.get(profile)
+        codex = await self._manager.get(profile, **({"task_id": task_id} if getattr(self._manager, "_test_gate", None) else {}))
         self._manager._start_event(profile, "thread_resume_requested")
         execution_scope = self._manager._token_issuer.issue_task_scope(profile.tenant_id, task_id) if task_id else uuid4().hex
         try:
@@ -325,6 +354,8 @@ class CodexRuntimeProvider(RuntimeProvider):
             self._manager._start_event(profile, "thread_started")
         self._profiles[profile.id] = profile
         self._threads[thread.id] = thread
+        if task_id:
+            self._task_ids[thread.id] = task_id
         return RuntimeSession(thread_id=thread.id, profile_id=profile.id)
 
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn:
@@ -343,7 +374,8 @@ class CodexRuntimeProvider(RuntimeProvider):
     async def _thread_for_session(self, session: RuntimeSession, profile: RuntimeProfile):
         thread = self._threads.get(session.thread_id)
         if thread is None:
-            codex = await self._manager.get(profile)
+            codex = await self._manager.get(profile, **({"task_id": self._task_ids.get(session.thread_id)}
+                if getattr(self._manager, "_test_gate", None) else {}))
             thread = await codex.thread_resume(session.thread_id, sandbox=self._sandbox(profile.sandbox))
             self._threads[session.thread_id] = thread
         return thread
@@ -491,7 +523,8 @@ class CodexRuntimeProvider(RuntimeProvider):
                 "total_model_calls_for_structured_result": model_calls,
             })
 
-        for attempt in range(1, MAX_STRUCTURED_MODEL_ATTEMPTS + 1):
+        max_attempts = 1 if getattr(self._manager, "_test_gate", None) else MAX_STRUCTURED_MODEL_ATTEMPTS
+        for attempt in range(1, max_attempts + 1):
             generation_stage = ("semantic_correcting" if attempt == 2 and original is not None
                                 and original_violations else "full_plan_generating")
             yield RuntimeStreamEvent.activity(generation_stage, "started")
@@ -510,7 +543,7 @@ class CodexRuntimeProvider(RuntimeProvider):
                 # A provider/adapter that rejects the schema can use one raw
                 # JSON attempt. Operational failures still follow normal error handling.
                 wording = str(exc).lower()
-                if attempt == 1 and any(part in wording for part in ("output_schema", "output schema", "json_schema", "json schema", "response_format")):
+                if max_attempts > 1 and attempt == 1 and any(part in wording for part in ("output_schema", "output schema", "json_schema", "json schema", "response_format")):
                     yield RuntimeStreamEvent.activity(generation_stage, "completed")
                     record("FORMAT_VALIDATION", attempt, format_valid=False)
                     use_schema = False
@@ -567,7 +600,7 @@ class CodexRuntimeProvider(RuntimeProvider):
         status = ("semantic_guard_failed_after_retry" if violations else
                   "targeted_correction_failed_after_retry" if not correction_merge_valid else
                   "format_validation_failed_after_retry")
-        record("FINAL", MAX_STRUCTURED_MODEL_ATTEMPTS, format_valid=candidate is not None,
+        record("FINAL", max_attempts, format_valid=candidate is not None,
                semantic_valid=False, correction_result="FAIL", issues=violations)
         yield RuntimeStreamEvent.visible_delta(fallback)
         yield RuntimeStreamEvent.completed(replace(
@@ -621,7 +654,9 @@ class CodexRuntimeProvider(RuntimeProvider):
                 id=hashlib.sha256((profile.id + ":grounding-audit-v1").encode()).hexdigest()[:24],
                 skill_manifest={}, tool_scopes=(), required_tools=(), grounding_policy=None,
             )
-            audit_session = await self.create_session(audit_profile, AUDIT_INSTRUCTION)
+            audit_session = await self.create_session(audit_profile, AUDIT_INSTRUCTION,
+                **({"task_id": self._task_ids.get(session.thread_id)}
+                   if getattr(self._manager, "_test_gate", None) else {}))
             self._grounding_child_sessions[session.thread_id] = audit_session
             phase = "grounding_auditing"
             yield RuntimeStreamEvent.activity(phase, "started")
