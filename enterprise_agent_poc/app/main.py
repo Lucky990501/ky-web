@@ -117,7 +117,7 @@ skill_registry = SkillRegistry(
 manager = CodexRuntimeManager(settings, SkillDeployment(skill_registry.published_root), token_issuer)
 runtime = CodexRuntimeProvider(manager)
 agents = AgentService(store, runtime, settings, skill_registry.manifest_for_agent)
-product_store = ProductStore(store)
+product_store = ProductStore(store, test_gate_settings=settings if settings.test_text_gate_enabled else None)
 document_service = ActivityPlanDocumentService(
     storage_provider(settings), brand_provider=lambda tenant_id: store.enterprise_config(tenant_id),
 )

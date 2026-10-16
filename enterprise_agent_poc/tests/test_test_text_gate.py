@@ -76,6 +76,179 @@ def stats(budget):
         return dict(c.execute("SELECT count(*) AS n,COALESCE(sum(input_debit),0) AS i,COALESCE(sum(output_debit),0) AS o FROM attempts").fetchone())
 
 
+def creation_entry(fixture):
+    s,store,task,budget,_,_=fixture
+    with store.connection() as c:
+        c.execute('INSERT INTO credit_accounts(tenant_id,balance) VALUES(?,64)',(task['tenant_id'],))
+        c.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status) VALUES(?,?,'enabled')",
+                  (task['tenant_id'],task['agent_id']))
+    return ProductStore(store,test_gate_settings=s)
+
+
+def test_creation_entry_counts_queued_and_startup_failed_tasks_without_sdk_claim(fixture):
+    _,store,initial,budget,_,_=fixture
+    entry=creation_entry(fixture)
+    created=[entry.create_task(initial['tenant_id'],initial['user_id'],initial['agent_id'],'Fixture only',None)
+             for _ in range(5)]
+    entry.set_task(created[0]['id'],initial['tenant_id'],'failed','failed','Fixture startup failure')
+    # Five queued/failed new Tasks + the original fixture Task fill the six cap.
+    with pytest.raises(PermissionError):
+        ProductStore(store,test_gate_settings=fixture[0]).create_task(
+            initial['tenant_id'],initial['user_id'],initial['agent_id'],'No seventh Task',None)
+    with store.connection() as c:
+        assert c.execute('SELECT count(*) AS n FROM tasks').fetchone()['n']==6
+    with budget.connect() as c:
+        assert c.execute('SELECT count(*) FROM allowed_tasks').fetchone()[0]==1
+        assert c.execute('SELECT count(*) FROM attempts').fetchone()[0]==0
+
+
+def test_creation_entry_concurrent_calls_cannot_overbook_six(fixture):
+    _,store,initial,_,_,_=fixture
+    entry=creation_entry(fixture)
+    def create(n):
+        try:
+            return entry.create_task(initial['tenant_id'],initial['user_id'],initial['agent_id'],
+                                     'Isolated concurrent '+str(n),None)['id']
+        except PermissionError:
+            return None
+    with ThreadPoolExecutor(12) as pool:
+        results=list(pool.map(create,range(16)))
+    assert len([r for r in results if r])==5
+    with store.connection() as c:
+        assert c.execute('SELECT count(*) AS n FROM tasks').fetchone()['n']==6
+
+
+def test_creation_entry_cross_tenant_and_operator_ordinary_requests_write_nothing(fixture):
+    _,store,initial,budget,_,_=fixture
+    entry=creation_entry(fixture)
+    with budget.connect() as c:identity=budget.scope(c)
+    for tenant,user in (('another-tenant',initial['user_id']),
+                        (initial['tenant_id'],identity['operator_id'])):
+        with pytest.raises(PermissionError):
+            entry.create_task(tenant,user,initial['agent_id'],'Rejected before insert',None)
+    with store.connection() as c:
+        assert c.execute('SELECT count(*) AS n FROM tasks').fetchone()['n']==1
+
+
+def test_byte_bound_covers_canonical_nested_function_argument_expansion():
+    # Compact numeric arrays acquire spaces in the documented DSML serializer.
+    args={'values':list(range(2000)),'text':'中文\\n"quoted"'}
+    body={'model':'deepseek-v4-pro','max_output_tokens':512,'input':[
+        {'type':'function_call','call_id':'f1','name':'example',
+         'arguments':json.dumps(args,ensure_ascii=False,separators=(',',':'))}]}
+    upper=TestTextGate.request_bound(body)['input_tokens_upper']
+    rendered=''.join(str(k)+json.dumps(v,ensure_ascii=False) for k,v in args.items()).encode()
+    assert upper>=len(rendered)+4096
+
+
+def test_full_context_growth_is_counted_and_oversized_envelope_never_reserves(fixture):
+    _,_,_,budget,gate,_=fixture
+    body={'model':'deepseek-v4-pro','max_output_tokens':512,'reasoning':{'effort':'high'},
+          'input':'plain','instructions':'unchanged','tools':[]}
+    original=TestTextGate.request_bound(body)['input_tokens_upper']
+    body['tools']=[{'type':'function','name':'complete_schema','parameters':
+                   {'type':'object','properties':{'history':{'description':'history '*1000}}}}]
+    assert TestTextGate.request_bound(body)['input_tokens_upper']>original+7000
+    body['input']='x'*140000
+    payload=gate.bounded_payload(json.dumps(body).encode())
+    upper=gate.request_bound(payload)
+    with pytest.raises(TestTextGateDenied,match='tokens_exhausted'):
+        budget.reserve(fixture[2],json.dumps(payload).encode(),input_tokens=upper['input_tokens_upper'],
+                       output_tokens=upper['output_tokens_upper'])
+    assert stats(budget)['n']==0
+
+
+def namespace_payload():
+    return {'model':'deepseek-v4-pro','reasoning':{'effort':'high'},'max_output_tokens':512,
+        'instructions':'Original instructions','input':'Do not change F:\\folder\\file or /opt/a/b.',
+        'tools':[{'type':'namespace','name':'mcp__platform','description':'Original namespace description',
+            'tools':[{'type':'function','name':'enterprise_config_get','description':'Original function description',
+                      'parameters':{'type':'object','properties':{'path':{'type':'string'}},'additionalProperties':False}}]}]}
+
+
+def test_namespace_mapping_preserves_complete_schema_and_original_input():
+    import copy
+    original=namespace_payload();before=copy.deepcopy(original)
+    payload,mapping=TestTextGate.provider_tools(original)
+    assert original==before and payload['input']==before['input']
+    assert payload['tools']==[{**original['tools'][0]['tools'][0],
+                              'name':'mcp__platform__enterprise_config_get'}]
+    assert mapping=={'mcp__platform__enterprise_config_get':('mcp__platform','enterprise_config_get')}
+    assert 'Original instructions' in payload['instructions']
+    assert 'Original namespace description' in payload['instructions']
+
+
+def test_namespace_collisions_and_unknown_identity_refused_without_dropping_tools():
+    body=namespace_payload()
+    body['tools'].append({'type':'function','name':'mcp__platform__enterprise_config_get','parameters':{}})
+    with pytest.raises(TestTextGateDenied,match='collision'):TestTextGate.provider_tools(body)
+    body=namespace_payload();body['input']=[{'type':'function_call','namespace':'not_registered',
+        'name':'enterprise_config_get','call_id':'c1','arguments':'{}'}]
+    with pytest.raises(TestTextGateDenied,match='unknown_tool_namespace'):TestTextGate.provider_tools(body)
+
+
+def test_namespace_history_and_choice_keep_arguments_and_call_id():
+    body=namespace_payload();arguments='{"literal":"mcp__platform","path":"F:\\\\raw"}'
+    body['input']=[{'type':'function_call','namespace':'mcp__platform','name':'enterprise_config_get',
+        'call_id':'original_call','arguments':arguments},
+        {'type':'function_call_output','call_id':'original_call','output':'Original output'}]
+    body['tool_choice']={'type':'function','namespace':'mcp__platform','name':'enterprise_config_get'}
+    mapped,_=TestTextGate.provider_tools(body)
+    assert mapped['input'][0]=={'type':'function_call','name':'mcp__platform__enterprise_config_get',
+                               'call_id':'original_call','arguments':arguments}
+    assert mapped['input'][1]==body['input'][1]
+    assert mapped['tool_choice']=={'type':'function','name':'mcp__platform__enterprise_config_get'}
+
+
+def test_namespace_sse_restores_added_done_and_completed_without_completing_truncation():
+    mapping={'mcp__platform__enterprise_config_get':('mcp__platform','enterprise_config_get')}
+    call={'type':'function_call','name':'mcp__platform__enterprise_config_get','arguments':'{}','call_id':'c1'}
+    events=[{'type':'response.output_item.added','item':call},
+            {'type':'response.output_item.done','item':call},
+            {'type':'response.completed','response':{**completed(),'output':[call]}}]
+    raw=b''.join(b'data: '+json.dumps(event).encode()+b'\n\n' for event in events)
+    mapped=TestTextGate.sdk_tools('text/event-stream',raw,mapping)
+    output=[json.loads(block[6:]) for block in mapped.decode().split('\n\n') if block]
+    for event in output:
+        item=event.get('item') or event['response']['output'][0]
+        assert item['namespace']=='mcp__platform' and item['name']=='enterprise_config_get'
+        assert item['call_id']=='c1' and item['arguments']=='{}'
+    partial=TestTextGate.sdk_tools('text/event-stream',raw[:-1],mapping)
+    assert not partial.endswith(b'\n\n') and TestTextGate.confirmed_usage(200,'text/event-stream',partial) is None
+
+
+def test_actual_loopback_namespace_wire_hash_and_restored_sdk_response(fixture,monkeypatch):
+    _,_,task,budget,gate,profile=fixture
+    captured=[]
+    def handler(req):
+        captured.append(req)
+        p=json.loads(req.content)
+        assert p['tools'][0]['type']=='function'
+        assert p['tools'][0]['name']=='mcp__platform__enterprise_config_get'
+        call={'type':'function_call','name':'mcp__platform__enterprise_config_get','arguments':'{}','call_id':'fixture_call'}
+        event={'type':'response.output_item.done','item':call}
+        terminal={'type':'response.completed','response':{**completed(),'output':[call]}}
+        return httpx.Response(200,headers={'content-type':'text/event-stream'},
+            content=b'data: '+json.dumps(event).encode()+b'\n\n' +b'data: '+json.dumps(terminal).encode()+b'\n\n')
+    actual_transport=httpx.AsyncHTTPTransport
+    monkeypatch.setattr(httpx,'AsyncHTTPTransport',lambda **kw:httpx.MockTransport(handler))
+    async def run():
+        url,credential=await gate.bind(profile,task['id'])
+        async with httpx.AsyncClient(transport=actual_transport(retries=0),trust_env=False) as client:
+            result=await client.post(url+'/responses',content=json.dumps(namespace_payload()).encode(),
+                                     headers={'Authorization':'Bearer '+credential})
+        await gate.close()
+        assert result.status_code==200
+        first=json.loads(result.content.split(b'\n\n')[0][6:])['item']
+        assert (first['name'],first['namespace'],first['call_id'])==('enterprise_config_get','mcp__platform','fixture_call')
+    asyncio.run(run())
+    assert len(captured)==1
+    with budget.connect() as c:
+        row=c.execute('SELECT * FROM attempts').fetchone()
+        assert row['request_sha']==hashlib.sha256(captured[0].content).hexdigest()
+        assert row['settled_sha'] is not None and row['input_debit']==100
+
+
 def test_twenty_http_slots_survive_restart_and_cannot_reset(fixture):
     s,_,task,budget,_,_=fixture
     for n in range(20): budget.reserve(task,str(n).encode(),input_tokens=1,output_tokens=1)

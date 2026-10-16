@@ -108,8 +108,9 @@ def _chat_image_attachment_view(item: dict) -> dict:
 
 
 class ProductStore:
-    def __init__(self, store: POCStore) -> None:
+    def __init__(self, store: POCStore, *, test_gate_settings=None) -> None:
         self._store = store
+        self._test_gate_settings = test_gate_settings
         self.execution_resolver = None
 
     def _history_agent(self, conversation_id: str, tenant_id: str, agent_id: str) -> dict:
@@ -444,13 +445,21 @@ class ProductStore:
             raise ValueError("当前仅图片生成智能体支持一张参考图。")
         with self._store.connection() as conn:
             context = None
-            if attachment_ids and not self._store.is_postgres:
+            if (self._test_gate_settings is not None or attachment_ids or agent_id not in CATALOG) and not self._store.is_postgres:
                 conn.execute("BEGIN IMMEDIATE")
+            if self._test_gate_settings is not None:
+                from app.test_text_gate import RequestBudget, TestTextGateDenied
+                settings = self._test_gate_settings
+                try:
+                    RequestBudget(settings.test_text_gate_state, settings.database_url).admit_creation(
+                        conn, postgres=self._store.is_postgres, tenant_id=tenant_id,user_id=user_id,
+                        agent_id=agent_id,runtime_test_id=_test_id,revision=_test_revision,
+                        fingerprint=_test_fingerprint)
+                except TestTextGateDenied:
+                    raise PermissionError("当前试用授权或任务额度不可用，现有结果仍可查看。") from None
             if agent_id not in CATALOG:
                 if not self.execution_resolver:
                     raise LookupError("Execution resolver unavailable")
-                if not self._store.is_postgres:
-                    conn.execute("BEGIN IMMEDIATE")
                 context = self.execution_resolver.resolve(conn, tenant_id, user_id, agent_id, conversation_id, test_revision=_test_revision)
                 if _test_fingerprint is not None and context['configuration_fingerprint'] != _test_fingerprint:
                     raise ValueError('Runtime Test fingerprint changed before task creation')

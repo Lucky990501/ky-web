@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import time
@@ -41,7 +42,8 @@ def uuid(value):
 
 GATE_CODE_FILES = {'app/test_text_gate.py','scripts/test_text_request_gate.py',
                    'app/runtime/codex_provider.py','app/platform_mcp/service.py',
-                   'app/settings.py','app/service.py','app/product_service.py'}
+                   'app/settings.py','app/service.py','app/product_service.py',
+                   'app/product_store.py','app/main.py'}
 
 
 def read_technical_scope(path):
@@ -201,6 +203,39 @@ class RequestBudget:
                 "pilot_budget_member_or_agent")
         return 'customer'
 
+    def admit_creation(self, connection, *, postgres, tenant_id, user_id, agent_id,
+                       runtime_test_id=None, revision=None, fingerprint=None):
+        """Count actual durable Tasks before INSERT, including pre-SDK failures.
+
+        The authenticated ProductStore entry owns this database transaction.
+        The SDK ledger remains a separate, append-only execution/HTTP witness.
+        No Task/HTTP slot or failed record is reset by this admission check.
+        """
+        with self.connect() as ledger:
+            identity = self.scope(ledger)
+        if any(v is not None for v in (runtime_test_id, revision, fingerprint)):
+            uuid(runtime_test_id); uuid(revision)
+            require(isinstance(fingerprint, str), 'pilot_budget_runtime_identity')
+        kind = self._task_kind(dict(tenant_id=tenant_id,user_id=user_id,agent_id=agent_id,
+            runtime_test_id=runtime_test_id,test_revision=revision,test_fingerprint=fingerprint),identity)
+        if postgres:
+            require(connection.execute('SHOW transaction_isolation').fetchone()['transaction_isolation']
+                    == 'read committed', 'pilot_creation_transaction_isolation')
+            # Held until the same transaction commits or rolls back. The count
+            # below uses a fresh READ COMMITTED snapshot after any lock wait.
+            connection.execute("SET LOCAL lock_timeout='3s'")
+            connection.execute('SELECT pg_advisory_xact_lock(667320,hashtext(?))',
+                               (identity['operation_id'],))
+        actor = connection.execute('SELECT tenant_id,role,account_status FROM users WHERE id=?',
+                                   (user_id,)).fetchone()
+        require(actor and actor['tenant_id']==tenant_id and actor['account_status']=='enabled'
+                and actor['role']==('member' if kind=='customer' else 'enterprise_admin'),
+                'pilot_creation_actual_actor')
+        count = connection.execute('SELECT count(*) AS n FROM tasks WHERE tenant_id=? AND user_id=?',
+                                   (tenant_id,user_id)).fetchone()['n']
+        require(count < self.LIMITS[kind], 'pilot_budget_created_task_limit')
+        return kind
+
     def allow(self,task):
         for key in ('id','user_id','run_id'): uuid(task[key])
         with self.connect() as c:
@@ -319,7 +354,7 @@ class TestTextGate:
         return f"http://127.0.0.1:{port}", credential
 
     @staticmethod
-    def bounded_payload(raw):
+    def bounded_payload(raw, *, with_namespaces=False):
         p = json.loads(raw)
         require(isinstance(p,dict) and p.get("model") == "deepseek-v4-pro"
                 and isinstance(p.get("reasoning"),dict) and p['reasoning'].get('effort') == 'high'
@@ -328,18 +363,124 @@ class TestTextGate:
         output = p.get('max_output_tokens',MAX_OUTPUT_TOKENS)
         require(type(output) is int and 0 < output <= MAX_OUTPUT_TOKENS, 'test_text_gate_output_exceeded')
         p["max_output_tokens"] = output
+        p, namespaces = TestTextGate.provider_tools(p)
         TestTextGate.request_bound(p)
-        return p
+        return (p,namespaces) if with_namespaces else p
+
+    @staticmethod
+    def provider_tools(payload):
+        """Preserve every SDK tool while mapping its identity to function wire.
+
+        DeepSeek documents function/custom tools, not Codex namespace wrappers.
+        Only tool identity fields change. Argument text, schemas, call IDs,
+        history, Skill text and all unrelated strings/paths remain untouched.
+        """
+        import copy
+        p=copy.deepcopy(payload)
+        tools=p.get('tools',[])
+        require(isinstance(tools,list),'test_text_gate_tool_schema')
+        mapped, namespaces, global_names, seen, descriptions = [], {}, set(), set(), []
+        def name(value):
+            require(isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',value),
+                    'test_text_gate_tool_identity')
+            return value
+        for tool in tools:
+            require(isinstance(tool,dict),'test_text_gate_tool_schema')
+            if tool.get('type')=='namespace':
+                require(set(tool)<={'type','name','description','tools'}
+                        and isinstance(tool.get('tools'),list),'test_text_gate_namespace_schema')
+                ns=name(tool.get('name'))
+                descriptions.append({k:v for k,v in tool.items() if k!='tools'})
+                for function in tool['tools']:
+                    require(isinstance(function,dict) and function.get('type')=='function',
+                            'test_text_gate_namespace_function_required')
+                    original=name(function.get('name'));flat=ns+'__'+original
+                    require(flat not in seen,'test_text_gate_tool_collision')
+                    seen.add(flat);namespaces[flat]=(ns,original)
+                    mapped.append({**function,'name':flat})
+            else:
+                if tool.get('type') in {'function','custom'}:
+                    identity=tool.get('name')
+                    require(isinstance(identity,str) and identity not in seen,'test_text_gate_tool_collision')
+                    seen.add(identity);global_names.add(identity)
+                mapped.append(tool)
+        # A global tool after a namespace must not collide either.
+        require(len(seen)==len([t for t in mapped if t.get('type') in {'function','custom'}]),
+                'test_text_gate_tool_collision')
+        if 'tools' in p:p['tools']=mapped
+        if descriptions:
+            original=p.get('instructions')
+            require(original is None or isinstance(original,str),'test_text_gate_input_bound_not_proven')
+            p['instructions']=(original or '')+'\n\nTool namespace descriptions:\n'+json.dumps(descriptions,ensure_ascii=True)
+        def flatten_call(item):
+            if 'namespace' not in item:return
+            ns=item['namespace'];original=item.get('name')
+            require((ns is None or isinstance(ns,str)) and isinstance(original,str),'test_text_gate_tool_identity')
+            if ns in (None,'','functions') and (original in global_names or original in namespaces):
+                del item['namespace'];return
+            flat=ns+'__'+original
+            require(namespaces.get(flat)==(ns,original),'test_text_gate_unknown_tool_namespace')
+            item['name']=flat;del item['namespace']
+        items=p.get('input',[])
+        if isinstance(items,list):
+            for item in items:
+                if isinstance(item,dict) and item.get('type')=='function_call':flatten_call(item)
+        choice=p.get('tool_choice')
+        if isinstance(choice,dict) and choice.get('type')=='function':flatten_call(choice)
+        return p,namespaces
+
+    @staticmethod
+    def sdk_tools(content_type,raw,namespaces):
+        """Restore advertised namespace/name pairs at actual response DTO paths.
+
+        Keep call_id/arguments and SSE completion/framing unchanged. In
+        particular, output_item.done must carry the restored identity because
+        SDK0.147 dispatches that item, not only response.completed.output.
+        """
+        if not namespaces:return raw
+        def item(value):
+            if not isinstance(value,dict) or value.get('type')!='function_call':return
+            original=namespaces.get(value.get('name'))
+            if original:
+                ns,name=original
+                require(value.get('namespace') in (None,'','functions',ns),
+                        'test_text_gate_response_namespace_conflict')
+                value['name']=name;value['namespace']=ns
+        def response(value):
+            if not isinstance(value,dict):return
+            for output in value.get('output',[]):item(output)
+        def packet(value):
+            require(isinstance(value,dict),'test_text_gate_response_schema')
+            if isinstance(value.get('item'),dict):item(value['item'])
+            response(value)
+            if isinstance(value.get('response'),dict):response(value['response'])
+            return value
+        if content_type.startswith('text/event-stream'):
+            blocks=raw.decode('utf-8').replace('\r\n','\n').split('\n\n')
+            transformed=[]
+            for block in blocks:
+                lines=block.split('\n')
+                data=[line[5:].lstrip() for line in lines if line.startswith('data:')]
+                if data and '\n'.join(data)!='[DONE]':
+                    result=json.dumps(packet(json.loads('\n'.join(data))),ensure_ascii=True)
+                    first=next(i for i,line in enumerate(lines) if line.startswith('data:'))
+                    lines=[line for line in lines if not line.startswith('data:')]
+                    lines.insert(first,'data: '+result)
+                transformed.append('\n'.join(lines))
+            return '\n\n'.join(transformed).encode()
+        return json.dumps(packet(json.loads(raw)),ensure_ascii=True).encode()
 
     @staticmethod
     def request_bound(p):
         """Bound the FINAL finite text envelope, not a user's text token estimate.
 
-        Proof/scope: deploy/MINIMAL_TEST_TEXT_REQUEST_GATE_V1.md. ASCII JSON
-        dominates UTF-8 content/JSON rendering; 4x covers retained/copied fields,
-        4096 covers high-effort/tools/format framing, 256 per item/part/tool
+        Proof/scope: deploy/ZHIYE_BATCH1_CUSTOMER_PILOT_GATE_V1.md. Complete ASCII
+        JSON dominates the published V4 byte-level text/tool/schema rendering.
+        Canonical decoded arguments are counted additionally because their
+        original JSON string can omit spaces used by DSML's value serializer.
+        4096 covers global tools/format/BOS framing, 256 per item/part/tool
         covers role/transition/invoke/result wrappers; 128 per decoded argument
-        covers DSML parameter wrappers. BPE cannot exceed rendered UTF-8 bytes.
+        covers DSML parameter wrappers. BPE merges cannot increase byte count.
         Opaque/remote/multimodal/unknown input is refused, never guessed.
         """
         allowed = {'model','input','instructions','tools','tool_choice','parallel_tool_calls',
@@ -353,7 +494,7 @@ class TestTextGate:
             items = [{'role':'user','content':items}]
         require(isinstance(items,list) and (items or p.get('instructions')),
                 'test_text_gate_input_bound_not_proven')
-        units, arguments = len(items), 0
+        units, arguments, argument_bytes = len(items), 0, 0
 
         def text_parts(value, types):
             if isinstance(value,str):
@@ -384,6 +525,7 @@ class TestTextGate:
                     raise TestTextGateDenied('test_text_gate_input_bound_not_proven') from None
                 require(isinstance(args,dict), 'test_text_gate_input_bound_not_proven')
                 arguments += len(args)
+                argument_bytes += len(json.dumps(args,ensure_ascii=True,allow_nan=False).encode('ascii'))
             elif kind in {'function_call_output','custom_tool_call_output'}:
                 require(set(item) <= common|{'call_id','output'} and isinstance(item.get('call_id'),str),
                         'test_text_gate_input_bound_not_proven')
@@ -412,7 +554,7 @@ class TestTextGate:
         units += len(tools)
         encoded = json.dumps(p,ensure_ascii=True,allow_nan=False).encode('ascii')
         require(len(encoded) <= MAX_REQUEST_BYTES, 'test_text_gate_request_too_large')
-        input_bound = 4096 + 4*len(encoded) + 256*units + 128*arguments
+        input_bound = 4096 + len(encoded) + argument_bytes + 256*units + 128*arguments
         output = p['max_output_tokens']
         require(input_bound + output <= 1048576, 'test_text_gate_context_exceeded')
         return {'input_tokens_upper':input_bound,'output_tokens_upper':output}
@@ -423,7 +565,7 @@ class TestTextGate:
         context = self.contexts.get(principal.runtime_profile_id)
         require(context and principal.tenant_id == context[0] and principal.agent_id == context[2],
                 "test_text_gate_signed_context")
-        payload = self.bounded_payload(raw)
+        payload,namespaces = self.bounded_payload(raw,with_namespaces=True)
         task = self.task(*context[:3], user=context[3], run_id=context[4])
         # No injected URL, headers, user credentials, redirects or HTTP retries.
         import httpx
@@ -439,11 +581,13 @@ class TestTextGate:
                                      trust_env=False, follow_redirects=False, timeout=120) as client:
             response = await client.post("https://api.deepseek.com/responses",content=wire,
                                          headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"})
-        usage=self.confirmed_usage(response.status_code,response.headers.get("content-type",""),response.content)
+        content_type=response.headers.get("content-type","application/json")
+        body=self.sdk_tools(content_type,response.content,namespaces) if 200<=response.status_code<300 else response.content
+        usage=self.confirmed_usage(response.status_code,content_type,response.content)
         if usage:
             self.budget.settle(attempt,hashlib.sha256(response.content).hexdigest(),
                                input_tokens=usage[0],output_tokens=usage[1])
-        return response.status_code, response.headers.get("content-type","application/json"), response.content
+        return response.status_code, content_type, body
 
     @staticmethod
     def confirmed_usage(status,content_type,raw):
