@@ -1,6 +1,8 @@
 """Isolated PostgreSQL coverage for Phase B stage and exact abort."""
 import asyncio
 import json
+import hashlib
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,16 @@ from test_agent_productization_postgres import pg_catalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def approved_bundle(tmp_path):
+    """Keep frozen schema014 Phase B on its genuine pre1.0.1 package inventory."""
+    bundle = Path(os.environ["V3_FROZEN_READER_FIXTURE"]) / "enterprise_agent_poc/skill_packages"
+    assert hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest() == "3b90dcc33d4d9855c82f50597c2df186b1cefb66ee2324b1a6ad36b57e114c5f"
+    target = tmp_path / "approved" / "skill_packages"
+    shutil.copytree(bundle, target)
+    return target
 
 
 class ClosedPolicy:

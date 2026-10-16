@@ -223,7 +223,9 @@ class PlatformMCPService:
         results, failures = [], []
         transport_options = ({"transport": httpx.AsyncHTTPTransport(retries=0),
                               "trust_env": False, "follow_redirects": False} if pilot_gate else {})
-        async with httpx.AsyncClient(timeout=120, **transport_options) as client:
+        # Cover client enter/exit failures as well as each request; never leak
+        # transport exception details or retry a partially completed request.
+        async with image_transport_guard("edits" if attachment else "generations"), httpx.AsyncClient(timeout=120, **transport_options) as client:
             for item in plan:
                 item_prompt = item["prompt"]
                 if logo_required:

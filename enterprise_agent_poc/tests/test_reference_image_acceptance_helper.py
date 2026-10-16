@@ -132,7 +132,8 @@ def test_fixed_helper_full_task_run_assistant_and_history_chain(tmp_path, monkey
     assert trace['payload']['result_persistence_status'] == 'completed'
     assert trace['payload']['runtime_completed'] and trace['payload']['required_tool_calls_completed']
     if backend == 'oss':
-        assert obs['read_calls'] == [obs['key'], obs['key']]  # helper + unchanged TaskService
+        # Acceptance helper, persisted-image validation, then dimension metadata.
+        assert obs['read_calls'] == [obs['key']] * 3
         assert not local_path.exists()  # No OSS copy downloaded to satisfy local path.
     user = product.user_by_email('member@tenant-a.test')
     detail = product.conversation_detail('tenant-a', user['id'], saved['conversation_id'])

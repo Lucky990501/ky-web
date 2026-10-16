@@ -2,6 +2,8 @@
 import copy
 import io
 import json
+import hashlib
+import os
 from pathlib import Path
 import shutil
 import zipfile
@@ -21,6 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "skill_packages"
 SLUG = "wechat-official-account-writing"
 VERSION = "1.0.0"
+
+
+@pytest.fixture(autouse=True)
+def frozen_phase_a_bundle(monkeypatch):
+    """The historical Phase A declaration consumes its actual frozen bundle."""
+    bundle = Path(os.environ["V3_FROZEN_READER_FIXTURE"]) / "enterprise_agent_poc/skill_packages"
+    assert hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest() == "3b90dcc33d4d9855c82f50597c2df186b1cefb66ee2324b1a6ad36b57e114c5f"
+    monkeypatch.setitem(globals(), "BUNDLE", bundle)
 
 
 def declarations():
