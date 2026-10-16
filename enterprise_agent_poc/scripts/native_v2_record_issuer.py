@@ -82,7 +82,7 @@ class Issuer:
         need(isinstance(p['review_text'],str) and p['review_text']
              and p['fees']['automatic_paid_retries']==0,'ACTUAL_REVIEW_AND_FEE_SCOPE_REQUIRED')
         need(type(p['remaining_work_seconds']) is int and 0<=p['remaining_work_seconds']<=10800,'FINITE_REMAINING_WORK')
-        self.root=self.base/'releases'/self.rid/'enterprise_agent_poc'
+        self.app_root=self.base/'releases'/self.rid/'enterprise_agent_poc'
         self.audit=self.base/'shared/release-state/native-v2-manual-issuance'/self.rid
         self.qual=self.base/'shared/release-qualifications'
         for item in p['report_paths'].values():
@@ -128,11 +128,11 @@ class Issuer:
         need(self.read(path)==raw,'DURABLE_READBACK')
 
     def artifact(self):
-        c=self.p['candidate'];raw=self.read(self.root.parent/(self.rid+'.manifest.json'),protected=False)
+        c=self.p['candidate'];raw=self.read(self.app_root.parent/(self.rid+'.manifest.json'),protected=False)
         m=parse(raw)
         need(sha(raw)==c['raw_manifest_sha256'] and digest(m)==c['manifest_sha256']
              and m['release_id']==self.rid and m['source_commit']==c['source_commit'],'ACTUAL_MANIFEST_IDENTITY')
-        raw=self.read(self.root.parent/(self.rid+'.tar.gz'),64*1024*1024,False)
+        raw=self.read(self.app_root.parent/(self.rid+'.tar.gz'),64*1024*1024,False)
         need(sha(raw)==c['archive_sha256']==m['archive_sha256'],'ACTUAL_ARCHIVE_IDENTITY')
         with tarfile.open(fileobj=io.BytesIO(raw)) as bundle:
             members=bundle.getmembers();need(len(members)<=1000,'ARCHIVE_BOUND')
@@ -145,17 +145,17 @@ class Issuer:
                 seen.add(item.name)
                 if item.isfile():
                     need(item.size<=8*1024*1024,'ARCHIVE_FILE_BOUND')
-                    installed=self.root.parent/Path(*q.parts)
+                    installed=self.app_root.parent/Path(*q.parts)
                     need(self.read(installed,8*1024*1024,False)==bundle.extractfile(item).read(),'INSTALLED_ARCHIVE_BYTES')
         need(m['runtime_only_release']['schema_version']==2
              and m['runtime_only_release']['successor']['source_tree']==c['source_tree']
              and m['runtime_only_release']['successor']['parent_source_commit']==c['parent_source_commit']
              and digest(m['runtime_only_release'])==self.p['binding_sha256'],'NATIVE_V2_DECLARATION')
-        need(Path(__file__).resolve()==self.root/'scripts/native_v2_record_issuer.py','CANDIDATE_OWN_ENTRY_REQUIRED')
+        need(Path(__file__).resolve()==self.app_root/'scripts/native_v2_record_issuer.py','CANDIDATE_OWN_ENTRY_REQUIRED')
         # Every imported repository byte was compared with the approved immutable archive.
-        sys.path.insert(0,str(self.root))
+        sys.path.insert(0,str(self.app_root))
         from scripts import schema015_successor_binding as binding
-        binding.declaration(self.root,m)
+        binding.declaration(self.app_root,m)
         need(self.p['predecessor']==binding.PREDECESSOR,'EXACT_D906_ARTIFACTS')
         self.manifest=m
         need((self.base/'release-current').resolve()==self.base/'releases'/binding.PREDECESSOR['release_id']/'enterprise_agent_poc','CURRENT_D906_BEFORE_ISSUANCE')
@@ -277,7 +277,7 @@ class Issuer:
         try:
             self.put(self.qual/(self.rid+'.evidence.v1.json'),evidence)
             self.put(self.qual/(self.rid+'.approval.v1.json'),approval)
-            if not self.fixture:self.binding.qualification(self.base,self.root,self.manifest,self.p['schema_fingerprint'])
+            if not self.fixture:self.binding.qualification(self.base,self.app_root,self.manifest,self.p['schema_fingerprint'])
             self.put(self.audit/'seal.complete.json',{'status':FIXTURE if self.fixture else 'FROZEN_CONSUMER_VERIFIED',
                      'approval_sha256':sha(enc(approval)),'evidence_sha256':sha(enc(evidence))})
         except Exception:
@@ -328,6 +328,6 @@ def main():
         result={'status':'REVIEW_NOT_AUTHORITY','request_sha256':app.pin,'request':app.p} if args.action=='review' else getattr(app,args.action)()
         print(json.dumps(result,ensure_ascii=False));return 0
     except (Exception,) as exc:
-        print(json.dumps({'status':'BLOCKED','check':str(exc) if isinstance(exc,Blocked) else 'INPUT_IO_OR_CONSUMER_REJECTED','retry':False}));return 2
+        print(json.dumps({'status':'BLOCKED','check':str(exc) if isinstance(exc,Blocked) else 'INPUT_IO_OR_CONSUMER_REJECTED','retry':False,'error_type':type(exc).__name__}));return 2
 
 if __name__=='__main__':raise SystemExit(main())
