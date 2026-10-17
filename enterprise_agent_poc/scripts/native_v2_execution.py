@@ -354,7 +354,12 @@ def restore(auth,context,pin):
         for row in summary['ledger']:
             need(re.fullmatch('[0-9]{3}',row['version']) and re.fullmatch('[A-Za-z0-9_.-]+',row['name']),'MIGRATION_IDENTIFIER')
             migration=location/'enterprise_agent_poc/migrations/postgres'/(row['version']+'_'+row['name'])
-            need(sha(read(migration).replace(b'\r\n',b'\n'))==row['checksum'],'EXACT_PAIR_RESTORED_LEDGER_SOURCE')
+            raw=read(migration)
+            # Same pure-byte compatibility as migrate.migration_checksums /
+            # compatibility_status; do not import application settings in -I -B -S.
+            canonical=raw.replace(b'\r\n',b'\n').replace(b'\r',b'\n')
+            need(row['checksum'] in {sha(raw),sha(canonical.replace(b'\n',b'\r\n'))},
+                 'EXACT_PAIR_RESTORED_LEDGER_SOURCE')
     root=pg(auth,'restore');target=auth.private/'restore';key=auth.private/'recipient/key.pem';cert=auth.private/'recipient/recipient.crt'
     read(key,os.getuid(),mode=0o600);need(sha(read(cert))==r['recipient_sha256'],'PRIVATE_RECIPIENT_MATCH')
     need(not os.path.lexists(target),'RESTORE_CLAIM_ALREADY_ATTEMPTED');auth.check(60)

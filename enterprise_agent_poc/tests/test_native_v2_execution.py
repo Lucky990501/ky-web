@@ -23,7 +23,12 @@ def save(path,value):
     path.write_bytes(value if isinstance(value,bytes) else enc(value));path.chmod(0o600)
 def run(args,**kw):return subprocess.run([str(x) for x in args],capture_output=True,timeout=kw.pop('timeout',90),**kw)
 
-def test_native_full_cli_backup_transfer_restore_and_failed_claim_boundaries(tmp_path):
+# Exact metadata from the retained d906 read-only ledger / immutable archive.
+# Synthetic isolated DB only; never a Production backup or authority.
+D906_CRLF_LEDGER={'001': ('workbench_v1.sql', '8872cf35cb070c885fc9fc486e75e49a014ddc2f61a088ceca981a50208cb4d7'), '002': ('user_profiles.sql', 'b2106089644f8fce35fedf0ad220aedbafc9020b70da3ab7d9f4edd215d17b91'), '003': ('agent_templates.sql', '79c9840b4d6d46353b94bb3aed3b09f546fe7fdc15c9bd04acecd475d968fcfd'), '004': ('knowledge_v1.sql', '79c03968ae3f50384cdeb28b8d3b7f17fa435933a00fde8bffc8dc28cbf86a74'), '005': ('skill_registry_v1.sql', '40486c0e59f337de0faaead1d57008026ac81f11c7d354e36143185a6eb89732'), '006': ('embedding_profiles.sql', 'ae1db2a4428aa38762fef98d189f23295fd1241a3d57a6ca756d1c92285cb0e7'), '007': ('history_storage_indexes.sql', 'd051a826539acbd4e39f326bfde982f60bbf78e9944c7895a6e59e9e7e099abb')}
+
+@pytest.mark.parametrize('ledger_case',['canonical_lf','d906_crlf','restored_ledger_drift'])
+def test_native_full_cli_backup_transfer_restore_and_failed_claim_boundaries(tmp_path,ledger_case):
     # Provided via the existing pinned Test fixture inventory, not a download.
     artifacts=Path(os.environ['NATIVE_EXECUTION_FIXTURE_ARTIFACT_DIR'])
     context_path=artifacts/'context.json'
@@ -48,6 +53,14 @@ def test_native_full_cli_backup_transfer_restore_and_failed_claim_boundaries(tmp
             ENTERPRISE_POC_DATABASE_URL='postgresql:///native_source?'+urlencode({'host':str(socket),'port':54328,'user':'native_source'}))
         migrated=run([sys.executable,'-B',PROJECT/'scripts/migrate.py','up'],env=env,cwd=PROJECT)
         assert migrated.returncode==0,migrated.stderr.decode(errors='replace')
+        if ledger_case!='canonical_lf':
+            statements=[]
+            for version,(name,checksum) in D906_CRLF_LEDGER.items():
+                raw=(PROJECT/'migrations/postgres'/(version+'_'+name)).read_bytes()
+                assert sha(raw.replace(b'\r\n',b'\n').replace(b'\r',b'\n').replace(b'\n',b'\r\n'))==checksum
+                statements.append(f"UPDATE schema_migrations SET checksum='{checksum}' WHERE version='{version}' AND name='{name}';")
+            updated=run([PG/'psql','-X','-h',socket,'-p','54328','-U','native_source','-d','native_source','-v','ON_ERROR_STOP=1','-c',''.join(statements)])
+            assert updated.returncode==0,updated.stderr.decode(errors='replace')
         sql="INSERT INTO tenants(id,name,poc_api_key) VALUES ('native-isolated-fixture','SYNTHETIC-NO-CUSTOMER','INVALID-FIXTURE');"
         seeded=run([PG/'psql','-X','-h',socket,'-p','54328','-U','native_source','-d','native_source','-v','ON_ERROR_STOP=1','-c',sql])
         assert seeded.returncode==0,seeded.stderr.decode(errors='replace')
@@ -115,10 +128,49 @@ def test_native_full_cli_backup_transfer_restore_and_failed_claim_boundaries(tmp
         assert not (private/'restore').exists();save(cipher,good)
         cli('restore','--context',context_file,'--context-sha256',context_pin,ok=False) # no receiver completion
         assert not (private/'restore').exists()
+        # Re-seal only explicit fixture transfer metadata for each negative.
+        # No real receipt, Claim or original backup is changed or removed.
+        original_summary=(incoming/'snapshot.readonly.summary.json').read_bytes()
+        original_receipt=(incoming/'backup.receipt.json').read_bytes()
+        def reseal_fixture(summary):
+            nonlocal context,context_pin
+            save(incoming/'snapshot.readonly.summary.json',summary)
+            receipt=json.loads(original_receipt);receipt['summary_sha256']=sha((incoming/'snapshot.readonly.summary.json').read_bytes())
+            save(incoming/'backup.receipt.json',receipt)
+            for name in ('snapshot.readonly.summary.json','backup.receipt.json'):
+                data=(incoming/name).read_bytes();context['files'][name]={'bytes':len(data),'sha256':sha(data)}
+            save(context_file,context);context_pin=sha(context_file.read_bytes())
+            save(private/'transfer.complete.json',{'status':'TRANSFER_COMPLETE_BYTES_AND_RECEIPTS_VERIFIED','fixture':True,
+                'context_sha256':context_pin,'request_sha256':pin,'root_sha256':sha((audit/'root.json').read_bytes()),'operation_id':op})
+        for field,value in (('checksum','f'*64),('version','999'),('name','wrong.sql')):
+            summary=json.loads(original_summary);summary['ledger'][0][field]=value;reseal_fixture(summary)
+            rejected=cli('restore','--context',context_file,'--context-sha256',context_pin,ok=False)
+            assert rejected['first_failure_point'] in ('EXACT_PAIR_RESTORED_LEDGER_SOURCE','SYSTEM_OR_INPUT_FAILURE')
+            assert not (private/'restore').exists()
+        reseal_fixture(json.loads(original_summary))
+        # Both exact immutable slots reject changed installed migration bytes.
+        for identity in (c,issuer.PRIOR):
+            migration=base/'releases'/identity['release_id']/'enterprise_agent_poc/migrations/postgres/001_workbench_v1.sql'
+            original=migration.read_bytes();save(migration,original+b'\n-- TAMPER\n')
+            rejected=cli('restore','--context',context_file,'--context-sha256',context_pin,ok=False)
+            assert rejected['first_failure_point']=='INSTALLED_BYTES' and not (private/'restore').exists()
+            save(migration,original)
+        if ledger_case=='restored_ledger_drift':
+            summary=json.loads(original_summary)
+            summary['ledger'][0]['checksum']=sha((PROJECT/'migrations/postgres/001_workbench_v1.sql').read_bytes())
+            reseal_fixture(summary)
+            rejected=cli('restore','--context',context_file,'--context-sha256',context_pin,ok=False)
+            assert rejected['first_failure_point']=='RESTORED_SCHEMA_LEDGER_DRIFT'
+            assert (private/'restore/restore.claim.json').exists() and (private/'restore/restore.failed.json').exists()
+            failed=(private/'restore/restore.failed.json').read_bytes()
+            assert cli('restore','--context',context_file,'--context-sha256',context_pin,ok=False)['first_failure_point']=='RESTORE_CLAIM_ALREADY_ATTEMPTED'
+            assert (private/'restore/restore.failed.json').read_bytes()==failed
+            (tmp_path/'NATIVE_ENTRY_AUDIT.json').write_text(json.dumps({'fixture':True,'ledger_case':ledger_case,'base':str(base),'private_root':str(private),'entry_results':results,'real_provider_calls':0,'production_changes':0},indent=2))
+            return
         cli('verify-transfer','--context',context_file,'--context-sha256',context_pin)
         completed=cli('restore','--context',context_file,'--context-sha256',context_pin)
         assert completed['data_preserved'] is True and completed['fixture'] is True
-        if os.environ.get('NATIVE_RECOVERY_HANDSHAKE_DIR'):
+        if ledger_case=='d906_crlf' and os.environ.get('NATIVE_RECOVERY_HANDSHAKE_DIR'):
             hand=Path(os.environ['NATIVE_RECOVERY_HANDSHAKE_DIR'])
             save(hand/'native-fixture-ready.json',{'base':str(base),'private':str(private),'authority':str(audit),'request_sha256':pin,'fixture':True})
             deadline=time.monotonic()+230
@@ -130,6 +182,6 @@ def test_native_full_cli_backup_transfer_restore_and_failed_claim_boundaries(tmp
         save(private/'restore/restore.failed.json',{'kind':'EXPLICIT FAILED-CLAIM NEGATIVE FIXTURE'})
         cli('restore','--context',context_file,'--context-sha256',context_pin,ok=False)
         save(audit/'revoked.json',{'fixture':True});cli('status',ok=False)
-        (tmp_path/'NATIVE_ENTRY_AUDIT.json').write_text(json.dumps({'fixture':True,'base':str(base),'private_root':str(private),'entry_results':results,'real_provider_calls':0,'production_changes':0},indent=2))
+        (tmp_path/'NATIVE_ENTRY_AUDIT.json').write_text(json.dumps({'fixture':True,'ledger_case':ledger_case,'base':str(base),'private_root':str(private),'entry_results':results,'real_provider_calls':0,'production_changes':0},indent=2))
     finally:
         if started:assert run([PG/'pg_ctl','-D',base/'pgdata','-m','fast','-w','stop']).returncode==0
