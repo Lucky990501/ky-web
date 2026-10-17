@@ -53,7 +53,10 @@ class CodexRuntimeManager:
         self._startup_events: dict[str, list[dict]] = {}
         self._lock = asyncio.Lock()
         self._test_gate = None
-        if getattr(settings, "test_text_gate_enabled", False):
+        if os.environ.get("STAGE2_TWO_PROBE_AUTHORITY"):
+            from app.stage2_two_probe_gate import Stage2TextGate
+            self._test_gate = Stage2TextGate(settings, token_issuer, os.environ["STAGE2_TWO_PROBE_AUTHORITY"])
+        elif getattr(settings, "test_text_gate_enabled", False):
             from app.test_text_gate import TestTextGate
             self._test_gate = TestTextGate(settings, token_issuer)
 
@@ -114,6 +117,8 @@ class CodexRuntimeManager:
             ]
             if self._test_gate:
                 provider_lines += ['request_max_retries = 0', 'stream_max_retries = 0', '']
+        if getattr(self._test_gate, "forbid_server_tools", False):
+            provider_lines.insert(0, 'web_search = "disabled"')
         (codex_home / "config.toml").write_text(
             "\n".join(
                 provider_lines + [

@@ -152,9 +152,10 @@ def _available_port() -> int:
 class IsolatedServices:
     """Own exactly one marked temporary Stage 2 cluster and all its children."""
 
-    def __init__(self, credential_file: Path | None = None):
+    def __init__(self, credential_file: Path | None = None, admission_directory: Path | None = None):
         self.root: Path | None = None
         self.credential_file = credential_file
+        self.admission_directory = admission_directory
         self.children: list[tuple[str, subprocess.Popen]] = []
         self.logs = []
         self.pg_started = False
@@ -297,6 +298,8 @@ class IsolatedServices:
         keys = ("PATH", "HOME", "LANG", "TMPDIR", "PYTHONDONTWRITEBYTECODE")
         result = {key: os.environ[key] for key in keys if key in os.environ}
         result["PATH"] = str(prepare_node().parent) + os.pathsep + result.get("PATH", "")
+        if self.admission_directory is not None:
+            result["STAGE2_TWO_PROBE_AUTHORITY"] = str(self.admission_directory)
         return result
 
     def start_app(self) -> None:
@@ -304,6 +307,11 @@ class IsolatedServices:
                 or self.credential_file.stat().st_uid != os.getuid()
                 or self.credential_file.stat().st_mode & 0o077):
             raise RuntimeError("Non-Production Stage 2 credential file with mode 0600 required")
+        if self.admission_directory is None:
+            raise RuntimeError("Formal Provider Stage2 requires two-probe Admission before startup")
+        from app.stage2_two_probe_gate import authority, ProbeBudget
+        identity = authority(self.admission_directory)
+        ProbeBudget.initialize(identity["ledger"], identity, lambda: authority(self.admission_directory))
         root = self._safe_root()
         self.migrate()
         subprocess.run([sys.executable, str(PROJECT / "scripts/stage2_preview.py"), "system-provision",
@@ -388,6 +396,7 @@ def main() -> int:
     sub.add_parser("prepare")
     run = sub.add_parser("run")
     run.add_argument("--credential-file", type=Path, required=True)
+    run.add_argument("--admission-directory", type=Path, required=True)
     run.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command == "prepare":
@@ -399,8 +408,11 @@ def main() -> int:
     arguments = args.pytest_args
     if arguments and arguments[0] == "--":
         arguments = arguments[1:]
-    with IsolatedServices(args.credential_file) as isolated:
-        return isolated.run_pytest(arguments or ["-q", "-ra"])
+    selected = ["tests/test_agent_runtime_test_redis_e2e.py", "tests/test_release_scoped_runtime_redis_e2e.py"]
+    if arguments and arguments != selected:
+        raise RuntimeError("Only the two approved formal Runtime probe modules are allowed")
+    with IsolatedServices(args.credential_file, args.admission_directory) as isolated:
+        return isolated.run_pytest(selected)
 
 
 if __name__ == "__main__":
