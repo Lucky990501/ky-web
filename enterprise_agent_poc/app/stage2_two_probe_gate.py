@@ -1,4 +1,4 @@
-"""Two HTTP sends, two existing Stage2 probes. Not a vendor invoice guarantee.
+"""Two Runtime probes, bounded multi-turn HTTP sends. Not a vendor invoice guarantee.
 
 Uses the existing finite-text envelope proof and SDK transport gate. Runtime
 never initializes/resets the durable budget. No secret or prompt is audited.
@@ -14,15 +14,16 @@ import sqlite3
 import stat
 import subprocess
 import time
+import re
 
 from app.test_text_gate import TestTextGate, TestTextGateDenied, require
 from app.security import RuntimeTokenIssuer
 from app.store import POCStore
 
 BASELINE = '28948beb5e3af1ba490e62fbf080ae3ee6ebbc4f'
-PROFILE = 'STAGE2_TWO_PROBE_ADMISSION_V1'
-LIMITS = dict(requests=2, input_each=65536, input_total=131072,
-              output_each=8192, output_total=16384, cost_micro_cny=1630000)
+PROFILE = 'STAGE2_TWO_PROBE_MULTITURN_ADMISSION_V2'
+LIMITS = dict(requests=8, requests_per_probe=4, input_each=65536, input_total=524288,
+              output_each=8192, output_total=65536, cost_micro_cny=6490000)
 # Worst documented peak/cache-miss price, CNY per million tokens. Integer
 # micro-CNY per token is numerically the same; every reservation is rounded up.
 INPUT_RATE = 9
@@ -105,7 +106,7 @@ def authority(directory):
     ledger = Path(fee['ledger_path'])
     require(ledger.is_absolute() and ledger.name=='stage2-two-probe.sqlite'
             and ledger.is_relative_to(Path('/opt/enterprise-agent-workbench-test/release-evidence'))
-            and '..' not in ledger.parts and not ledger.parent.is_symlink(), 'stage2_exact_ledger_path')
+            and '..' not in ledger.parts and ledger.parent.resolve(strict=True)==ledger.parent, 'stage2_exact_ledger_path')
     root = Path(__file__).resolve().parents[2]
     actual = subprocess.check_output(['git','-C',str(root),'show','-s','--format=%H%n%T','HEAD'],text=True).splitlines()
     require(actual == [request['candidate']['source_commit'], request['candidate']['source_tree']]
@@ -134,7 +135,8 @@ class ProbeBudget:
                 f.write(raw);f.flush();os.fsync(f.fileno())
         with budget.connect() as c:
             c.executescript('CREATE TABLE control(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, stopped TEXT);'
-                            'CREATE TABLE attempts(id INTEGER PRIMARY KEY,probe TEXT UNIQUE NOT NULL,task_id TEXT UNIQUE NOT NULL,run_id TEXT NOT NULL,request_sha TEXT NOT NULL,input_reserved INTEGER NOT NULL,output_reserved INTEGER NOT NULL,cost_reserved INTEGER NOT NULL,state TEXT NOT NULL,response_sha TEXT,input_actual INTEGER,output_actual INTEGER);')
+                            'CREATE TABLE denials(id INTEGER PRIMARY KEY,request_sha TEXT NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL);'
+                            'CREATE TABLE attempts(id INTEGER PRIMARY KEY,probe TEXT NOT NULL,task_id TEXT NOT NULL,run_id TEXT NOT NULL,test_revision TEXT NOT NULL,test_fingerprint TEXT NOT NULL,request_sha TEXT NOT NULL,input_reserved INTEGER NOT NULL,output_reserved INTEGER NOT NULL,cost_reserved INTEGER NOT NULL,state TEXT NOT NULL,response_sha TEXT,input_actual INTEGER,output_actual INTEGER);')
             c.execute('INSERT INTO control VALUES(1,?,NULL)',(json.dumps(identity,sort_keys=True),))
         return budget
 
@@ -187,15 +189,23 @@ class ProbeBudget:
                     and control['identity'] == json.dumps(self.identity,sort_keys=True),'stage2_budget_stopped')
             rows = c.execute('SELECT * FROM attempts').fetchall()
             require(all(r['state']=='COMPLETE' for r in rows),'stage2_inflight_or_unknown')
-            require(len(rows) < 2 and not any(r['task_id']==task['id'] or r['probe']==task['_probe'] for r in rows),
-                    'stage2_two_http_sends_only')
+            require(task['_probe'] in PROMPTS, 'stage2_only_two_probe_identities')
+            own = [r for r in rows if r['probe']==task['_probe']]
+            require(len(rows) < LIMITS['requests'] and len(own) < LIMITS['requests_per_probe'],
+                    'stage2_multiturn_http_limit')
+            require(all((r['task_id'],r['run_id'],r['test_revision'],r['test_fingerprint']) ==
+                        (task['id'],task['run_id'],task['test_revision'],task['test_fingerprint']) for r in own)
+                    and not any(r['task_id']==task['id'] and r['probe']!=task['_probe'] for r in rows),
+                    'stage2_probe_task_binding_conflict')
+            require(not any(r['task_id']==task['id'] and r['request_sha']==digest(raw) for r in rows),
+                    'stage2_identical_request_replay')
             require(sum(r['input_reserved'] for r in rows)+input_tokens <= LIMITS['input_total']
                     and sum(r['output_reserved'] for r in rows)+output_tokens <= LIMITS['output_total'],
                     'stage2_cumulative_tokens')
             require(sum(r['cost_reserved'] for r in rows)+cost <= LIMITS['cost_micro_cny'],
                     'stage2_cost_exhausted')
-            c.execute('INSERT INTO attempts(probe,task_id,run_id,request_sha,input_reserved,output_reserved,cost_reserved,state) VALUES(?,?,?,?,?,?,?,?)',
-                      (task['_probe'],task['id'],task['run_id'],digest(raw),input_tokens,output_tokens,cost,'INFLIGHT'))
+            c.execute('INSERT INTO attempts(probe,task_id,run_id,test_revision,test_fingerprint,request_sha,input_reserved,output_reserved,cost_reserved,state) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      (task['_probe'],task['id'],task['run_id'],task['test_revision'],task['test_fingerprint'],digest(raw),input_tokens,output_tokens,cost,'INFLIGHT'))
             return c.execute('SELECT last_insert_rowid()').fetchone()[0]
 
     def finish(self, attempt, response_sha, usage):
@@ -214,6 +224,11 @@ class ProbeBudget:
     def stop(self):
         with self.connect() as c:
             c.execute("UPDATE control SET stopped='TRANSPORT_FAILED_OR_CANCELLED' WHERE id=1")
+
+    def denied(self,raw,reason):
+        with self.connect() as c:
+            c.execute('INSERT INTO denials(request_sha,reason,observed_at) VALUES(?,?,?)',
+                      (digest(raw),reason[:128],int(time.time())))
 
 
 class Stage2TextGate(TestTextGate):
@@ -250,11 +265,41 @@ class Stage2TextGate(TestTextGate):
         return task
 
     async def forward(self, credential, raw):
+        try:return await self._admitted_forward(credential,raw)
+        except TestTextGateDenied as exc:
+            try:self.budget.denied(raw,str(exc))
+            except Exception:pass  # original refusal remains; no fallback send
+            raise
+
+    def tool_outcomes(self,payload):
+        """SDK0.147 success envelopes only; never pay for tool-error repair.
+
+        Do not change content/history. Unknown, running or failed tools stop
+        the whole allowance before the next model HTTP reservation.
+        """
+        for item in payload.get('input',[]) if isinstance(payload.get('input'),list) else []:
+            if item.get('type') not in {'function_call_output','custom_tool_call_output'}:continue
+            value=item['output']
+            text=value if isinstance(value,str) else ''.join(p['text'] for p in value)
+            success=bool(re.search(r'(?m)^Process exited with code 0$',text))
+            if 'Process exited with code' not in text and '\nOutput:\n' in text:
+                try:
+                    result=json.loads(text.split('\nOutput:\n',1)[1])
+                    success=isinstance(result,dict) and 'result' in result and not result.get('isError',False)
+                    if isinstance(result.get('result') if isinstance(result,dict) else None,dict):
+                        success=success and not result['result'].get('isError',False)
+                except (ValueError,TypeError):success=False
+            if not success:
+                self.budget.stop()
+                raise TestTextGateDenied('stage2_tool_outcome_not_proven_success')
+
+    async def _admitted_forward(self, credential, raw):
         principal = self.issuer.verify(credential,'test-text:request')
         context = self.contexts.get(principal.runtime_profile_id)
         require(context and principal.tenant_id==context[0] and principal.agent_id==context[2],
                 'stage2_signed_context')
         payload, namespaces = self.bounded_payload(raw,with_namespaces=True)
+        self.tool_outcomes(payload)
         # Server-side Search/Fetch and any other independently priced tools
         # are forbidden, even when a future vendor starts billing them.
         require(all(t.get('type') in {'function','custom'} for t in payload.get('tools',[])),

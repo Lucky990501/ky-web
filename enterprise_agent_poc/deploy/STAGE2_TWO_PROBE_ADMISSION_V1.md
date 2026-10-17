@@ -1,62 +1,83 @@
-# Two-probe Stage2 Admission
+# Two Runtime probes with bounded multi-turn HTTP
 
-This fixed profile extends the existing text gate only for the two formal
-Stage2 Runtime probes. It is neither a billing platform nor Provider approval.
-The business baseline is exact28948; a resulting successor needs its own
-Source/tree/Archive/Manifest and current Native Owner decision.
+This dedicated extension reuses `test_text_gate`, the existing Runtime SDK,
+`release_test_environment.py` and the Native V2 Owner archive. No billing
+service or new issuer is introduced. Business baseline is exact28948; final
+Source/tree and byte hashes must be independently bound to a new decision.
 
-The formal operator command is the existing
-`scripts/release_test_environment.py run --credential-file <dedicated0600>
---admission-directory <Root-owned exact Native Owner export directory>`.
-Only the two existing real Provider test modules are selected. The Worker
-alone reads the dedicated non-Production key. No Key is accepted in chat.
+## Operator and identity
 
-`request.json` and `owner.json` are byte-identical, Root-owned0444 exports
-of the existing actual Native V2 Owner archive. Original0600 receipts are
-retained. The export must be managed through the same authorized operator;
-revocation must stop this run and place `revoked.json` in its protected
-export directory before any further execution. No new issuer is supplied.
+Use the existing `scripts/release_test_environment.py run --credential-file
+<dedicated0600> --admission-directory <Root-owned Native Owner export>`.
+Only the two existing formal Stage2 Provider modules may run, using existing
+`stage25-test-tenant` / `runtime@stage2.test` identity and exact module prompts.
+The dedicated non-Production key is read by the Worker only, never in chat.
+Task/Run ownership, runtime-test revision and configuration fingerprint must
+match on every request. Two tasks are allowed, not two arbitrary tasks or
+an extra WeChat1.0.1 Runtime test.
 
-The signed request's `fees.stage2_two_probe` must contain profile
-`STAGE2_TWO_PROBE_ADMISSION_V1`, exact `LIMITS` from the Source, model
-`deepseek-v4-pro`, reasoning `high`, peak input/output micro-CNY per token
-9/27, `automatic_paid_retries=0`, `other_paid_calls=0`, actual
-`price_verified_at` within24hours and `ledger_path` under the existing
-Test release-evidence root ending `stage2-two-probe.sqlite`.
+Root-managed request.json/owner.json exports are byte-identical0444 copies
+of original0600 Native records. Existing issuance and revocation semantics
+remain in force. This code neither creates an Owner decision nor resets its
+24-hour maximum. Revocation must reach the protected export before another
+request; the authorized operator owns that transport. No old Source grant
+or prior ledger can authorize this profile.
 
-Every actual upstream HTTP send reserves durable capacity first:
+## Exact fee profile and send boundary
 
-* Two HTTP sends total, at most one per distinct formal probe/Task.
-* Each input at most65536 tokens under the existing finite-text byte bound;
-  cumulative input at most131072.
-* Each output `max_output_tokens=8192` or a smaller caller cap, including
-  reasoning; cumulative output at most16384.
-* Nominal peak-price maximum is131072*9/1M+16384*27/1M=1.622016CNY;
-  the local pre-send monetary ceiling is1.63CNY. Reservations are never refunded.
-* No concurrent send, third request, same-probe replay or automatic retry.
-  Unknown usage, HTTP failure, timeout or cancellation stops all later sends.
+`fees.stage2_two_probe` must bind profile
+`STAGE2_TWO_PROBE_MULTITURN_ADMISSION_V2`, exact Source `LIMITS`, model
+`deepseek-v4-pro`, reasoning high, rates input9/output27 micro-CNY per token,
+automatic_paid_retries0, other_paid_calls0, price_verified_at within24hours,
+and ledger_path ending stage2-two-probe.sqlite beneath the existing Test
+release-evidence root. The outer fees.automatic_paid_retries is also0.
 
-These are local request and published-price bounds, not an independently
-enforced Provider invoice ceiling. Price/account charging errors are not
-controlled by this code. Fresh price review and actual Owner fee approval
-remain necessary; no paid test runs during implementation.
+* Maximum4 actual model HTTP sends per Runtime task,8 total.
+* Input each65536 and cumulative524288 tokens; finite ASCII JSON plus the
+  existing conservative framing bound covers the complete SDK/tool history.
+  Unsupported/opaque/multimodal content is refused before sending.
+* Output each at most8192, cumulative65536; actual Responses request enforces
+  max_output_tokens, including reasoning. No omitted unbounded output cap.
+* Worst documented peak/cache-miss arithmetic:
+  524288*9/1000000 +65536*27/1000000 = CNY6.488064.
+  Durable pre-send reservation ceiling is CNY6.49. Reservations never refund.
+* The local ceiling bounds accepted requests at those verified rates. It is
+  not a separately enforced vendor invoice/account balance cap. Unexpected
+  vendor charging is outside local enforcement and must be disclosed in the
+  actual fee decision. No fee permission is implied by this document.
 
-The Runtime SDK is configured to use the loopback gate instead of the
-Provider URL, with local signed gate credentials, masked inherited secrets,
-request/stream retries0 and one structured-model attempt. Server-paid
-web_search tools are rejected. Other images/Embedding remain outside this
-profile and are not authorized. Existing required MCP/tool turns can cause
-a Runtime to need a second model request: it will be refused. Two Runtime
-Tasks are not assumed to fit two HTTP calls, and no formal PASS is implied.
+Official rate source: https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+Output cap: https://api-docs.deepseek.com/api/create-response/
+Prices and supported output semantics require Fresh confirmation before a
+paid run; implementation tests make zero real Provider requests.
 
-The SQLite ledger and separate exclusive initialization marker must remain
-outside disposable Stage2 fixtures. A second run, missing state, failed
-attempt or existing marker cannot initialize/reset the allowance. Audits
-contain identities, byte hashes, reserved/actual token counts and integer
-monetary reservations, never API keys, prompts or generated content.
+All Runtime model traffic uses the signed loopback Admission. The sole actual
+outbound post targets the fixed Responses URL with retries0, redirects off,
+trust_env false. SDK request/stream retries and structured-model retries are0.
+Paid server search/fetch and all separately priced server tools are refused.
+Image/Embedding are outside this profile and remain unauthorized. MCP tools
+in the two bound probes are existing read-only tools; no image generation or
+extra agent/task is admitted.
 
-Native execution remains a separate gap: historical backup/restore helpers
-consume old V3 policy/Operation schemas, while the unchanged Native recovery
-CLI demands final qualification before DB/runtime access. Adapting field
-names does not create a lawful qualification-only rehearsal permission.
-No frozen consumer is relaxed by this Stage2 change.
+SQLite BEGIN IMMEDIATE serializes reservations. Inflight/unknown attempts,
+identical request replay, changed Task/Run/test revision/fingerprint, a fifth
+turn, a ninth request, timeout/cancel/error or unknown/excess usage fail closed.
+Successful Skill/MCP outputs may continue the same bounded task. SDK0.147
+exec success envelopes and actual MCP result envelopes are checked; failed,
+running or unknown tools stop before another paid model request, so model
+repair/compensation cannot consume extra fees.
+
+## Evidence and limits
+
+The actual installed SDK0.147 CLI reads a real sandboxed Skill and invokes a
+real local FastMCP tool. Explicit upstream MockTransport responses complete
+two tasks in6 HTTP sends. Tests also exercise4-send exhaustion, Provider
+read timeout, MCP error and MCP deadline. This is full SDK path simulation,
+not a real Provider Stage2 PASS. The original approval reviewer stays active;
+existing truthful read-only MCP annotations are retained, not bypassed.
+
+Audits contain identities, request/response hashes, denied-request reasons,
+reserved/actual token counts and integer monetary reservations; no API Key,
+prompt or generated content. A durable exclusive initialization marker
+survives missing ledger state and prevents allowance reset/reentry. Old
+single-HTTP profile grants do not transfer to the new profile.

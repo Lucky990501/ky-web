@@ -74,10 +74,32 @@ def test_cumulative_limits_before_send(budget,monkeypatch,limit):
     assert count(budget)==1
 
 
-def test_one_probe_cannot_eat_second_probe_allowance(budget):
+def test_identical_wire_replay_and_different_task_for_same_probe_rejected(budget):
     t=task();n=reserve(budget,t);complete(budget,n)
     with pytest.raises(TestTextGateDenied):reserve(budget,t)
     with pytest.raises(TestTextGateDenied):reserve(budget,task())
+    assert count(budget)==1
+
+
+def test_four_distinct_turns_per_probe_eight_total_worst_case_reserved(budget):
+    for probe in PROMPTS:
+        t=task(probe)
+        for turn in range(4):
+            n=budget.reserve(t,('turn'+str(turn)).encode(),input_tokens=65536,output_tokens=8192)
+            complete(budget,n)
+        with pytest.raises(TestTextGateDenied,match='http_limit'):
+            budget.reserve(t,b'fifth-turn',input_tokens=5000,output_tokens=8192)
+    with budget.connect() as c:
+        row=c.execute('SELECT count(*),sum(input_reserved),sum(output_reserved),sum(cost_reserved) FROM attempts').fetchone()
+    assert tuple(row)==(8,524288,65536,6488064)
+
+
+@pytest.mark.parametrize('field',['run_id','test_revision','test_fingerprint'])
+def test_multiturn_identity_conflict_before_send(budget,field):
+    t=task();n=reserve(budget,t);complete(budget,n)
+    changed={**t,field:'conflict'}
+    with pytest.raises(TestTextGateDenied,match='binding_conflict'):
+        budget.reserve(changed,b'new-turn',input_tokens=5000,output_tokens=8192)
     assert count(budget)==1
 
 
