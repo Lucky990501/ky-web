@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+import subprocess
 import sys
 import tarfile
 
@@ -58,6 +59,65 @@ def migration_lock(items):
     return items
 
 
+def exact_d906_history(directory, rid, expected_commit, manifest):
+    """Only the original pinned d906 artifact uses its historical contract.
+
+    Current successor declarations still use the current strict validator.
+    This is identity recognition, not a historical authorization or recovery
+    target override. Installed bytes are verified before executing any reader.
+    """
+    source = "d9063ee43bc65e821457221ad824f5dde84fe408"
+    release = "20261014-d9063ee-release-tty-pg1614-v1"
+    if rid != release and expected_commit != source and manifest.get("source_commit") != source:
+        return False
+    require(rid == release and expected_commit == source and manifest.get("source_commit") == source,
+            "historical_d906_source_identity")
+    require(hashlib.sha256((directory / (rid + ".manifest.json")).read_bytes()).hexdigest()
+            == "30fb8c512253ce62cfce7c5bee7ef072c0d16dab5b436c47e94c12a7f7ab36fc"
+            and digest(manifest) == "f54752cfd149526f98adad416a6626fdb02e347c356c52dc5ccc6b6ed50dd166"
+            and manifest.get("archive_sha256") == "9d8f56ba6748ed44de6aa994f5972c86021ed02d1afd88de2fccfb9c2a54ee86",
+            "historical_d906_manifest_identity")
+    return True
+
+
+def validate_d906_frozen_contract(source, manifest_path):
+    """Reuse two exact d906 readers in a fresh stdlib-only process, without pyc.
+
+    This mirrors the existing captured frozen-reader mechanism. The child has
+    no inherited settings, package initialization, decisions or authority. It
+    never imports the current validator under the historical module names.
+    """
+    code = r'''import hashlib,json,sys
+from pathlib import Path
+from types import ModuleType
+root=Path(sys.argv[1]);path=Path(sys.argv[2]);raw=path.read_bytes()
+assert hashlib.sha256(raw).hexdigest()=="30fb8c512253ce62cfce7c5bee7ef072c0d16dab5b436c47e94c12a7f7ab36fc"
+package=ModuleType("scripts");package.__path__=[];sys.modules["scripts"]=package
+readers={}
+for name,pin in (("schema015_successor_binding","1ab292f9d4bf43847f418aee34bf7847db7c158968b00e4d198f70cec3d5e843"),
+                 ("release_manifest","ef5151ebe83448627b79621e9608f36e3fbc3cc18438f4fe8539ca4d9ac9fa71")):
+    file=root/"scripts"/(name+".py");captured=file.read_bytes()
+    assert hashlib.sha256(captured).hexdigest()==pin
+    module=ModuleType("scripts."+name);module.__file__=str(file)
+    sys.modules[module.__name__]=module;setattr(package,name,module)
+    exec(compile(captured,str(file),"exec",dont_inherit=True),module.__dict__)
+    readers[name]=module
+manifest=json.loads(raw)
+readers["release_manifest"].validate_manifest_contract(manifest)
+value=readers["schema015_successor_binding"].declaration(root,manifest)
+assert value["successor"]["source_commit"]=="d9063ee43bc65e821457221ad824f5dde84fe408"
+assert value["exact_predecessor"]["source_commit"]=="562f201e362f0b10ae4fe3a8dae9a8c4d9ef91d3"
+print("EXACT_D906_FROZEN_CONTRACT_VALID")
+'''
+    try:
+        result = subprocess.run([sys.executable, "-I", "-B", "-S", "-c", code, str(source), str(manifest_path)],
+                                env={}, capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        raise RollbackBlocked("historical_d906_frozen_contract") from None
+    require(result.returncode == 0 and result.stdout == b"EXACT_D906_FROZEN_CONTRACT_VALID\n",
+            "historical_d906_frozen_contract")
+
+
 def release_identity(base, rid, expected_commit, expected=None):
     require(isinstance(rid, str) and RELEASE.fullmatch(rid) and rid not in {'.', '..'}
             and COMMIT.fullmatch(expected_commit), 'release_identity_input')
@@ -68,10 +128,12 @@ def release_identity(base, rid, expected_commit, expected=None):
     # Reject that unmanifested input without opening it before any app import.
     require(not (directory / '.env').exists() and not (directory / '.env').is_symlink(), 'unapproved_environment_file')
     manifest = read_json(directory / f'{rid}.manifest.json')
-    try:
-        validate_manifest_contract(manifest)
-    except ManifestContractError as exc:
-        raise RollbackBlocked(str(exc)) from None
+    historical = exact_d906_history(directory, rid, expected_commit, manifest)
+    if not historical:
+        try:
+            validate_manifest_contract(manifest)
+        except ManifestContractError as exc:
+            raise RollbackBlocked(str(exc)) from None
     require(manifest['release_id'] == rid and manifest['source_commit'] == expected_commit
             and HASH.fullmatch(manifest['archive_sha256']), 'manifest_identity')
     if expected is not None:
@@ -108,6 +170,8 @@ def release_identity(base, rid, expected_commit, expected=None):
             name = path.relative_to(directory).as_posix()
             machine_cache = '__pycache__' in path.relative_to(source).parts and path.suffix == '.pyc'
             require(name in files or machine_cache, 'unmanifested_release_file')
+    if historical:
+        validate_d906_frozen_contract(source, directory / f'{rid}.manifest.json')
     return source, manifest
 
 
