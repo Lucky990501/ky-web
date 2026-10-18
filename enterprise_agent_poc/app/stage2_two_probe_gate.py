@@ -6,6 +6,7 @@ never initializes/resets the durable budget. No secret or prompt is audited.
 from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -15,8 +16,9 @@ import stat
 import subprocess
 import time
 import re
+import sys
 
-from app.test_text_gate import TestTextGate, TestTextGateDenied, require
+from app.test_text_gate import TestTextGate, TestTextGateDenied, require, input_shape
 from app.security import RuntimeTokenIssuer
 from app.store import POCStore
 
@@ -24,6 +26,7 @@ BASELINE = '28948beb5e3af1ba490e62fbf080ae3ee6ebbc4f'
 PROFILE = 'STAGE2_TWO_PROBE_MULTITURN_ADMISSION_V2'
 LIMITS = dict(requests=8, requests_per_probe=4, input_each=65536, input_total=524288,
               output_each=8192, output_total=65536, cost_micro_cny=6490000)
+_DENIAL_CONTEXT = ContextVar('stage2_denial_context',default=None)
 # Worst documented peak/cache-miss price, CNY per million tokens. Integer
 # micro-CNY per token is numerically the same; every reservation is rounded up.
 INPUT_RATE = 9
@@ -267,11 +270,80 @@ class Stage2TextGate(TestTextGate):
         return task
 
     async def forward(self, credential, raw):
+        token=_DENIAL_CONTEXT.set({'phase':'pre_transform','reserved':False,'http_started':False,
+                                  'mcp_checked':False,'task_id':None})
         try:return await self._admitted_forward(credential,raw)
         except TestTextGateDenied as exc:
+            self._denial_snapshot(raw,exc)
             try:self.budget.denied(raw,str(exc))
             except Exception:pass  # original refusal remains; no fallback send
             raise
+        finally:_DENIAL_CONTEXT.reset(token)
+
+    def _denial_snapshot(self,raw,exc):
+        """Private fixed-schema denial receipt; failure can never permit send."""
+        destination=os.environ.get('STAGE2_FAILURE_EVIDENCE_DIR')
+        if not destination:return
+        try:
+            from scripts.stage2_failure_snapshot import durable_json,secure_directory
+            from uuid import uuid4
+            directory=secure_directory(Path(destination))
+            data=Path(self.settings.data_dir).resolve()
+            private_root=data.parent if data.parent.parent==Path('/private/tmp') else data
+            require(not directory.is_relative_to(private_root),'stage2_diagnostic_private_root')
+            config=os.environ.get('STAGE25_REDIS_E2E_CONFIG')
+            if config and Path(config).is_file():
+                root=Path(parse(Path(config).read_bytes())['root'])
+                require(not directory.is_relative_to(root),'stage2_diagnostic_private_root')
+            context=_DENIAL_CONTEXT.get() or {}
+            project=Path(__file__).resolve().parents[1]
+            identity=subprocess.check_output(['git','-C',str(project),'show','-s','--format=%H%n%T','HEAD'],text=True,timeout=5).splitlines()
+            runner=Path(sys.argv[0]).resolve()
+            runner_sha=digest(runner.read_bytes()) if runner.is_file() and runner.stat().st_size<=16777216 else None
+            runner_kind='CURRENT_PROCESS_ENTRY_NOT_ORCHESTRATOR'
+            authority_dir=self.budget.identity.get('directory')
+            if authority_dir:
+                request=parse((Path(authority_dir)/'request.json').read_bytes())
+                runner=self.budget.path.parent/'formal-stage2-attempt-01/runner.py'
+                runner_sha=digest(runner.read_bytes())
+                require(runner_sha==request['execution_orchestration']['runner_sha256'],'stage2_diagnostic_runner_hash')
+                runner_kind='SCOPE_BOUND_ORCHESTRATOR'
+            try:payload=parse(raw)
+            except (ValueError,UnicodeError):payload=None
+            task=context.get('task_id');observations=getattr(self,'_mcp_observations',{})
+            linked=[v for (tid,_),v in observations.items() if tid==task]
+            with sqlite3.connect('file:'+str(self.budget.path)+'?mode=ro',uri=True) as c:
+                counts={'requests':c.execute('SELECT count(*) FROM attempts').fetchone()[0],
+                        'http_complete':c.execute("SELECT count(*) FROM attempts WHERE state='COMPLETE'").fetchone()[0]}
+            branch=getattr(exc,'branch_id',None)
+            # Non-input denial categories are already fixed public constants.
+            known={'stage2_tool_outcome_not_proven_success','stage2_per_request_tokens',
+                   'stage2_multiturn_http_limit','stage2_cumulative_tokens','stage2_cost_exhausted',
+                   'stage2_inflight_or_unknown','stage2_budget_stopped','stage2_response_unknown_or_excess',
+                   'stage2_budget_stopped_or_missing','stage2_identical_request_replay',
+                   'test_text_gate_request_too_large','test_text_gate_context_exceeded'}
+            if branch is None:branch=str(exc) if str(exc) in known else 'other_guard_no_input_branch'
+            phase=getattr(exc,'validation_stage',context.get('phase','request_bound'))
+            require(phase in {'pre_transform','post_transform','request_bound','admission'},'stage2_diagnostic_phase')
+            record={'kind':'STAGE2_INPUT_DENIAL_BRANCH_V1','observed_at':int(time.time()),
+                    'source_commit':identity[0],'source_tree':identity[1],
+                    'source_dirty':bool(subprocess.check_output(['git','-C',str(project),'status','--porcelain'],text=True,timeout=5).strip()),
+                    'gate_sha256':{n:digest((project/'app'/n).read_bytes()) for n in ('test_text_gate.py','stage2_two_probe_gate.py')},
+                    'runner_sha256':runner_sha,'runner_kind':runner_kind,
+                    'request_sha256':digest(raw),'request_bytes':len(raw),
+                    'validation_stage':phase,'branch_id':branch,
+                    'structure':getattr(exc,'safe_structure',input_shape(payload)),
+                    'controlled_bounds':getattr(exc,'controlled_bounds',context.get('bound',{})),
+                    'limits':LIMITS,'mcp_task_observations':len(linked),
+                    'mcp_typed_completed_no_error':sum(v[2]=='completed' and not v[3] for v in linked),
+                    'mcp_status_identity_hash_checked':bool(context.get('mcp_checked')),
+                    'admission_reserved':context.get('reserved',False),
+                    'real_http_started_for_rejected_request':context.get('http_started',False),
+                    'prior_attempts':counts}
+            durable_json(directory,'input-denial-'+uuid4().hex+'.json',record)
+        except Exception:
+            # No original request, exception text, or user value may escape here.
+            print('STAGE2_INPUT_DENIAL_SNAPSHOT_FAILED_REFUSAL_RETAINED',file=sys.stderr)
 
     def observe_mcp_tool(self, task_id, item):
         """Observe typed App Server events, never model-supplied output text."""
@@ -346,24 +418,31 @@ class Stage2TextGate(TestTextGate):
         context = self.contexts.get(principal.runtime_profile_id)
         require(context and principal.tenant_id==context[0] and principal.agent_id==context[2],
                 'stage2_signed_context')
+        diagnostic=_DENIAL_CONTEXT.get()
+        if diagnostic is not None:diagnostic['task_id']=context[1]
         payload, namespaces = self.bounded_payload(raw,with_namespaces=True)
+        if diagnostic is not None:diagnostic['phase']='post_transform'
         await self.await_tool_observations(payload,context[1])
         self.tool_outcomes(payload,task_id=context[1])
+        if diagnostic is not None:diagnostic.update(mcp_checked=True,phase='request_bound')
         # Server-side Search/Fetch and any other independently priced tools
         # are forbidden, even when a future vendor starts billing them.
         require(all(t.get('type') in {'function','custom'} for t in payload.get('tools',[])),
                 'stage2_additional_paid_tools_forbidden')
         task = self.task(*context[:3],user=context[3],run_id=context[4])
         bound = self.request_bound(payload)
+        if diagnostic is not None:diagnostic.update(bound=bound,phase='admission')
         wire = json.dumps(payload,ensure_ascii=True,allow_nan=False).encode()
         key = os.environ.get(self.settings.codex_api_key_env)
         require(bool(key),'stage2_dedicated_credential_missing')
         attempt = self.budget.reserve(task,wire,input_tokens=bound['input_tokens_upper'],
                                       output_tokens=bound['output_tokens_upper'])
+        if diagnostic is not None:diagnostic['reserved']=True
         try:
             import httpx
             async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0),
                                          trust_env=False,follow_redirects=False,timeout=120) as client:
+                if diagnostic is not None:diagnostic['http_started']=True
                 response = await client.post('https://api.deepseek.com/responses',content=wire,
                     headers={'Authorization':f'Bearer {key}','Content-Type':'application/json'})
             kind = response.headers.get('content-type','application/json')

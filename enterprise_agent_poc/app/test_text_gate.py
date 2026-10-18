@@ -30,6 +30,61 @@ class TestTextGateDenied(PermissionError):
     __test__ = False
 
 
+def input_shape(payload):
+    """Counts and fixed schema labels only; never retain a request value/key."""
+    def typ(v):
+        return ('null' if v is None else 'bool' if type(v) is bool else
+                'number' if type(v) in (int,float) else 'string' if isinstance(v,str) else
+                'array' if isinstance(v,list) else 'object' if isinstance(v,dict) else 'other')
+    fields=('input','instructions','content','summary','encrypted_content','output',
+            'arguments','call_id','name','role','type','status','id','annotations',
+            'tools','previous_response_id','conversation','max_output_tokens')
+    kinds={'message','function_call','function_call_output','custom_tool_call',
+           'custom_tool_call_output','reasoning'}
+    parts={'input_text','output_text','reasoning_text','summary_text'}
+    out={'payload_type':typ(payload),'known_fields':{},'unknown_top_fields':0,
+         'input_items':0,'item_types':{},'content_part_types':{},'part_field_types':{},
+         'unknown_part_fields':0,'items':[],'truncated':False}
+    if not isinstance(payload,dict):return out
+    top={'model','input','instructions','tools','tool_choice','parallel_tool_calls','reasoning',
+         'max_output_tokens','stream','store','metadata','include','prompt_cache_key','text','client_metadata'}
+    out['known_fields']={k:typ(payload[k]) if k in payload else 'missing' for k in fields}
+    out['unknown_top_fields']=min(len(set(payload)-top),1000000)
+    items=payload.get('input',[])
+    if not isinstance(items,list):return out
+    out['input_items']=len(items);out['truncated']=len(items)>128
+    for value in items[:128]:
+        kind=value.get('type','message' if 'role' in value else None) if isinstance(value,dict) else None
+        kind=kind if isinstance(kind,str) and kind in kinds else 'unknown'
+        out['item_types'][kind]=out['item_types'].get(kind,0)+1
+        if not isinstance(value,dict):out['items'].append({'value_type':typ(value)});continue
+        row={'kind':kind,'fields':{k:typ(value[k]) if k in value else 'missing' for k in fields},
+             'unknown_fields':min(len(set(value)-set(fields)),1000000),'part_counts':{}}
+        for name in ('content','summary','output'):
+            if not isinstance(value.get(name),list):continue
+            row['part_counts'][name]=len(value[name]);out['truncated'] |= len(value[name])>128
+            for part in value[name][:128]:
+                pk=part.get('type') if isinstance(part,dict) else None
+                pk=pk if isinstance(pk,str) and pk in parts else 'unknown'
+                out['content_part_types'][pk]=out['content_part_types'].get(pk,0)+1
+                if isinstance(part,dict):
+                    out['unknown_part_fields']+=len(set(part)-{'type','text','annotations'})
+                    for field in ('type','text','annotations'):
+                        label=typ(part[field]) if field in part else 'missing'
+                        counts=out['part_field_types'].setdefault(field,{})
+                        counts[label]=counts.get(label,0)+1
+        out['items'].append(row)
+    return out
+
+
+def input_refusal(branch,payload,*,phase='request_bound',bounds=None):
+    # Attributes are internal only. Public exception/HTTP semantics are unchanged.
+    exc=TestTextGateDenied('test_text_gate_input_bound_not_proven')
+    exc.branch_id=branch;exc.validation_stage=phase
+    exc.safe_structure=input_shape(payload);exc.controlled_bounds=bounds or {}
+    return exc
+
+
 def require(ok, code):
     if not ok:
         raise TestTextGateDenied(code)
@@ -363,8 +418,15 @@ class TestTextGate:
         output = p.get('max_output_tokens',MAX_OUTPUT_TOKENS)
         require(type(output) is int and 0 < output <= MAX_OUTPUT_TOKENS, 'test_text_gate_output_exceeded')
         p["max_output_tokens"] = output
-        p, namespaces = TestTextGate.provider_tools(p)
-        TestTextGate.request_bound(p)
+        try:p, namespaces = TestTextGate.provider_tools(p)
+        except TestTextGateDenied as exc:
+            if str(exc)=='test_text_gate_input_bound_not_proven':
+                raise input_refusal('namespace_instructions_invalid_type',p,phase='pre_transform') from None
+            raise
+        try:TestTextGate.request_bound(p)
+        except TestTextGateDenied as exc:
+            exc.validation_stage='post_transform'
+            raise
         return (p,namespaces) if with_namespaces else p
 
     @staticmethod
@@ -410,7 +472,8 @@ class TestTextGate:
         if 'tools' in p:p['tools']=mapped
         if descriptions:
             original=p.get('instructions')
-            require(original is None or isinstance(original,str),'test_text_gate_input_bound_not_proven')
+            if original is not None and not isinstance(original,str):
+                raise input_refusal('namespace_instructions_invalid_type',p,phase='pre_transform')
             p['instructions']=(original or '')+'\n\nTool namespace descriptions:\n'+json.dumps(descriptions,ensure_ascii=True)
         def flatten_call(item):
             if 'namespace' not in item:return
@@ -486,81 +549,88 @@ class TestTextGate:
         allowed = {'model','input','instructions','tools','tool_choice','parallel_tool_calls',
                    'reasoning','max_output_tokens','stream','store','metadata','include',
                    'prompt_cache_key','text','client_metadata'}
-        require(set(p) <= allowed, 'test_text_gate_input_bound_not_proven')
-        require(p.get('instructions') is None or isinstance(p['instructions'],str),
-                'test_text_gate_input_bound_not_proven')
+        measured={'encoded_bytes':None,'input_tokens_upper':None,'output_tokens_upper':None,
+                  'units':None,'argument_bytes':None,'arguments':None}
+        def check(ok,branch):
+            if not ok:raise input_refusal(branch,p,bounds=measured.copy())
+        check(isinstance(p,dict),'payload_invalid_type')
+        check(set(p) <= allowed,'top_level_unknown')
+        check(p.get('instructions') is None or isinstance(p['instructions'],str),'instructions_invalid_type')
         items = p.get('input',[])
         if isinstance(items,str):
             items = [{'role':'user','content':items}]
-        require(isinstance(items,list) and (items or p.get('instructions')),
-                'test_text_gate_input_bound_not_proven')
+        check(isinstance(items,list),'input_invalid_container')
+        check(bool(items or p.get('instructions')),'input_empty')
         units, arguments, argument_bytes = len(items), 0, 0
+        measured.update(units=units,arguments=arguments,argument_bytes=argument_bytes,
+                        output_tokens_upper=p.get('max_output_tokens') if type(p.get('max_output_tokens')) is int else None)
 
-        def text_parts(value, types):
+        def text_parts(value, types, location):
             if isinstance(value,str):
                 return 0
-            require(isinstance(value,list), 'test_text_gate_input_bound_not_proven')
+            check(isinstance(value,list),location+'_invalid_container')
             for part in value:
-                require(isinstance(part,dict) and part.get('type') in types
-                        and isinstance(part.get('text'),str)
-                        and set(part) <= {'type','text','annotations'}, 'test_text_gate_input_bound_not_proven')
-                require(not part.get('annotations'), 'test_text_gate_input_bound_not_proven')
+                check(isinstance(part,dict),location+'_part_invalid_container')
+                check(isinstance(part.get('type'),str) and part['type'] in types,location+'_part_invalid_type')
+                check(isinstance(part.get('text'),str),location+'_part_invalid_text')
+                check(set(part) <= {'type','text','annotations'},location+'_part_unknown_field')
+                check(not part.get('annotations'),location+'_part_annotations')
             return len(value)
 
         for item in items:
-            require(isinstance(item,dict), 'test_text_gate_input_bound_not_proven')
+            check(isinstance(item,dict),'item_invalid_container')
             kind = item.get('type','message' if 'role' in item else None)
             common = {'type','id','status'}
             if kind == 'message':
-                require(set(item) <= common|{'role','content'} and item.get('role') in
-                        {'system','developer','user','assistant'}, 'test_text_gate_input_bound_not_proven')
-                units += text_parts(item.get('content'), {'input_text','output_text'})
+                check(set(item) <= common|{'role','content'},'message_unknown_field')
+                check(isinstance(item.get('role'),str) and item['role'] in {'system','developer','user','assistant'},'message_invalid_role')
+                units += text_parts(item.get('content'), {'input_text','output_text'},'message_content')
             elif kind == 'function_call':
-                require(set(item) <= common|{'call_id','name','arguments'}
-                        and all(isinstance(item.get(k),str) for k in ('call_id','name','arguments')),
-                        'test_text_gate_input_bound_not_proven')
+                check(set(item) <= common|{'call_id','name','arguments'},'function_call_unknown_field')
+                check(all(isinstance(item.get(k),str) for k in ('call_id','name','arguments')),'function_call_invalid_structure')
                 try:
                     args = json.loads(item['arguments'])
                 except (ValueError,TypeError):
-                    raise TestTextGateDenied('test_text_gate_input_bound_not_proven') from None
-                require(isinstance(args,dict), 'test_text_gate_input_bound_not_proven')
+                    raise input_refusal('function_arguments_invalid_json',p,bounds=measured.copy()) from None
+                check(isinstance(args,dict),'function_arguments_invalid_container')
                 arguments += len(args)
                 argument_bytes += len(json.dumps(args,ensure_ascii=True,allow_nan=False).encode('ascii'))
+                measured.update(arguments=arguments,argument_bytes=argument_bytes)
             elif kind in {'function_call_output','custom_tool_call_output'}:
-                require(set(item) <= common|{'call_id','output'} and isinstance(item.get('call_id'),str),
-                        'test_text_gate_input_bound_not_proven')
-                units += text_parts(item.get('output'), {'input_text','output_text'})
+                check(set(item) <= common|{'call_id','output'},'function_output_unknown_field')
+                check(isinstance(item.get('call_id'),str),'function_output_invalid_call_id')
+                units += text_parts(item.get('output'), {'input_text','output_text'},'function_output')
             elif kind == 'custom_tool_call':
-                require(set(item) <= common|{'call_id','name','input'} and item.get('name') == 'apply_patch'
-                        and isinstance(item.get('input'),str) and isinstance(item.get('call_id'),str),
-                        'test_text_gate_input_bound_not_proven')
+                check(set(item) <= common|{'call_id','name','input'},'custom_call_unknown_field')
+                check(item.get('name') == 'apply_patch' and isinstance(item.get('input'),str)
+                      and isinstance(item.get('call_id'),str),'custom_call_invalid_structure')
             elif kind == 'reasoning':
                 # SDK0.147 materializes encrypted_content:null even for a
                 # plaintext-only provider response. Null carries no opaque
                 # context; any non-null encrypted history remains unprovable.
-                require(set(item) <= common|{'content','summary','encrypted_content'}
-                        and item.get('encrypted_content') is None,
-                        'test_text_gate_input_bound_not_proven')
+                check(set(item) <= common|{'content','summary','encrypted_content'},'reasoning_unknown_field')
+                check(item.get('encrypted_content') is None,'reasoning_opaque_history')
                 if item.get('content') is not None:
-                    units += text_parts(item['content'], {'reasoning_text'})
+                    units += text_parts(item['content'], {'reasoning_text'},'reasoning_content')
                 summary = item.get('summary',[])
-                require(isinstance(summary,list), 'test_text_gate_input_bound_not_proven')
-                units += text_parts(summary, {'summary_text'})
+                check(isinstance(summary,list),'reasoning_summary_invalid_container')
+                units += text_parts(summary, {'summary_text'},'reasoning_summary')
             else:
-                raise TestTextGateDenied('test_text_gate_input_bound_not_proven')
+                raise input_refusal('item_unknown_type',p,bounds=measured.copy())
 
         tools = p.get('tools',[])
-        require(isinstance(tools,list), 'test_text_gate_input_bound_not_proven')
+        check(isinstance(tools,list),'tools_invalid_container')
         for tool in tools:
-            require(isinstance(tool,dict) and tool.get('type') in {'function','custom','namespace','web_search'},
-                    'test_text_gate_input_bound_not_proven')
+            check(isinstance(tool,dict),'tool_invalid_container')
+            check(isinstance(tool.get('type'),str) and tool['type'] in {'function','custom','namespace','web_search'},'tool_definition_invalid_type')
             if tool['type'] == 'custom':
-                require(tool.get('name') == 'apply_patch', 'test_text_gate_input_bound_not_proven')
+                check(tool.get('name') == 'apply_patch','custom_tool_invalid_identity')
             # namespace and web_search definitions are ignored by this exact
             # stateless provider protocol, but ALL their bytes are still charged
             # in the bound. No web_search_call/history or remote input admitted.
         units += len(tools)
         encoded = json.dumps(p,ensure_ascii=True,allow_nan=False).encode('ascii')
+        measured.update(encoded_bytes=len(encoded),units=units,arguments=arguments,argument_bytes=argument_bytes)
         require(len(encoded) <= MAX_REQUEST_BYTES, 'test_text_gate_request_too_large')
         input_bound = 4096 + len(encoded) + argument_bytes + 256*units + 128*arguments
         output = p['max_output_tokens']
