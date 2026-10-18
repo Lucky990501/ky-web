@@ -115,7 +115,7 @@ class CodexRuntimeManager:
                 "requires_openai_auth = false",
                 "",
             ]
-            if self._test_gate:
+            if self._test_gate or os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true':
                 provider_lines += ['request_max_retries = 0', 'stream_max_retries = 0', '']
         if getattr(self._test_gate, "forbid_server_tools", False):
             provider_lines.insert(0, 'web_search = "disabled"')

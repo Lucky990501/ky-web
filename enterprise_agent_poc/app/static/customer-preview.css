@@ -1,0 +1,6 @@
+html[data-customer-preview] .side-credit,
+html[data-customer-preview] .side-user,
+html[data-customer-preview] .account-menu-wrap,
+html[data-customer-preview] .credit-panel { display:none; }
+html[data-customer-preview] .topbar::after { content:'AI体验版 · 独立测试空间 · 请勿上传敏感资料'; color:#52627c; font-size:14px; }
+@media(max-width:600px){html[data-customer-preview] .topbar::after{font-size:12px;max-width:260px;}}

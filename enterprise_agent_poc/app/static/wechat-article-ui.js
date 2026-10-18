@@ -12,8 +12,9 @@
     try {
       const url = new URL(value, location.origin);
       if (url.origin !== location.origin || url.search || url.hash || url.username || url.password) return '';
+      if (window.WORKBENCH_PREVIEW_BASE) url.pathname = url.pathname.replace(/^\/preview(?=\/)/, '');
       if (!/^\/api\/v1\/(?:storage\/(?:generated|assets)\/[A-Za-z0-9_./-]+|chat-images\/[A-Za-z0-9_-]+)$/.test(url.pathname) || value.includes('..') || value.includes('%') || value.includes('\\')) return '';
-      return url.href;
+      return window.workbenchPreviewUrl ? window.workbenchPreviewUrl(url.href) : url.href;
     } catch { return ''; }
   }
   function sanitizeArticle(html) {

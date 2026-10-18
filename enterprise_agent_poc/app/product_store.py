@@ -426,7 +426,8 @@ class ProductStore:
             # Stage 1 catalog drafts / configured instances are not runnable.
             columns = {r["name"] for r in conn.execute("PRAGMA table_info(agent_templates)")} if not self._store.is_postgres else {r["column_name"] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='agent_templates'")}
             category = "COALESCE(t.category,'general')" if "category" in columns else "'general'"
-            rows = conn.execute(f"SELECT t.id,t.name,t.slug,t.description,t.icon,{category} AS category,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? WHERE t.id IN (?,?,?) ORDER BY t.id", (tenant_id, *CATALOG)).fetchall()
+            placeholders = ','.join('?' for _ in CATALOG)
+            rows = conn.execute(f"SELECT t.id,t.name,t.slug,t.description,t.icon,{category} AS category,t.status,t.default_runtime_profile,t.credit_cost,t.skill_manifest,t.allows_image_generation,i.status AS tenant_status FROM agent_templates t LEFT JOIN tenant_agent_instances i ON i.agent_id=t.id AND i.tenant_id=? WHERE t.id IN ({placeholders}) ORDER BY t.id", (tenant_id, *CATALOG)).fetchall()
         result = [{**dict(row), "enabled": dict(row).get("tenant_status") == "enabled"} for row in rows]
         if self.execution_resolver:
             with self._store.connection() as conn:

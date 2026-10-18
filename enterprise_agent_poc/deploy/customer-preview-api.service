@@ -1,0 +1,21 @@
+[Unit]
+Description=Customer AI Preview API (independent of Production)
+After=network-online.target customer-preview-mcp.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enterprise-agent-workbench-preview/app/enterprise_agent_poc
+ExecStart=/opt/enterprise-agent-workbench/venv/bin/python scripts/customer_preview.py --data-dir /opt/enterprise-agent-workbench-preview/customer-ai-preview-data --credentials-env /opt/enterprise-agent-workbench/shared/enterprise-agent.env --pricing-json /opt/enterprise-agent-workbench-preview/pricing.json --run-as enterprise-preview
+Environment=PYTHONUNBUFFERED=1
+Restart=no
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+CPUQuota=100%
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=128
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

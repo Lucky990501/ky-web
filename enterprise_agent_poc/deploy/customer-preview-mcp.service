@@ -1,0 +1,20 @@
+[Unit]
+Description=Customer AI Preview MCP (private loopback)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/enterprise-agent-workbench-preview/app/enterprise_agent_poc
+ExecStart=/opt/enterprise-agent-workbench/venv/bin/python scripts/customer_preview.py --mcp --data-dir /opt/enterprise-agent-workbench-preview/customer-ai-preview-data --credentials-env /opt/enterprise-agent-workbench/shared/enterprise-agent.env --pricing-json /opt/enterprise-agent-workbench-preview/pricing.json --run-as enterprise-preview
+Environment=PYTHONUNBUFFERED=1
+Restart=no
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+CPUQuota=50%
+MemoryMax=256M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
