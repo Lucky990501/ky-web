@@ -71,14 +71,19 @@ def _public(services, agent_id):
 
 def test_snapshot_reads_real_pg_without_mutation_or_payload_export(domain,tmp_path):
     import json,hashlib
-    from scripts.stage2_failure_snapshot import capture
     services=domain[0]
     with _db(services) as conn:
         row=conn.execute("SELECT id,result_json FROM agent_template_tests WHERE test_type='runtime' ORDER BY created_at DESC LIMIT 1").fetchone()
         before=conn.execute('SELECT count(*) AS n FROM tasks').fetchone()['n']
     prior=dict(os.environ);tmp_path.chmod(0o700)
-    try:receipt=capture(services.manifest,tmp_path,test_id=row['id'])
-    finally:os.environ.clear();os.environ.update(prior)
+    # Follow the existing Stage2 child-process boundary: its marked PG/Redis
+    # manifest is checked by assert_worker_isolated. The pytest parent's
+    # autouse POCStore guard deliberately permits only its Stage1 PG socket.
+    child="from scripts.stage2_failure_snapshot import capture; import sys,json; print(json.dumps(capture(*sys.argv[1:3],test_id=sys.argv[3])))"
+    result=subprocess.run([sys.executable,'-B','-c',child,str(services.manifest),str(tmp_path),row['id']],
+                          cwd=PROJECT,env=services._child_env(),check=True,capture_output=True,text=True)
+    receipt=json.loads(result.stdout.splitlines()[-1])
+    assert dict(os.environ)==prior
     raw=Path(receipt['path']).read_bytes()
     assert hashlib.sha256(raw).hexdigest()==receipt['sha256']
     saved=json.loads(raw);assert saved['tests'][0]['id']==row['id']

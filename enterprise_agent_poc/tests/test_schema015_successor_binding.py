@@ -286,27 +286,31 @@ def test_real_untrusted_tmp_directory_cannot_supply_protected_qualification(tmp_
 def test_nofollow_descriptor_root_seal_and_resources(tmp_path, monkeypatch, fault):
     path = tmp_path / "record.json"
     path.write_text("{}")
-    actual = Path.lstat
-    def trusted_parents(p):
-        observed = actual(p)
-        if p != path:
-            return SimpleNamespace(st_mode=0o40755, st_uid=0)
-        return observed
-    monkeypatch.setattr(Path, "lstat", trusted_parents)
-    closed = []
-    close = os.close
-    monkeypatch.setattr(os, "close", lambda fd: (closed.append(fd), close(fd))[-1])
-    if fault == "symlink":
-        target = tmp_path / "target.json"
-        path.rename(target)
-        path.symlink_to(target)
-        with pytest.raises(OSError): binding.protected_json(path)
-        assert closed == []  # open(NO_FOLLOW) rejected before descriptor creation
-        return
-    monkeypatch.setattr(os, "fstat", lambda fd: SimpleNamespace(
-        st_mode=0o100644 if fault == "mode" else 0o100600,
-        st_uid=1000 if fault == "owner" else 0, st_nlink=2 if fault == "links" else 1,
-        st_size=262145 if fault == "size" else 2))
-    with pytest.raises(binding.BindingBlocked, match="root_seal"):
-        binding.protected_json(path)
-    assert len(closed) == 1
+    # The synthetic descriptor metadata belongs only to this Guard call.
+    # pytest may remove successful tmp_path directories before its monkeypatch
+    # fixture finalizer; shutil must see the real os.fstat at that point.
+    with monkeypatch.context() as scoped:
+        actual = Path.lstat
+        def trusted_parents(p):
+            observed = actual(p)
+            if p != path:
+                return SimpleNamespace(st_mode=0o40755, st_uid=0)
+            return observed
+        scoped.setattr(Path, "lstat", trusted_parents)
+        closed = []
+        close = os.close
+        scoped.setattr(os, "close", lambda fd: (closed.append(fd), close(fd))[-1])
+        if fault == "symlink":
+            target = tmp_path / "target.json"
+            path.rename(target)
+            path.symlink_to(target)
+            with pytest.raises(OSError): binding.protected_json(path)
+            assert closed == []  # open(NO_FOLLOW) rejected before descriptor creation
+            return
+        scoped.setattr(os, "fstat", lambda fd: SimpleNamespace(
+            st_mode=0o100644 if fault == "mode" else 0o100600,
+            st_uid=1000 if fault == "owner" else 0, st_nlink=2 if fault == "links" else 1,
+            st_size=262145 if fault == "size" else 2))
+        with pytest.raises(binding.BindingBlocked, match="root_seal"):
+            binding.protected_json(path)
+        assert len(closed) == 1
