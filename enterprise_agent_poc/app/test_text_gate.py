@@ -535,9 +535,17 @@ class TestTextGate:
                         and isinstance(item.get('input'),str) and isinstance(item.get('call_id'),str),
                         'test_text_gate_input_bound_not_proven')
             elif kind == 'reasoning':
-                require(set(item) <= common|{'content','summary'} and not item.get('summary'),
+                # SDK0.147 materializes encrypted_content:null even for a
+                # plaintext-only provider response. Null carries no opaque
+                # context; any non-null encrypted history remains unprovable.
+                require(set(item) <= common|{'content','summary','encrypted_content'}
+                        and item.get('encrypted_content') is None,
                         'test_text_gate_input_bound_not_proven')
-                units += text_parts(item.get('content',[]), {'reasoning_text'})
+                if item.get('content') is not None:
+                    units += text_parts(item['content'], {'reasoning_text'})
+                summary = item.get('summary',[])
+                require(isinstance(summary,list), 'test_text_gate_input_bound_not_proven')
+                units += text_parts(summary, {'summary_text'})
             else:
                 raise TestTextGateDenied('test_text_gate_input_bound_not_proven')
 

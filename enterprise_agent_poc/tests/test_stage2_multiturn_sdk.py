@@ -15,7 +15,7 @@ from app.domain import RuntimeProfile
 from app.runtime.codex_provider import CodexRuntimeManager,CodexRuntimeProvider
 from test_stage2_two_probe_gate import task
 
-def sse(output,number):
+def sse(output,number,reasoning=None):
     rid='fixture-response-'+str(number)
     base={'id':rid,'object':'response','model':'deepseek-v4-pro','created_at':1,'status':'in_progress','output':[]}
     events=[{'type':'response.created','response':base},
@@ -32,6 +32,19 @@ def sse(output,number):
     events += [{'type':'response.output_item.done','output_index':0,'item':output},
                {'type':'response.completed','response':{**base,'status':'completed','output':[output],
                 'usage':{'input_tokens':100,'output_tokens':20,'total_tokens':120,'output_tokens_details':{'reasoning_tokens':5}}}}]
+    if reasoning:
+        item={'type':'reasoning','id':'fixture-reasoning-'+str(number),'summary':[]}
+        if reasoning in {'content','null_encrypted'}:
+            item['content']=[{'type':'reasoning_text','text':'EXPLICIT SYNTHETIC REASONING TEXT'}]
+        if reasoning=='summary':
+            item['summary']=[{'type':'summary_text','text':'EXPLICIT SYNTHETIC REASONING SUMMARY'}]
+        if reasoning=='null_encrypted':item['encrypted_content']=None
+        if reasoning=='opaque':item['encrypted_content']='EXPLICIT_SYNTHETIC_OPAQUE_HISTORY'
+        events.insert(1,{'type':'response.output_item.added','output_index':0,'item':item})
+        events.insert(2,{'type':'response.output_item.done','output_index':0,'item':item})
+        for event in events[3:]:
+            if 'output_index' in event:event['output_index']=1
+            if event['type']=='response.completed':event['response']['output']=[item,output]
     return ''.join('event: '+v['type']+'\ndata: '+json.dumps({**v,'sequence_number':i})+'\n\n' for i,v in enumerate(events)).encode()
 
 @pytest.mark.parametrize('case',['complete','overlimit','tool_timeout','mcp_error','mcp_timeout'])
@@ -43,7 +56,22 @@ def test_two_runtime_tasks_with_skill_mcp_and_every_http_audited(tmp_path,monkey
 def test_structured_mcp_outcomes_require_typed_sdk_proof(tmp_path,monkeypatch,case,shape):
     _sdk_case(tmp_path,monkeypatch,case,shape)
 
-def _sdk_case(tmp_path,monkeypatch,case,shape='string'):
+@pytest.mark.parametrize('reasoning',['content','summary','null_encrypted'])
+def test_real_sdk_second_turn_plaintext_reasoning_and_mcp_first(tmp_path,monkeypatch,reasoning):
+    _sdk_case(tmp_path,monkeypatch,'complete','dict',reasoning=reasoning,mcp_first=True)
+
+
+def test_real_sdk_opaque_reasoning_still_refused_before_second_http(tmp_path,monkeypatch):
+    import sqlite3
+    with pytest.raises(Exception):
+        _sdk_case(tmp_path,monkeypatch,'complete','dict',reasoning='opaque',mcp_first=True)
+    with sqlite3.connect(tmp_path/'budget.sqlite') as c:
+        assert c.execute('SELECT count(*) FROM attempts').fetchone()[0]==1
+        assert c.execute('SELECT reason FROM denials').fetchone()[0]=='test_text_gate_input_bound_not_proven'
+        assert c.execute("SELECT count(*) FROM tool_observations WHERE status='completed' AND error_present=0").fetchone()[0]==1
+
+
+def _sdk_case(tmp_path,monkeypatch,case,shape='string',*,reasoning=None,mcp_first=False):
     import app.stage2_two_probe_gate as module
     from uuid import uuid4
     with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
@@ -94,11 +122,11 @@ def _sdk_case(tmp_path,monkeypatch,case,shape='string'):
         assert payload['max_output_tokens']==8192 and req.url==httpx.URL('https://api.deepseek.com/responses')
         if case=='tool_timeout' and number==2:raise httpx.ReadTimeout('EXPLICIT SYNTHETIC TIMEOUT')
         if number<=2 or case=='overlimit':
-            suffix='exec_command' if number==1 else 'enterprise_config_get'
+            suffix=('enterprise_config_get' if number==1 else 'exec_command') if mcp_first else ('exec_command' if number==1 else 'enterprise_config_get')
             name=next(x['name'] for x in payload['tools'] if x.get('name','').endswith(suffix))
-            item={'type':'function_call','id':'fc'+str(number),'status':'completed','call_id':str(uuid4()),'name':name,'arguments':json.dumps({'cmd':'cat '+shlex.quote(str(skill)),'max_output_tokens':256}) if number==1 else '{}'}
+            item={'type':'function_call','id':'fc'+str(number),'status':'completed','call_id':str(uuid4()),'name':name,'arguments':json.dumps({'cmd':'cat '+shlex.quote(str(skill)),'max_output_tokens':256}) if suffix=='exec_command' else '{}'}
         else:item={'type':'message','id':'msg'+str(number),'status':'completed','role':'assistant','content':[{'type':'output_text','text':'SIMULATED RUNTIME COMPLETE','annotations':[]}]}
-        return httpx.Response(200,headers={'content-type':'text/event-stream'},content=sse(item,len(calls)))
+        return httpx.Response(200,headers={'content-type':'text/event-stream'},content=sse(item,len(calls),reasoning) if reasoning else sse(item,len(calls)))
     monkeypatch.setattr(httpx,'AsyncHTTPTransport',lambda **_:httpx.MockTransport(upstream))
     issuer=RuntimeTokenIssuer('EXPLICIT-FIXTURE-NOT-A-REAL-KEY')
     manager=CodexRuntimeManager(settings,SimpleNamespace(deploy=lambda *_:None),issuer);provider=CodexRuntimeProvider(manager)
@@ -159,4 +187,9 @@ def _sdk_case(tmp_path,monkeypatch,case,shape='string'):
         'mcp_calls':events,'skill_read_via_real_sdk_sandbox':True,
         'input_reserved':sum(x['input_reserved'] for x in rows),'output_reserved':sum(x['output_reserved'] for x in rows),
         'cost_reserved_micro_cny':sum(x['cost_reserved'] for x in rows),'attempts':rows,'denials':denials,'real_provider_calls':0}
+    trace['sdk_request_structures']=[{'item_types':[i.get('type','message') for i in p['input']],
+        'reasoning':[{'fields':sorted(i),'encrypted_content_is_null':i.get('encrypted_content') is None,
+                      'content_type':type(i.get('content')).__name__,'summary_type':type(i.get('summary')).__name__}
+                     for i in p['input'] if i.get('type')=='reasoning']}
+        for p in calls]
     (tmp_path/'MULTITURN_AUDIT.json').write_text(json.dumps(trace,indent=2))
