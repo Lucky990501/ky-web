@@ -529,7 +529,7 @@ class CodexRuntimeProvider(RuntimeProvider):
                 "total_model_calls_for_structured_result": model_calls,
             })
 
-        max_attempts = 1 if getattr(self._manager, "_test_gate", None) else MAX_STRUCTURED_MODEL_ATTEMPTS
+        max_attempts = 1 if getattr(self._manager, "_test_gate", None) or os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true' else MAX_STRUCTURED_MODEL_ATTEMPTS
         for attempt in range(1, max_attempts + 1):
             generation_stage = ("semantic_correcting" if attempt == 2 and original is not None
                                 and original_violations else "full_plan_generating")

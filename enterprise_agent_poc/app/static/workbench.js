@@ -37,8 +37,8 @@ function safeCompanyLogoUrl(value){
 }
 function companyLogoUrl(){
   if(enterpriseBrand?.scope!==principalCacheScope())return '';
-  if(me?.role==='enterprise_admin'&&enterpriseBrand.logo)return `${brandLogoPath}?v=${enterpriseBrand.logoVersion}`;
-  return enterpriseBrand.legacyLogo||'';
+  const url=me?.role==='enterprise_admin'&&enterpriseBrand.logo?`${brandLogoPath}?v=${enterpriseBrand.logoVersion}`:enterpriseBrand.legacyLogo||'';
+  return url&&window.workbenchPreviewUrl?window.workbenchPreviewUrl(url):url;
 }
 function companyLogoMarkup(){const url=companyLogoUrl();return url?`<img class="company-brand-image" src="${escapeHtml(url)}" alt="企业品牌 Logo">`:icon('building-2');}
 function syncCompanyViews(){
@@ -1108,7 +1108,8 @@ function brandLogoErrorMessage(payload={}){
 const brandLogoMetadata=value=>value&&value.download_url===brandLogoPath&&value.content_type==='image/png'&&typeof value.filename==='string'?value:null;
 function brandLogoCardHtml(state){
   const logo=brandLogoMetadata(state.logo),uploading=state.phase==='uploading',canEdit=state.canEdit;
-  const preview=logo?`<div class="brand-logo-preview"><img src="${brandLogoPath}?v=${state.previewVersion}" alt="当前企业品牌 Logo"></div><div class="brand-logo-file"><strong>${escapeHtml(logo.filename)}</strong>${Number.isInteger(logo.width)&&Number.isInteger(logo.height)?`<span>${logo.width} × ${logo.height}px</span>`:''}</div>`:`<div class="brand-logo-preview brand-logo-empty">${icon('image',28)}<span>尚未上传品牌 Logo</span></div><p class="brand-logo-missing">品牌 Logo 尚未配置。当前 Word 导出仍可使用；配置 Logo 后可用于后续品牌模板。</p>`;
+  const previewUrl=window.workbenchPreviewUrl?window.workbenchPreviewUrl(`${brandLogoPath}?v=${state.previewVersion}`):`${brandLogoPath}?v=${state.previewVersion}`;
+  const preview=logo?`<div class="brand-logo-preview"><img src="${escapeHtml(previewUrl)}" alt="当前企业品牌 Logo"></div><div class="brand-logo-file"><strong>${escapeHtml(logo.filename)}</strong>${Number.isInteger(logo.width)&&Number.isInteger(logo.height)?`<span>${logo.width} × ${logo.height}px</span>`:''}</div>`:`<div class="brand-logo-preview brand-logo-empty">${icon('image',28)}<span>尚未上传品牌 Logo</span></div><p class="brand-logo-missing">品牌 Logo 尚未配置。当前 Word 导出仍可使用；配置 Logo 后可用于后续品牌模板。</p>`;
   return `<h2>${icon('image')} 品牌 Logo</h2><p class="brand-logo-description">上传后可用于后续品牌 Word 模板的页眉和水印。</p>${preview}<p class="brand-logo-requirements">仅支持透明背景 PNG · 最大 5MB · 最大 4096 × 4096 · 建议长边 512–2048px</p>${canEdit?`<input id="brand-logo-file" type="file" accept="image/png,.png" aria-label="选择透明背景 PNG Logo" hidden ${uploading?'disabled':''}><button class="button secondary brand-logo-upload-button" type="button" id="brand-logo-upload" ${uploading?'disabled aria-busy="true"':''}>${icon(uploading?'loader-circle':'upload',16)}${uploading?'正在上传...':logo?'更换 Logo':'上传 Logo'}</button>`:''}${state.phase==='success'?'<p class="brand-logo-feedback" role="status">上传成功，当前预览已更新。</p>':''}${state.phase==='error'?`<p class="brand-logo-feedback brand-logo-feedback-error" role="alert">${escapeHtml(state.error)}</p>`:''}`;
 }
 function renderBrandLogoCard(main,state){

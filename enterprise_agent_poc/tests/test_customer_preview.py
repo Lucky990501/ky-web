@@ -19,9 +19,9 @@ def test_unknown_or_opaque_inputs_fail_closed(item):
 
 def test_budget_count_persists_across_restart(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(12): meter.reserve("text",Decimal('0.1'))
+    for _ in range(24): meter.reserve("text",Decimal('0.1'))
     with pytest.raises(PreviewBudgetExceeded): PreviewBudget(tmp_path).reserve("text",Decimal('0.1'))
-    assert PreviewBudget(tmp_path).summary()['text']['requests']==12
+    assert PreviewBudget(tmp_path).summary()['text']['requests']==24
 
 
 def test_money_limit_reserves_unknown_outcome_and_never_refunds(tmp_path):

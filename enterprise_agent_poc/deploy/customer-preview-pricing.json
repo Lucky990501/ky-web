@@ -1,0 +1,17 @@
+{
+  "text_pricing_verified": true,
+  "text_base_url": "https://api.deepseek.com",
+  "text_input_cny_per_million": 9,
+  "text_output_cny_per_million": 27,
+  "image_pricing_verified": true,
+  "image_request_max_cny": 1,
+  "image_public_usd_price": 0.16,
+  "image_max_group_ratio": 0.27574,
+  "usd_exchange_rate": 6.718,
+  "embedding_pricing_verified": true,
+  "embedding_request_max_cny": 0.05,
+  "embedding_model_ratio": 0.01,
+  "embedding_max_group_ratio": 1.4706,
+  "quota_per_usd": 500000,
+  "verified_on": "2026-10-19"
+}

@@ -44,7 +44,7 @@ class PreviewBudgetExceeded(PermissionError):
 
 
 class PreviewBudget:
-    LIMITS = {"text": (12, Decimal("10")), "image": (2, Decimal("20")), "embedding": (8, Decimal("5"))}
+    LIMITS = {"text": (24, Decimal("10")), "image": (2, Decimal("20")), "embedding": (8, Decimal("5"))}
 
     def __init__(self, root: Path):
         self.path = root / "preview-budget.sqlite"
@@ -87,8 +87,29 @@ class PreviewImageTransport(httpx.AsyncHTTPTransport):
         self.budget, self.pricing = budget, pricing
 
     async def handle_async_request(self, request):
+        reserve_embedding(request, self.budget, self.pricing)
         if request.url.host == "llm-api.net" and request.url.path.startswith("/v1/images/"):
             if not self.pricing.get("image_pricing_verified"):
                 raise PreviewBudgetExceeded("图片供应商费用尚未核实；未调用图片Provider。")
             self.budget.reserve("image", Decimal(str(self.pricing["image_request_max_cny"])))
         return await super().handle_async_request(request)
+
+
+def reserve_embedding(request, budget, pricing):
+    if request.url.host != 'llm-api.net' or request.url.path != '/v1/embeddings': return
+    import json
+    body = json.loads(request.content)
+    if (not pricing.get('embedding_pricing_verified') or body.get('model') != 'text-embedding-3-small'
+        or len(request.content) > 8192):
+        raise PreviewBudgetExceeded('Embedding身份或请求费用边界未满足；没有调用。')
+    budget.reserve('embedding', Decimal(str(pricing['embedding_request_max_cny'])))
+
+
+class PreviewSyncTransport(httpx.HTTPTransport):
+    def __init__(self, budget, pricing):
+        super().__init__(retries=0)
+        self.budget, self.pricing = budget, pricing
+
+    def handle_request(self, request):
+        reserve_embedding(request, self.budget, self.pricing)
+        return super().handle_request(request)
