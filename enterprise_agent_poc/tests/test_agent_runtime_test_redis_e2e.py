@@ -52,6 +52,11 @@ def probe(config_path):
                 observed.append(test['status'])
                 if test['status'] in {'passed','failed','invalidated'}:break
                 time.sleep(.25)
+            if test['status']!='passed':
+                from scripts.stage2_failure_snapshot import try_capture
+                destination=os.environ.get('STAGE2_FAILURE_EVIDENCE_DIR')
+                if destination:
+                    try_capture(config_path,destination,test_id=evidence['runtime_test_id'])
             assert test['status']=='passed',test['status']
             assert 'running' in observed
             evidence.update(http_status=202,observed_states=list(dict.fromkeys(observed)))
@@ -96,6 +101,8 @@ def test_real_private_redis_worker_runtime_e2e():
     config=os.environ.get('STAGE25_REDIS_E2E_CONFIG')
     if not config:pytest.skip('Explicit isolated service manifest required; unit doubles are not E2E')
     env={k:os.environ[k] for k in ('PATH','HOME','TMPDIR','LANG','PYTHONDONTWRITEBYTECODE','STAGE25_API_PID') if k in os.environ}
+    if os.environ.get('STAGE2_FAILURE_EVIDENCE_DIR'):
+        env['STAGE2_FAILURE_EVIDENCE_DIR']=os.environ['STAGE2_FAILURE_EVIDENCE_DIR']
     result=subprocess.run([sys.executable,__file__,'--probe',config],env=env,capture_output=True,text=True,timeout=150)
     assert result.returncode==0,result.stdout+result.stderr
 

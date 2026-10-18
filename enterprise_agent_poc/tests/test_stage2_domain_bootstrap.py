@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import psycopg
@@ -66,6 +67,24 @@ def _public(services, agent_id):
             "JOIN agent_execution_contexts c ON c.id=m.context_id "
             "WHERE t.agent_id=%s AND t.id NOT IN "
             "(SELECT task_id FROM agent_template_tests WHERE task_id IS NOT NULL)", (agent_id,))]
+
+
+def test_snapshot_reads_real_pg_without_mutation_or_payload_export(domain,tmp_path):
+    import json,hashlib
+    from scripts.stage2_failure_snapshot import capture
+    services=domain[0]
+    with _db(services) as conn:
+        row=conn.execute("SELECT id,result_json FROM agent_template_tests WHERE test_type='runtime' ORDER BY created_at DESC LIMIT 1").fetchone()
+        before=conn.execute('SELECT count(*) AS n FROM tasks').fetchone()['n']
+    prior=dict(os.environ);tmp_path.chmod(0o700)
+    try:receipt=capture(services.manifest,tmp_path,test_id=row['id'])
+    finally:os.environ.clear();os.environ.update(prior)
+    raw=Path(receipt['path']).read_bytes()
+    assert hashlib.sha256(raw).hexdigest()==receipt['sha256']
+    saved=json.loads(raw);assert saved['tests'][0]['id']==row['id']
+    assert saved['tests'][0]['task']['run_id']==saved['tests'][0]['trace']['run_id']
+    assert b'input_text' not in raw and b'final_response"' not in raw and b'"payload"' not in raw
+    with _db(services) as conn:assert conn.execute('SELECT count(*) AS n FROM tasks').fetchone()['n']==before
 
 
 def test_d1_fresh_private_database_bootstraps(domain):

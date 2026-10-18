@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import uuid
+import os
+import logging
+import traceback
 from dataclasses import dataclass, replace
 from collections.abc import Awaitable
 from typing import Callable
@@ -167,7 +170,7 @@ class AgentService:
                     existing["runtime_thread_id"],
                     developer_instructions=agent.instructions,
                     recovery_context=recovery_context,
-                    **({"task_id": task_id} if task_id and (agent_id == "image-agent" or getattr(self._settings, "test_text_gate_enabled", False)) else {}),
+                    **({"task_id": task_id} if task_id and (agent_id == "image-agent" or getattr(self._settings, "test_text_gate_enabled", False) or os.environ.get("STAGE2_TWO_PROBE_AUTHORITY")) else {}),
                 )
                 if session.thread_id != existing["runtime_thread_id"]:
                     if not self._store.replace_conversation_thread(
@@ -177,7 +180,7 @@ class AgentService:
             else:
                 session = await self._runtime.create_session(
                     profile, agent.instructions,
-                    **({"task_id": task_id} if task_id and (agent_id == "image-agent" or getattr(self._settings, "test_text_gate_enabled", False)) else {}),
+                    **({"task_id": task_id} if task_id and (agent_id == "image-agent" or getattr(self._settings, "test_text_gate_enabled", False) or os.environ.get("STAGE2_TWO_PROBE_AUTHORITY")) else {}),
                 )
                 if execution_context:
                     with self._store.connection() as conn:
@@ -268,6 +271,14 @@ class AgentService:
                 self._store.log_event(conversation_id, "turn.cancelled", {"run_id": run_id})
             raise
         except Exception as exc:
+            if os.environ.get("STAGE2_TWO_PROBE_AUTHORITY"):
+                kind=type(exc).__name__
+                if kind not in {"TestTextGateDenied","RuntimeStartError","AgentRunError","PermissionError","TypeError","ValueError","RuntimeError"}:kind="OtherRuntimeError"
+                origin=traceback.extract_tb(exc.__traceback__)[-1]
+                filename=os.path.basename(origin.filename)
+                safe_origin=(filename+':'+origin.name+':'+str(origin.lineno)
+                             if filename.endswith('.py') and origin.name.isidentifier() else 'unavailable')
+                logging.getLogger(__name__).warning("STAGE2_FAILURE type=%s stage=runtime correlation=%s origin=%s",kind,run_id,safe_origin)
             trace["status"] = "failed"
             trace["partial_output"] = bool(trace.get("final_response_received"))
             trace["failure_stage"] = getattr(exc, "failure_stage", "runtime_start" if isinstance(exc, RuntimeStartError) else "runtime")

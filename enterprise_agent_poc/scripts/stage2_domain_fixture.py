@@ -21,7 +21,7 @@ PUBLIC_PROMPTS = ('Synthetic historical public task A', 'Synthetic historical pu
 class _FixtureRuntime:
     """Deterministic local completion through the normal TaskService path."""
 
-    async def create_session(self, profile, _instructions):
+    async def create_session(self, profile, _instructions, *, task_id=None):
         return RuntimeSession(thread_id='stage2-fixture-' + str(uuid4()), profile_id=profile.id)
 
     async def resume_session(self, profile, thread_id, **_kwargs):

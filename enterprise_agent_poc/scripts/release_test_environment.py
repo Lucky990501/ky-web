@@ -163,6 +163,7 @@ class IsolatedServices:
         self.redis_cli: Path | None = None
         self.manifest: Path | None = None
         self.api_port = 0
+        self.failure_evidence_directory: Path | None = None
 
     def __enter__(self):
         self.start()
@@ -353,8 +354,47 @@ class IsolatedServices:
                        check=True, stdout=subprocess.DEVNULL)
 
     def run_pytest(self, arguments: list[str]) -> int:
-        self.start_app()
+        # A sibling evidence sink survives the disposable PG root. A failed
+        # startup is captured too; diagnostics never change the original result.
+        supplied = os.environ.get('STAGE2_FAILURE_EVIDENCE_DIR')
+        if supplied:
+            from scripts.stage2_failure_snapshot import secure_directory
+            self.failure_evidence_directory = secure_directory(supplied)
+            if self.root and self.failure_evidence_directory.is_relative_to(self.root):
+                raise ValueError('snapshot_must_survive_private_root_cleanup')
+        else:
+            self.failure_evidence_directory = Path(tempfile.mkdtemp(prefix='stage2-failure-evidence.', dir=ISOLATED_PARENT))
+            self.failure_evidence_directory.chmod(0o700)
+        failure = None
+        rc = 1
+        try:
+            self.start_app()
+            rc = self._run_pytest(arguments)
+            return rc
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            if rc != 0 and self.manifest:
+                from scripts.stage2_failure_snapshot import try_capture, durable_json
+                ledger = None
+                if self.admission_directory:
+                    try:
+                        from app.stage2_two_probe_gate import authority
+                        ledger = authority(self.admission_directory)['ledger']
+                    except Exception:
+                        pass
+                receipt = try_capture(self.manifest,self.failure_evidence_directory,
+                    processes=self.children,phase='stage2_startup' if failure else 'pytest_failed',exception=failure,ledger=ledger)
+                if not receipt:
+                    print('STAGE2_FAILURE_CAPTURE_BLOCKED_ORIGINAL_FAILURE_RETAINED',file=sys.stderr)
+                if receipt and self.root and (self.root/'evidence').is_dir():
+                    try:durable_json(self.root/'evidence','failure-snapshot-receipt.json',receipt)
+                    except Exception:pass
+
+    def _run_pytest(self, arguments: list[str]) -> int:
         environment = self._child_env()
+        environment['STAGE2_FAILURE_EVIDENCE_DIR'] = str(self.failure_evidence_directory)
         environment["STAGE25_REDIS_E2E_CONFIG"] = str(self.manifest)
         environment["STAGE25_API_PID"] = str(next(process.pid for name, process in self.children if name == "api"))
         environment["PYTHONUTF8"] = "1"

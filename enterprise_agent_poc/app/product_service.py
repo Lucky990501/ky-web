@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import re
+import os
+import logging
 
 from PIL import Image, UnidentifiedImageError
 
@@ -88,7 +90,8 @@ class TaskService:
 
             agent = self._store.task_definition(task)
             execution_options = {}
-            if getattr(getattr(self._agents, "_settings", None), "test_text_gate_enabled", False):
+            if (getattr(getattr(self._agents, "_settings", None), "test_text_gate_enabled", False)
+                    or os.environ.get("STAGE2_TWO_PROBE_AUTHORITY")):
                 execution_options["task_id"] = task_id
             if self._store.execution_resolver and task["agent_id"] not in CATALOG:
                 with self._store._store.connection() as conn:
@@ -147,6 +150,10 @@ class TaskService:
                 task_id, tenant_id, run_id=current.get("run_id"), conversation_id=current.get("conversation_id")
             )
         except Exception as exc:
+            if os.environ.get("STAGE2_TWO_PROBE_AUTHORITY"):
+                kind=type(exc).__name__
+                if kind not in {"AgentRunError","PermissionError","TypeError","ValueError","RuntimeError"}:kind="OtherRuntimeError"
+                logging.getLogger(__name__).warning("STAGE2_FAILURE type=%s stage=runtime correlation=%s",kind,task_id)
             if isinstance(exc, ResultPersistenceError):
                 code, message = "result_persistence_error", "任务正文已生成，但结果保存失败；可安全重试保存。"
                 run_id = (self._store.task_for_worker(task_id) or {}).get("run_id")
