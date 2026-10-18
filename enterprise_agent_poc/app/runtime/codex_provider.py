@@ -365,7 +365,8 @@ class CodexRuntimeProvider(RuntimeProvider):
 
     async def run_turn(self, session: RuntimeSession, message: str) -> RuntimeTurn:
         profile = self._profiles[session.profile_id]
-        if (getattr(profile, "grounding_policy", None) and profile.grounding_policy.get("enabled") is True
+        if (getattr(getattr(self._manager, "_test_gate", None), "requires_mcp_observations", False) is True
+                or getattr(profile, "grounding_policy", None) and profile.grounding_policy.get("enabled") is True
                 or is_full_activity_plan(getattr(profile, "agent_id", ""), message)
                 or getattr(profile, "agent_id", "") == "campaign-agent" and assess_activity(message) is not None):
             async for event in self.stream_turn(session, message):
@@ -815,6 +816,9 @@ class CodexRuntimeProvider(RuntimeProvider):
                 elif isinstance(payload, ItemCompletedNotification) and payload.turn_id == handle.id:
                     items.append(payload.item)
                     item = getattr(payload.item, "root", payload.item)
+                    gate = getattr(self._manager, "_test_gate", None)
+                    if getattr(gate, "requires_mcp_observations", False) is True:
+                        gate.observe_mcp_tool(self._task_ids.get(session.thread_id), item)
                     if getattr(item, "tool", None) and getattr(item, "id", None):
                         attempt_timestamps.setdefault(item.id, {})["completed_at"] = now()
                     if (material_sink is not None and getattr(item, "tool", None) in

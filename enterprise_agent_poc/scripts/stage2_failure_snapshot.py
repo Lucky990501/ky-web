@@ -24,6 +24,8 @@ CODES = {'runtime_error','runtime_start_error','runtime_terminal_error','require
          'stage2_runtime_test_only','stage2_budget_stopped','stage2_budget_stopped_or_missing',
          'stage2_inflight_or_unknown','stage2_real_owner_decision_required','stage2_exact_fee_profile',
          'stage2_tool_outcome_not_proven_success','test_text_gate_task_context',
+         'stage2_mcp_task_context','stage2_mcp_observation_conflict','stage2_mcp_observation_limit',
+         'stage2_per_request_tokens',
          'test_text_gate_task_missing','stage2_exact_probe_identity_and_input'}
 BOOLS = ('worker_started','worker_interrupted','runtime_completed','required_tool_calls_completed',
          'final_response_received','final_response_persisted','artifact_completed','skill_discovery_passed')

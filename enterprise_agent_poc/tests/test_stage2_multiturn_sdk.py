@@ -36,19 +36,32 @@ def sse(output,number):
 
 @pytest.mark.parametrize('case',['complete','overlimit','tool_timeout','mcp_error','mcp_timeout'])
 def test_two_runtime_tasks_with_skill_mcp_and_every_http_audited(tmp_path,monkeypatch,case):
+    _sdk_case(tmp_path,monkeypatch,case)
+
+@pytest.mark.parametrize('shape',['dict','list'])
+@pytest.mark.parametrize('case',['complete','mcp_error','mcp_timeout','explicit_error','unknown_outcome'])
+def test_structured_mcp_outcomes_require_typed_sdk_proof(tmp_path,monkeypatch,case,shape):
+    _sdk_case(tmp_path,monkeypatch,case,shape)
+
+def _sdk_case(tmp_path,monkeypatch,case,shape='string'):
     import app.stage2_two_probe_gate as module
     from uuid import uuid4
     with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
     skill=tmp_path/'SKILL.md';skill.write_text('FIXTURE Skill: use enterprise_config_get then finish. No external calls.')
     witness=tmp_path/'mcp-witness.jsonl'
     server=tmp_path/'mcp_fixture.py'
-    server.write_text("from mcp.server.fastmcp import FastMCP\nfrom mcp.types import ToolAnnotations\nfrom pathlib import Path\nimport json,time\n"
+    returned={'string':"json.dumps({'brand_name':'EXPLICIT SYNTHETIC FIXTURE'})",
+              'dict':"{'brand_name':'EXPLICIT SYNTHETIC FIXTURE'}",
+              'list':"[{'brand_name':'EXPLICIT SYNTHETIC FIXTURE'}]"}[shape]
+    if case=='explicit_error':returned="CallToolResult(isError=True,content=[TextContent(type='text',text=json.dumps({'brand_name':'EXPLICIT SYNTHETIC FIXTURE'}))])"
+    annotation='CallToolResult' if case=='explicit_error' else {'string':'str','dict':'dict','list':'list[dict]'}[shape]
+    server.write_text("from mcp.server.fastmcp import FastMCP\nfrom mcp.types import ToolAnnotations,CallToolResult,TextContent\nfrom pathlib import Path\nimport json,time\n"
        +f"m=FastMCP('FixtureOnly',host='127.0.0.1',port={port},stateless_http=True,json_response=True)\n"
        +f"w=Path({str(witness)!r})\n"
        +"@m.tool(annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,openWorldHint=False))\ndef read_skill()->str:\n with w.open('a') as f:f.write('read_skill\\n')\n return Path("+repr(str(skill))+").read_text()\n"
-       +"@m.tool(annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,openWorldHint=False))\ndef enterprise_config_get()->str:\n with w.open('a') as f:f.write('enterprise_config_get\\n')\n"
+       +"@m.tool(annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,openWorldHint=False))\ndef enterprise_config_get()->"+annotation+":\n with w.open('a') as f:f.write('enterprise_config_get\\n')\n"
        +(" raise RuntimeError('EXPLICIT SYNTHETIC TOOL ERROR')\n" if case=='mcp_error' else " time.sleep(2)\n" if case=='mcp_timeout' else '')
-       +" return json.dumps({'brand_name':'EXPLICIT SYNTHETIC FIXTURE'})\n"
+       +" return "+returned+"\n"
        +"m.run(transport='streamable-http')\n")
     log=(tmp_path/'mcp.log').open('w');child=subprocess.Popen([sys.executable,'-B',str(server)],stdout=log,stderr=log)
     identity={'kind':'FIXTURE_NOT_AUTHORITY','ledger':str(tmp_path/'budget.sqlite'),'source':'SDK_SIMULATION_NOT_PROVIDER_PASS'}
@@ -89,6 +102,7 @@ def test_two_runtime_tasks_with_skill_mcp_and_every_http_audited(tmp_path,monkey
     monkeypatch.setattr(httpx,'AsyncHTTPTransport',lambda **_:httpx.MockTransport(upstream))
     issuer=RuntimeTokenIssuer('EXPLICIT-FIXTURE-NOT-A-REAL-KEY')
     manager=CodexRuntimeManager(settings,SimpleNamespace(deploy=lambda *_:None),issuer);provider=CodexRuntimeProvider(manager)
+    if case=='unknown_outcome':monkeypatch.setattr(manager._test_gate,'observe_mcp_tool',lambda *a:None)
     if case=='mcp_timeout':
         prepare=manager._prepare_profile
         def prepare_with_tool_deadline(*args,**kwargs):
@@ -127,6 +141,7 @@ def test_two_runtime_tasks_with_skill_mcp_and_every_http_audited(tmp_path,monkey
     with budget.connect() as c:
         rows=[dict(x) for x in c.execute('SELECT * FROM attempts')]
         denials=[dict(x) for x in c.execute('SELECT * FROM denials')]
+        observations=[dict(x) for x in c.execute('SELECT * FROM tool_observations')]
     assert len(rows)==len(calls)==(6 if case=='complete' else 4 if case=='overlimit' else 2)
     assert sum(x['input_reserved'] for x in rows)<=LIMITS['input_total']
     assert sum(x['cost_reserved'] for x in rows)<=LIMITS['cost_micro_cny']
@@ -140,7 +155,7 @@ def test_two_runtime_tasks_with_skill_mcp_and_every_http_audited(tmp_path,monkey
         with pytest.raises(TestTextGateDenied):budget.reserve(tasks[0],b'AFTER-FAILURE',input_tokens=5000,output_tokens=8192)
         with pytest.raises(TestTextGateDenied):manager._test_gate.task(tasks[1]['tenant_id'],tasks[1]['id'],tasks[1]['agent_id'])
     trace={'kind':'REAL_SDK_MCP_WITH_EXPLICIT_SIMULATED_UPSTREAM_NOT_PAID_STAGE2','case':case,
-        'runtime_tasks_completed':2 if case=='complete' else 0,'http_sends':len(rows),
+        'runtime_tasks_completed':2 if case=='complete' else 0,'http_sends':len(rows),'mcp_shape':shape,'tool_observations':observations,
         'mcp_calls':events,'skill_read_via_real_sdk_sandbox':True,
         'input_reserved':sum(x['input_reserved'] for x in rows),'output_reserved':sum(x['output_reserved'] for x in rows),
         'cost_reserved_micro_cny':sum(x['cost_reserved'] for x in rows),'attempts':rows,'denials':denials,'real_provider_calls':0}

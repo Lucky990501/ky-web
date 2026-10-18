@@ -136,6 +136,7 @@ class ProbeBudget:
         with budget.connect() as c:
             c.executescript('CREATE TABLE control(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, stopped TEXT);'
                             'CREATE TABLE denials(id INTEGER PRIMARY KEY,request_sha TEXT NOT NULL,reason TEXT NOT NULL,observed_at INTEGER NOT NULL);'
+                            'CREATE TABLE tool_observations(task_id TEXT NOT NULL,call_id TEXT NOT NULL,server TEXT NOT NULL,tool TEXT NOT NULL,status TEXT NOT NULL,error_present INTEGER NOT NULL,content_sha TEXT,structured_sha TEXT,observed_at INTEGER NOT NULL,source TEXT NOT NULL,PRIMARY KEY(task_id,call_id));'
                             'CREATE TABLE attempts(id INTEGER PRIMARY KEY,probe TEXT NOT NULL,task_id TEXT NOT NULL,run_id TEXT NOT NULL,test_revision TEXT NOT NULL,test_fingerprint TEXT NOT NULL,request_sha TEXT NOT NULL,input_reserved INTEGER NOT NULL,output_reserved INTEGER NOT NULL,cost_reserved INTEGER NOT NULL,state TEXT NOT NULL,response_sha TEXT,input_actual INTEGER,output_actual INTEGER);')
             c.execute('INSERT INTO control VALUES(1,?,NULL)',(json.dumps(identity,sort_keys=True),))
         return budget
@@ -234,6 +235,7 @@ class ProbeBudget:
 class Stage2TextGate(TestTextGate):
     __test__ = False
     forbid_server_tools = True
+    requires_mcp_observations = True
     def __init__(self, settings, issuer: RuntimeTokenIssuer, directory):
         require(settings.environment == 'test' and not settings.test_text_gate_enabled
                 and settings.agent_runtime_test_tenant_id == 'stage25-test-tenant'
@@ -271,7 +273,42 @@ class Stage2TextGate(TestTextGate):
             except Exception:pass  # original refusal remains; no fallback send
             raise
 
-    def tool_outcomes(self,payload):
+    def observe_mcp_tool(self, task_id, item):
+        """Observe typed App Server events, never model-supplied output text."""
+        from openai_codex.generated.v2_all import McpToolCallThreadItem
+        if not isinstance(item,McpToolCallThreadItem):return
+        require(any(c[1]==task_id for c in self.contexts.values()),'stage2_mcp_task_context')
+        status=item.status.value
+        content=item.result.content if item.result is not None else None
+        record=(item.server,item.tool,status,item.error is not None,
+                digest(json.dumps(content,sort_keys=True,ensure_ascii=True,allow_nan=False).encode()),
+                digest(json.dumps(item.result.structured_content,sort_keys=True,ensure_ascii=True,allow_nan=False).encode())
+                if item.result is not None and item.result.structured_content is not None else None)
+        key=(task_id,item.id)
+        observations=getattr(self,'_mcp_observations',{})
+        prior=observations.get(key)
+        if prior and (prior[:2]!=record[:2] or prior[2]!='inProgress' and prior!=record):
+            self.budget.stop()
+            raise TestTextGateDenied('stage2_mcp_observation_conflict')
+        require(len(observations)<64 or key in observations,'stage2_mcp_observation_limit')
+        observations[key]=record
+        self._mcp_observations=observations
+        with self.budget.connect() as c:
+            c.execute('INSERT OR IGNORE INTO tool_observations VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      (*key,*record,int(time.time()),'SDK_TYPED_ITEM_COMPLETED'))
+
+    async def await_tool_observations(self,payload,task_id):
+        # Notification delivery and the loopback model request have separate
+        # readers. Allow bounded event delivery, never an HTTP retry.
+        ids=[i.get('call_id') for i in payload.get('input',[]) if isinstance(i,dict)
+             and i.get('type') in {'function_call_output','custom_tool_call_output'}
+             and 'Process exited with code' not in str(i.get('output',''))]
+        deadline=time.monotonic()+1
+        while any(getattr(self,'_mcp_observations',{}).get((task_id,i),(None,None,'inProgress'))[2]=='inProgress' for i in ids):
+            if time.monotonic()>=deadline:break
+            await asyncio.sleep(.01)
+
+    def tool_outcomes(self,payload,*,task_id=None):
         """SDK0.147 success envelopes only; never pay for tool-error repair.
 
         Do not change content/history. Unknown, running or failed tools stop
@@ -284,11 +321,22 @@ class Stage2TextGate(TestTextGate):
             success=bool(re.search(r'(?m)^Process exited with code 0$',text))
             if 'Process exited with code' not in text and '\nOutput:\n' in text:
                 try:
-                    result=json.loads(text.split('\nOutput:\n',1)[1])
-                    success=isinstance(result,dict) and 'result' in result and not result.get('isError',False)
-                    if isinstance(result.get('result') if isinstance(result,dict) else None,dict):
-                        success=success and not result['result'].get('isError',False)
-                except (ValueError,TypeError):success=False
+                    result=parse(text.split('\nOutput:\n',1)[1])
+                    # SDK0.147 serializes structured MCP results as content
+                    # blocks, omitting isError from the model history. Its
+                    # typed McpToolCall status retains the protocol outcome.
+                    observation=getattr(self,'_mcp_observations',{}).get((task_id,item.get('call_id')))
+                    calls=[i for i in payload.get('input',[]) if isinstance(i,dict)
+                           and i.get('type')=='function_call' and i.get('call_id')==item.get('call_id')]
+                    content=result if isinstance(result,(list,dict)) else None
+                    expected=digest(json.dumps(content,sort_keys=True,ensure_ascii=True,allow_nan=False).encode())
+                    success=bool(observation and len(calls)==1
+                        and observation[0]=='platform' and observation[1] in {'enterprise_config_get','knowledge_search','asset_search'}
+                        and calls[0].get('name')=='mcp__platform__'+observation[1]
+                        and observation[2]=='completed' and observation[3] is False
+                        and content is not None and expected in observation[4:6])
+                    if isinstance(result,dict):success=success and not result.get('isError',False)
+                except (ValueError,TypeError,TestTextGateDenied):success=False
             if not success:
                 self.budget.stop()
                 raise TestTextGateDenied('stage2_tool_outcome_not_proven_success')
@@ -299,7 +347,8 @@ class Stage2TextGate(TestTextGate):
         require(context and principal.tenant_id==context[0] and principal.agent_id==context[2],
                 'stage2_signed_context')
         payload, namespaces = self.bounded_payload(raw,with_namespaces=True)
-        self.tool_outcomes(payload)
+        await self.await_tool_observations(payload,context[1])
+        self.tool_outcomes(payload,task_id=context[1])
         # Server-side Search/Fetch and any other independently priced tools
         # are forbidden, even when a future vendor starts billing them.
         require(all(t.get('type') in {'function','custom'} for t in payload.get('tools',[])),
