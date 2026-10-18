@@ -45,7 +45,7 @@ const {chromium}=require('playwright'),fs=require('node:fs'),assert=require('nod
   assert.equal(await page.locator('iframe.wechat-inline-article').count(),1);
   await page.locator('[data-copy-rich]').click();await page.getByText('已复制排版内容，请粘贴到公众号编辑器',{exact:true}).waitFor();
   const clipboard=await page.evaluate(async()=>{const data=await navigator.clipboard.read();return Promise.all(data.map(async item=>({types:item.types,html:item.types.includes('text/html')?await(await item.getType('text/html')).text():''})));});
-  assert.ok(clipboard.some(x=>x.types.includes('text/html')&&x.types.includes('text/plain')));assert.ok(clipboard.some(x=>x.html.includes('天文')));
+  assert.ok(clipboard.some(x=>x.types.includes('text/html')&&x.types.includes('text/plain')));assert.ok(clipboard.some(x=>x.html.includes('天文')));assert.ok(clipboard.some(x=>/<h1\b/.test(x.html)));assert.ok(clipboard.every(x=>!x.html.includes('&lt;div')));
   await page.locator('[data-copy-source]').click();assert.match(await page.evaluate(()=>navigator.clipboard.readText()),/<(?:section|p)/);
   const downloading=page.waitForEvent('download');await page.locator('[data-download-html]').click();const file=await downloading;await file.saveAs(dir+'/公众号真实文章.html');assert.match(fs.readFileSync(dir+'/公众号真实文章.html','utf8'),/<!doctype html>/i);
   await page.reload();await page.locator('[data-copy-rich]').waitFor();await page.screenshot({path:dir+'/wechat-actual-preview.png'});
@@ -55,8 +55,11 @@ const {chromium}=require('playwright'),fs=require('node:fs'),assert=require('nod
  cases.cycle={agent:'copywriting-agent',route:'copywriting',message:'使用本企业知识库中已上传的天文观察课资料，先真实调用企业配置、知识检索和素材工具。输出一段60字的周三课程报名文案，品牌名称取企业配置，课程时间取检索结果。不要输出工具调用源码。'};
  cases.imageApproved={...cases.image,message:'Owner已获知上次image_generation被托管审批429拒绝、图片Provider调用0次，现明确批准通过同一正式工具再验收一次，保持全部原审批、租户隔离及预算。请为星河体验教育生成仅1张1024x1024亲子天文观察海报，中文标题“亲子天文观察”，副标题“周三19点”，星空亲子剪影，不加Logo不写价格。只调用1次image_generation；若审批再次拒绝立即停止，不走其他接口。'};
  cases.copySecond={...cases.copy,conversation:JSON.parse(fs.readFileSync(dir+'/cycle.json')).final.conversation_id,message:'把上一版文案改为温和、自然、不催促的家长邀请，去掉未经资料确认的“名额有限”，保留品牌、周三19点和星图手工。请使用最新知识和企业设置，60字左右。'};
+ cases.resumeDiagnostic={...cases.copySecond,message:'继续修改为温和邀请，保留周三19点，并读取本企业最新设置。'};
  cases.campaignQuestion={...cases.campaign,message:'我想为企业策划亲子天文招生活动，先帮我明确还需要提供哪些关键活动信息，不要编造时间地点。'};
  if(fs.existsSync(dir+'/campaignQuestion.json'))cases.campaign={...cases.campaign,conversation:JSON.parse(fs.readFileSync(dir+'/campaignQuestion.json')).final.conversation_id};
+ cases.campaignVerified={...cases.campaign,message:'补充关键信息：活动为天文观察课招生活动，2026年10月25日19:00到20:30，测试体验教室，6到9岁亲子20组，预算800元。流程含星图手工、基础观察、课程咨询。先读取最新企业配置，并一次检索天文观察课。请输出简洁但完整的正式活动方案，表格和邀约文案完整，不生图。'};
+ cases.campaignFinal={...cases.campaignVerified};
  const resumed=kind.startsWith('resume:'),name=resumed?kind.slice(7):kind,c=cases[name];if(!c)throw Error('Unknown case');const out=dir+'/'+name+'.json';if(fs.existsSync(out)&&!resumed)throw Error('Existing real case evidence; will not submit a duplicate Task');
  await page.goto(base+'/agents/'+c.route);await page.locator('#prompt').waitFor();
  if(c.conversation){await page.evaluate(({agent,id})=>selectAgentConversation(agent,id),{agent:c.agent,id:c.conversation});await page.locator('#prompt').waitFor();}

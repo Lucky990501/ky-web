@@ -113,6 +113,7 @@
     if (current()) frame.srcdoc = previewDocument(result.html, images); else cleanup();
   }
   function articleHtml(content, markdown) {
+    if(window.previewArticleContent)content=window.previewArticleContent(content);
     const fenced = /^\s*```html\s*\n([\s\S]*?)\n```\s*$/i.exec(content);
     return fenced ? fenced[1] : /^\s*</.test(content) ? content : markdown(content);
   }

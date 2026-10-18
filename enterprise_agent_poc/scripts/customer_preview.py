@@ -78,7 +78,6 @@ def prepare(root, api_port, mcp_port, keys=None, pricing=None):
         "ENTERPRISE_POC_MCP_HOST": "127.0.0.1", "ENTERPRISE_POC_MCP_PORT": str(mcp_port),
         "ENTERPRISE_POC_MODEL_BASE_URL": f"http://127.0.0.1:{api_port}/_preview_model",
         "ENTERPRISE_POC_MODEL_PROVIDER_ID": "deepseek", "ENTERPRISE_POC_MODEL_WIRE_API": "responses",
-        "ENTERPRISE_POC_REASONING_EFFORT": "low",
         "ENTERPRISE_POC_CODEX_API_KEY_ENV": "PREVIEW_TEXT_GATE_TOKEN",
         "PREVIEW_TEXT_GATE_TOKEN": secrets.token_urlsafe(32),
         "ENTERPRISE_POC_IMAGE_API_KEY_ENV": "PREVIEW_IMAGE_KEY",
@@ -138,6 +137,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     import httpx
 
     budget = PreviewBudget(root)
+    identity_path=ROOT.parent/'preview-source.json'
+    identity=json.loads(identity_path.read_text()) if identity_path.is_file() else {'source':'LOCAL_CANDIDATE','base_source':'8eb2fa7061de17fe355d64c03fa5451b547dae85'}
     submission_lock = asyncio.Lock()
     main.product_store.initialize()
     main.skill_registry.initialize()
@@ -167,11 +168,15 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 raise PermissionError("Preview文本供应商配置或费率尚未核实。")
             body, dropped = plaintext_history(await request.json())
             body, namespaces = TestTextGate.provider_tools(body)
+            with main.store.connection() as conn:
+                running_task = conn.execute("SELECT id,agent_id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
             # An anonymous Preview receives only the existing tenant-scoped
             # business MCP tools, never shell/file/browser/server-side tools.
             body['tools'] = [tool for tool in body.get('tools', [])
                              if tool.get('type') == 'function'
-                             and tool.get('name', '').startswith('mcp__platform__')]
+                             and tool.get('name', '').startswith('mcp__platform__')
+                             and (tool.get('name') != 'mcp__platform__image_generation'
+                                  or running_task and running_task['agent_id']=='image-agent')]
             if not body['tools']:
                 raise PermissionError('未取得合法业务工具定义；未调用模型。')
             body['instructions'] = (body.get('instructions') or '') + '\nPreview执行要求：读取上下文中真实工具返回；同一轮已取得企业配置或充分的同一事实检索结果后不要重复查询。信息足够时直接完成用户要求。工具返回报错时如实说明，不伪造结果，不改用其他执行通道。'
@@ -180,11 +185,11 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 raise PermissionError("本轮模型上下文超过体验费用边界，请缩短会话。")
             if body.get("model") != main.settings.model_id:
                 raise PermissionError("模型身份不匹配。")
-            with main.store.connection() as conn:
-                running_task = conn.execute("SELECT id,agent_id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
             output_cap = 8192 if running_task and running_task['agent_id']=='campaign-agent' else 4096
             body["max_output_tokens"] = min(int(body.get("max_output_tokens") or output_cap), output_cap)
             bounds = TestTextGate.request_bound(body)
+            if prices.get('text_dispatch_paused'):
+                raise PermissionError('Preview付费请求已暂停；未调用供应商。')
             cost = (Decimal(bounds['input_tokens_upper']) * Decimal(str(prices["text_input_cny_per_million"]))
                     + Decimal(body["max_output_tokens"]) * Decimal(str(prices["text_output_cny_per_million"]))) / Decimal(1_000_000)
             budget.reserve("text", cost)
@@ -237,7 +242,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             scope = dict(scope, path=path[len(BASE):], raw_path=scope.get("raw_path", b"")[len(BASE):])
             path = scope["path"]
             if path in {"/api/health", "/api/v1/preview-status"}:
-                return await JSONResponse({"status": "preview", "source": "8eb2fa7", "budget": budget.summary(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
+                return await JSONResponse({"status": "preview", **identity, "budget": budget.summary(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
             if path.startswith(denied):
                 return await JSONResponse({"user_message": "体验版不开放平台管理或账号接口"}, 403)(scope, receive, send)
@@ -246,6 +251,9 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             if path.startswith("/api/v1/agents/") and path.endswith("/runs") and scope["method"] == "POST":
                 if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
                     return await JSONResponse({"user_message": "Preview模型凭据或费率尚未就绪，未发起付费任务。"}, 503)(scope, receive, send)
+                quota=budget.summary()['text']
+                if prices.get('text_dispatch_paused') or quota['requests']>=quota['max_requests'] or Decimal(quota['reserved_ceiling_cny'])>=Decimal(quota['max_cny']):
+                    return await JSONResponse({'user_message':'本次体验模型调用额度已用完或暂停，请Owner补充授权；未创建新任务。'},429)(scope,receive,send)
             if path.startswith("/static/"):
                 return await main.app(scope, receive, send)
             headers = [(k, v) for k, v in scope["headers"] if k.lower() != b"cookie"]

@@ -324,6 +324,12 @@ class CodexRuntimeProvider(RuntimeProvider):
         recovery_context: str | None = None,
         *, task_id: str | None = None,
     ) -> RuntimeSession:
+        if os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true' and developer_instructions and recovery_context:
+            # Preview uses a fresh supported thread, carrying only the existing
+            # server-authorized visible conversation. Never replay an opaque
+            # SDK rollout, invent tool outputs, or change the original chat ID.
+            instructions = developer_instructions + '\n\nContinue the following server-authorized user-visible conversation. It contains no hidden reasoning. Read current enterprise facts through the real business tools:\n' + recovery_context
+            return await self.create_session(profile, instructions, task_id=task_id)
         codex = await self._manager.get(profile, **({"task_id": task_id} if getattr(self._manager, "_test_gate", None) else {}))
         self._manager._start_event(profile, "thread_resume_requested")
         execution_scope = self._manager._token_issuer.issue_task_scope(profile.tenant_id, task_id) if task_id else uuid4().hex

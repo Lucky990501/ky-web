@@ -189,7 +189,7 @@ async function render(page) {
   previousMain.replaceWith(main);
   main._owner=principalSnapshot();
   main.dataset.page = page;
-  document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === (page.startsWith('agent:')?'image':page)));
+  document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === (page.startsWith('agent:')&&!window.WORKBENCH_PREVIEW_BASE?'image':page)));
   main.innerHTML = pageLoading();
   try {
     if (page === 'workspace') return await workspaceV2(main);
@@ -239,7 +239,7 @@ async function conversationHistory(main,offset=0,loaded=[]){
   bindNavigation();refreshIcons();
 }
 const agentPage=id=>id==='image-agent'?'image':id==='copywriting-agent'?'copywriting':id==='campaign-agent'?'campaign':`agent:${id}`;
-const agentPlaceholder=agentId=>agentId==='image-agent'?'描述你想创作的图片，例如：帮我做一张秋季招生海报':agentId==='copywriting-agent'?'描述需要的文案，例如：写一篇秋季招生公众号推文':'描述需要策划的活动，例如：制定国庆招生开放日方案';
+const agentPlaceholder=agentId=>window.WORKBENCH_PREVIEW_BASE&&agentId==='preview-wechat-agent'?'输入公众号文章主题、目标读者与希望调整的内容':agentId==='image-agent'?'描述你想创作的图片，例如：帮我做一张秋季招生海报':agentId==='copywriting-agent'?'描述需要的文案，例如：写一篇秋季招生公众号推文':'描述需要策划的活动，例如：制定国庆招生开放日方案';
 const formatHistoryTime=value=>String(value||'').replace('T',' ').slice(0,16);
 const compactHistoryText=(value,maxLength=10)=>Array.from(String(value||'')).slice(0,maxLength).join('');
 const taskStatusLabel=status=>({queued:'排队中',running:'处理中',cancelling:'正在停止',completed:'已完成',failed:'失败',cancelled:'已取消'})[status]||'暂无任务';

@@ -33,3 +33,17 @@ def test_money_limit_reserves_unknown_outcome_and_never_refunds(tmp_path):
 @pytest.mark.parametrize('cost',['0','-1','NaN','Infinity'])
 def test_unbounded_or_free_assumptions_are_not_permission(tmp_path,cost):
     with pytest.raises(PreviewBudgetExceeded): PreviewBudget(tmp_path).reserve('text',Decimal(cost))
+
+
+def test_preview_resume_uses_authorized_visible_history_not_sdk_rollout(monkeypatch):
+    import asyncio
+    from app.runtime.codex_provider import CodexRuntimeProvider
+    provider=object.__new__(CodexRuntimeProvider);calls=[]
+    async def create(profile,instructions,**kwargs):
+        calls.append((profile,instructions,kwargs));return 'fresh-session'
+    provider.create_session=create
+    monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true')
+    result=asyncio.run(provider.resume_session('profile','old-thread',developer_instructions='Original Skill',recovery_context='user: 原需求\nassistant: 原文案',task_id='task'))
+    assert result=='fresh-session' and len(calls)==1
+    assert 'Original Skill' in calls[0][1] and '原文案' in calls[0][1]
+    assert calls[0][2]=={'task_id':'task'}

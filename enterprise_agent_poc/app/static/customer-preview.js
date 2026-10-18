@@ -12,6 +12,16 @@
     return parsed.href;
   };
   window.workbenchPreviewUrl = url;
+  // The existing server Markdown formatter can wrap an HTML-only reply as
+  // escaped text. Recover only that whole-document shape, then pass it through
+  // the unchanged reviewed sanitizer. Never insert the decoded HTML into DOM.
+  window.previewArticleContent = content => {
+    const parsed=document.createElement('template');parsed.innerHTML=content;
+    const root=parsed.content.querySelector('section#article');
+    if(!root||root.querySelector('h1,h2,h3,article,section,div,iframe,img'))return content;
+    const text=root.textContent.trim().replace(/^```html\s*\n?/i,'').replace(/\n?```\s*$/,'').trim();
+    return /^<(?:div|section|article)(?:\s|>)/i.test(text)&&/<\/(?:div|section|article)>\s*$/i.test(text)?text:content;
+  };
   const fetchOriginal = window.fetch.bind(window);
   window.fetch = (input, options) => fetchOriginal(input instanceof Request ? new Request(url(input.url), input) : url(input), options);
   const Source = window.EventSource;
