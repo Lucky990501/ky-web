@@ -20,6 +20,9 @@ import httpx
 from PIL import Image
 
 MODEL='qwen-image-3.0'
+WECHAT_DEFAULT_SIZE='1024x768'  # 4:3, no larger pixel budget than the old square.
+ILLUSTRATION_RATIO_SIZES={'1:1':'1024x1024','4:3':WECHAT_DEFAULT_SIZE,'3:4':'768x1024',
+                          '16:9':'1024x576','9:16':'576x1024','3:2':'960x640','2:3':'640x960'}
 APPROVED_BASE_URLS=frozenset({'https://api.n1n.ai','https://llm-api.net'})
 MAX_IMAGE=2*1024*1024  # Existing Word image contract, checked before storage.
 MAX_ORIGINAL_IMAGE=8*1024*1024  # Preview-only originals; Word uses a separate <=2MB copy.
@@ -141,11 +144,14 @@ def download_vetted_image(url,allowed_hosts,*,max_bytes=MAX_IMAGE):
 class IllustrationProvider:
     def __init__(self,config):self.config=config
 
-    async def generate(self,prompt,record_http):
+    async def generate(self,prompt,record_http,*,size=None):
         config=self.config
         if not config.enabled or not config.key:raise IllustrationError('ILLUSTRATION_NOT_CONFIGURED','配图模型未配置；纯文字生成与导出仍可使用。')
         if config.base_url not in APPROVED_BASE_URLS:raise IllustrationError('ILLUSTRATION_CONFIG_INVALID','配图接口未获本轮授权。')
-        body={'prompt':prompt,'model':MODEL,'provider':{'sort':'success_rate'},'size':config.size,
+        requested_size=size if size is not None else config.size
+        if requested_size not in ILLUSTRATION_RATIO_SIZES.values():
+            raise IllustrationError('ILLUSTRATION_SIZE_UNSUPPORTED','配图比例不在当前已适配范围内；未请求模型。')
+        body={'prompt':prompt,'model':MODEL,'provider':{'sort':'success_rate'},'size':requested_size,
               'watermark':True,'prompt_extend':True,'prompt_extend_mode':'direct'}
         try:
             async with asyncio.timeout(180), httpx.AsyncClient(timeout=httpx.Timeout(180,connect=10),trust_env=False,follow_redirects=False,transport=httpx.AsyncHTTPTransport(retries=0)) as client:

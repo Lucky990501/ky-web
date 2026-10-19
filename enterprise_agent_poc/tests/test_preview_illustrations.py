@@ -64,7 +64,7 @@ def completed_task(service,actor,kind='activity',content=None):
 
 def enable_fixture_provider(service,monkeypatch,fail_index=None):
     calls=[]
-    async def generate(prompt,record_http):
+    async def generate(prompt,record_http,**kwargs):
         index=len(calls);calls.append(prompt)
         record_http(503 if index==fail_index else 200,'FIXTURE-'+str(index))
         if index==fail_index:raise IllustrationError('ILLUSTRATION_PROVIDER_REJECTED','FIXTURE rejection')

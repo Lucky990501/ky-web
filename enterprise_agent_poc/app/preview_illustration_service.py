@@ -19,7 +19,7 @@ import zipfile
 
 from app.document_generator import ActivityPlanContent,ActivityPlanDocumentService,DocumentPresentationOptions
 from app.preview_illustration_html import ArticleTree,full_document
-from app.preview_illustration_provider import IllustrationConfig,IllustrationProvider,IllustrationError,MODEL,private_file,validated_image,word_image_copy,MAX_ORIGINAL_IMAGE
+from app.preview_illustration_provider import IllustrationConfig,IllustrationProvider,IllustrationError,MODEL,private_file,validated_image,word_image_copy,MAX_ORIGINAL_IMAGE,WECHAT_DEFAULT_SIZE,ILLUSTRATION_RATIO_SIZES
 from app.preview_article_references import clean_text
 from app.storage import storage_provider
 
@@ -171,16 +171,18 @@ class PreviewIllustrationService:
                 raise IllustrationError('ILLUSTRATION_HTML_REQUIRED','请先生成完整HTML文章，普通文本不会被当作文章HTML执行。')
             tree=ArticleTree(source);positions=tree.positions();text=''.join(tree.root.itertext())
             title=next((''.join(node.itertext()).strip() for node in positions if node.tag=='h1'),'公众号文章')[:120]
+            size=self.article_image_size(actor,task)
             chosen=[(0,'文章头图')]
             headings=[i for i,node in enumerate(positions) if node.tag=='h2']
             if len(text)>300:
-                indices=headings[:2] if headings else ([len(positions)//2] if len(positions)>1 else [])
+                # Head image plus up to nine chapter images, never ten by force.
+                indices=headings[:9] if headings else ([len(positions)//2] if len(positions)>1 else [])
                 chosen.extend((i,''.join(positions[i].itertext()).strip()[:100] or '正文配图') for i in indices if i!=0)
             payload={'kind':'wechat','html':tree.html(),'title':title,'items':[]}
             for index,label in chosen:
                 context={'文章主题':title,'配图位置':label,'对应段落':''.join(positions[index].itertext())[:1800] if positions else text[:1800],
                          '正文概要':text[:2500],'品牌':brand}
-                payload['items'].append({'position':index,'label':label,'requirement':label,'prompt':self.prompt(context)})
+                payload['items'].append({'position':index,'label':label,'requirement':label,'size':size,'prompt':self.prompt(context)})
         # Source identity only: a brand-setting refresh or repeated export must
         # not silently create a fresh paid image set for the same content.
         digest=hashlib.sha256((task_id+'\n'+source).encode()).hexdigest()
@@ -193,6 +195,21 @@ class PreviewIllustrationService:
                 conn.execute('insert into illustration_plans(id,tenant_id,user_id,task_id,digest,payload,status,created) values(?,?,?,?,?,?,?,?)',
                              (identifier,actor.tenant_id,actor.user_id,task_id,digest,canonical(payload),'planned',time.time()))
         return self.get(actor,identifier)
+
+    def article_image_size(self,actor,task):
+        texts=[]
+        if task.get('conversation_id'):
+            texts=[m['content'] for m in self.main.store.conversation_messages(task['conversation_id'],actor.tenant_id) if m['role']=='user']
+        texts.append(task.get('input_text') or '')
+        for text in reversed(texts):
+            match=re.search(r'(?:配图|图片|插图|比例|尺寸|画幅)[^。！？\n]{0,20}?(\d{1,2})\s*[:：]\s*(\d{1,2})',text)
+            if not match:match=re.search(r'(\d{1,2})\s*[:：]\s*(\d{1,2})\s*(?:的)?(?:配图|图片|插图|比例|画幅)',text)
+            if match:
+                ratio=match[1]+':'+match[2]
+                if ratio not in ILLUSTRATION_RATIO_SIZES:
+                    raise IllustrationError('ILLUSTRATION_SIZE_UNSUPPORTED','指定的配图比例尚未适配；请使用4:3、3:4、16:9、9:16、1:1、3:2或2:3。')
+                return ILLUSTRATION_RATIO_SIZES[ratio]
+        return WECHAT_DEFAULT_SIZE
 
     @staticmethod
     def prompt(context):
@@ -350,8 +367,18 @@ class PreviewIllustrationService:
                     conn.execute("update illustration_requests set status='attempted' where id=?",(request['id'],))
                 def record_http(status,request_id):
                     with self.db() as conn:conn.execute('update illustration_requests set http_status=?,request_id=? where id=?',(status,request_id,request['id']))
-                content,provider_metadata=await self.provider.generate(item['prompt'],record_http)
+                if payload['kind']=='wechat':
+                    # Legacy planned articles get the new default, saved assets
+                    # are never regenerated. A user's explicit ratio wins.
+                    size=item.get('size') or self.article_image_size(actor,self.source(actor,row['task_id']))
+                    content,provider_metadata=await self.provider.generate(item['prompt'],record_http,size=size)
+                else:
+                    size=None
+                    content,provider_metadata=await self.provider.generate(item['prompt'],record_http)
                 metadata=validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE)
+                if size:
+                    width,height=map(int,size.split('x'))
+                    metadata.update(requested_size=size,dimension_match=metadata['width']==width and metadata['height']==height)
                 if provider_metadata.get('response_format') in {'url','b64_json'}:metadata['response_format']=provider_metadata['response_format']
                 asset_id=uuid4().hex;filename=asset_id+metadata['extension']
                 key=f'brand-assets/{actor.tenant_id}/activity-plan-images/{filename}'
