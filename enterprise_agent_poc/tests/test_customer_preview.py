@@ -32,9 +32,9 @@ def test_unknown_or_opaque_inputs_fail_closed(item):
 
 def test_budget_count_persists_across_restart(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(46): meter.reserve("text",Decimal('0.1'))
+    for _ in range(54): meter.reserve("text",Decimal('0.1'))
     with pytest.raises(PreviewBudgetExceeded): PreviewBudget(tmp_path).reserve("text",Decimal('0.1'))
-    assert PreviewBudget(tmp_path).summary()['text']['requests']==46
+    assert PreviewBudget(tmp_path).summary()['text']['requests']==54
 
 
 def test_embedding_batches_use_wire_bytes_without_loss():
@@ -56,10 +56,23 @@ def test_embedding_oversized_single_chunk_is_rejected_without_payment():
 
 def test_full_file_preflight_preserves_budget_and_rejects_partial_spend(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(15):meter.reserve('embedding',Decimal('.05'))
+    for _ in range(19):meter.reserve('embedding',Decimal('.05'))
     with pytest.raises(PreviewBudgetExceeded) as raised:meter.check_capacity('embedding',13,Decimal('.05'))
     assert raised.value.code=='PREVIEW_EMBEDDING_BUDGET_EXHAUSTED'
-    assert meter.summary()['embedding']['requests']==15
+    assert meter.summary()['embedding']['requests']==19
+
+
+def test_per_request_text_cost_cap_rejects_before_counting(tmp_path):
+    meter=PreviewBudget(tmp_path)
+    with pytest.raises(PreviewBudgetExceeded):meter.reserve('text',Decimal('0.600001'))
+    assert meter.summary()['text']['requests']==0
+
+
+def test_aggregate_cap_stays45_despite_individual_text_extension(tmp_path):
+    meter=PreviewBudget(tmp_path);meter.reserve('image',Decimal('20'))
+    for _ in range(40):meter.reserve('text',Decimal('.60'))
+    for _ in range(20):meter.reserve('embedding',Decimal('.05'))
+    with pytest.raises(PreviewBudgetExceeded):meter.reserve('embedding',Decimal('.05'))
 
 
 def test_safe_error_categories_never_include_internal_text():

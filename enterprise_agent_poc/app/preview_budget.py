@@ -83,7 +83,7 @@ def preview_task_failure(task, trace, denied):
 
 
 class PreviewBudget:
-    LIMITS = {"text": (46, Decimal("20")), "image": (2, Decimal("20")), "embedding": (27, Decimal("5"))}
+    LIMITS = {"text": (54, Decimal("24")), "image": (2, Decimal("20")), "embedding": (31, Decimal("5"))}
 
     def __init__(self, root: Path):
         self.path = root / "preview-budget.sqlite"
@@ -99,6 +99,8 @@ class PreviewBudget:
     def reserve(self, kind: str, ceiling: Decimal):
         if kind not in self.LIMITS or not ceiling.is_finite() or ceiling <= 0:
             raise PreviewBudgetExceeded("调用费用上限尚未核实；没有发起付费请求。")
+        if kind == 'text' and ceiling > Decimal('0.60'):
+            raise PreviewBudgetExceeded("本次请求预留费用超过单次授权上限；请缩短输入，未调用模型。", "PREVIEW_INPUT_REJECTED")
         with sqlite3.connect(self.path, timeout=10) as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute("SELECT kind,ceiling FROM requests").fetchall()
