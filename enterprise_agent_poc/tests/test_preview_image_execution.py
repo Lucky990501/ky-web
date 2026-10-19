@@ -1,6 +1,7 @@
 """Isolated fixtures only. Never evidence of a real image Provider success."""
 import asyncio
 import io
+import sqlite3
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
@@ -36,7 +37,7 @@ def image_fixture(tmp_path, monkeypatch):
         actors.append(SimpleNamespace(tenant_id=tenant,user_id=user['id']))
     budget = PreviewBudget(tmp_path)
     main = SimpleNamespace(settings=settings,store=store,product_store=products,token_issuer=RuntimeTokenIssuer('isolated-fixture-only-token-signing'))
-    grant = dict(authorization_id=AUTHORIZATION_ID,approved=True,execution_mode=MODE,model=settings.image_model_id,max_provider_calls=20,request_max_cny='1')
+    grant = dict(authorization_id=AUTHORIZATION_ID,approved=True,execution_mode=MODE,model=settings.image_model_id,max_provider_calls=70,request_max_cny='1')
     executor = PreviewImageExecution(main,budget,dict(image_pricing_verified=True,image_request_max_cny='1'),grant)
     calls = []
     async def fixture_image(task, plan):
@@ -117,7 +118,8 @@ def test_disabled_agent_fails_before_task_or_payment(image_fixture):
 
 def test_exhaustion_does_not_create_new_task(image_fixture):
     executor,actors,calls=image_fixture
-    for _ in range(20):executor.budget.reserve('image',Decimal('1'))
+    with sqlite3.connect(executor.budget.path) as conn:
+        conn.executemany('insert into requests values(?,?,?)',[('image','1',0)]*70)
     with pytest.raises(PreviewBudgetExceeded):executor.submit(actors[0],payload())
     with executor.main.store.connection() as conn:
         assert conn.execute('select count(*) from tasks').fetchone()[0]==0
@@ -210,14 +212,23 @@ def test_multi_output_all_results_and_full_budget_preflight(image_fixture,count)
     assert executor.budget.summary()['image']['requests']==count
 
 
-def test_v2_budget_keeps_old_spend_and_refuses_21st_request(tmp_path):
+def test_expanded_budget_keeps_old_spend_and_refuses_71st_request(tmp_path):
     budget=PreviewBudget(tmp_path)
     for _ in range(2):budget.reserve('image',Decimal('1'))
     resumed=PreviewBudget(tmp_path)
-    assert resumed.summary()['image']['max_requests']==20
+    assert resumed.summary()['image']['max_requests']==70
     assert resumed.summary()['image']['requests']==2
-    for _ in range(18):resumed.reserve('image',Decimal('1'))
+    with sqlite3.connect(resumed.path) as conn:
+        conn.executemany('insert into requests values(?,?,?)',[('image','1',0)]*68)
     with pytest.raises(PreviewBudgetExceeded):resumed.reserve('image',Decimal('1'))
+
+
+@pytest.mark.parametrize('maximum',[20,69,71,True,'70'])
+def test_image_authority_must_match_explicit_expanded_limit(image_fixture,maximum):
+    executor,actors,calls=image_fixture
+    executor.authorization['max_provider_calls']=maximum
+    with pytest.raises(PermissionError):executor.submit(actors[0],payload())
+    assert calls==[] and executor.budget.summary()['image']['requests']==0
 
 
 def test_per_side_single_image_is_not_a_conflicting_total():

@@ -2,6 +2,7 @@
 import asyncio
 import base64
 from dataclasses import replace
+from decimal import Decimal
 import io
 import json
 from pathlib import Path
@@ -232,6 +233,24 @@ def test_acceptance_budget_scope_denies_unapproved_visitor_before_reservation(se
     assert not service.capability(actor)['enabled']
     with pytest.raises(PermissionError):service.confirm(actor,plan['id'],plan['digest'],True)
     assert service.capability()['reserved_requests']==0
+
+
+def test_quota_expansion_preserves_old_reservations_and_scope(setup):
+    service,actors,old,budget=setup;actor=actors[0]
+    service.authorization={**GRANT,'max_requests':115,'max_total_cny':'23.00',
+                           'request_max_cny':'0.20','allowed_tenant_ids':[actor.tenant_id]}
+    with service.db() as conn:
+        for index in range(15):
+            conn.execute('insert into illustration_requests(id,plan_id,item_index,ceiling,status,created) values(?,?,?,?,?,?)',
+                         (str(index),'FIXTURE_OLD_PLAN',index,'0.20','failed',index))
+    snapshot=lambda:list(service.db().execute('select * from illustration_requests order by id'))
+    before=[tuple(r) for r in snapshot()]
+    assert service.capability(actor)['remaining_requests']==100
+    assert service.capability(actor)['reserved_ceiling_cny']=='3.00'
+    assert not service.capability(actors[1])['enabled']
+    assert [tuple(r) for r in snapshot()]==before
+    assert service.limits()[1:3]==(Decimal('23.00'),115)
+    assert old==[] and budget.summary()['image']['requests']==0
 
 
 def test_branded_word_embeds_original_logo_and_distinct_illustrations(setup,monkeypatch):

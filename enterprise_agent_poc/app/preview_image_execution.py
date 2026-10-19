@@ -44,7 +44,8 @@ class PreviewImageExecution:
                 and grant.get('approved') is True
                 and grant.get('execution_mode') == MODE
                 and grant.get('model') == self.main.settings.image_model_id
-                and grant.get('max_provider_calls') == 20
+                and type(grant.get('max_provider_calls')) is int
+                and grant['max_provider_calls'] == self.budget.LIMITS['image'][0]
                 and self.pricing.get('image_pricing_verified') is True
                 and fee.is_finite() and authorized_fee.is_finite() and Decimal('0') < fee <= authorized_fee <= Decimal('1'))
 

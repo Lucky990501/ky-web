@@ -139,7 +139,10 @@ def observe_text_terminal(budget,task_id,block):
 
 
 class PreviewBudget:
-    LIMITS = {"text": (154, Decimal("84")), "image": (20, Decimal("20")), "embedding": (71, Decimal("5"))}
+    # Owner-approved additions: 200 Text/120 CNY, 50 Image/50 CNY,
+    # 200 Embedding/10 CNY. Existing reservations are never reset.
+    LIMITS = {"text": (354, Decimal("204")), "image": (70, Decimal("70")), "embedding": (271, Decimal("15"))}
+    TOTAL_LIMIT_CNY = Decimal("289")
 
     def __init__(self, root: Path):
         self.path = root / "preview-budget.sqlite"
@@ -173,7 +176,7 @@ class PreviewBudget:
             count, limit = self.LIMITS[kind]
             if (sum(k == kind for k, _ in rows) >= count
                 or sum((Decimal(v) for k, v in rows if k == kind), Decimal(0)) + ceiling > limit
-                or sum((Decimal(v) for _, v in rows), Decimal(0)) + ceiling > Decimal("109")):
+                or sum((Decimal(v) for _, v in rows), Decimal(0)) + ceiling > self.TOTAL_LIMIT_CNY):
                 raise PreviewBudgetExceeded("本次体验调用额度已用完，请联系Owner；不会自动重试。")
             # Reserve the verified worst-case amount before network dispatch.
             # Unknown outcomes remain reserved; restart never resets this file.
@@ -189,7 +192,7 @@ class PreviewBudget:
         cost = ceiling * count
         if (sum(t == kind for t,v in rows) + count > maximum
                 or sum((Decimal(v) for t,v in rows if t == kind), Decimal(0)) + cost > money
-                or sum((Decimal(v) for t,v in rows), Decimal(0)) + cost > Decimal("109")):
+                or sum((Decimal(v) for t,v in rows), Decimal(0)) + cost > self.TOTAL_LIMIT_CNY):
             code = "PREVIEW_EMBEDDING_BUDGET_EXHAUSTED" if kind == "embedding" else "PREVIEW_MODEL_BUDGET_EXHAUSTED"
             raise PreviewBudgetExceeded(PREVIEW_ERRORS[code], code)
 

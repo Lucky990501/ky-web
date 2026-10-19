@@ -1,7 +1,14 @@
 """Only isolated counter/compatibility tests; never a real Provider PASS."""
 from decimal import Decimal
+import sqlite3
 import pytest
 from app.preview_budget import PreviewBudget, PreviewBudgetExceeded, plaintext_history
+
+
+def seed_ledger(meter,kind,count,ceiling):
+    """FIXTURE_ONLY historical reservations; no dispatch or real ledger access."""
+    with sqlite3.connect(meter.path) as conn:
+        conn.executemany('insert into requests values(?,?,?)',[(kind,str(ceiling),0)]*count)
 
 
 @pytest.mark.parametrize(('path','method','blocked'),[
@@ -43,16 +50,16 @@ def test_unknown_or_opaque_inputs_fail_closed(item):
 
 def test_budget_count_persists_across_restart(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(154): meter.reserve("text",Decimal('0.1'))
+    seed_ledger(meter,'text',353,'.1');meter.reserve('text',Decimal('.1'))
     with pytest.raises(PreviewBudgetExceeded): PreviewBudget(tmp_path).reserve("text",Decimal('0.1'))
-    assert PreviewBudget(tmp_path).summary()['text']['requests']==154
+    assert PreviewBudget(tmp_path).summary()['text']['requests']==354
 
 
 def test_customer_trial_approved_limits_and_prior_ledger_are_preserved(tmp_path):
     meter=PreviewBudget(tmp_path)
-    assert meter.LIMITS=={'text':(154,Decimal('84')),'image':(20,Decimal('20')),'embedding':(71,Decimal('5'))}
-    for _ in range(49):meter.reserve('text',Decimal('.1'))
-    for _ in range(30):meter.reserve('embedding',Decimal('.05'))
+    assert meter.LIMITS=={'text':(354,Decimal('204')),'image':(70,Decimal('70')),'embedding':(271,Decimal('15'))}
+    assert meter.TOTAL_LIMIT_CNY==Decimal('289')
+    seed_ledger(meter,'text',49,'.1');seed_ledger(meter,'embedding',30,'.05')
     resumed=PreviewBudget(tmp_path)
     assert resumed.summary()['text']['requests']==49
     assert resumed.summary()['embedding']['requests']==30
@@ -80,10 +87,10 @@ def test_embedding_oversized_single_chunk_is_rejected_without_payment():
 
 def test_full_file_preflight_preserves_budget_and_rejects_partial_spend(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(59):meter.reserve('embedding',Decimal('.05'))
+    seed_ledger(meter,'embedding',259,'.05')
     with pytest.raises(PreviewBudgetExceeded) as raised:meter.check_capacity('embedding',13,Decimal('.05'))
     assert raised.value.code=='PREVIEW_EMBEDDING_BUDGET_EXHAUSTED'
-    assert meter.summary()['embedding']['requests']==59
+    assert meter.summary()['embedding']['requests']==259
 
 
 def test_per_request_text_cost_cap_rejects_before_counting(tmp_path):
@@ -92,15 +99,14 @@ def test_per_request_text_cost_cap_rejects_before_counting(tmp_path):
     assert meter.summary()['text']['requests']==0
 
 
-def test_aggregate_cap_is109_for_dispatch_and_preflight(tmp_path,monkeypatch):
+def test_aggregate_cap_is289_for_dispatch_and_preflight(tmp_path,monkeypatch):
     # Broader individual limit is a fixture only, to isolate the aggregate guard.
-    monkeypatch.setattr(PreviewBudget,'LIMITS',{**PreviewBudget.LIMITS,'text':(200,Decimal('100'))})
-    meter=PreviewBudget(tmp_path);meter.reserve('image',Decimal('20'))
-    for _ in range(148):meter.reserve('text',Decimal('.60'))
-    for _ in range(4):meter.reserve('embedding',Decimal('.05'))
+    monkeypatch.setattr(PreviewBudget,'LIMITS',{**PreviewBudget.LIMITS,'text':(500,Decimal('300'))})
+    meter=PreviewBudget(tmp_path);meter.reserve('image',Decimal('70'))
+    seed_ledger(meter,'text',364,'.60');seed_ledger(meter,'embedding',12,'.05')
     with pytest.raises(PreviewBudgetExceeded):meter.check_capacity('embedding',1,Decimal('.05'))
     with pytest.raises(PreviewBudgetExceeded):meter.reserve('embedding',Decimal('.05'))
-    assert meter.summary()['embedding']['requests']==4
+    assert meter.summary()['embedding']['requests']==12
 
 
 def test_safe_error_categories_never_include_internal_text():
@@ -122,9 +128,9 @@ def test_task_denial_uses_historical_observation_not_current_quota(tmp_path):
 
 
 def test_money_limit_reserves_unknown_outcome_and_never_refunds(tmp_path):
-    meter=PreviewBudget(tmp_path);meter.reserve('image',Decimal('20'))
+    meter=PreviewBudget(tmp_path);meter.reserve('image',Decimal('70'))
     with pytest.raises(PreviewBudgetExceeded): meter.reserve('image',Decimal('1'))
-    assert meter.summary()['image']['reserved_ceiling_cny']=='20'
+    assert meter.summary()['image']['reserved_ceiling_cny']=='70'
 
 
 @pytest.mark.parametrize('cost',['0','-1','NaN','Infinity'])

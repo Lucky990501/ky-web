@@ -44,7 +44,7 @@ if __name__=='__main__':
     app=create_preview(args.data_dir,args.port,args.port+1,local_http=True,credentials={'DEEPSEEK_API_KEY':'FIXTURE_ONLY_NOT_A_KEY'},
         pricing={'image_pricing_verified':True,'image_request_max_cny':'1','text_pricing_verified':True},
         image_authorization={'authorization_id':AUTHORIZATION_ID,'approved':True,'execution_mode':MODE,
-            'model':'gpt-image-2.5-sunburst-c','max_provider_calls':20,'request_max_cny':'1'})
+            'model':'gpt-image-2.5-sunburst-c','max_provider_calls':70,'request_max_cny':'1'})
     from app import main
     assert main.settings.database_url=='sqlite:///'+str(Path(args.data_dir).resolve()/'preview.sqlite')
     uvicorn.run(app,host='127.0.0.1',port=args.port,access_log=False)
