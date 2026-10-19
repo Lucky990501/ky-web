@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 import secrets
 import sys
+from types import SimpleNamespace
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -213,7 +214,18 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 main.product_store.set_task(task['id'],task['tenant_id'],'failed','failed','对标文章关联失败，未调用模型。',error_code='preview_article_reference_invalid')
                 return
         context=text_task_context.set(task['id'])
-        try:return await original_execute(task)
+        try:
+            result=await original_execute(task)
+            if task.get('agent_id') in {'campaign-agent',ARTICLE_AGENT}:
+                # Only the completion path of a newly executing task triggers
+                # paid illustrations. History GET/reload never does this.
+                actor=SimpleNamespace(tenant_id=task['tenant_id'],user_id=task['user_id'])
+                completed=main.product_store.task(task['id'],actor.tenant_id,actor.user_id)
+                if task.get('status') not in {'completed','failed','cancelled'} and completed and completed['status']=='completed':
+                    try:illustration_service.auto_after_text(actor,task['id'])
+                    except Exception:
+                        main.store.log_event(completed['conversation_id'],'preview.illustration.skipped',{'task_id':task['id'],'code':'ILLUSTRATION_AUTO_START_FAILED'})
+            return result
         finally:text_task_context.reset(context)
     main.task_service.execute = execute_preview_task
     original_public_task, original_public_file = main._public_task, main._public_knowledge_file

@@ -1188,6 +1188,7 @@ function validIllustrationBriefs(briefs){
   return Array.isArray(briefs)&&briefs.length<=12?briefs.filter(item=>item&&item.execution==='requires_separate_image_agent_task_and_budget'&&typeof item.purpose==='string'&&item.purpose.trim()&&typeof item.prompt==='string'&&item.prompt.trim()&&item.prompt.length<=10000&&/^(?:1:1|16:9|9:16|3:2|2:3|4:5)$/.test(item.aspect_ratio)):[];
 }
 function mountIllustrationBriefs(main,article,briefs,messageId){
+  if(window.WORKBENCH_PREVIEW_BASE)return; // Preview uses its automatic Qwen pipeline only.
   const items=validIllustrationBriefs(briefs),owner=main?._conversationContext?.owner;
   if(!items.length||!article||!messageId||!principalIsCurrent(owner)||article.querySelector('[data-illustration-briefs]'))return;
   const current=()=>main.isConnected!==false&&article.isConnected!==false&&document.querySelector('#main')===main&&principalIsCurrent(owner)&&article.dataset.assistantMessageId===messageId;
