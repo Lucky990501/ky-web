@@ -11,6 +11,7 @@ const {chromium}=require('playwright'),assert=require('node:assert/strict'),fs=r
  await page.goto(base+'/agents/image');await page.locator('#preview-image-direct-notice').waitFor();await page.waitForFunction(()=>!document.querySelector('#prompt').disabled);
  const before=await page.evaluate(()=>fetch('/preview/api/health').then(r=>r.json()));assert.equal(before.image_business.enabled,true);
  const me=await page.evaluate(()=>fetch('/preview/api/v1/me').then(r=>r.json()));assert.ok(me.tenant_id.startsWith('preview-'));
+ if(real)await context.storageState({path:path.join(out,'private-browser-state.json')});
  if(!real){const rejected=await context.request.post(base+'/api/v1/agents/image-agent/runs',{headers:{origin:'https://foreign.invalid'},data:{message:'不得执行',preview_image_confirmed:true,preview_image_request_id:crypto.randomUUID()}});assert.equal(rejected.status(),403);}
  const prompt='请生成1张1024x1024正方形图片：温暖的亲子阅读场景，家长与孩子在明亮安静的图书角共同阅读，柔和自然光，蓝色与暖黄色点缀，简洁可信的教育宣传插画。不要Logo，不写价格、网址或效果承诺。';
  await page.locator('#prompt').fill(prompt);
@@ -21,8 +22,13 @@ const {chromium}=require('playwright'),assert=require('node:assert/strict'),fs=r
  page.once('dialog',dialog=>dialog.accept());await page.locator('#composer-submit').click();const accepted=await acceptedPromise;
  assert.equal(accepted.status(),202);const task=await accepted.json();assert.ok(task.id);
  fs.writeFileSync(path.join(out,'accepted-task.json'),JSON.stringify({id:task.id,tenant:me.tenant_id},null,2));
- await page.waitForFunction(async id=>{const t=await fetch('/preview/api/v1/tasks/'+id).then(r=>r.json());return ['completed','failed','cancelled'].includes(t.status);},task.id,{timeout:180000,polling:1500});
- const done=await page.evaluate(id=>fetch('/preview/api/v1/tasks/'+id).then(r=>r.json()),task.id);fs.writeFileSync(path.join(out,'task-result.json'),JSON.stringify(done,null,2));
+ let done;
+ for(let read=0;read<90;read++){
+   done=await page.evaluate(id=>fetch('/preview/api/v1/tasks/'+id,{cache:'no-store'}).then(r=>r.json()),task.id);
+   if(['completed','failed','cancelled'].includes(done.status))break;
+   await new Promise(resolve=>setTimeout(resolve,2000));
+ }
+ fs.writeFileSync(path.join(out,'task-result.json'),JSON.stringify(done,null,2));
  assert.equal(done.status,'completed',JSON.stringify({status:done.status,error:done.error_code,message:done.user_message}));assert.equal(done.generations.length,1);
  await page.locator('.message-image-gallery img').first().waitFor({timeout:20000});assert.ok(await page.locator('.message-image-gallery img').first().evaluate(n=>n.complete&&n.naturalWidth>0));
  const img=done.generations[0];await page.screenshot({path:path.join(out,'image-1440.png'),fullPage:false});
