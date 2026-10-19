@@ -375,8 +375,17 @@ class KnowledgeProcessingService:
                 )
             embedding_texts = [embedding_input(item["content"], item["metadata"]) for item in chunks]
             vectors: list[list[float]] = []
-            for start in range(0, len(embedding_texts), self.EMBEDDING_BATCH_SIZE):
-                vectors.extend(await self.embedding.embed_documents(embedding_texts[start:start + self.EMBEDDING_BATCH_SIZE]))
+            batches = [embedding_texts[start:start + self.EMBEDDING_BATCH_SIZE] for start in range(0, len(embedding_texts), self.EMBEDDING_BATCH_SIZE)]
+            import os
+            if os.environ.get("CUSTOMER_PREVIEW_MODE") == "true" and self.settings.embedding_provider in {"openai-compatible", "openai"}:
+                from app.preview_budget import PreviewBudget, bounded_embedding_batches
+                from decimal import Decimal
+                batches = bounded_embedding_batches(embedding_texts, self.settings.embedding_model)
+                meter = PreviewBudget(self.settings.data_dir)
+                meter.check_capacity('embedding', len(batches), Decimal('0.05'))
+                meter.observe({'event':'embedding_plan','file_id':file_id,'chunks':len(chunks),'requests':len(batches)})
+            for batch in batches:
+                vectors.extend(await self.embedding.embed_documents(batch))
             if len(vectors) != len(chunks) or any(len(vector) != self.settings.embedding_dimension for vector in vectors):
                 raise RuntimeError("KNOWLEDGE_EMBEDDING_RESPONSE_DIMENSION_MISMATCH")
             for item, vector in zip(chunks, vectors):

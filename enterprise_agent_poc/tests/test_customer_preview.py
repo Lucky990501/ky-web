@@ -32,9 +32,52 @@ def test_unknown_or_opaque_inputs_fail_closed(item):
 
 def test_budget_count_persists_across_restart(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(40): meter.reserve("text",Decimal('0.1'))
+    for _ in range(46): meter.reserve("text",Decimal('0.1'))
     with pytest.raises(PreviewBudgetExceeded): PreviewBudget(tmp_path).reserve("text",Decimal('0.1'))
-    assert PreviewBudget(tmp_path).summary()['text']['requests']==40
+    assert PreviewBudget(tmp_path).summary()['text']['requests']==46
+
+
+def test_embedding_batches_use_wire_bytes_without_loss():
+    import httpx
+    from app.preview_budget import bounded_embedding_batches
+    texts=['中文段落'+('招生资料' * 180)+str(i) for i in range(124)]
+    batches=bounded_embedding_batches(texts,'text-embedding-3-small')
+    assert [x for batch in batches for x in batch]==texts
+    for batch in batches:
+        wire=httpx.Request('POST','https://llm-api.net/v1/embeddings',json={'model':'text-embedding-3-small','input':batch,'encoding_format':'float'}).content
+        assert len(wire)<=8192 and len(batch)<=32
+
+
+def test_embedding_oversized_single_chunk_is_rejected_without_payment():
+    from app.preview_budget import bounded_embedding_batches
+    with pytest.raises(PreviewBudgetExceeded) as raised: bounded_embedding_batches(['汉'*9000],'text-embedding-3-small')
+    assert raised.value.code=='KNOWLEDGE_EMBEDDING_BATCH_TOO_LARGE'
+
+
+def test_full_file_preflight_preserves_budget_and_rejects_partial_spend(tmp_path):
+    meter=PreviewBudget(tmp_path)
+    for _ in range(15):meter.reserve('embedding',Decimal('.05'))
+    with pytest.raises(PreviewBudgetExceeded) as raised:meter.check_capacity('embedding',13,Decimal('.05'))
+    assert raised.value.code=='PREVIEW_EMBEDDING_BUDGET_EXHAUSTED'
+    assert meter.summary()['embedding']['requests']==15
+
+
+def test_safe_error_categories_never_include_internal_text():
+    from app.preview_budget import PREVIEW_ERRORS,preview_task_failure
+    assert preview_task_failure({}, {}, {'reason':'PreviewBudgetExceeded'})=='PREVIEW_MODEL_BUDGET_EXHAUSTED'
+    assert preview_task_failure({}, {'result_persistence_error_stage':'database'}, None)=='CONTENT_SAVE_FAILED'
+    assert preview_task_failure({}, {'error':'secret=/opt/private'}, None)=='MODEL_TOOL_UNAVAILABLE'
+    assert all('/opt/' not in value and 'secret=' not in value for value in PREVIEW_ERRORS.values())
+
+
+def test_task_denial_uses_historical_observation_not_current_quota(tmp_path):
+    from datetime import datetime,timezone,timedelta
+    now=datetime.now(timezone.utc);meter=PreviewBudget(tmp_path)
+    meter.observe({'event':'text_denied','task_id':'other-task','reason':'PreviewBudgetExceeded'})
+    task={'id':'own-task','started_at':(now-timedelta(seconds=1)).isoformat(),'completed_at':(now+timedelta(seconds=1)).isoformat()}
+    assert meter.task_denial(task) is None
+    meter.observe({'event':'text_denied','task_id':'own-task','reason':'PreviewBudgetExceeded','code':'PREVIEW_MODEL_BUDGET_EXHAUSTED'})
+    assert meter.task_denial(task)['code']=='PREVIEW_MODEL_BUDGET_EXHAUSTED'
 
 
 def test_money_limit_reserves_unknown_outcome_and_never_refunds(tmp_path):

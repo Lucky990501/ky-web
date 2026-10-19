@@ -61,27 +61,48 @@
     panel.innerHTML='<h3>测试知识检索</h3><label>问题<input id="preview-query" placeholder="输入资料中的具体问题"></label><button type="button" class="button secondary" id="preview-search">检索</button><div id="preview-search-result" role="status"></div>';
     main.querySelector('.right-rail').prepend(panel);
     const owner=principalCacheScope(),current=()=>main.isConnected&&main.dataset.page==='knowledge'&&principalCacheScope()===owner;
+    const waitForFile=async(id,feedback)=>{
+      for(let i=0;i<90&&current();i++){
+        const item=await api('/api/v1/knowledge/files/'+encodeURIComponent(id),{cache:'no-store'});
+        if(!current())return;feedback.textContent='文件状态：'+statusText(item.status);
+        if(item.status==='ready'){await knowledge(main);return;}
+        if(item.status==='failed')throw Error(item.user_message||'资料处理失败，原文件已保留，可重新处理。');
+        await new Promise(resolve=>setTimeout(resolve,1000));
+      }
+      if(current())feedback.textContent='资料仍在处理中；稍后重新打开知识库查看真实状态。';
+    };
+    api('/api/v1/knowledge/files',{cache:'no-store'}).then(files=>{
+      if(!current())return;
+      main.querySelectorAll('.trow').forEach(row=>{
+        const id=row.querySelector('[data-delete-knowledge]')?.dataset.deleteKnowledge,item=files.find(x=>x.id===id);
+        if(!item)return;
+        const status=row.querySelector('.status');status.className='status '+(item.status==='ready'?'ready':'');status.textContent=statusText(item.status);
+        if(item.status!=='failed')return;
+        const feedback=document.createElement('p');feedback.className='form-error';feedback.setAttribute('role','alert');feedback.textContent=item.user_message||'资料处理失败，原文件已保留。';row.after(feedback);
+        const retry=document.createElement('button');retry.type='button';retry.className='link-button';retry.textContent='重新处理';retry.dataset.previewKnowledgeRetry=id;
+        const remove=row.querySelector('[data-delete-knowledge]'),actions=document.createElement('span');remove.replaceWith(actions);actions.append(retry,remove);
+        retry.onclick=async()=>{
+          retry.disabled=true;
+          try{await api('/api/v1/knowledge/files/'+encodeURIComponent(id)+'/retry',{method:'POST'});await waitForFile(id,feedback);}
+          catch(error){if(current())feedback.textContent=error.message;}
+          finally{if(current())retry.disabled=false;}
+        };
+      });
+    }).catch(error=>{if(current())main.querySelector('#preview-upload-status').textContent='文件状态查询失败：'+error.message;});
     main.querySelector('#preview-knowledge-file').onchange=async event=>{
       const input=event.target,file=input.files?.[0],feedback=main.querySelector('#preview-upload-status');if(!file)return;
       if(file.size>2*1024*1024){feedback.textContent='文件超过2MB，请选择较小的测试资料。';return;}
       input.disabled=true;
       try{
         const form=new FormData();form.append('file',file);const accepted=await apiForm('/api/v1/knowledge/files',form);
-        for(let i=0;i<30&&current();i++){
-          const item=await api('/api/v1/knowledge/files/'+encodeURIComponent(accepted.file_id),{cache:'no-store'});
-          if(!current())return;feedback.textContent='文件状态：'+statusText(item.status);
-          if(item.status==='ready'){await knowledge(main);return;}
-          if(item.status==='failed')throw Error('资料处理失败，请检查文件后重新上传。');
-          await new Promise(resolve=>setTimeout(resolve,1000));
-        }
-        if(current())feedback.textContent='资料仍在处理中；稍后重新打开知识库查看真实状态。';
+        await waitForFile(accepted.file_id,feedback);
       }catch(error){if(current())feedback.textContent=error.message;}
       finally{if(current())input.disabled=false;}
     };
     main.querySelector('#preview-search').onclick=async event=>{
       const query=main.querySelector('#preview-query').value.trim(),result=main.querySelector('#preview-search-result');if(!query)return;
       event.currentTarget.disabled=true;
-      try{const data=await api('/api/v1/knowledge/retrieval-test',{method:'POST',body:JSON.stringify({query,top_k:5})});if(current())result.innerHTML=(data.results||[]).map(item=>'<p>'+escapeHtml(item.content||item.text||'')+'</p>').join('')||'未找到匹配资料，请确认文件已ready。';}
+      try{const data=await api('/api/v1/knowledge/retrieval-test',{method:'POST',body:JSON.stringify({query,top_k:5})});if(current())result.innerHTML=(data.results||[]).map(item=>'<article><b>'+escapeHtml(item.filename||item.title||'来源文件')+'</b><p>'+escapeHtml(item.content||item.text||'')+'</p></article>').join('')||'未找到匹配资料，请确认文件已ready。';}
       catch(error){if(current())result.textContent=error.message;}
       finally{if(current())main.querySelector('#preview-search').disabled=false;}
     };

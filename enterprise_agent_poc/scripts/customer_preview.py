@@ -136,13 +136,33 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     os.environ.pop('EMBEDDING_API_KEY', None)
     from app.auth import UserPrincipal
     from app.agent_catalog import CATALOG
-    from app.preview_budget import PreviewBudget, plaintext_history
+    from app.preview_budget import PreviewBudget, plaintext_history, PREVIEW_ERRORS, preview_task_failure
     from app.test_text_gate import TestTextGate
     from starlette.requests import Request
     from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
     import httpx
 
     budget = PreviewBudget(root)
+    original_public_task, original_public_file = main._public_task, main._public_knowledge_file
+    def public_task(task, **kwargs):
+        result = original_public_task(task, **kwargs)
+        if task.get('status') == 'failed' and task.get('error_code') in {'runtime_error','runtime_start_error','mcp_error','required_tool_dependency_error','worker_interrupted','result_persistence_error'}:
+            with main.store.connection() as conn:
+                row = conn.execute('SELECT payload FROM run_traces WHERE run_id=?', (task.get('run_id'),)).fetchone()
+            trace = json.loads(row['payload']) if row else {}
+            code = preview_task_failure(task, trace, budget.task_denial(task))
+            result.update(error_code=code, user_message=PREVIEW_ERRORS.get(code, PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE']))
+        return result
+    def public_file(item):
+        result = original_public_file(item)
+        if item.get('status') == 'failed':
+            raw = str(item.get('error_message') or '')
+            code = ('PREVIEW_EMBEDDING_BUDGET_EXHAUSTED' if '额度' in raw else
+                    'KNOWLEDGE_EMBEDDING_BATCH_TOO_LARGE' if '大小限制' in raw else
+                    'KNOWLEDGE_EMBEDDING_VALIDATION_FAILED' if '请求费用边界' in raw else 'KNOWLEDGE_PROCESSING_FAILED')
+            result.update(error_code=code, user_message=PREVIEW_ERRORS[code])
+        return result
+    main._public_task, main._public_knowledge_file = public_task, public_file
     identity_path=ROOT.parent/'preview-source.json'
     identity=json.loads(identity_path.read_text()) if identity_path.is_file() else {'source':'LOCAL_CANDIDATE','base_source':'8eb2fa7061de17fe355d64c03fa5451b547dae85'}
     submission_lock = asyncio.Lock()
@@ -169,6 +189,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
         request = Request(scope, receive)
         if not secrets.compare_digest(request.headers.get("authorization", ""), "Bearer " + os.environ["PREVIEW_TEXT_GATE_TOKEN"]):
             return await JSONResponse({"error": {"message": "Preview model authorization required"}}, 403)(scope, receive, send)
+        running_task = None
         try:
             if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
                 raise PermissionError("Preview文本供应商配置或费率尚未核实。")
@@ -207,8 +228,11 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                             "opaque_reasoning_items_omitted": dropped})
         except (PermissionError, ValueError, KeyError) as exc:
             budget.observe({'event':'text_denied','reason':getattr(exc,'branch_id',type(exc).__name__),
+                            'task_id':running_task['id'] if running_task else None,
+                            'code':getattr(exc,'code','PREVIEW_INPUT_REJECTED'),
                             'structure':getattr(exc,'safe_structure',None)})
-            return await JSONResponse({"error": {"message": str(exc)}}, 429)(scope, receive, send)
+            code=getattr(exc,'code','PREVIEW_INPUT_REJECTED')
+            return await JSONResponse({"error": {"code":code,"message":PREVIEW_ERRORS.get(code,PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE'])}}, 429)(scope, receive, send)
         client = httpx.AsyncClient(timeout=180, trust_env=False, transport=httpx.AsyncHTTPTransport(retries=0))
         upstream = await client.send(client.build_request("POST", prices["text_base_url"].rstrip("/") + "/responses",
             headers={"Authorization": "Bearer " + keys["DEEPSEEK_API_KEY"]}, json=body), stream=True)
@@ -325,6 +349,8 @@ if __name__ == "__main__":
         os.environ["PREVIEW_IMAGE_KEY"] = keys.get("N1N_IMAGE_API_KEY") or keys.get("GATEWAY_API_TOKEN", "")
         metered_clients(root, pricing)
         from app.platform_mcp.server import create_mcp
+        from app.platform_mcp.service import PlatformMCPService
+        PlatformMCPService.KNOWLEDGE_MAX_ATTEMPTS = 1  # Preview budget forbids paid automatic retries.
         os.environ.pop('EMBEDDING_API_KEY', None)
         create_mcp().run(transport="streamable-http")
     else:
