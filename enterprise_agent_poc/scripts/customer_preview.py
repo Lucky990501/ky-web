@@ -532,8 +532,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                         context_fee = Decimal('0')
                         if payload.get('use_enterprise_context') is True:
                             from app.preview_image_context import check_context_capacity
-                            check_context_capacity(main,budget,prices,principal.tenant_id)
-                            context_fee = Decimal(str(prices['embedding_request_max_cny']))
+                            has_knowledge=check_context_capacity(main,budget,prices,principal.tenant_id)
+                            if has_knowledge is not False:context_fee = Decimal(str(prices['embedding_request_max_cny']))
                         return await JSONResponse({'count':count,'max_reserved_cny':str(Decimal(str(prices['image_request_max_cny'])) * count),
                             'knowledge_requests':int(context_fee>0),'knowledge_max_reserved_cny':str(context_fee),
                             'size':planned[0]['size'],'quality':payload.get('quality')}, 200)(scope, receive, with_cookie)

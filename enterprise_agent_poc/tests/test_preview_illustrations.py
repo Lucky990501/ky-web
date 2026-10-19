@@ -77,7 +77,7 @@ def test_env_is_independent_blank_disabled_and_parameter_contract(tmp_path):
     config=IllustrationConfig.load(path);assert not config.key and not config.enabled and config.model==MODEL
     path.write_text('N1N_ILLUSTRATION_API_KEY=FIXTURE_ONLY_PRIVATE\n',encoding='utf-8')
     config=IllustrationConfig.load(path);assert 'FIXTURE_ONLY_PRIVATE' not in repr(config)
-    path.write_text('N1N_ILLUSTRATION_WATERMARK=false\n',encoding='utf-8')
+    path.write_text('N1N_ILLUSTRATION_WATERMARK=true\n',encoding='utf-8')
     with pytest.raises(IllustrationError):IllustrationConfig.load(path)
 
 
@@ -105,7 +105,7 @@ def test_explicit_approved_base_keeps_exact_model_body_and_no_fallback(tmp_path,
         asyncio.run(IllustrationProvider(config).generate('FIXTURE_ONLY',lambda *args:None))
     assert error.value.code=='ILLUSTRATION_PROVIDER_REJECTED' and len(requests)==1
     assert str(requests[0].url)==base+'/v1/images/generations?sort=success_rate'
-    assert json.loads(requests[0].content)=={'prompt':'FIXTURE_ONLY','model':MODEL,'provider':{'sort':'success_rate'},'size':'1024x1024','watermark':True,'prompt_extend':True,'prompt_extend_mode':'direct'}
+    assert json.loads(requests[0].content)=={'prompt':'FIXTURE_ONLY','model':MODEL,'provider':{'sort':'success_rate'},'size':'1024x1024','watermark':False,'prompt_extend':True,'prompt_extend_mode':'direct'}
 
 
 @pytest.mark.parametrize('base',['http://llm-api.net','https://llm-api.net/v1/images/generations','https://llm-api.net/','https://llm-api.net.evil.invalid','https://user@llm-api.net','https://127.0.0.1','https://unapproved.invalid'])
@@ -301,15 +301,15 @@ def test_partial_failure_keeps_success_does_not_replay_or_claim_complete(setup,m
 def test_wechat_safe_positions_assets_zip_and_no_raw_model_urls(setup,monkeypatch):
     service,actors,old,budget=setup;actor=actors[0];task=completed_task(service,actor,'wechat');plan=service.plan(actor,task['id'])
     calls=enable_fixture_provider(service,monkeypatch);service.confirm(actor,plan['id'],plan['digest'],True);asyncio.run(service.execute(actor,plan['id']))
-    done=service.get(actor,plan['id']);assert done['status']=='completed' and len(done['assets'])==3
+    done=service.get(actor,plan['id']);assert done['status']=='completed' and len(done['assets'])==4
     assert done['html'].count('<img ')==3 and '#FFCA00' in done['html'] and '保留原正文事实' in done['html']
     assert all(asset['url'].startswith(PREFIX+'/assets/') and 'storage_key' not in asset for asset in done['assets'])
     archive_bytes=service.export_article(actor,plan['id'],True)
     with ZipFile(io.BytesIO(archive_bytes)) as archive:
-        assert len([n for n in archive.namelist() if n.startswith('images/')])==3
+        assert len([n for n in archive.namelist() if n.startswith('images/')])==4
         html=archive.read('article.html').decode();assert '/api/' not in html and 'images/' in html
         assert '后台需人工上传' in archive.read('使用说明.txt').decode()
-    assert len(calls)==3 and service.capability()['provider_attempts']==3
+    assert len(calls)==4 and service.capability()['provider_attempts']==4
     assert service.export_article(actor,plan['id'],False).startswith(b'<!doctype html>')
 
 
@@ -361,7 +361,7 @@ def test_qwen_exact_wire_b64_contract_no_retry_and_safe_errors(monkeypatch):
     def response(request):
         observed.append(request);body=json.loads(request.content)
         assert str(request.url)=='https://api.n1n.ai/v1/images/generations?sort=success_rate'
-        assert body=={'prompt':'FIXTURE_ONLY prompt','model':MODEL,'provider':{'sort':'success_rate'},'size':'1024x1024','watermark':True,'prompt_extend':True,'prompt_extend_mode':'direct'}
+        assert body=={'prompt':'FIXTURE_ONLY prompt','model':MODEL,'provider':{'sort':'success_rate'},'size':'1024x1024','watermark':False,'prompt_extend':True,'prompt_extend_mode':'direct'}
         return httpx.Response(200,json={'data':[{'b64_json':base64.b64encode(picture()).decode()}]},headers={'x-request-id':'fixture-id'})
     monkeypatch.setattr(httpx,'AsyncHTTPTransport',lambda **kwargs:httpx.MockTransport(response))
     events=[];content,metadata=asyncio.run(IllustrationProvider(config).generate('FIXTURE_ONLY prompt',lambda *x:events.append(x)))

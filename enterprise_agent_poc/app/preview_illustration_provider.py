@@ -61,7 +61,7 @@ class IllustrationConfig:
         if base_url not in APPROVED_BASE_URLS:
             raise IllustrationError('ILLUSTRATION_CONFIG_INVALID','配图接口必须使用本轮明确授权的完整Base URL。')
         expected={'MODEL':MODEL,'DEFAULT_SIZE':'1024x1024',
-                  'WATERMARK':'true','PROMPT_EXTEND':'true','PROMPT_EXTEND_MODE':'direct','SORT':'success_rate'}
+                  'WATERMARK':'false','PROMPT_EXTEND':'true','PROMPT_EXTEND_MODE':'direct','SORT':'success_rate'}
         if any(values.get('N1N_ILLUSTRATION_'+key,value)!=value for key,value in expected.items()):
             raise IllustrationError('ILLUSTRATION_CONFIG_INVALID','配图模型或固定参数不符合本轮合同。')
         hosts=tuple(filter(None,values.get('N1N_ILLUSTRATION_ASSET_HOSTS','').split(',')))
@@ -152,7 +152,7 @@ class IllustrationProvider:
         if requested_size not in ILLUSTRATION_RATIO_SIZES.values():
             raise IllustrationError('ILLUSTRATION_SIZE_UNSUPPORTED','配图比例不在当前已适配范围内；未请求模型。')
         body={'prompt':prompt,'model':MODEL,'provider':{'sort':'success_rate'},'size':requested_size,
-              'watermark':True,'prompt_extend':True,'prompt_extend_mode':'direct'}
+              'watermark':False,'prompt_extend':True,'prompt_extend_mode':'direct'}
         try:
             async with asyncio.timeout(180), httpx.AsyncClient(timeout=httpx.Timeout(180,connect=10),trust_env=False,follow_redirects=False,transport=httpx.AsyncHTTPTransport(retries=0)) as client:
                 async with client.stream('POST',config.base_url+'/v1/images/generations?sort=success_rate',
@@ -173,7 +173,7 @@ class IllustrationProvider:
             else:
                 if not isinstance(picture['url'],str):raise ValueError()
                 content=await asyncio.to_thread(download_vetted_image,picture['url'],config.asset_hosts,max_bytes=MAX_ORIGINAL_IMAGE);format_used='url'
-            return content,{**validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE),'response_format':format_used}
+            return content,{**validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE),'response_format':format_used,'requested_watermark':False}
         except IllustrationError:raise
         except (httpx.TransportError,TimeoutError) as error:
             error_type=type(error).__name__

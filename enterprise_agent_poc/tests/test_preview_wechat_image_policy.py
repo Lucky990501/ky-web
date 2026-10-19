@@ -31,10 +31,11 @@ def test_heading_planning_up_to_ten_at_four_by_three(setup,chapters,count):
     service,actors,_,_=setup;authorize(service,actors)
     task=completed_task(service,actors[0],'wechat',article(chapters))
     plan=service.plan(actors[0],task['id'])
-    assert plan['count']==count and plan['can_generate']
-    assert Decimal(plan['maximum_cost_cny'])==Decimal('.20')*count
+    assert plan['count']==count+1 and plan['can_generate']
+    assert Decimal(plan['maximum_cost_cny'])==Decimal('.20')*(count+1)
+    assert sum(i.get('role')=='cover' for i in plan['items'])==1
     assert all(i['size']=='1024x768' for i in plan['items'])
-    assert len({i['position'] for i in plan['items']})==count
+    assert len({i['position'] for i in plan['items']})==count+1
     assert service.plan_limits('activity')[0]==10
     assert service.plan(actors[0],task['id'])['id']==plan['id']
 
@@ -44,7 +45,7 @@ def test_ten_allowed_eleven_cannot_be_confirmed(setup):
     task=completed_task(service,actors[0],'wechat',article(9));plan=service.plan(actors[0],task['id'])
     with service.db() as c:
         payload=json.loads(c.execute('select payload from illustration_plans where id=?',(plan['id'],)).fetchone()[0])
-        payload['items'].append({**payload['items'][-1],'position':100,'label':'FIXTURE十一张'})
+        payload['items'].insert(0,{'position':100,'label':'FIXTURE十一张正文','size':'1024x768','prompt':'FIXTURE'})
         c.execute('update illustration_plans set payload=? where id=?',(json.dumps(payload),plan['id']))
     assert service.get(actors[0],plan['id'])['blocker_code']=='ILLUSTRATION_TASK_LIMIT'
     with pytest.raises(IllustrationError) as error:service.confirm(actors[0],plan['id'],plan['digest'],True)
@@ -75,10 +76,10 @@ def test_existing_planned_article_executes_new_default_and_history_stays_free(se
     monkeypatch.setattr(service.provider,'generate',generate)
     service.confirm(actor,plan['id'],plan['digest'],True);asyncio.run(service.execute(actor,plan['id']))
     done=service.get(actor,plan['id']);assert done['status']=='completed'
-    assert calls==['1024x768']*3 and all(a['dimension_match'] and a['requested_size']=='1024x768' for a in done['assets'])
-    with ZipFile(io.BytesIO(service.export_article(actor,plan['id'],True))) as z:assert len([n for n in z.namelist() if n.startswith('images/')])==3
+    assert calls==['1024x768']*4 and all(a['dimension_match'] and a['requested_size']=='1024x768' for a in done['assets'])
+    with ZipFile(io.BytesIO(service.export_article(actor,plan['id'],True))) as z:assert len([n for n in z.namelist() if n.startswith('images/')])==4
     service.get(actor,plan['id']);service.confirm(actor,plan['id'],plan['digest'],True)
-    assert len(calls)==3 and old==[] and budget.summary()['image']['requests']==0
+    assert len(calls)==4 and old==[] and budget.summary()['image']['requests']==0
 
 
 @pytest.mark.parametrize('size',[None,'1024x768','1024x576'])
@@ -90,7 +91,7 @@ def test_actual_adapter_http_body_preserves_request_override_and_activity_defaul
     provider=IllustrationProvider(IllustrationConfig(key='FIXTURE_ONLY',enabled=True))
     asyncio.run(provider.generate('FIXTURE',lambda *a:None,**({'size':size} if size else {})))
     assert len(seen)==1 and seen[0]['size']==(size or '1024x1024')
-    assert seen[0]['model']=='qwen-image-3.0' and seen[0]['watermark'] is True
+    assert seen[0]['model']=='qwen-image-3.0' and seen[0]['watermark'] is False
 
 
 def test_unknown_size_rejected_before_provider_transport(monkeypatch):

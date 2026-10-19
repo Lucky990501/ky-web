@@ -87,6 +87,7 @@ class ArticleTree(HTMLParser):
     def html(self,assets=(),portable=False):
         positions=self.positions();parents={child:parent for parent in self.root.iter() for child in parent}
         for asset in assets:
+            if asset.get('role')=='cover':continue  # Publishing suggestion, not body content.
             figure=ET.Element('figure',{'style':'margin:24px 0'})
             src='images/'+asset['filename'] if portable else asset['url']
             ET.SubElement(figure,'img',{'src':src,'alt':asset['label'],'style':'width:100%;height:auto'})

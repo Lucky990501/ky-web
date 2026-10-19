@@ -74,27 +74,36 @@
     return window.WORKBENCH_PREVIEW_BASE?documentHtml.replace('</style>','body{font:17px/1.95 system-ui,sans-serif;color:#222;background:#fff}@media(max-width:480px){body{padding:20px 16px}h1,h2{font-size:28px!important}p{font-size:16px!important}}</style>'):documentHtml;
   }
   async function mountSafePreview(frame, result, isCurrent) {
+    // Preview-only DOM access for native selection copying. This grants NO
+    // scripts/forms/navigation: model HTML is still sanitized, CSP default
+    // deny is unchanged, and allow-scripts is deliberately never granted.
+    if(window.WORKBENCH_PREVIEW_BASE)frame.setAttribute('sandbox','allow-same-origin');
+    frame.dataset.articleReady='false';
+    const show=(html,ready)=>{
+      frame.onload=()=>{if(frame.isConnected&&isCurrent())frame.dataset.articleReady=ready?'true':'false';};
+      frame.srcdoc=html;
+    };
     const parsed = document.createElement('template'); parsed.innerHTML = sanitizeArticle(result.html);
     const sources = [...new Set([...parsed.content.querySelectorAll('img')].map(node => node.getAttribute('src')))];
-    if (!sources.length) { frame.srcdoc = previewDocument(result.html); return; }
+    if (!sources.length) { show(previewDocument(result.html),true); return; }
     // Opaque sandbox cannot use SameSite=Lax cookies. Read authorized bytes in
     // the host and decode/re-encode raster pixels for opaque preview only.
     // Incoming HTML still cannot contain data/blob/file or arbitrary URLs;
     // exported/clipboard HTML retains the authorized server address, not bytes.
     const images = new Map(), controller = new AbortController();
-    frame.srcdoc = previewDocument(result.html, images, Boolean(window.WORKBENCH_PREVIEW_BASE));
+    show(previewDocument(result.html, images, Boolean(window.WORKBENCH_PREVIEW_BASE)),false);
     const current = () => frame.isConnected && isCurrent();
     const cleanup = () => { controller.abort(); clearTimeout(timer); observer.disconnect(); images.clear(); };
     const observer = new MutationObserver(() => { if (!current()) cleanup(); });
     observer.observe(document.documentElement, {childList: true, subtree: true});
     const timer = setTimeout(() => controller.abort(), window.WORKBENCH_PREVIEW_BASE?30000:10000);
-    for (const url of sources.slice(0, 12)) {
+    const loadImage=async url => {
       if (!current()) { cleanup(); return; }
       try {
-        if (safeArticleImage(url) !== url) continue;
+        if (safeArticleImage(url) !== url) return;
         const response = await fetch(url, {method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal});
         const type = (response.headers.get('content-type') || '').split(';')[0].trim();
-        if (!response.ok || !['image/png', 'image/jpeg', 'image/webp'].includes(type) || Number(response.headers.get('content-length')) > 10 * 1024 * 1024) { await response.body?.cancel(); continue; }
+        if (!response.ok || !['image/png', 'image/jpeg', 'image/webp'].includes(type) || Number(response.headers.get('content-length')) > 10 * 1024 * 1024) { await response.body?.cancel(); return; }
         const reader = response.body.getReader(), parts = []; let size = 0;
         while (true) { const {done, value} = await reader.read(); if (done) break; size += value.byteLength; if (size > 10 * 1024 * 1024) { await reader.cancel(); throw Error('IMAGE_TOO_LARGE'); } parts.push(value); }
         if (!current()) { cleanup(); return; }
@@ -110,9 +119,35 @@
           } finally { bitmap.close(); }
         }
       } catch { /* Explicit unavailable image placeholder, never fake success. */ }
-    }
+    };
+    if(window.WORKBENCH_PREVIEW_BASE)await Promise.all(sources.slice(0,12).map(loadImage));
+    else for(const url of sources.slice(0,12))await loadImage(url);
     clearTimeout(timer);
-    if (current()) frame.srcdoc = previewDocument(result.html, images); else cleanup();
+    if (current()) show(previewDocument(result.html, images),true); else cleanup();
+  }
+  async function copyRenderedArticle(frame) {
+    if(!window.WORKBENCH_PREVIEW_BASE||frame?.dataset.articleReady!=='true')throw Error('ARTICLE_STILL_LOADING');
+    const doc=frame.contentDocument,win=frame.contentWindow;
+    if(!doc?.body||!doc.body.textContent.trim())throw Error('ARTICLE_STILL_LOADING');
+    if([...doc.images].some(i=>!i.complete||!i.naturalWidth))throw Error('ARTICLE_IMAGE_UNAVAILABLE');
+    // Exactly the same browser selection-copy path as selecting the rendered
+    // article by hand, including the already decoded authorized raster images.
+    const focus=document.activeElement,selection=win.getSelection(),range=doc.createRange();
+    const prior=[...Array(selection.rangeCount)].map((_,i)=>selection.getRangeAt(i).cloneRange());
+    try {
+      win.focus();range.selectNodeContents(doc.body);selection.removeAllRanges();selection.addRange(range);
+      if(doc.execCommand('copy'))return;
+      // Native selection copy unavailable: serialize THIS rendered DOM with
+      // its computed styles, not a separately simplified article template.
+      if(!navigator.clipboard?.write||typeof ClipboardItem!=='function')throw Error('RICH_CLIPBOARD_UNAVAILABLE');
+      const clone=doc.body.cloneNode(true),original=[doc.body,...doc.body.querySelectorAll('*')],nodes=[clone,...clone.querySelectorAll('*')];
+      for(let i=0;i<nodes.length;i++){
+        const style=win.getComputedStyle(original[i]);
+        for(const name of properties)nodes[i].style.setProperty(name,style.getPropertyValue(name));
+      }
+      const section=document.createElement('section');section.setAttribute('style',clone.getAttribute('style')||'');section.append(...clone.childNodes);
+      await navigator.clipboard.write([new ClipboardItem({'text/html':new Blob([section.outerHTML],{type:'text/html'}),'text/plain':new Blob([doc.body.innerText],{type:'text/plain'})})]);
+    } finally {selection.removeAllRanges();for(const old of prior)selection.addRange(old);focus?.focus();}
   }
   function articleHtml(content, markdown) {
     if(window.previewArticleContent)content=window.previewArticleContent(content);
@@ -251,8 +286,8 @@
     slot.innerHTML = '<div class="wechat-article-buttons"><button type="button" class="button secondary" data-article-preview>预览文章</button><button type="button" class="button primary" data-copy-rich>复制富文本</button><button type="button" class="button secondary" data-copy-source>复制HTML源码</button><button type="button" class="button secondary" data-copy-plain>复制纯文本</button><button type="button" class="button secondary" data-download-html>下载 HTML</button></div><dl class="wechat-manual-metadata"><div><dt>建议标题</dt><dd data-manual-title></dd></div><div><dt>摘要</dt><dd data-manual-digest></dd></div><div><dt>封面</dt><dd data-manual-cover></dd></div></dl><p class="wechat-article-feedback" role="status" aria-live="polite"></p><p class="wechat-manual-notice">请自行打开目标公众号后台，粘贴正文后保存草稿。标题、摘要和封面需单独填写／上传；正文图片请在后台手动上传。复制不会连接公众号或创建草稿。</p><div data-copy-recovery hidden><label>复制失败，可选中下方内容后按 Ctrl+C（Mac：⌘C）<textarea readonly aria-label="手动复制内容"></textarea></label></div>';
     article.append(slot);
     if(window.WORKBENCH_PREVIEW_BASE){
-      const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='稿件设置与使用说明';
-      details.append(summary,slot.querySelector('.wechat-manual-metadata'),slot.querySelector('.wechat-manual-notice'));slot.append(details);
+      const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='发布建议';details.open=true;
+      details.append(summary,slot.querySelector('.wechat-manual-metadata'));slot.querySelector('.wechat-manual-notice').remove();slot.append(details);
     }
     const feedback = slot.querySelector('[role="status"]'), buttons = [...slot.querySelectorAll('button')], preview = slot.querySelector('[data-article-preview]');
     let result, busy = false;
@@ -280,8 +315,17 @@
       }
     }
     slot.querySelector('[data-manual-title]').textContent = result.title || '请在公众号后台手动填写';
-    slot.querySelector('[data-manual-digest]').textContent = result.digest || '未提供，请在公众号后台手动填写';
+    const excerpt=document.createElement('template');excerpt.innerHTML=result.html;
+    slot.querySelector('[data-manual-digest]').textContent = result.digest || (window.WORKBENCH_PREVIEW_BASE?excerpt.content.querySelector('p')?.textContent?.trim().slice(0,120):'') || '未提供，请在公众号后台手动填写';
     slot.querySelector('[data-manual-cover]').textContent = result.cover || '请在公众号后台手动上传';
+    if(window.WORKBENCH_PREVIEW_BASE){
+      const cover=slot.querySelector('[data-manual-cover]'),src=safeArticleImage(metadata.coverAsset?.url||'');
+      if(src){
+        const image=document.createElement('img');image.src=src;image.alt='文章发布封面';image.loading='lazy';
+        const link=document.createElement('a');link.href=src;link.download='公众号封面'+(metadata.coverAsset.extension||'.png');link.textContent='下载封面';link.className='button secondary';
+        cover.replaceChildren(image,link);
+      }else cover.textContent='独立封面准备中；正文阅读和导出不受影响。';
+    }
     feedback.textContent = result.redacted ? '安全排版已准备；内部文件路径已移除，请核对正文。' : '安全排版已准备。粘贴到公众号后请核对内容、样式和图片，再手动保存草稿。';
     for (const [selector, mode] of [['[data-copy-rich]', 'rich'], ['[data-copy-source]', 'source'], ['[data-copy-plain]', 'plain']]) {
       slot.querySelector(selector).onclick = async () => {
@@ -289,11 +333,12 @@
         busy = true; buttons.forEach(button => button.disabled = true); slot.setAttribute('aria-busy', 'true');
         feedback.textContent = '正在复制…'; slot.querySelector('[data-copy-recovery]').hidden = true;
         try {
-          await copyManualExport(result, mode);
+          if(mode==='rich'&&window.WORKBENCH_PREVIEW_BASE)await copyRenderedArticle(article.querySelector('.wechat-inline-article'));
+          else await copyManualExport(result, mode);
           if (current()) feedback.textContent = mode === 'rich' ? '已复制排版内容，请粘贴到公众号编辑器' : mode === 'source' ? '已复制HTML源码；这是源码文本，不是富文本粘贴。' : '已复制纯文本；不包含排版样式。';
-        } catch {
+        } catch (error) {
           if (!current()) return;
-          feedback.textContent = mode === 'rich' ? '富文本复制失败，未复制排版内容。请使用“复制HTML源码”或“复制纯文本”，或手动复制下方内容。' : '复制失败；请手动选中下方内容并复制。';
+          feedback.textContent = error.message==='ARTICLE_STILL_LOADING'?'正文与图片仍在加载，请稍后再复制。':mode === 'rich' ? '富文本复制失败，未复制排版内容。可在正文中手动框选复制，或使用源码／纯文本。' : '复制失败；请手动选中下方内容并复制。';
           const recovery = slot.querySelector('[data-copy-recovery]'), area = recovery.querySelector('textarea');
           recovery.hidden = false; area.value = mode === 'plain' ? result.text : result.html; area.focus(); area.select();
         } finally {
@@ -320,5 +365,5 @@
     };
     return Object.freeze({result});
   }
-  window.WorkbenchWechatArticle = Object.freeze({mountManual, buildManualExport, copyManualExport, downloadManualExport, hasArticleHtml, sanitizeArticle, previewDocument});
+  window.WorkbenchWechatArticle = Object.freeze({mountManual, buildManualExport, copyManualExport, copyRenderedArticle, downloadManualExport, hasArticleHtml, sanitizeArticle, previewDocument});
 })();

@@ -29,3 +29,5 @@ html[data-customer-preview] .wechat-article-buttons{display:flex;flex-wrap:wrap;
 html[data-customer-preview] .wechat-article-buttons .button{min-height:44px;}
 html[data-customer-preview] .preview-illustrations>ul{font-size:13px;}
 html[data-customer-preview] .wechat-inline-article{max-height:none;border:0;border-radius:0;}
+html[data-customer-preview] [data-manual-cover]{display:flex;align-items:flex-start;flex-direction:column;gap:10px;}
+html[data-customer-preview] [data-manual-cover] img{display:block;width:min(100%,320px);height:auto;object-fit:contain;}

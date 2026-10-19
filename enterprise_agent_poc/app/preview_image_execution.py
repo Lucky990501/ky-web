@@ -103,7 +103,7 @@ class PreviewImageExecution:
             raise ValueError('图片执行身份及配置只能由服务端确定。')
         if not isinstance(payload.get('use_enterprise_context',False),bool):raise ValueError('知识使用选项无效。')
         if payload.get('preview_image_confirmed') is not True:
-            raise PermissionError('请先明确确认图片生成费用。')
+            raise PermissionError('请通过当前Preview图片页面提交生成需求。')
         request_id = str(UUID(str(payload.get('preview_image_request_id', ''))))
         quality = quality_value(payload.get('quality'))
         prompt = payload.get('message')
@@ -117,7 +117,6 @@ class PreviewImageExecution:
         if not isinstance(attachments, list) or len(attachments) > 5:
             raise ValueError('当前每任务最多支持5张参考图，不会丢弃额外图片。')
         if len(attachments)>reference_limit():
-            from app.image_request_contract import ImageRequestError
             raise ImageRequestError('preview_multi_reference_pending','多参考图当前暂不可用，未提交图片请求；请仅使用1张参考图。')
         ids=[item.get('id') for item in attachments if isinstance(item,dict)]
         if len(ids)!=len(attachments) or len(set(str(x) for x in ids))!=len(ids):raise ValueError('参考图片不能重复。')
@@ -139,7 +138,6 @@ class PreviewImageExecution:
                 saved = conn.execute('SELECT id FROM generations WHERE conversation_id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL LIMIT 1',
                     (payload['conversation_id'], principal.tenant_id, principal.user_id)).fetchone()
             if saved:
-                from app.image_request_contract import ImageRequestError
                 raise ImageRequestError('preview_edit_base_required','请先点击需要修改图片的“基于此图继续修改”，或上传参考图。没有把编辑请求偷偷改为文字生图，也没有调用图片服务。')
         if parent_id:
             if attachments:
@@ -167,9 +165,10 @@ class PreviewImageExecution:
             if conn.execute("select count(*) from tasks where status in ('queued','running')").fetchone()[0]:
                 raise PermissionError('体验服务当前正在生成，请稍后再提交。')
         self.budget.check_capacity('image', len(plan), Decimal(str(self.pricing['image_request_max_cny'])))
+        has_knowledge=False
         if payload.get('use_enterprise_context'):
             from app.preview_image_context import check_context_capacity
-            check_context_capacity(self.main,self.budget,self.pricing,principal.tenant_id)
+            has_knowledge=check_context_capacity(self.main,self.budget,self.pricing,principal.tenant_id) is not False
         if not self.main.product_store.agent_enabled(principal.tenant_id, 'image-agent'):
             raise PermissionError('图片智能体尚未为当前企业启用。')
         self.credit_preflight(principal)
@@ -192,6 +191,7 @@ class PreviewImageExecution:
                              'request_id': request_id, 'fingerprint': fingerprint, 'task_id': task['id'],
                              'references': attachments, 'edit_parent_generation_id': parent_id, 'requested_outputs': len(plan), 'aspect_ratio': source_ratio,
                              'use_enterprise_context':payload.get('use_enterprise_context',False),
+                             'knowledge_context_available':has_knowledge,
                              'size':plan[0]['size'],'quality':quality,'parameter_spec':SPEC_ID})
         return task
 
@@ -223,7 +223,9 @@ class PreviewImageExecution:
                 if use_context:
                     from app.preview_image_context import collect_context
                     self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'knowledge_retrieving','started')
-                    prompt, context = await collect_context(session,task,self.budget)
+                    prompt, context = await collect_context(session,task,self.budget,
+                        has_knowledge=submission.get('knowledge_context_available',True),
+                        enterprise_config=self.main.store.enterprise_config(task['tenant_id']))
                     self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'knowledge_retrieving','completed')
                 self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'generating','started')
                 arguments = {

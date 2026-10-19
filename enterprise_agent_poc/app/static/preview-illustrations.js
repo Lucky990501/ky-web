@@ -10,7 +10,7 @@
   }
   function mount(article,main,taskId) {
     const slot=document.createElement('section');slot.className='preview-illustrations';slot.setAttribute('aria-label','自动配图进度');
-    const title=document.createElement('strong');title.textContent='自动配图 · qwen-image-3.0';
+    const title=document.createElement('strong');title.textContent='自动配图';
     const feedback=document.createElement('p');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');feedback.setAttribute('aria-atomic','true');
     const actions=document.createElement('div'),assets=document.createElement('div');assets.className='preview-illustration-gallery';
     const notice=document.createElement('p');notice.textContent='图片为AI概念示意，非真实现场照片。正文和纯文字导出始终可用；失败不自动重新生图。';
@@ -37,7 +37,8 @@
       if(!version||article.dataset.illustrationPlan===version||!window.WorkbenchWechatArticle||typeof window.bindModalDialog!=='function')return;
       article.dataset.illustrationPlan=version;article.querySelector('.wechat-article-actions')?.remove();
       window.WorkbenchWechatArticle.mountManual({article,main,agent:{slug:'wechat-official-account-writing'},
-        content:plan.html,messageId:article.dataset.assistantMessageId,markdown:s=>s,modal:window.bindModalDialog,isCurrent:current,inlineBody:true});
+        content:plan.html,messageId:article.dataset.assistantMessageId,markdown:s=>s,modal:window.bindModalDialog,isCurrent:current,inlineBody:true,
+        metadata:{title:plan.publication?.title,digest:plan.publication?.digest,coverAsset:plan.publication?.cover}});
     }
     function again() {
       if(timer||polls>=300||!current())return;
@@ -47,6 +48,7 @@
       if(!current())return;
       actions.replaceChildren();assets.replaceChildren();
       for(const asset of plan?.assets||[]) {
+        if(asset.role==='cover')continue;
         const figure=document.createElement('figure'),image=document.createElement('img'),caption=document.createElement('figcaption');
         image.src=window.workbenchPreviewUrl(asset.url);image.alt=asset.label;image.loading='lazy';image.width=asset.width;image.height=asset.height;
         caption.textContent=asset.label+' · '+asset.width+'×'+asset.height+' · AI示意图';

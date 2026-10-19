@@ -97,12 +97,17 @@ def test_missing_knowledge_fails_closed_before_image(sources,image_fixture):
     assert len(session.calls)==1 and calls==[]
 
 
-def test_context_unavailable_does_not_accept_task_or_charge(image_fixture):
+def test_empty_library_uses_available_brand_and_assets_without_paid_search(image_fixture):
     executor,actors,calls=image_fixture
-    with pytest.raises(ValueError):executor.submit(actors[0],payload(use_enterprise_context=True))
     with pytest.raises(ValueError):executor.submit(actors[0],payload(use_enterprise_context='yes'))
+    task=executor.submit(actors[0],payload(use_enterprise_context=True))
+    assert executor.submission(task['id'])['knowledge_context_available'] is False
+    session=Session()
+    text,audit=asyncio.run(collect_context(session,task,executor.budget,has_knowledge=False,enterprise_config={'brand_name':'Fixture品牌'}))
+    assert [n for n,_ in session.calls]==['asset_search'] and 'Fixture品牌' in text
+    assert audit['knowledge_search_performed'] is False and audit['sources']==[]
     assert calls==[]
-    with executor.main.store.connection() as conn:assert conn.execute('select count(*) from tasks').fetchone()[0]==0
+    assert executor.budget.summary()['embedding']['requests']==0
 
 
 def test_image_default_has_no_retrieval_and_optin_is_persisted(image_fixture,monkeypatch):
