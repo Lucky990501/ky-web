@@ -107,6 +107,7 @@ class PreviewTaskTextGate:
     """Reuse the manager's existing task gate extension, only in Preview."""
     requires_mcp_observations=False
     forbid_server_tools=True
+    preview_flash_allowed=True
     def __init__(self,store,guard,base_url):
         self.store,self.guard,self.base_url=store,guard,base_url
         self.credentials={}

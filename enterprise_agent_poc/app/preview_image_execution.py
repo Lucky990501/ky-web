@@ -161,9 +161,8 @@ class PreviewImageExecution:
         plan = preview_plan(prompt,source_ratio,payload.get('size'))
         if (quality or len(attachments)>1 or any(int(x)>1536 for x in plan[0]['size'].split('x'))) and self.main.settings.image_model_id!=MODEL:
             raise ValueError('新增图片参数仅适用于Owner已确认的模型。')
-        with self.main.store.connection() as conn:
-            if conn.execute("select count(*) from tasks where status in ('queued','running')").fetchone()[0]:
-                raise PermissionError('体验服务当前正在生成，请稍后再提交。')
+        from app.preview_task_admission import require_task_capacity
+        require_task_capacity(self.main.store)
         self.budget.check_capacity('image', len(plan), Decimal(str(self.pricing['image_request_max_cny'])))
         has_knowledge=False
         if payload.get('use_enterprise_context'):
@@ -340,6 +339,17 @@ class PreviewImageExecution:
             main.store.finish_run_trace(run_id, 'cancelled', trace)
             products.finalize_task_cancellation(tid, tenant, run_id=run_id, conversation_id=conversation_id)
         except Exception as error:
+            # TaskGroup wraps failures from authenticated MCP sessions. Retain
+            # safe leaf classes/stage instead of discarding them as ExceptionGroup.
+            def leaves(value):
+                children=getattr(value,'exceptions',None)
+                return [leaf for child in children for leaf in leaves(child)] if children else [value]
+            leaf_errors=leaves(error)
+            if len(leaf_errors)==1:error=leaf_errors[0]
+            self.budget.observe({'event':'preview_image_failure','task_id':tid,
+                'leaf_error_types':[type(leaf).__name__ for leaf in leaf_errors],
+                'stage':products.task_for_worker(tid).get('stage'),
+                'provider_http_status':getattr(error,'preview_provider_status',None)})
             code = ('PREVIEW_MODEL_BUDGET_EXHAUSTED' if isinstance(error, PreviewBudgetExceeded)
                     else 'image_knowledge_unavailable' if str(error).startswith(('preview_context_','preview_image_knowledge_'))
                     else 'image_business_error')

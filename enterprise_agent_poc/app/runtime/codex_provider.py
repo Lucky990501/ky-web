@@ -100,7 +100,8 @@ class CodexRuntimeManager:
         provider_lines = []
         if self._settings.model_provider_id == "deepseek":
             catalog_path = codex_home / "models.json"
-            catalog_path.write_text(json.dumps({"models": [self._deepseek_model_catalog(profile.model_id)]}), encoding="utf-8")
+            catalog_path.write_text(json.dumps({"models": [self._deepseek_model_catalog(profile.model_id,
+                preview_flash=bool(getattr(self._test_gate,'preview_flash_allowed',False)))]}), encoding="utf-8")
             provider_lines = [
                 f'model = "{profile.model_id}"',
                 'model_provider = "deepseek"',
@@ -134,13 +135,14 @@ class CodexRuntimeManager:
         return codex_home, workspace, token, token_expires_at
 
     @staticmethod
-    def _deepseek_model_catalog(model_id: str | None) -> dict:
-        if model_id != "deepseek-v4-pro":
+    def _deepseek_model_catalog(model_id: str | None, *, preview_flash=False) -> dict:
+        flash=preview_flash and model_id=='deepseek-flash'
+        if model_id != "deepseek-v4-pro" and not flash:
             raise ValueError("DeepSeek Gate 2 仅允许模型 deepseek-v4-pro。")
         return {
-            "slug": "deepseek-v4-pro",
-            "display_name": "DeepSeek-V4-Pro",
-            "description": "DeepSeek V4 Pro for Codex Runtime POC.",
+            "slug": model_id,
+            "display_name": "DeepSeek-Flash" if flash else "DeepSeek-V4-Pro",
+            "description": "Preview Flash Responses runtime." if flash else "DeepSeek V4 Pro for Codex Runtime POC.",
             "context_window": 1048576,
             "max_context_window": 1048576,
             "truncation_policy": {"mode": "tokens", "limit": 10000},

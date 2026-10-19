@@ -96,6 +96,15 @@ def prepare(root, api_port, mcp_port, keys=None, pricing=None):
         "ENTERPRISE_POC_TEST_TEXT_GATE_ENABLED": "false",
     })
     os.environ.pop("STAGE2_TWO_PROBE_AUTHORITY", None)
+    if (pricing or {}).get('text_model')=='deepseek-flash':
+        # Official peak/cache-miss rates are conservative at every time of day.
+        # Pricing changes only new requests; historical reservations are immutable.
+        if (pricing.get('text_base_url')!='https://api.deepseek.com'
+            or not pricing.get('text_pricing_verified')
+            or Decimal(str(pricing.get('text_input_cny_per_million',0)))!=Decimal('2')
+            or Decimal(str(pricing.get('text_output_cny_per_million',0)))!=Decimal('8')):
+            raise ValueError('Preview Flash pricing/Responses identity not verified')
+        os.environ['ENTERPRISE_POC_MODEL_ID']='deepseek-flash'
     if (pricing or {}).get('embedding_pricing_verified'):
         os.environ.update(EMBEDDING_PROVIDER='openai-compatible', EMBEDDING_MODEL='text-embedding-3-small',
                           EMBEDDING_DIMENSION='1536', EMBEDDING_BASE_URL='https://llm-api.net/v1',
@@ -306,6 +315,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 raise PreviewInputRejected('preview_provider_config_unverified')
             body, dropped = plaintext_history(await request.json())
             body, namespaces = TestTextGate.provider_tools(body)
+            from app.preview_request_context import compact_knowledge_history
+            body,context_compaction=compact_knowledge_history(body)
             # An anonymous Preview receives only the existing tenant-scoped
             # business MCP tools, never shell/file/browser/server-side tools.
             body['tools'] = [tool for tool in body.get('tools', [])
@@ -320,6 +331,12 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             from app.preview_wechat_article import provider_request as wechat_request
             body=wechat_request(body,running_task)
             body['instructions'] = (body.get('instructions') or '') + '\nPreview执行要求：读取上下文中真实工具返回；同一轮已取得企业配置或充分的同一事实检索结果后不要重复查询。信息足够时直接完成用户要求。工具返回报错时如实说明，不伪造结果，不改用其他执行通道。'
+            if running_task['agent_id']=='campaign-agent' and context_compaction['redundant_search_tail']>=2:
+                # Two successful lookups added no new source body. Finish from
+                # retained evidence instead of paying for an unbounded loop.
+                body['tools']=[tool for tool in body['tools'] if tool['name']!='mcp__platform__knowledge_search']
+                if isinstance(body.get('tool_choice'),dict) and body['tool_choice'].get('name')=='mcp__platform__knowledge_search':body['tool_choice']='auto'
+                body['instructions']+='\n连续检索已没有新增资料，请使用已保留的原始事实与来源完成本轮活动方案；仍未核实的课程、价格和权益标记【待确认】，不得编造，不再重复检索。'
             if running_task and running_task['agent_id'] == ARTICLE_AGENT:
                 reference = article_references.for_task(dict(running_task))
                 if reference:
@@ -342,6 +359,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             text_guard.reserve(running_task,cost)
             budget.observe({"event": "text_dispatch", "task_id": running_task['id'],
                             'copywriting_prompt_sha256':copywriting_prompt_sha,
+                            'context_compaction':context_compaction,
                             'wire_utf8_bytes':wire_size,
                             'input_tokens_upper':input_bound,
                             'max_output_tokens':body['max_output_tokens'],'reserved_ceiling_cny':str(cost),
@@ -567,9 +585,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 return await HTMLResponse(html)(scope, receive, with_cookie)
             if path.startswith('/api/v1/agents/') and path.endswith('/runs') and scope['method']=='POST':
                 async with submission_lock:
-                    with main.store.connection() as conn:
-                        busy = conn.execute("SELECT count(*) FROM tasks WHERE status IN ('queued','running')").fetchone()[0]
-                    if busy: return await JSONResponse({"user_message": "体验服务当前正在生成，请稍后再提交。"}, 429)(scope, receive, with_cookie)
+                    from app.preview_task_admission import require_task_capacity
+                    try:require_task_capacity(main.store)
+                    except PermissionError as error:
+                        return await JSONResponse({'user_message':str(error),'error_code':'PREVIEW_TASK_CAPACITY'},429)(scope,receive,with_cookie)
                     if path == f'/api/v1/agents/{ARTICLE_AGENT}/runs':
                         request = Request(scope, receive)
                         raw = await request.body()

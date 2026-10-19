@@ -40,8 +40,11 @@ async def collect_context(session,task,budget,*,has_knowledge=True,enterprise_co
     # Both tools enforce the signed tenant scope server-side. No owner/tenant
     # field supplied by the browser, no URL fetch or raw material transfer.
     knowledge = tool_value(await session.call_tool('knowledge_search',{'query':task['input_text'][:1000],'limit':3})) if has_knowledge else []
-    if not isinstance(knowledge,list) or has_knowledge and not knowledge:
+    if not isinstance(knowledge,list):
         raise RuntimeError('preview_image_knowledge_no_evidence')
+    # A successful search with zero matches is not an unavailable tool. Image
+    # requests often describe layout rather than a factual knowledge question.
+    # Do not invent citations or implicitly reuse any photograph in that case.
     sources=[]
     for item in knowledge[:3]:
         if not isinstance(item,dict):raise RuntimeError('preview_context_result_invalid')

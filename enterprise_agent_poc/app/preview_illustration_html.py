@@ -91,7 +91,8 @@ class ArticleTree(HTMLParser):
             figure=ET.Element('figure',{'style':'margin:24px 0'})
             src='images/'+asset['filename'] if portable else asset['url']
             ET.SubElement(figure,'img',{'src':src,'alt':asset['label'],'style':'width:100%;height:auto'})
-            ET.SubElement(figure,'figcaption',{'style':'font-size:12px;color:#666666;text-align:center'}).text='AI配图示意，非真实活动照片 · '+asset['label']
+            # Internal provenance remains on the asset/plan. Do not inject a
+            # reader-facing system caption; original author captions survive.
             index=asset['position']
             if positions and 0<=index<len(positions):
                 target=positions[index];parent=parents.get(target,self.root);parent.insert(list(parent).index(target)+1,figure)

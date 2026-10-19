@@ -863,12 +863,18 @@ function replaceTaskFailure(node,message,retryText,diagnosticId='',main=null){
 }
 async function agentWorkspaceV2(main, agentId) {
   const selectedId=activeConversationId,selectedTaskId=activeTaskId,owner=main._owner||principalSnapshot();
-  const data=await api('/api/v1/workspace',{cache:'no-store'});if(main.isConnected===false||!principalIsCurrent(owner))return;applyEnterpriseBrand(data,'workspace',owner);activityPlanBrandName=typeof data.brand_name==='string'?data.brand_name:'';
-  let agent=agentPage(agentId).startsWith('agent:')?await api(`/api/v1/agents/${encodeURIComponent(agentId)}`).catch(()=>null):(data.agents||[]).find(x=>x.id===agentId);
+  const preview=window.WORKBENCH_PREVIEW_BASE==='/preview';
+  // Preview paints an inert shell immediately; parallel read-only loading does
+  // not cancel an existing run or create any task/conversation.
+  if(preview)main.innerHTML='<section class="creation-main" aria-busy="true"><div class="chat-body"><p role="status">正在读取此智能体的历史…</p></div><form class="composer"><textarea disabled placeholder="正在准备输入区…"></textarea></form></section>';
+  const reads=preview?Promise.all([api('/api/v1/workspace',{cache:'no-store'}),api('/api/v1/conversations',{cache:'no-store'}),selectedTaskId?api(`/api/v1/tasks/${encodeURIComponent(selectedTaskId)}`,{cache:'no-store'}):null,agentPage(agentId).startsWith('agent:')?api(`/api/v1/agents/${encodeURIComponent(agentId)}`).catch(()=>null):null]):null;
+  const loaded=reads?await reads:null;
+  const data=loaded?loaded[0]:await api('/api/v1/workspace',{cache:'no-store'});if(main.isConnected===false||!principalIsCurrent(owner))return;applyEnterpriseBrand(data,'workspace',owner);activityPlanBrandName=typeof data.brand_name==='string'?data.brand_name:'';
+  let agent=agentPage(agentId).startsWith('agent:')?(loaded?loaded[3]:await api(`/api/v1/agents/${encodeURIComponent(agentId)}`).catch(()=>null)):(data.agents||[]).find(x=>x.id===agentId);
   if(main.dataset.page!==agentPage(agentId))return;
   if((!agent||!agent.enabled)&&!selectedId&&!selectedTaskId){main.innerHTML='<section class="empty-state">该智能体暂未启用。</section>';return;}
-  const allConversations=await api('/api/v1/conversations',{cache:'no-store'});
-  const selectedTask=selectedTaskId?await api(`/api/v1/tasks/${encodeURIComponent(selectedTaskId)}`,{cache:'no-store'}):null;
+  const allConversations=loaded?loaded[1]:await api('/api/v1/conversations',{cache:'no-store'});
+  const selectedTask=loaded?loaded[2]:selectedTaskId?await api(`/api/v1/tasks/${encodeURIComponent(selectedTaskId)}`,{cache:'no-store'}):null;
   if(selectedTask&&(selectedTask.id!==selectedTaskId||agent&&selectedTask.agent_id&&selectedTask.agent_id!==agent.id))throw Error('任务与当前智能体不匹配，无法恢复。');
   if(selectedTask&&selectedId&&selectedTask.conversation_id!==selectedId)throw Error('任务与指定会话不匹配，无法恢复。');
   const currentProject=selectedId||selectedTask?.conversation_id||(!window.history.state?.newProject?allConversations.find(item=>(item.agent_id===agent?.id||item.agent?.slug===agentId)&&['queued','running','cancelling'].includes(item.latest_status))?.id:null);

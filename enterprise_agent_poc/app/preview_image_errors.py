@@ -1,6 +1,7 @@
 """Safe Preview image admission errors; never expose raw internal exceptions."""
 from app.image_request_contract import ImageRequestError,INPUT_ERRORS
 from app.preview_budget import PreviewBudgetExceeded
+from app.preview_task_admission import PreviewTaskCapacity
 
 MESSAGES={
  'PREVIEW_INSUFFICIENT_CREDIT':'当前体验企业的演示积分不足，未创建图片任务；请联系Owner补充演示积分。模型费用额度与积分独立。',
@@ -18,6 +19,7 @@ MESSAGES={
 
 
 def image_admission_error(error):
+    if isinstance(error,PreviewTaskCapacity):return 429,{'error_code':'PREVIEW_TASK_CAPACITY','user_message':str(error)}
     if str(error)=='insufficient_credit':code='PREVIEW_INSUFFICIENT_CREDIT';status=402
     elif isinstance(error,PreviewBudgetExceeded):
         code='IMAGE_CONTEXT_BUDGET_EXHAUSTED' if error.code=='PREVIEW_EMBEDDING_BUDGET_EXHAUSTED' else 'IMAGE_BUDGET_EXHAUSTED';status=429
