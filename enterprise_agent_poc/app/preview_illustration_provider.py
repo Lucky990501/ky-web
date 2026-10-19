@@ -22,6 +22,7 @@ from PIL import Image
 MODEL='qwen-image-3.0'
 APPROVED_BASE_URLS=frozenset({'https://api.n1n.ai','https://llm-api.net'})
 MAX_IMAGE=2*1024*1024  # Existing Word image contract, checked before storage.
+MAX_ORIGINAL_IMAGE=8*1024*1024  # Preview-only originals; Word uses a separate <=2MB copy.
 
 
 class IllustrationError(ValueError):
@@ -65,8 +66,8 @@ class IllustrationConfig:
         return cls(key=values.get('N1N_ILLUSTRATION_API_KEY',''),enabled=values.get('N1N_ILLUSTRATION_ENABLED','false')=='true',base_url=base_url,asset_hosts=hosts)
 
 
-def validated_image(content,mime=None):
-    if not content or len(content)>MAX_IMAGE:raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图为空或超过当前Word支持的2MB限制。')
+def validated_image(content,mime=None,*,max_bytes=MAX_IMAGE):
+    if not content or len(content)>max_bytes:raise IllustrationError('ILLUSTRATION_IMAGE_INVALID',f'配图为空或超过{max_bytes//(1024*1024)}MB文件上限。')
     try:
         with Image.open(io.BytesIO(content)) as image:
             actual=image.format;width,height=image.size
@@ -81,7 +82,28 @@ def validated_image(content,mime=None):
     return {'extension':extension,'mime_type':actual_mime,'width':width,'height':height,'sha256':hashlib.sha256(content).hexdigest(),'bytes':len(content)}
 
 
-def download_vetted_image(url,allowed_hosts):
+def word_image_copy(content):
+    """Keep the original intact; return only a bounded Word-specific derivative."""
+    original=validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE)
+    if len(content)<=MAX_IMAGE:return content,{**original,'conversion':'original_bytes'}
+    try:
+        with Image.open(io.BytesIO(content)) as source:
+            source.load()
+            if source.mode in {'RGBA','LA'} or 'transparency' in source.info:
+                image=Image.new('RGB',source.size,'white');rgba=source.convert('RGBA');image.paste(rgba,mask=rgba.getchannel('A'))
+            else:image=source.convert('RGB')
+            image.thumbnail((1600,1600),Image.Resampling.LANCZOS)
+            for quality in (90,85,80):
+                buffer=io.BytesIO();image.save(buffer,format='JPEG',quality=quality,optimize=True)
+                candidate=buffer.getvalue()
+                if len(candidate)<=MAX_IMAGE:
+                    return candidate,{**validated_image(candidate,'image/jpeg'),'conversion':f'word_jpeg_q{quality}_white_background'}
+    except IllustrationError:raise
+    except Exception:pass
+    raise IllustrationError('ILLUSTRATION_WORD_COPY_FAILED','Word专用图片副本处理未完成；不截断原图、不重试生图。')
+
+
+def download_vetted_image(url,allowed_hosts,*,max_bytes=MAX_IMAGE):
     """Exact approved host, public-IP pin, TLS SNI verification, no redirects."""
     try:parsed=urlsplit(url);port=parsed.port
     except (ValueError,TypeError):raise IllustrationError('ILLUSTRATION_URL_BLOCKED','图片资源地址合同未通过校验。') from None
@@ -105,12 +127,12 @@ def download_vetted_image(url,allowed_hosts):
             client.request('GET',parsed.path+('?' +parsed.query if parsed.query else ''),headers={'Accept':'image/png,image/jpeg'})
             response=client.getresponse()
             if response.status!=200:raise IllustrationError('ILLUSTRATION_DOWNLOAD_FAILED','配图资源未返回200，未跟随跳转或重试。',{'failure_phase':'asset_http','http_status':response.status})
-            if int(response.getheader('content-length','0'))>MAX_IMAGE:
-                raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图超过当前Word支持的2MB限制，未截断保存。')
+            if int(response.getheader('content-length','0'))>max_bytes:
+                raise IllustrationError('ILLUSTRATION_IMAGE_INVALID',f'配图超过{max_bytes//(1024*1024)}MB下载上限，未截断保存。')
             mime=response.getheader('content-type','').split(';')[0].strip().lower()
             if mime not in {'image/png','image/jpeg'}:raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图MIME缺失或不是受支持的PNG/JPEG。')
-            content=response.read(MAX_IMAGE+1)
-            validated_image(content,mime);return content
+            content=response.read(max_bytes+1)
+            validated_image(content,mime,max_bytes=max_bytes);return content
         finally:client.close()
     except IllustrationError:raise
     except Exception:raise IllustrationError('ILLUSTRATION_DOWNLOAD_FAILED','配图下载或验证失败，未自动重试。') from None
@@ -135,7 +157,7 @@ class IllustrationProvider:
                     raw=bytearray()
                     async for chunk in response.aiter_bytes():
                         raw.extend(chunk)
-                        if len(raw)>3*1024*1024:raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图响应超过大小上限。')
+                        if len(raw)>12*1024*1024:raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图响应超过大小上限。')
             value=json.loads(raw);data=value.get('data')
             if not isinstance(data,list) or len(data)!=1 or not isinstance(data[0],dict):raise ValueError()
             picture=data[0]
@@ -144,8 +166,8 @@ class IllustrationProvider:
                 content=base64.b64decode(picture['b64_json'],validate=True);format_used='b64_json'
             else:
                 if not isinstance(picture['url'],str):raise ValueError()
-                content=await asyncio.to_thread(download_vetted_image,picture['url'],config.asset_hosts);format_used='url'
-            return content,{**validated_image(content),'response_format':format_used}
+                content=await asyncio.to_thread(download_vetted_image,picture['url'],config.asset_hosts,max_bytes=MAX_ORIGINAL_IMAGE);format_used='url'
+            return content,{**validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE),'response_format':format_used}
         except IllustrationError:raise
         except (httpx.TransportError,TimeoutError) as error:
             error_type=type(error).__name__

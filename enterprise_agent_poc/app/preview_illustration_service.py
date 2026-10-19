@@ -19,7 +19,7 @@ import zipfile
 
 from app.document_generator import ActivityPlanContent,ActivityPlanDocumentService,DocumentPresentationOptions
 from app.preview_illustration_html import ArticleTree,full_document
-from app.preview_illustration_provider import IllustrationConfig,IllustrationProvider,IllustrationError,MODEL,private_file,validated_image
+from app.preview_illustration_provider import IllustrationConfig,IllustrationProvider,IllustrationError,MODEL,private_file,validated_image,word_image_copy,MAX_ORIGINAL_IMAGE
 from app.preview_article_references import clean_text
 from app.storage import storage_provider
 
@@ -222,7 +222,7 @@ class PreviewIllustrationService:
 
     def get(self,actor,identifier):
         row=self.row(actor,identifier);payload=json.loads(row['payload']);assets=self.assets(identifier);limits=self.limits()
-        public_assets=[{k:v for k,v in asset.items() if k!='storage_key'} for asset in assets]
+        public_assets=[{k:v for k,v in asset.items() if k not in {'storage_key','word_storage_key'}} for asset in assets]
         result={k:row[k] for k in ('id','task_id','digest','status','error_code')}
         if payload.get('safe_diagnostic'):result['safe_diagnostic']=payload['safe_diagnostic']
         result.update(kind=payload['kind'],title=payload['title'],count=len(payload['items']),
@@ -286,7 +286,7 @@ class PreviewIllustrationService:
                 def record_http(status,request_id):
                     with self.db() as conn:conn.execute('update illustration_requests set http_status=?,request_id=? where id=?',(status,request_id,request['id']))
                 content,provider_metadata=await self.provider.generate(item['prompt'],record_http)
-                metadata=validated_image(content)
+                metadata=validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE)
                 if provider_metadata.get('response_format') in {'url','b64_json'}:metadata['response_format']=provider_metadata['response_format']
                 asset_id=uuid4().hex;filename=asset_id+metadata['extension']
                 key=f'brand-assets/{actor.tenant_id}/activity-plan-images/{filename}'
@@ -295,6 +295,16 @@ class PreviewIllustrationService:
                     raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','配图存储校验失败，保留费用记录，不重试生图。')
                 asset={**metadata,'id':asset_id,'position':item['position'],'label':item['label'],
                        'filename':filename,'storage_key':key,'url':PREFIX+'/assets/'+asset_id}
+                # Keep verified original evidence even if Word-copy preparation
+                # fails. Status stays attempted, never presented as completed.
+                with self.db() as conn:conn.execute('update illustration_requests set asset_json=? where id=?',(canonical(asset),request['id']))
+                if payload['kind']=='activity':
+                    word_bytes,word_meta=word_image_copy(content)
+                    word_key=key if word_bytes==content else f'brand-assets/{actor.tenant_id}/activity-plan-images/{uuid4().hex}'+word_meta['extension']
+                    if word_key!=key:self.storage.put(word_key,word_bytes,word_meta['mime_type'])
+                    if hashlib.sha256(self.storage.get(word_key)).hexdigest()!=word_meta['sha256']:
+                        raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','Word配图副本回读校验失败；不重试生图。')
+                    asset.update(word_storage_key=word_key,word_variant=word_meta)
                 with self.db() as conn:conn.execute("update illustration_requests set status='saved',asset_json=? where id=?",(canonical(asset),request['id']))
             await asyncio.to_thread(self.finish_export,actor,identifier)
         except Exception as error:
@@ -310,8 +320,12 @@ class PreviewIllustrationService:
             if row['document_json']:document=json.loads(row['document_json'])
             else:
                 service=ActivityPlanDocumentService(self.storage,brand_provider=self.main.store.enterprise_config)
+                for asset in assets:
+                    picture=self.storage.get(asset.get('word_storage_key',asset['storage_key']))
+                    if hashlib.sha256(picture).hexdigest()!=asset.get('word_variant',asset)['sha256']:
+                        raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','Word配图导出前Hash校验失败。')
                 document=service.create(actor.tenant_id,actor.user_id,ActivityPlanContent.model_validate(payload['content']),
-                    DocumentPresentationOptions(image_paths={a['position']:a['storage_key'] for a in assets})).public()
+                    DocumentPresentationOptions(image_paths={a['position']:a.get('word_storage_key',a['storage_key']) for a in assets})).public()
         with self.db() as conn:conn.execute("update illustration_plans set status='completed',error_code=null,document_json=? where id=?",
                                           (canonical(document) if document else None,identifier))
 
@@ -331,7 +345,7 @@ class PreviewIllustrationService:
     def export_article(self,actor,identifier,package=False):
         row=self.row(actor,identifier);payload=json.loads(row['payload'])
         if row['status']!='completed' or payload['kind']!='wechat':raise IllustrationError('ILLUSTRATION_EXPORT_PENDING','图文文章尚未完整生成。')
-        assets=self.assets(identifier);public_assets=[{k:v for k,v in a.items() if k!='storage_key'} for a in assets]
+        assets=self.assets(identifier);public_assets=[{k:v for k,v in a.items() if k not in {'storage_key','word_storage_key'}} for a in assets]
         body=ArticleTree(payload['html']).html([{**a,'url':'/preview'+a['url']} for a in public_assets],portable=package)
         html=full_document(body,payload['title'],portable=package).encode('utf-8')
         if not package:return html

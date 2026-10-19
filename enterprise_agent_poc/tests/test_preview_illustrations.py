@@ -357,7 +357,7 @@ def test_url_response_reuses_only_verified_host_download(monkeypatch):
     config=IllustrationConfig(key='FIXTURE_ONLY',enabled=True,asset_hosts=('approved.example',))
     monkeypatch.setattr(httpx,'AsyncHTTPTransport',lambda **kwargs:httpx.MockTransport(lambda request:httpx.Response(200,json={'data':[{'url':'https://approved.example/fixture.png'}]})))
     seen=[]
-    def download(url,hosts):seen.append((url,hosts));return picture()
+    def download(url,hosts,**kwargs):seen.append((url,hosts));assert kwargs['max_bytes']==8*1024*1024;return picture()
     monkeypatch.setattr('app.preview_illustration_provider.download_vetted_image',download)
     content,metadata=asyncio.run(IllustrationProvider(config).generate('FIXTURE_ONLY',lambda *x:None))
     assert metadata['response_format']=='url' and seen==[('https://approved.example/fixture.png',('approved.example',))]
