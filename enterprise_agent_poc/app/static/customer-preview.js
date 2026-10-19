@@ -36,6 +36,23 @@
     const anchor = event.target.closest?.('a[href]');
     if (anchor) anchor.href = url(anchor.href);
   }, true);
+  const imageUnavailable = '图片生成暂不可用：自动审批服务处理中。请先体验其他功能。';
+  const markImageUnavailable = () => {
+    document.querySelectorAll('.side-nav [data-page="image"] span').forEach(label => {
+      if(label.textContent!=='图片生成（暂不可用）')label.textContent='图片生成（暂不可用）';
+    });
+    const main=document.querySelector('#main');if(main?.dataset.agentId!=='image-agent')return;
+    const form=main.querySelector('#composer');if(!form)return;
+    let notice=main.querySelector('#preview-image-unavailable');
+    if(!notice){notice=document.createElement('p');notice.id='preview-image-unavailable';notice.className='composer-run-feedback';notice.setAttribute('role','status');notice.textContent=imageUnavailable;form.before(notice);}
+    form.querySelectorAll('button,input,textarea').forEach(control=>{if(!control.disabled)control.disabled=true;control.setAttribute('aria-describedby',notice.id);});
+    const send=form.querySelector('#composer-submit');if(send){send.title=imageUnavailable;send.setAttribute('aria-label','图片生成暂不可用');}
+  };
+  document.addEventListener('submit',event=>{
+    if(event.target.id==='composer'&&document.querySelector('#main')?.dataset.agentId==='image-agent'){
+      event.preventDefault();event.stopImmediatePropagation();markImageUnavailable();
+    }
+  },true);
   window.enhancePreviewKnowledge = (main, items) => {
     const zone = main.querySelector('.upload-zone');
     if (!zone) return;
@@ -74,7 +91,9 @@
     const observer=new MutationObserver(()=>{
       const main=document.querySelector('#main');
       if(main?.dataset.page==='knowledge'&&main.querySelector('.upload-zone')&&!main.querySelector('#preview-knowledge-file'))window.enhancePreviewKnowledge(main,[]);
+      markImageUnavailable();
     });
-    observer.observe(document.querySelector('#app'),{childList:true,subtree:true});
+    observer.observe(document.querySelector('#app'),{childList:true,subtree:true,attributes:true,attributeFilter:['disabled']});
+    markImageUnavailable();
   });
 })();

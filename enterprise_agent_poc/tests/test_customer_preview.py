@@ -4,6 +4,19 @@ import pytest
 from app.preview_budget import PreviewBudget, PreviewBudgetExceeded, plaintext_history
 
 
+@pytest.mark.parametrize(('path','method','blocked'),[
+    ('/api/v1/agents/image-agent/runs','POST',True),
+    ('/api/v1/agents/image-agent/runs','GET',False),
+    ('/api/v1/agents/copywriting-agent/runs','POST',False),
+    ('/api/v1/agents/campaign-agent/runs','POST',False),
+    ('/api/v1/agents/preview-wechat-agent/runs','POST',False),
+    ('/api/v1/conversations','GET',False),
+])
+def test_image_admission_stop_does_not_change_other_business_routes(path,method,blocked):
+    from scripts.customer_preview import image_submission_blocked
+    assert image_submission_blocked(path,method) is blocked
+
+
 def test_plain_tool_cycle_preserves_real_call_and_result():
     call={"type":"function_call","call_id":"real-call","name":"knowledge_search","arguments":"{}"}
     result={"type":"function_call_output","call_id":"real-call","output":"真实工具返回"}

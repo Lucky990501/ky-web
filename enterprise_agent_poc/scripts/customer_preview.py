@@ -22,6 +22,12 @@ if os.environ.get("PREVIEW_EXTRA_SITE_PACKAGES"):
     sys.path.append(os.environ["PREVIEW_EXTRA_SITE_PACKAGES"])
 BASE = "/preview"
 COOKIE = "workbench_preview_session"
+IMAGE_BLOCK_MESSAGE = "图片生成暂不可用：自动审批服务处理中。请先体验其他功能。"
+
+
+def image_submission_blocked(path, method):
+    """Temporary Preview admission stop, not an approval-policy override."""
+    return method == "POST" and path == "/api/v1/agents/image-agent/runs"
 
 
 def load_provider_values(path):
@@ -241,6 +247,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 return await JSONResponse({"user_message": "Preview路径不匹配"}, 404)(scope, receive, send)
             scope = dict(scope, path=path[len(BASE):], raw_path=scope.get("raw_path", b"")[len(BASE):])
             path = scope["path"]
+            if image_submission_blocked(path, scope["method"]):
+                return await JSONResponse({"error_code": "IMAGE_APPROVAL_EXTERNAL_BLOCKED", "user_message": IMAGE_BLOCK_MESSAGE}, 503)(scope, receive, send)
             if path in {"/api/health", "/api/v1/preview-status"}:
                 return await JSONResponse({"status": "preview", **identity, "budget": budget.summary(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
@@ -285,7 +293,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 for name, marker in (("workbench.js", "__JS_SHA256_V1__"), ("workbench.css", "__CSS_SHA256_V1_")):
                     html = html.replace(marker, hashlib.sha256((main.STATIC_DIR / name).read_bytes()).hexdigest()[:16])
                 html = html.replace('src="/static/', 'src="/preview/static/').replace('href="/static/', 'href="/preview/static/')
-                html = html.replace("<head>", '<head><script src="/preview/static/customer-preview.js"></script><link rel="stylesheet" href="/preview/static/customer-preview.css">')
+                preview_script = hashlib.sha256((main.STATIC_DIR / "customer-preview.js").read_bytes()).hexdigest()[:16]
+                html = html.replace("<head>", f'<head><script src="/preview/static/customer-preview.js?v={preview_script}"></script><link rel="stylesheet" href="/preview/static/customer-preview.css">')
                 return await HTMLResponse(html)(scope, receive, with_cookie)
             if path.startswith('/api/v1/agents/') and path.endswith('/runs') and scope['method']=='POST':
                 async with submission_lock:
