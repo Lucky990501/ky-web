@@ -35,6 +35,15 @@ def plaintext_history(body):
                 raise ValueError("未支持的工具历史类型")
             if item.get("encrypted_content") is not None:
                 raise ValueError("不向供应商转发不透明加密字段")
+            item = dict(item)
+            if item.get('type', 'message') == 'message':
+                # SDK output decorations are not Responses input fields. Only
+                # these two observed SDK fields are removed; all other unknown
+                # fields still fail the unchanged formal request validator.
+                if 'phase' in item and item['phase'] not in {None, 'commentary', 'final_answer'}:
+                    raise ValueError('未支持的消息阶段')
+                item.pop('phase', None)
+                item.pop('internal_chat_message_metadata_passthrough', None)
             safe.append(item)
         body["input"] = safe
     return body, dropped
@@ -49,7 +58,8 @@ class PreviewBudgetExceeded(PermissionError):
 PREVIEW_ERRORS = {
     "PREVIEW_MODEL_BUDGET_EXHAUSTED": "模型体验额度不足，请联系Owner追加授权；不会自动重试。",
     "PREVIEW_EMBEDDING_BUDGET_EXHAUSTED": "知识处理额度不足，原文件已保留；追加授权后可重新处理。",
-    "PREVIEW_INPUT_REJECTED": "本次输入或上下文超出体验限制，请缩短后重试。",
+    "PREVIEW_INPUT_REJECTED": "模型上下文未通过安全或费用校验，并非一定是文字过长；请保留诊断ID。",
+    "PREVIEW_CONTEXT_COST_LIMIT": "本轮会话上下文超过单请求费用上限，未调用模型；请新建会话或联系Owner。",
     "KNOWLEDGE_EMBEDDING_BATCH_TOO_LARGE": "资料向量请求超过大小限制，原文件已保留，请重新处理。",
     "KNOWLEDGE_EMBEDDING_VALIDATION_FAILED": "资料向量请求未通过校验，原文件已保留，请重新处理；仍失败时请联系Owner。",
     "KNOWLEDGE_PROCESSING_FAILED": "资料处理失败，原文件已保留，可重新处理，无需重复上传。",
@@ -83,7 +93,7 @@ def preview_task_failure(task, trace, denied):
 
 
 class PreviewBudget:
-    LIMITS = {"text": (154, Decimal("84")), "image": (2, Decimal("20")), "embedding": (71, Decimal("5"))}
+    LIMITS = {"text": (154, Decimal("84")), "image": (20, Decimal("20")), "embedding": (71, Decimal("5"))}
 
     def __init__(self, root: Path):
         self.path = root / "preview-budget.sqlite"

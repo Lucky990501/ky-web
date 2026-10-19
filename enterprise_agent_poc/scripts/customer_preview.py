@@ -144,7 +144,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
 
     budget = PreviewBudget(root)
     from app.preview_image_execution import PreviewImageExecution
-    authorization_path = ROOT.parent / 'preview-image-authorization.json'
+    authorization_path = ROOT.parent / 'preview-image-authorization.v2.json'
     if image_authorization is None and authorization_path.is_file():
         image_authorization = json.loads(authorization_path.read_text(encoding='utf-8'))
     image_executor = PreviewImageExecution(main, budget, prices, image_authorization)
@@ -234,6 +234,16 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 raise PermissionError('Preview付费请求已暂停；未调用供应商。')
             cost = (Decimal(bounds['input_tokens_upper']) * Decimal(str(prices["text_input_cny_per_million"]))
                     + Decimal(body["max_output_tokens"]) * Decimal(str(prices["text_output_cny_per_million"]))) / Decimal(1_000_000)
+            if cost > Decimal('.60'):
+                # Keep the same conservative input proof and currency cap.
+                # Fit only the supported output token limit, never undercount
+                # input or retry a paid request. Refuse if no useful answer fits.
+                available = Decimal('.60') * 1_000_000 - Decimal(bounds['input_tokens_upper']) * Decimal(str(prices['text_input_cny_per_million']))
+                fitted = int(available / Decimal(str(prices['text_output_cny_per_million'])))
+                if fitted < 2048:
+                    raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'], 'PREVIEW_CONTEXT_COST_LIMIT')
+                body['max_output_tokens'] = min(body['max_output_tokens'], fitted)
+                cost = (Decimal(bounds['input_tokens_upper']) * Decimal(str(prices['text_input_cny_per_million'])) + Decimal(body['max_output_tokens']) * Decimal(str(prices['text_output_cny_per_million']))) / Decimal(1_000_000)
             budget.reserve("text", cost)
             with main.store.connection() as conn:
                 task = conn.execute("SELECT id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
@@ -322,7 +332,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
-            if path == '/api/v1/agents/image-agent/runs' and scope['method'] == 'POST':
+            if path in {'/api/v1/agents/image-agent/runs', '/api/v1/agents/image-agent/plan'} and scope['method'] == 'POST':
                 try:
                     from fastapi import HTTPException
                     try:
@@ -336,6 +346,11 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     if len(raw) > 20000: raise ValueError('图片请求过大。')
                     payload = json.loads(raw)
                     if not isinstance(payload, dict): raise ValueError('图片请求格式无效。')
+                    if path.endswith('/plan'):
+                        from app.image_request_contract import image_plan
+                        count = len(image_plan(payload.get('message', ''), payload.get('message', ''), '1:1', None))
+                        budget.check_capacity('image', count, Decimal(str(prices['image_request_max_cny'])))
+                        return await JSONResponse({'count':count,'max_reserved_cny':str(Decimal(str(prices['image_request_max_cny'])) * count)}, 200)(scope, receive, with_cookie)
                     async with submission_lock:
                         task = image_executor.submit(principal, payload)
                         image_executor.schedule(task)
@@ -346,8 +361,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     return await JSONResponse({'user_message': str(error)}, 403)(scope, receive, with_cookie)
                 except LookupError:
                     return await JSONResponse({'user_message':'会话不存在或无权访问。'}, 404)(scope, receive, with_cookie)
-                except (ValueError, TypeError):
-                    return await JSONResponse({'user_message':'图片请求未通过校验：请确认费用、仅生成1张且不附参考图；输入有效比例或像素。'}, 422)(scope, receive, with_cookie)
+                except (ValueError, TypeError) as error:
+                    from app.image_request_contract import ImageRequestError
+                    message = str(error) if isinstance(error, ImageRequestError) else '图片请求未通过校验：请检查参考图片、费用确认、张数与尺寸；多参考图及高清能力尚未核验。'
+                    return await JSONResponse({'user_message':message}, 422)(scope, receive, with_cookie)
             if not path.startswith("/api/"):
                 if path == "/":
                     return await Response(status_code=307, headers={"location": BASE + "/agents/copywriting"})(scope, receive, with_cookie)

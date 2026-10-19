@@ -835,7 +835,7 @@ class ProductStore:
                 result_json = json.dumps(
                     {"run_id": run_id, "assistant_message_id": assistant_message_id, "generation_id": generation_id,
                      "generation_ids": generation_ids, "image_delivery": evidence.get("image_delivery"),
-                     "image_details": [{"generation_id": identifier, **{key: image[key] for key in ("purpose", "dimension_match", "brand_logo_applied") if key in image}}
+                     "image_details": [{"generation_id": identifier, **{key: image[key] for key in ("purpose", "dimension_match", "brand_logo_applied", "edit_parent_generation_id", "reference_images_used", "actual_size", "format") if key in image}}
                                        for identifier, image in zip(generation_ids, image_artifacts)],
                      "structured_result": structured_result},
                     ensure_ascii=False,
@@ -1022,7 +1022,7 @@ class ProductStore:
                                 for item in call.get("artifacts", []) if isinstance(item, dict)}
                     for image in message["generations"]:
                         image.update({key: value for key, value in metadata.get(image["storage_key"], {}).items()
-                                      if key in {"purpose", "dimension_match", "brand_logo_applied"}})
+                                      if key in {"purpose", "dimension_match", "brand_logo_applied", "edit_parent_generation_id", "reference_images_used", "actual_size", "format"}})
                     message["image_delivery"] = image_trace.get("image_delivery")
                 if message["role"] == "assistant":
                     payload = trace_payloads.get(task_runs.get(task_id), {})

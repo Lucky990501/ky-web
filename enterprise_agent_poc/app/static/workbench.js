@@ -419,7 +419,7 @@ const imageDeliveryHtml = delivery => {
   if(Number(delivery.failed)>0)return `<p class="image-delivery-warning" role="status">部分图片未生成：已完成 ${Number.isInteger(delivery.generated)?delivery.generated:'部分'} 张，失败 ${Number.isInteger(delivery.failed)?delivery.failed:'部分'} 张。已完成的图片仍可查看和下载；不会自动重试。</p>`;
   return delivery.status==='partial'?'<p class="image-delivery-warning" role="status">图片结果未完全符合请求，请核对尺寸与下方提示。已保留真实生成结果，不会自动重试。</p>':'';
 };
-const imageResultStatusHtml = generation => `${generation.dimension_match===false?'<p class="image-delivery-warning" role="status">实际尺寸与请求不一致；展示原始生成图片，未进行放大。</p>':''}${generation.brand_logo_applied===true?'<p class="image-result-dimensions">原始品牌 Logo 已叠加</p>':''}`;
+const imageResultStatusHtml = generation => `${generation.dimension_match===false?'<p class="image-delivery-warning" role="status">实际尺寸与请求不一致；展示原始生成图片，未进行放大。</p>':''}${generation.brand_logo_applied===true?'<p class="image-result-dimensions">原始品牌 Logo 已叠加</p>':''}${generation.edit_parent_generation_id?'<p class="image-result-dimensions">基于已保存版本编辑 · 原图已保留</p>':''}${generation.mime_type?`<p class="image-result-dimensions">格式 ${escapeHtml(generation.mime_type)}</p>`:''}`;
 const messageGalleryHtml = result => {
   const items=resultGenerations(result);return `${imageDeliveryHtml(result?.image_delivery)}${items.length?`<section class="message-image-gallery" aria-label="已生成 ${items.length} 张图片">${items.map(messageGenerationHtml).join('')}</section>`:''}`;
 };

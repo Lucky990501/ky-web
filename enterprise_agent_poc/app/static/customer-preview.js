@@ -23,15 +23,22 @@
     return /^<(?:div|section|article)(?:\s|>)/i.test(text)&&/<\/(?:div|section|article)>\s*$/i.test(text)?text:content;
   };
   const fetchOriginal = window.fetch.bind(window);
-  let imageCapability=null,imageConsent=null;
+  let imageCapability=null,imageConsent=null,editGeneration=null,confirming=false,confirmedSubmit=false;
   window.fetch = (input, options) => {
     const target=input instanceof Request?new Request(url(input.url),input):url(input);
     if(options?.method==='POST'&&new URL(input instanceof Request?input.url:String(target),location.href).pathname==='/preview/api/v1/agents/image-agent/runs'&&imageConsent){
       const body=JSON.parse(options.body||'{}');
-      if(body.message===imageConsent.prompt)options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id})};
+      if(body.message===imageConsent.prompt){
+        const items=document.querySelector('#main')?._chatImage?.items||[];
+        if(body.attachments)body.attachments=body.attachments.map(item=>({...item,role:items.find(x=>x.record?.id===item.id)?.role||'subject'}));
+        if(editGeneration)body.edit_generation_id=editGeneration.id;
+        options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id})};
+      }
       imageConsent=null;
     }
-    return fetchOriginal(target,options);
+    const pending=fetchOriginal(target,options);
+    if(options?.method==='POST'&&String(target).includes('/agents/image-agent/runs'))pending.then(response=>{if(response.ok)editGeneration=null;}).catch(()=>{});
+    return pending;
   };
   const Source = window.EventSource;
   window.EventSource = class extends Source { constructor(value, options) { super(url(value), options); } };
@@ -51,12 +58,13 @@
     document.querySelectorAll('.side-nav [data-page="image"] span').forEach(label => {
       const text=enabled?'图片生成':'图片生成（暂不可用）';if(label.textContent!==text)label.textContent=text;
     });
-    const main=document.querySelector('#main');if(main?.dataset.agentId!=='image-agent')return;
+    const main=document.querySelector('#main');if(main?.dataset.agentId!=='image-agent'){editGeneration=null;return;}
+    if(editGeneration&&editGeneration.context!==main._conversationContext)editGeneration=null;
     const form=main.querySelector('#composer');if(!form)return;
     let notice=main.querySelector('[data-preview-image-notice]');
     if(!notice){notice=document.createElement('p');notice.dataset.previewImageNotice='true';notice.className='composer-run-feedback';notice.setAttribute('role','status');form.before(notice);}
     notice.id=enabled?'preview-image-direct-notice':'preview-image-unavailable';
-    const text=enabled?`独立图片体验：每次1张，单次费用预留不超过¥${imageCapability.request_max_cny}；提交前需确认，不自动重试。暂不支持参考图编辑。`:imageUnavailable;
+    const text=enabled?`独立图片体验：每任务1～5张，剩余${imageCapability.remaining_requests}次；每张费用预留不超过¥${imageCapability.request_max_cny}，逐请求计数，不自动重试。支持1张参考图；多参考图、原生2K/4K尚未核验。${editGeneration?'当前已选编辑基图；未指定部分不能保证绝对不变。':''}`:imageUnavailable;
     if(notice.textContent!==text)notice.textContent=text;
     const send=form.querySelector('#composer-submit');
     if(send?.type==='button')return; // Never disable an active Stop control.
@@ -67,15 +75,43 @@
     });
     if(send&&!enabled){send.title=imageUnavailable;send.setAttribute('aria-label','图片生成暂不可用');}
     if(send&&enabled&&send.title===imageUnavailable){send.title='发送';send.setAttribute('aria-label','发送消息');}
+    main.querySelectorAll('.message-generation[data-result-image]').forEach(card=>{
+      if(card.querySelector('[data-preview-edit-image]')){
+        const button=card.querySelector('[data-preview-edit-image]'),text=editGeneration?.id===card.dataset.resultImage?'取消此编辑基图':'基于此图继续修改';
+        if(button.textContent!==text)button.textContent=text;return;
+      }
+      const button=document.createElement('button');button.type='button';button.className='button secondary';button.dataset.previewEditImage=card.dataset.resultImage;button.textContent='基于此图继续修改';
+      button.onclick=()=>{editGeneration=editGeneration?.id===card.dataset.resultImage?null:{id:card.dataset.resultImage,context:main._conversationContext};main.querySelector('#prompt')?.focus();markImageUnavailable();};
+      card.querySelector('.message-generation-actions')?.append(button);
+    });
+    const slot=main.querySelector('.reference-limit');if(slot&&slot.textContent!=='最多独立管理5张；当前Edit合同仅允许提交1张。多张会明确阻止，不会静默丢弃。')slot.textContent='最多独立管理5张；当前Edit合同仅允许提交1张。多张会明确阻止，不会静默丢弃。';
+    main.querySelectorAll('[data-reference-role]').forEach(select=>{
+      if(select.dataset.previewRoles)return;select.dataset.previewRoles='true';
+      for(const [value,label] of [['style','风格参考'],['background','背景参考'],['composition','构图参考'],['brand','品牌素材']]){const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option);}
+      if(select.parentNode.firstChild?.nodeType===Node.TEXT_NODE)select.parentNode.firstChild.textContent='参考用途';
+    });
   };
-  document.addEventListener('submit',event=>{
+  document.addEventListener('submit',async event=>{
     if(event.target.id==='composer'&&document.querySelector('#main')?.dataset.agentId==='image-agent'){
+      if(confirmedSubmit){confirmedSubmit=false;return;}
+      event.preventDefault();event.stopImmediatePropagation();if(confirming)return;
       const prompt=document.querySelector('#prompt')?.value.trim();
       if(!imageCapability?.enabled||!prompt){event.preventDefault();event.stopImmediatePropagation();markImageUnavailable();return;}
-      if(!window.confirm(`确认生成1张图片？单次费用预留不超过¥${imageCapability.request_max_cny}。请求失败或结果未知时不会自动重试。`)){
-        event.preventDefault();event.stopImmediatePropagation();return;
-      }
-      imageConsent={prompt,id:crypto.randomUUID()};
+      const main=document.querySelector('#main'),attachment=main._chatImage;
+      if(attachment&&!['idle','ready'].includes(attachment.status))return;
+      if(editGeneration&&attachment?.items.length){alert('请选择已有基图或上传参考图，不要同时提交。');return;}
+      confirming=true;
+      try{
+        const response=await fetchOriginal('/preview/api/v1/agents/image-agent/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:prompt})}),plan=await response.json();
+        if(!response.ok)throw Error(plan.user_message||'图片计划校验失败，未提交生成。');
+        if(!main.isConnected||document.querySelector('#prompt')?.value.trim()!==prompt)return;
+        if(!window.confirm(`确认生成${plan.count}张图片？本任务最多预留¥${plan.max_reserved_cny}，按每张实际请求计数。参考图会进入Edit接口；人物及局部编辑不能保证完全不变。失败或结果未知不会自动重试。`))return;
+        imageConsent={prompt,id:crypto.randomUUID()};confirmedSubmit=true;event.target.requestSubmit();
+      }catch(error){
+        let feedback=main.querySelector('#preview-image-error');
+        if(!feedback){feedback=document.createElement('p');feedback.id='preview-image-error';feedback.className='image-delivery-warning';feedback.setAttribute('role','alert');feedback.tabIndex=-1;event.target.before(feedback);}
+        feedback.textContent=error.message;feedback.focus();
+      }finally{confirming=false;}
     }
   },true);
   window.enhancePreviewKnowledge = (main, items) => {

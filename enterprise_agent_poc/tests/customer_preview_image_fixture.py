@@ -14,13 +14,18 @@ from scripts.customer_preview import create_preview
 async def fixture_image(self,task,plan):
     from PIL import Image
     from app.storage import storage_provider
-    self.budget.reserve('image',Decimal('1'))
-    output=io.BytesIO();Image.new('RGB',(1024,1024),(30,80,140)).save(output,format='PNG')
-    key=f"generated/{task['tenant_id']}/{uuid4().hex}.png"
-    storage_provider(self.main.settings).put(key,output.getvalue(),'image/png')
+    from app.image_request_contract import image_plan
+    results=[]
+    for item in image_plan(task['input_text'],task['input_text'],plan['aspect_ratio'],None):
+        self.budget.reserve('image',Decimal('1'))
+        width,height=map(int,item['size'].split('x'))
+        output=io.BytesIO();Image.new('RGB',(width,height),(30,80,140)).save(output,format='PNG')
+        key=f"generated/{task['tenant_id']}/{uuid4().hex}.png"
+        storage_provider(self.main.settings).put(key,output.getvalue(),'image/png')
+        results.append({'storage_key':key,'width':width,'height':height,'requested_size':item['size'],'purpose':'FIXTURE_ONLY '+item['purpose'],'dimension_match':True})
     return {'provider':'FIXTURE_ONLY','model':self.main.settings.image_model_id,
-            'results':[{'storage_key':key,'width':1024,'height':1024,'requested_size':plan['size'],'purpose':'FIXTURE_ONLY','dimension_match':True}],
-            'delivery':{'status':'completed','requested':1,'generated':1,'failed':0}}
+            'results':results,
+            'delivery':{'status':'completed','requested':len(results),'generated':len(results),'failed':0}}
 
 
 if __name__=='__main__':
@@ -30,5 +35,5 @@ if __name__=='__main__':
     app=create_preview(args.data_dir,args.port,args.port+1,local_http=True,
         pricing={'image_pricing_verified':True,'image_request_max_cny':'1'},
         image_authorization={'authorization_id':AUTHORIZATION_ID,'approved':True,'execution_mode':MODE,
-            'model':'gpt-image-2.5-sunburst-c','max_provider_calls':2,'request_max_cny':'1'})
+            'model':'gpt-image-2.5-sunburst-c','max_provider_calls':20,'request_max_cny':'1'})
     uvicorn.run(app,host='127.0.0.1',port=args.port,access_log=False)

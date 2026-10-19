@@ -25,6 +25,17 @@ def test_plain_tool_cycle_preserves_real_call_and_result():
     assert "encrypted_content" not in str(normalized)
 
 
+def test_observed_sdk_message_decorations_removed_not_unknown_fields():
+    from app.test_text_gate import TestTextGate,TestTextGateDenied
+    message={'type':'message','role':'assistant','content':[{'type':'output_text','text':'已确认'}],
+             'phase':'final_answer','internal_chat_message_metadata_passthrough':{'sdk':'transport-only'}}
+    body,_=plaintext_history({'model':'fixture','input':[message],'max_output_tokens':2048})
+    assert 'phase' not in body['input'][0]
+    TestTextGate.request_bound(body)
+    body['input'][0]['unknown_future_field']='not allowed'
+    with pytest.raises(TestTextGateDenied):TestTextGate.request_bound(body)
+
+
 @pytest.mark.parametrize("item",[{"type":"item_reference","id":"unknown"},{"type":"computer_call"},{"type":"message","encrypted_content":"Fixture"}])
 def test_unknown_or_opaque_inputs_fail_closed(item):
     with pytest.raises(ValueError): plaintext_history({"input":[item]})
@@ -39,7 +50,7 @@ def test_budget_count_persists_across_restart(tmp_path):
 
 def test_customer_trial_approved_limits_and_prior_ledger_are_preserved(tmp_path):
     meter=PreviewBudget(tmp_path)
-    assert meter.LIMITS=={'text':(154,Decimal('84')),'image':(2,Decimal('20')),'embedding':(71,Decimal('5'))}
+    assert meter.LIMITS=={'text':(154,Decimal('84')),'image':(20,Decimal('20')),'embedding':(71,Decimal('5'))}
     for _ in range(49):meter.reserve('text',Decimal('.1'))
     for _ in range(30):meter.reserve('embedding',Decimal('.05'))
     resumed=PreviewBudget(tmp_path)

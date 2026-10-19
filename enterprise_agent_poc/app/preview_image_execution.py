@@ -21,7 +21,7 @@ from app.security import RuntimePrincipal
 
 
 MODE = 'preview_direct_image_business_v1'
-AUTHORIZATION_ID = 'owner-preview-direct-image-20261019-v1'
+AUTHORIZATION_ID = 'owner-preview-image-capabilities-20261019-v2'
 
 
 class PreviewImageExecution:
@@ -41,7 +41,7 @@ class PreviewImageExecution:
                 and grant.get('approved') is True
                 and grant.get('execution_mode') == MODE
                 and grant.get('model') == self.main.settings.image_model_id
-                and grant.get('max_provider_calls') == 2
+                and grant.get('max_provider_calls') == 20
                 and self.pricing.get('image_pricing_verified') is True
                 and fee.is_finite() and authorized_fee.is_finite() and Decimal('0') < fee <= authorized_fee <= Decimal('1'))
 
@@ -51,13 +51,21 @@ class PreviewImageExecution:
                        and json.loads(row[0]).get('task_id') == task_id
                        for row in conn.execute('select payload from observations'))
 
+    def submission(self, task_id):
+        with sqlite3.connect(self.budget.path) as conn:
+            return next((p for row in conn.execute('select payload from observations')
+                         if (p := json.loads(row[0])).get('event') == 'preview_image_submission'
+                         and p.get('task_id') == task_id), {})
+
     def capability(self):
         quota = self.budget.summary()['image']
         enabled = self.authorized() and quota['requests'] < quota['max_requests']
         return {'enabled': enabled, 'execution_mode': MODE,
                 'request_max_cny': str(self.pricing.get('image_request_max_cny', '0')),
                 'remaining_requests': max(0, quota['max_requests'] - quota['requests']),
-                'user_message': ('独立体验图片生成：每次仅生成1张，不自动重试。'
+                'max_outputs': 5, 'max_reference_images': 1,
+                'native_high_resolution': 'NOT_VERIFIED',
+                'user_message': ('独立体验图片生成：每任务1～5张，参考图编辑及版本保留；不自动重试。'
                                  if enabled else '图片生成暂不可用：未取得独立执行授权或体验额度已用完。')}
 
     def _prior_claim(self, principal, request_id, fingerprint):
@@ -77,7 +85,7 @@ class PreviewImageExecution:
     def submit(self, principal, payload):
         if not self.authorized() or not principal.tenant_id.startswith('preview-'):
             raise PermissionError('尚未取得Preview独立图片业务授权。')
-        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id'}:
+        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id', 'edit_generation_id'}:
             raise ValueError('图片执行身份及配置只能由服务端确定。')
         if payload.get('preview_image_confirmed') is not True:
             raise PermissionError('请先明确确认图片生成费用。')
@@ -85,25 +93,67 @@ class PreviewImageExecution:
         prompt = payload.get('message')
         if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000:
             raise ValueError('请输入1～4000字的图片需求。')
-        if payload.get('attachments'):
-            raise ValueError('本次独立图片入口仅开放文字生图，参考图编辑尚未开放。')
-        plan = image_plan(prompt, prompt, '1:1', None)
-        if len(plan) != 1:
-            raise ValueError('本次体验每个任务只支持1张图片，请拆分需求。')
-        fingerprint = hashlib.sha256(json.dumps({'message': prompt, 'conversation_id': payload.get('conversation_id')}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         prior = self._prior_claim(principal, request_id, fingerprint)
         if prior:
             return prior
+        attachments = payload.get('attachments') or []
+        if not isinstance(attachments, list) or len(attachments) > 1:
+            raise ValueError('当前供应商多参考图合同尚未核实；请仅选择1张，不会丢弃额外图片。')
+        for item in attachments:
+            if not isinstance(item, dict) or set(item) - {'type', 'id', 'role'} or item.get('type') != 'image':
+                raise ValueError('参考图片格式无效。')
+            if item.get('role', 'subject') not in {'subject', 'style', 'background', 'composition', 'brand', 'reference', 'front', 'back'}:
+                raise ValueError('参考图片用途无效。')
+            record = self.main.product_store.chat_image_attachment(principal.tenant_id, principal.user_id, str(item.get('id', '')))
+            if not record or record.get('task_id'):
+                raise ValueError('参考图不存在、已发送或无权访问。')
+        parent_id = payload.get('edit_generation_id')
+        parent = None
+        if parent_id:
+            if attachments:
+                raise ValueError('请选择已有图片或上传参考图，不要同时提交。')
+            with self.main.store.connection() as conn:
+                row = conn.execute('SELECT * FROM generations WHERE id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL',
+                                   (parent_id, principal.tenant_id, principal.user_id)).fetchone()
+            if not row:
+                raise LookupError('编辑基图不存在或无权访问。')
+            parent = dict(row)
+            if parent.get('conversation_id') != payload.get('conversation_id'):
+                raise ValueError('编辑基图必须属于当前会话。')
+        from fractions import Fraction
+        source_ratio = '1:1'
+        source_record = parent or (record if attachments else {})
+        if source_record and source_record.get('width') and source_record.get('height'):
+            fraction = Fraction(source_record['width'], source_record['height'])
+            candidate = f'{fraction.numerator}:{fraction.denominator}'
+            if candidate in {'1:1','9:16','16:9','4:5','3:2','2:3'}:
+                source_ratio = candidate
+        plan = image_plan(prompt, prompt, source_ratio, None)
         with self.main.store.connection() as conn:
             if conn.execute("select count(*) from tasks where status in ('queued','running')").fetchone()[0]:
                 raise PermissionError('体验服务当前正在生成，请稍后再提交。')
-        self.budget.check_capacity('image', 1, Decimal(str(self.pricing['image_request_max_cny'])))
+        self.budget.check_capacity('image', len(plan), Decimal(str(self.pricing['image_request_max_cny'])))
         if not self.main.product_store.agent_enabled(principal.tenant_id, 'image-agent'):
             raise PermissionError('图片智能体尚未为当前企业启用。')
-        task = self.main.product_store.create_task(principal.tenant_id, principal.user_id, 'image-agent', prompt, payload.get('conversation_id'))
+        if parent:
+            # An owner-checked immutable copy through the existing upload store;
+            # no arbitrary URL/path, original Generation never overwritten.
+            from app.storage import storage_provider
+            from app.chat_image_uploads import validate_chat_image
+            source = storage_provider(self.main.settings).get(parent['storage_key'])
+            ext, mime, width, height = validate_chat_image(source, parent['mime_type'])
+            key = f'chat-uploads/{principal.tenant_id}/{uuid4().hex}{ext}'
+            storage_provider(self.main.settings).put(key, source, mime)
+            record = self.main.product_store.create_chat_image_attachment(principal.tenant_id, principal.user_id,
+                key, '编辑基图' + ext, mime, len(source), width, height)
+            attachments = [{'type': 'image', 'id': record['id'], 'role': 'subject'}]
+        task = self.main.product_store.create_task(principal.tenant_id, principal.user_id, 'image-agent', prompt,
+            payload.get('conversation_id'), attachment_ids=[item['id'] for item in attachments])
         self.budget.observe({'event': 'preview_image_submission', 'authorization_id': AUTHORIZATION_ID,
                              'tenant_id': principal.tenant_id, 'user_id': principal.user_id,
-                             'request_id': request_id, 'fingerprint': fingerprint, 'task_id': task['id']})
+                             'request_id': request_id, 'fingerprint': fingerprint, 'task_id': task['id'],
+                             'references': attachments, 'edit_parent_generation_id': parent_id, 'requested_outputs': len(plan), 'aspect_ratio': source_ratio})
         return task
 
     def schedule(self, task):
@@ -118,25 +168,29 @@ class PreviewImageExecution:
         from mcp.client.streamable_http import streamablehttp_client
         issuer = self.main.token_issuer
         token = issuer.issue(RuntimePrincipal(task['tenant_id'], 'image-agent', MODE,
-                                             ('image:generate',), int(time.time()) + 240))
+                                             ('image:generate',), int(time.time()) + 900))
         scope = issuer.issue_task_scope(task['tenant_id'], task['id'])
         # This is the normal authenticated MCP transport, without a Codex client.
         async with streamablehttp_client(self.main.settings.platform_mcp_url,
                 headers={'Authorization': 'Bearer ' + token, 'X-Runtime-Execution-Scope': scope},
-                timeout=timedelta(seconds=180), sse_read_timeout=timedelta(seconds=180)) as (reader, writer, _):
+                timeout=timedelta(seconds=660), sse_read_timeout=timedelta(seconds=660)) as (reader, writer, _):
             async with ClientSession(reader, writer) as session:
                 await session.initialize()
+                attachment = self.main.product_store.task_chat_image_attachment(task['id'], task['tenant_id'])
+                submission = self.submission(task['id'])
                 result = await session.call_tool('image_generation', {
                     'prompt': task['input_text'], 'references': [],
+                    'reference_images': [attachment['id']] if attachment else [],
+                    'reference_role': (submission.get('references') or [{}])[0].get('role', 'subject'),
                     'aspect_ratio': plan['aspect_ratio'], 'size': plan['size'],
-                }, read_timeout_seconds=timedelta(seconds=180))
+                }, read_timeout_seconds=timedelta(seconds=660))
         if result.isError:
             raise RuntimeError('image_business_tool_failed')
         value = result.structuredContent
         if not isinstance(value, dict):
             value = next((json.loads(item.text) for item in result.content
                           if getattr(item, 'type', '') == 'text'), None)
-        if not isinstance(value, dict) or not isinstance(value.get('results'), list) or len(value['results']) != 1:
+        if not isinstance(value, dict) or not isinstance(value.get('results'), list) or not value['results']:
             raise RuntimeError('image_business_result_invalid')
         return value
 
@@ -177,25 +231,35 @@ class PreviewImageExecution:
             products.add_task_activity(tid, tenant, 'generating', 'started')
             if products.cancellation_requested(tid, tenant):
                 raise asyncio.CancelledError()
-            plan = image_plan(task['input_text'], task['input_text'], '1:1', None)[0]
+            plan = image_plan(task['input_text'], task['input_text'], self.submission(tid).get('aspect_ratio', '1:1'), None)[0]
             result = await self.call_image(task, plan)
-            artifact = result['results'][0]
+            artifacts = result['results']
+            if len(artifacts) > len(image_plan(task['input_text'], task['input_text'], '1:1', None)):
+                raise ValueError('image_business_result_count_invalid')
+            submission = self.submission(tid)
+            trace['edit_parent_generation_id'] = submission.get('edit_parent_generation_id')
+            trace['reference_images_submitted'] = submission.get('references', [])
+            trace['reference_images_used'] = list(dict.fromkeys(x for item in artifacts for x in item.get('reference_images_used', [])))
             from app.platform_mcp.service import _validated_image_metadata
             from app.storage import storage_provider
             from PIL import Image
             import io
-            key = artifact.get('storage_key', '')
-            if not key.startswith(f'generated/{tenant}/') or any(x in {'', '.', '..'} for x in key.split('/')) or '\\' in key:
-                raise ValueError('image_business_storage_invalid')
-            content = storage_provider(main.settings).get(key)
-            _validated_image_metadata(content)
-            with Image.open(io.BytesIO(content)) as picture:
-                artifact['width'], artifact['height'] = picture.size
-            response = '已生成1张图片，请使用下方图片卡片查看大图或下载。'
+            for artifact in artifacts:
+                artifact['edit_parent_generation_id'] = submission.get('edit_parent_generation_id')
+                key = artifact.get('storage_key', '')
+                if not key.startswith(f'generated/{tenant}/') or any(x in {'', '.', '..'} for x in key.split('/')) or '\\' in key:
+                    raise ValueError('image_business_storage_invalid')
+                content = storage_provider(main.settings).get(key)
+                _validated_image_metadata(content)
+                with Image.open(io.BytesIO(content)) as picture:
+                    artifact['width'], artifact['height'] = picture.size
+            response = f'已生成{len(artifacts)}张图片，请使用下方图片卡片查看大图或下载。'
+            if result.get('failures'):
+                response += f"\n部分图片失败：{len(result['failures'])}张；已保留成功结果，没有自动重试。"
             if result.get('delivery', {}).get('status') == 'partial':
                 response += '\n提示：供应商实际尺寸与请求不一致，请查看卡片中的实际像素。'
             trace.update(mcp_calls=[{'server': 'platform', 'tool': 'image_generation', 'status': 'completed',
-                                    'artifact': artifact, 'artifacts': [artifact], 'execution_mode': MODE}],
+                                    'artifact': artifacts[0], 'artifacts': artifacts, 'execution_mode': MODE}],
                          image_delivery=result.get('delivery'), runtime_completed=True, runtime_status='completed',
                          required_tool_calls_completed=True, final_response_received=True,
                          final_result=response, final_response_length=len(response), artifact_available=True)
@@ -203,7 +267,7 @@ class PreviewImageExecution:
             if products.cancellation_requested(tid, tenant):
                 raise asyncio.CancelledError()
             products.complete_task_success(task, run_id=run_id, conversation_id=conversation_id,
-                response=response, trace_payload=trace, image_artifacts=[artifact])
+                response=response, trace_payload=trace, image_artifacts=artifacts)
             products.add_task_activity(tid, tenant, 'generating', 'completed')
             products.add_task_activity(tid, tenant, 'completed', 'completed')
         except asyncio.CancelledError:

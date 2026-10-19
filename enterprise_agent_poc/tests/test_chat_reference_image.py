@@ -80,7 +80,7 @@ def test_upload_accepts_real_image_formats_and_private_proxy(chat_image_env, ima
     (b"GIF89a-not-an-image", "image/gif"),
     (b"not an image", "image/png"),
     (b"x" * (10 * 1024 * 1024 + 1), "image/png"),
-])
+], ids=['mime-mismatch','truncated','unsupported','not-image','oversize'])
 def test_upload_rejects_mismatch_corruption_unsupported_and_oversize(chat_image_env, content, mime):
     client, _store, _product, _settings, _owner = chat_image_env
     response = client.post("/api/v1/chat-images", files={"file": ("bad.png", content, mime)})
@@ -225,6 +225,34 @@ def test_attached_task_uses_multipart_edits_and_actual_png_metadata(chat_image_e
     with pytest.raises(ValueError, match="最多"):
         asyncio.run(service.image_generation(token, "prompt", [], "1:1", execution_scope=scope,
                                              reference_images=[uploaded["id"], uploaded["id"]]))
+
+
+@pytest.mark.parametrize('partial',[False,True])
+def test_preview_bound_reference_multi_output_uses_bytes_and_reports_partial(chat_image_env,monkeypatch,partial):
+    client,store,product,settings,_owner=chat_image_env
+    source=picture('JPEG',(20,16))
+    uploaded=client.post('/api/v1/chat-images',files={'file':('teacher.jpg',source,'image/jpeg')}).json()
+    task=client.post('/api/v1/agents/image-agent/runs',json={'message':'生成2张人物海报，每面单独一张，不要Logo','attachments':[{'type':'image','id':uploaded['id']}]}).json()
+    issuer=RuntimeTokenIssuer('isolated-preview-edit-fixture')
+    token=issuer.issue(RuntimePrincipal('tenant-a','image-agent','fixture',('image:generate',),int(time.time())+60))
+    scope='runtime:'+issuer.issue_task_scope('tenant-a',task['id'])
+    monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true');monkeypatch.setenv(settings.image_api_key_env,'fixture-not-a-key')
+    calls=[]
+    class Client:
+        def __init__(self,**kwargs):pass
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        async def post(self,url,**kwargs):
+            calls.append((url,kwargs))
+            if partial and len(calls)==2:return httpx.Response(500,json={'error':'fixture'})
+            return httpx.Response(200,json={'data':[{'b64_json':base64.b64encode(picture('PNG',(864,1536))).decode()}]})
+    monkeypatch.setattr(httpx,'AsyncClient',Client)
+    result=asyncio.run(PlatformMCPService(store,issuer,settings).image_generation(token,'人物海报',[],'9:16',execution_scope=scope,reference_images=[uploaded['id']]))
+    assert len(calls)==2
+    assert all(url.endswith('/images/edits') and kwargs['files']['image'][1]==source for url,kwargs in calls)
+    assert len(result['results'])==(1 if partial else 2)
+    assert result['delivery']['failed']==(1 if partial else 0)
+    assert all(item['reference_images_used']==[uploaded['id']] for item in result['results'])
 
 
 def test_missing_reference_cannot_be_forced_into_edits(chat_image_env, monkeypatch):

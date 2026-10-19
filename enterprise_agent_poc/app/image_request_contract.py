@@ -39,6 +39,9 @@ def requested_count(text: str) -> int:
     counts = []
     for match in re.finditer(r"([1-9]\d*|一|二|两|三|四|五|六|七|八|九|十)\s*(?:张|幅)(图片|图|海报|宣传图)?", text):
         before, after = text[max(0,match.start()-12):match.start()], text[match.end():match.end()+10]
+        # A per-side instruction is not another total output count.
+        if re.search(r'(?:每面|每张|每个用途|各)(?:单独|分别)?\s*$', before):
+            continue
         if re.search(r"(?:参考图|原图|素材)[：:]?\s*$", before) or re.match(r"\s*(?:参考图|参考图片|原图|素材|卡片|券)", after):
             continue
         if not match.group(2) and after.strip(" ，,。；;！!") and not re.search(r"生成|制作|输出|设计|做|来|要|正反|正面|背面|反面", before):

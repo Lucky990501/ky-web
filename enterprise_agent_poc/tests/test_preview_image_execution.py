@@ -35,7 +35,7 @@ def image_fixture(tmp_path, monkeypatch):
         actors.append(SimpleNamespace(tenant_id=tenant,user_id=user['id']))
     budget = PreviewBudget(tmp_path)
     main = SimpleNamespace(settings=settings,store=store,product_store=products,token_issuer=RuntimeTokenIssuer('isolated-fixture-only-token-signing'))
-    grant = dict(authorization_id=AUTHORIZATION_ID,approved=True,execution_mode=MODE,model=settings.image_model_id,max_provider_calls=2,request_max_cny='1')
+    grant = dict(authorization_id=AUTHORIZATION_ID,approved=True,execution_mode=MODE,model=settings.image_model_id,max_provider_calls=20,request_max_cny='1')
     executor = PreviewImageExecution(main,budget,dict(image_pricing_verified=True,image_request_max_cny='1'),grant)
     calls = []
     async def fixture_image(task, plan):
@@ -64,7 +64,7 @@ def test_explicit_grant_and_click_required(image_fixture):
 
 
 @pytest.mark.parametrize('extra',[{'tenant_id':'preview-fixture-b'},{'storage_key':'/opt/private'},
-                                  {'message':'生成2张图片'},{'attachments':[{'id':'foreign'}]}])
+                                  {'message':'生成6张图片'},{'attachments':[{'id':'foreign'}]}])
 def test_untrusted_identity_paths_batch_and_attachments_rejected(image_fixture,extra):
     executor,actors,calls=image_fixture
     with pytest.raises(ValueError):executor.submit(actors[0],payload(**extra))
@@ -116,7 +116,7 @@ def test_disabled_agent_fails_before_task_or_payment(image_fixture):
 
 def test_exhaustion_does_not_create_new_task(image_fixture):
     executor,actors,calls=image_fixture
-    executor.budget.reserve('image',Decimal('1'));executor.budget.reserve('image',Decimal('1'))
+    for _ in range(20):executor.budget.reserve('image',Decimal('1'))
     with pytest.raises(PreviewBudgetExceeded):executor.submit(actors[0],payload())
     with executor.main.store.connection() as conn:
         assert conn.execute('select count(*) from tasks').fetchone()[0]==0
@@ -138,3 +138,79 @@ def test_cancelled_task_does_not_dispatch(image_fixture):
     task=executor.submit(actor,payload());executor.main.product_store.cancel_task(task['id'],actor.tenant_id,actor.user_id)
     asyncio.run(executor.execute(task))
     assert calls==[]
+
+
+def upload_reference(executor, actor):
+    stream=io.BytesIO();Image.new('RGB',(320,480),'gray').save(stream,format='JPEG')
+    key=f'chat-uploads/{actor.tenant_id}/{uuid4().hex}.jpg'
+    storage_provider(executor.main.settings).put(key,stream.getvalue(),'image/jpeg')
+    return executor.main.product_store.create_chat_image_attachment(actor.tenant_id,actor.user_id,key,'teacher.jpg','image/jpeg',len(stream.getvalue()),320,480)
+
+
+def test_reference_binds_original_owned_upload_and_replay_is_idempotent(image_fixture):
+    executor,actors,calls=image_fixture;actor=actors[0];ref=upload_reference(executor,actor)
+    request=payload(message='根据原人物做9:16教师海报',attachments=[{'type':'image','id':ref['id'],'role':'subject'}])
+    task=executor.submit(actor,request)
+    assert executor.submit(actor,request)['id']==task['id']
+    bound=executor.main.product_store.task_chat_image_attachment(task['id'],actor.tenant_id)
+    assert bound['id']==ref['id'] and bound['storage_key']==ref['storage_key']
+    assert executor.submission(task['id'])['references'][0]['role']=='subject'
+    assert calls==[]
+
+
+@pytest.mark.parametrize('peer',[1,2])
+def test_reference_other_visitor_never_binds(image_fixture,peer):
+    executor,actors,calls=image_fixture;ref=upload_reference(executor,actors[peer])
+    with pytest.raises(ValueError):executor.submit(actors[0],payload(attachments=[{'type':'image','id':ref['id']}]))
+    assert calls==[]
+
+
+def test_multiple_references_fail_explicitly_without_dispatch(image_fixture):
+    executor,actors,calls=image_fixture
+    refs=[upload_reference(executor,actors[0]) for _ in range(2)]
+    with pytest.raises(ValueError,match='多参考图合同'):
+        executor.submit(actors[0],payload(attachments=[{'type':'image','id':r['id']} for r in refs]))
+    assert calls==[] and executor.budget.summary()['image']['requests']==0
+
+
+def test_saved_generation_edit_creates_new_version_keeps_original(image_fixture):
+    executor,actors,calls=image_fixture;actor=actors[0]
+    first=executor.submit(actor,payload());asyncio.run(executor.execute(first))
+    done=executor.main.product_store.task(first['id'],actor.tenant_id,actor.user_id);old=done['generations'][0]
+    edit=executor.submit(actor,payload(message='只改标题，人物不要变',conversation_id=done['conversation_id'],edit_generation_id=old['id']))
+    asyncio.run(executor.execute(edit))
+    result=executor.main.product_store.task(edit['id'],actor.tenant_id,actor.user_id)
+    assert result['status']=='completed'
+    assert result['generations'][0]['edit_parent_generation_id']==old['id']
+    assert result['generations'][0]['id']!=old['id']
+    history=executor.main.product_store.conversation_detail(actor.tenant_id,actor.user_id,done['conversation_id'])
+    assert len(history['generations'])==2
+
+
+@pytest.mark.parametrize('count',[2,3,5])
+def test_multi_output_all_results_and_full_budget_preflight(image_fixture,count):
+    executor,actors,calls=image_fixture;original=executor.call_image
+    async def batch(task,plan):
+        values=[await original(task,plan) for _ in range(count)]
+        return {'results':[v['results'][0] for v in values], 'delivery':{'status':'completed','requested':count,'generated':count,'failed':0}}
+    executor.call_image=batch
+    task=executor.submit(actors[0],payload(message=f'生成{count}张不同用途的图片，不要Logo'))
+    asyncio.run(executor.execute(task));done=executor.main.product_store.task(task['id'],actors[0].tenant_id,actors[0].user_id)
+    assert done['status']=='completed' and len(done['generations'])==count
+    assert executor.budget.summary()['image']['requests']==count
+
+
+def test_v2_budget_keeps_old_spend_and_refuses_21st_request(tmp_path):
+    budget=PreviewBudget(tmp_path)
+    for _ in range(2):budget.reserve('image',Decimal('1'))
+    resumed=PreviewBudget(tmp_path)
+    assert resumed.summary()['image']['max_requests']==20
+    assert resumed.summary()['image']['requests']==2
+    for _ in range(18):resumed.reserve('image',Decimal('1'))
+    with pytest.raises(PreviewBudgetExceeded):resumed.reserve('image',Decimal('1'))
+
+
+def test_per_side_single_image_is_not_a_conflicting_total():
+    from app.image_request_contract import requested_count
+    assert requested_count('生成2张图片，正面和背面，每面单独一张，不要拼图')==2
+    with pytest.raises(ValueError):requested_count('生成2张图片，另外生成3张图片')

@@ -110,6 +110,7 @@ def create_mcp():
                                reference_images: list[str] | None = None,
                                size: str | None = None,
                                outputs: list[dict[str, str]] | None = None,
+                               reference_role: str = 'subject',
                                include_brand_logo: bool = False) -> dict[str, Any]:
         """Generate an image via the platform Tool Gateway.
 
@@ -135,7 +136,7 @@ def create_mcp():
                 bearer, prompt, references, aspect_ratio,
                 retry_of=retry_of, execution_scope=execution_scope,
                 reference_images=reference_images, size=size, outputs=outputs,
-                include_brand_logo=include_brand_logo,
+                include_brand_logo=include_brand_logo, reference_role=reference_role,
             )
         except ImageRequestError as error:
             failure = {"error_code": error.code, "message": str(error), "retryable": False, "provider_invoked": False}
