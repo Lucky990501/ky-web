@@ -215,7 +215,7 @@ def test_confirmation_digest_disabled_agent_and_whole_plan_capacity(setup):
         with pytest.raises(PermissionError):service.confirm(actor,plan['id'],digest,confirmed)
     service.authorization={**GRANT,'max_images_per_task':1}
     with pytest.raises(IllustrationError) as error:service.confirm(actor,plan['id'],plan['digest'],True)
-    assert error.value.code=='ILLUSTRATION_BUDGET_EXHAUSTED' and service.capability()['reserved_requests']==0
+    assert error.value.code=='ILLUSTRATION_TASK_LIMIT' and service.capability()['reserved_requests']==0
     with service.main.store.connection() as conn:conn.execute("update tenant_agent_instances set status='disabled' where tenant_id=? and agent_id='campaign-agent'",(actor.tenant_id,))
     with pytest.raises(PermissionError):service.confirm(actor,plan['id'],plan['digest'],True)
 

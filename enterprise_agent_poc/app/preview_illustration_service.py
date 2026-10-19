@@ -63,15 +63,31 @@ class PreviewIllustrationService:
     def limits(self):
         grant=self.authorization
         try:
-            fee=Decimal(str(grant.get('request_max_cny','0')));total=Decimal(str(grant.get('max_total_cny','0')))
+            ceiling=Decimal(str(grant.get('request_max_cny','0')))
+            fee=Decimal(str(grant.get('estimated_request_cny',ceiling)));total=Decimal(str(grant.get('max_total_cny','0')))
             count=grant.get('max_requests',0);per_task=grant.get('max_images_per_task',0)
             valid=(grant.get('approved') is True and grant.get('pricing_verified') is True
                    and grant.get('model')==MODEL and re.fullmatch(r'[a-zA-Z0-9_-]{1,120}',grant.get('authorization_id',''))
                    and grant.get('automatic_paid_retries')==0 and fee.is_finite() and fee>0
+                   and ceiling.is_finite() and ceiling>=fee
                    and total.is_finite() and total>=fee and type(count) is int and count>0
                    and type(per_task) is int and 0<per_task<=80)
         except (ValueError,TypeError,InvalidOperation):valid=False
         return (fee,total,count,per_task) if valid else None
+
+    def plan_limits(self,kind):
+        """Agent-specific Preview limits; no change to shared image generation."""
+        limits=self.limits()
+        if not limits:raise IllustrationError('ILLUSTRATION_BUDGET_PENDING','配图预算合同无效。')
+        agent='campaign-agent' if kind=='activity' else 'preview-wechat-agent'
+        count=self.authorization.get('agent_max_images_per_task',{}).get(agent,limits[3])
+        maximum=self.authorization.get('agent_max_plan_cny',{}).get(agent)
+        try:
+            cost=Decimal(str(maximum)) if maximum is not None else None
+            valid=type(count) is int and 0<count<=80 and (cost is None or cost.is_finite() and cost>0)
+        except (ValueError,TypeError,InvalidOperation):valid=False
+        if not valid:raise IllustrationError('ILLUSTRATION_BUDGET_PENDING','配图任务预算合同无效。')
+        return count,cost
 
     def actor_allowed(self,actor):
         tenants=self.authorization.get('allowed_tenant_ids')
@@ -113,7 +129,9 @@ class PreviewIllustrationService:
           'ILLUSTRATION_BUDGET_EXHAUSTED':'Qwen全局配图额度不足，未发起新请求；已有正文及图片仍可查看。'}
         return {'model':MODEL,'configured':configured,'key_status':'CONFIGURED' if self.config.key else 'PENDING',
                 'budget_status':'APPROVED' if limits else 'PENDING','enabled':reason is None,'eligibility_code':reason,
-                'request_max_cny':str(limits[0]) if limits else None,
+                'request_max_cny':str(self.authorization['request_max_cny']) if limits else None,
+                'estimated_request_cny':str(limits[0]) if limits else None,
+                'agent_max_images_per_task':self.authorization.get('agent_max_images_per_task',{}),
                 'max_images_per_task':limits[3] if limits else 0,'max_requests':limits[2] if limits else 0,
                 'reserved_requests':len(rows),'provider_attempts':sum(r['status']!='reserved' for r in rows),
                 'provider_http_responses':sum(r['http_status'] is not None for r in rows),
@@ -257,8 +275,11 @@ class PreviewIllustrationService:
                       user_message=self.capability(actor)['user_message'])
         if row['status']=='planned' and limits and result['capability']['enabled']:
             count=len(payload['items'])
-            if count>limits[3]:
-                result.update(can_generate=False,blocker_code='ILLUSTRATION_TASK_LIMIT',user_message=f'本计划需要{count}张，超过当前单任务{limits[3]}张上限；没有静默删减配图。')
+            per_task,plan_cost=self.plan_limits(payload['kind'])
+            if count>per_task:
+                result.update(can_generate=False,blocker_code='ILLUSTRATION_TASK_LIMIT',user_message=f'本计划需要{count}张，超过当前单任务{per_task}张上限；没有静默删减配图。')
+            elif plan_cost is not None and limits[0]*count>plan_cost:
+                result.update(can_generate=False,blocker_code='ILLUSTRATION_PLAN_COST_LIMIT',user_message=f'完整计划最高预留¥{limits[0]*count}，超过单计划¥{plan_cost}上限；未生成任何新配图。')
             elif count>result['capability']['remaining_requests'] or Decimal(result['capability']['reserved_ceiling_cny'])+limits[0]*count>limits[1]:
                 result.update(can_generate=False,blocker_code='ILLUSTRATION_BUDGET_EXHAUSTED',user_message=f'完整计划需要{count}张，当前全局额度不足；未生成任何新配图。')
             else:result['can_generate']=bool(count)
@@ -292,14 +313,18 @@ class PreviewIllustrationService:
         if not self.config.enabled or not self.config.key:raise IllustrationError('ILLUSTRATION_NOT_CONFIGURED','配图模型未配置；纯文字导出仍可使用。')
         limits=self.limits()
         if not limits:raise IllustrationError('ILLUSTRATION_BUDGET_PENDING','新配图模型价格与预算尚未批准，没有调用。')
-        count=len(payload['items']);fee,total,maximum,per_task=limits
+        count=len(payload['items']);fee,total,maximum,_=limits
+        per_task,plan_cost=self.plan_limits(payload['kind'])
         if not count:raise IllustrationError('ILLUSTRATION_NO_REQUIREMENTS','该方案没有有效示意图需求，可直接导出纯文字。')
+        if count>per_task:raise IllustrationError('ILLUSTRATION_TASK_LIMIT',f'本计划需要{count}张，超过当前单任务{per_task}张上限；没有静默删减配图。')
+        if plan_cost is not None and fee*count>plan_cost:
+            raise IllustrationError('ILLUSTRATION_PLAN_COST_LIMIT',f'完整计划最高预留¥{fee*count}，超过单计划¥{plan_cost}上限；未调用模型。')
         with self.db() as conn:
             conn.execute('begin immediate')
             if conn.execute('select status from illustration_plans where id=?',(identifier,)).fetchone()[0]!='planned':return self.get(actor,identifier)
             rows=conn.execute('select ceiling from illustration_requests').fetchall()
             self.check_task_allowance(actor,row['task_id'],count,fee,conn)
-            if count>per_task or len(rows)+count>maximum or sum((Decimal(r[0]) for r in rows),Decimal(0))+fee*count>total:
+            if len(rows)+count>maximum or sum((Decimal(r[0]) for r in rows),Decimal(0))+fee*count>total:
                 raise IllustrationError('ILLUSTRATION_BUDGET_EXHAUSTED',f'本方案需要{count}张配图，超出单任务或累计额度；未生成任何配图。')
             for index in range(count):
                 conn.execute('insert into illustration_requests(id,plan_id,item_index,ceiling,status,created) values(?,?,?,?,?,?)',
