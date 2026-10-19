@@ -228,11 +228,12 @@ def test_attached_task_uses_multipart_edits_and_actual_png_metadata(chat_image_e
 
 
 @pytest.mark.parametrize('partial',[False,True])
-def test_preview_bound_reference_multi_output_uses_bytes_and_reports_partial(chat_image_env,monkeypatch,partial):
+@pytest.mark.parametrize('size,ratio',[('864x1536','9:16'),('1024x1408','8:11')])
+def test_preview_bound_reference_multi_output_uses_bytes_and_reports_partial(chat_image_env,monkeypatch,partial,size,ratio):
     client,store,product,settings,_owner=chat_image_env
     source=picture('JPEG',(20,16))
     uploaded=client.post('/api/v1/chat-images',files={'file':('teacher.jpg',source,'image/jpeg')}).json()
-    task=client.post('/api/v1/agents/image-agent/runs',json={'message':'生成2张人物海报，每面单独一张，不要Logo','attachments':[{'type':'image','id':uploaded['id']}]}).json()
+    task=client.post('/api/v1/agents/image-agent/runs',json={'message':f'生成2张人物海报，{size}，每面单独一张，不要Logo','attachments':[{'type':'image','id':uploaded['id']}]}).json()
     issuer=RuntimeTokenIssuer('isolated-preview-edit-fixture')
     token=issuer.issue(RuntimePrincipal('tenant-a','image-agent','fixture',('image:generate',),int(time.time())+60))
     scope='runtime:'+issuer.issue_task_scope('tenant-a',task['id'])
@@ -245,11 +246,12 @@ def test_preview_bound_reference_multi_output_uses_bytes_and_reports_partial(cha
         async def post(self,url,**kwargs):
             calls.append((url,kwargs))
             if partial and len(calls)==2:return httpx.Response(500,json={'error':'fixture'})
-            return httpx.Response(200,json={'data':[{'b64_json':base64.b64encode(picture('PNG',(864,1536))).decode()}]})
+            return httpx.Response(200,json={'data':[{'b64_json':base64.b64encode(picture('PNG',tuple(map(int,size.split('x'))))).decode()}]})
     monkeypatch.setattr(httpx,'AsyncClient',Client)
-    result=asyncio.run(PlatformMCPService(store,issuer,settings).image_generation(token,'人物海报',[],'9:16',execution_scope=scope,reference_images=[uploaded['id']]))
+    result=asyncio.run(PlatformMCPService(store,issuer,settings).image_generation(token,'人物海报',[],ratio,size=size,execution_scope=scope,reference_images=[uploaded['id']]))
     assert len(calls)==2
     assert all(url.endswith('/images/edits') and kwargs['files']['image'][1]==source for url,kwargs in calls)
+    assert all(kwargs['data']['size']==size for _,kwargs in calls)
     assert len(result['results'])==(1 if partial else 2)
     assert result['delivery']['failed']==(1 if partial else 0)
     assert all(item['reference_images_used']==[uploaded['id']] for item in result['results'])

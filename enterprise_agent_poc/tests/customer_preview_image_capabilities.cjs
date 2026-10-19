@@ -30,8 +30,12 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
    for(const image of result.generations){
      await page.locator(`[data-result-image="${image.id}"] img`).waitFor();
      await page.waitForFunction(id=>{const n=[...document.querySelectorAll('[data-result-image]')].find(x=>x.dataset.resultImage===id)?.querySelector('img');return n?.complete&&n.naturalWidth>0},image.id);
+     await page.locator(`[data-result-image="${image.id}"] [data-open-message-generation]`).click();
+     await page.waitForFunction(()=>{const n=document.querySelector('#generation-viewer img');return n?.complete&&n.naturalWidth>0});
+     await page.locator('#generation-viewer .dialog-close').click();
      const link=page.locator(`[data-result-image="${image.id}"] a[download]`),download=page.waitForEvent('download');
      await link.click();const item=await download;await item.saveAs(path.join(out,item.suggestedFilename()));
+     image.browser_download_filename=item.suggestedFilename();image.browser_large_preview=true;
    }
    return result;
  }

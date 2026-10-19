@@ -166,7 +166,12 @@ class PlatformMCPService:
         if reference_images and (not attachment or reference_images != [attachment["id"]]):
             raise ValueError("参考图片与当前任务不匹配。")
         image_dependency = reference_image_dependency(principal.tenant_id, task_id, attachment["id"]) if attachment else None
-        if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5", "3:2", "2:3"}:
+        preview = os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true'
+        custom_pixel_ratio = None
+        if preview and size:
+            from app.image_request_contract import pixel_size
+            _, custom_pixel_ratio = pixel_size(size)
+        if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5", "3:2", "2:3"} and not (custom_pixel_ratio is not None and aspect_ratio == custom_pixel_ratio):
             self._audit(principal.tenant_id, "image_generation", "failed")
             error = ToolInputValidationError(
                 "请选择1:1、9:16、16:9、4:5、3:2或2:3比例。",
