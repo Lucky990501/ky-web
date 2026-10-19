@@ -4,3 +4,9 @@ html[data-customer-preview] .account-menu-wrap,
 html[data-customer-preview] .credit-panel { display:none; }
 html[data-customer-preview] .topbar::after { content:'AI体验版 · 独立测试空间 · 请勿上传敏感资料'; color:#52627c; font-size:14px; }
 @media(max-width:600px){html[data-customer-preview] .topbar::after{font-size:12px;max-width:260px;}}
+html[data-customer-preview] .preview-context-option{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#52627c;line-height:1.5;}
+html[data-customer-preview] .preview-context-option input{width:16px;min-width:16px;height:16px;margin:2px 0 0;}
+html[data-customer-preview] .preview-article-reference{padding:8px 0;font-size:13px;color:#52627c;min-width:0;overflow-wrap:anywhere;}
+html[data-customer-preview] .preview-article-reference label{display:flex;align-items:center;flex-wrap:wrap;gap:8px;}
+html[data-customer-preview] .preview-article-reference input{max-width:100%;min-width:0;font-size:13px;}
+html[data-customer-preview] .preview-article-reference p{margin:4px 0;line-height:1.5;}

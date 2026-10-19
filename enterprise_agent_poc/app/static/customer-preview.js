@@ -24,6 +24,7 @@
   };
   const fetchOriginal = window.fetch.bind(window);
   let imageCapability=null,imageConsent=null,editGeneration=null,confirming=false,confirmedSubmit=false;
+  let articleSelection=null;
   window.fetch = (input, options) => {
     const target=input instanceof Request?new Request(url(input.url),input):url(input);
     if(options?.method==='POST'&&new URL(input instanceof Request?input.url:String(target),location.href).pathname==='/preview/api/v1/agents/image-agent/runs'&&imageConsent){
@@ -32,9 +33,14 @@
         const items=document.querySelector('#main')?._chatImage?.items||[];
         if(body.attachments)body.attachments=body.attachments.map(item=>({...item,role:items.find(x=>x.record?.id===item.id)?.role||'subject'}));
         if(editGeneration)body.edit_generation_id=editGeneration.id;
-        options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id})};
+        options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id,use_enterprise_context:imageConsent.useContext})};
       }
       imageConsent=null;
+    }
+    if(options?.method==='POST'&&new URL(input instanceof Request?input.url:String(target),location.href).pathname==='/preview/api/v1/agents/preview-wechat-agent/runs'){
+      const main=document.querySelector('#main'),body=JSON.parse(options.body||'{}');
+      if(articleSelection?.context===main?._conversationContext)
+        options={...options,body:JSON.stringify({...body,preview_article_reference_id:articleSelection.record?.id||null})};
     }
     const pending=fetchOriginal(target,options);
     if(options?.method==='POST'&&String(target).includes('/agents/image-agent/runs'))pending.then(response=>{if(response.ok)editGeneration=null;}).catch(()=>{});
@@ -67,6 +73,11 @@
     const main=document.querySelector('#main');if(main?.dataset.agentId!=='image-agent'){editGeneration=null;return;}
     if(editGeneration&&editGeneration.context!==main._conversationContext)editGeneration=null;
     const form=main.querySelector('#composer');if(!form)return;
+    if(!form.querySelector('#preview-use-image-context')){
+      const label=document.createElement('label');label.className='preview-context-option';
+      const input=document.createElement('input');input.type='checkbox';input.id='preview-use-image-context';
+      label.append(input,document.createTextNode('使用企业知识与素材说明（额外1次语义检索，最多预留¥0.05；不自动上传素材图片）'));form.prepend(label);
+    }
     let notice=main.querySelector('[data-preview-image-notice]');
     if(!notice){notice=document.createElement('p');notice.dataset.previewImageNotice='true';notice.className='composer-run-feedback';notice.setAttribute('role','status');form.before(notice);}
     notice.id=enabled?'preview-image-direct-notice':'preview-image-unavailable';
@@ -98,6 +109,9 @@
     });
   };
   document.addEventListener('submit',async event=>{
+    if(event.target.id==='composer'&&document.querySelector('#main')?.dataset.agentId==='preview-wechat-agent'&&articleSelection?.busy){
+      event.preventDefault();event.stopImmediatePropagation();return;
+    }
     if(event.target.id==='composer'&&document.querySelector('#main')?.dataset.agentId==='image-agent'){
       if(confirmedSubmit){confirmedSubmit=false;return;}
       event.preventDefault();event.stopImmediatePropagation();if(confirming)return;
@@ -108,11 +122,12 @@
       if(editGeneration&&attachment?.items.length){alert('请选择已有基图或上传参考图，不要同时提交。');return;}
       confirming=true;
       try{
-        const response=await fetchOriginal('/preview/api/v1/agents/image-agent/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:prompt})}),plan=await response.json();
+        const useContext=!!main.querySelector('#preview-use-image-context')?.checked;
+        const response=await fetchOriginal('/preview/api/v1/agents/image-agent/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:prompt,use_enterprise_context:useContext})}),plan=await response.json();
         if(!response.ok)throw Error(plan.user_message||'图片计划校验失败，未提交生成。');
-        if(!main.isConnected||document.querySelector('#prompt')?.value.trim()!==prompt)return;
-        if(!window.confirm(`确认生成${plan.count}张图片？本任务最多预留¥${plan.max_reserved_cny}，按每张实际请求计数。参考图会进入Edit接口；人物及局部编辑不能保证完全不变。失败或结果未知不会自动重试。`))return;
-        imageConsent={prompt,id:crypto.randomUUID()};confirmedSubmit=true;event.target.requestSubmit();
+        if(!main.isConnected||document.querySelector('#prompt')?.value.trim()!==prompt||useContext!==!!main.querySelector('#preview-use-image-context')?.checked)return;
+        if(!window.confirm(`确认生成${plan.count}张图片？图片最多预留¥${plan.max_reserved_cny}，按每张实际请求计数。${plan.knowledge_requests?`另含1次企业知识语义检索，最多预留¥${plan.knowledge_max_reserved_cny}；无可核验资料时停止生图。`:''}参考图会进入Edit接口；人物及局部编辑不能保证完全不变。失败或结果未知不会自动重试。`))return;
+        imageConsent={prompt,id:crypto.randomUUID(),useContext};confirmedSubmit=true;event.target.requestSubmit();
       }catch(error){
         let feedback=main.querySelector('#preview-image-error');
         if(!feedback){feedback=document.createElement('p');feedback.id='preview-image-error';feedback.className='image-delivery-warning';feedback.setAttribute('role','alert');feedback.tabIndex=-1;event.target.before(feedback);}
@@ -120,6 +135,43 @@
       }finally{confirming=false;}
     }
   },true);
+  function enhanceArticleReference(){
+    const main=document.querySelector('#main'),context=main?._conversationContext;
+    if(main?.dataset.agentId!=='preview-wechat-agent'||!context){articleSelection=null;return;}
+    if(context.canRun!==true)return;
+    const form=main.querySelector('#composer');if(!form||main.querySelector('[data-preview-article-reference]'))return;
+    if(articleSelection?.context!==context)articleSelection={context,record:null};
+    const selection=articleSelection;
+    const box=document.createElement('div');box.dataset.previewArticleReference='true';box.className='preview-article-reference';
+    const label=document.createElement('label');label.textContent='对标文章（可选）';
+    const input=document.createElement('input');input.type='file';input.accept='.html,.htm,.txt,.md';input.setAttribute('aria-label','上传对标文章');label.append(input);
+    const hint=document.createElement('p');hint.textContent='UTF-8 HTML/TXT/MD，最大256KB。参考前6000字及安全内联样式；不复制原文事实或图片。不会进入知识库。';
+    const status=document.createElement('p');status.setAttribute('role','status');
+    const remove=document.createElement('button');remove.type='button';remove.className='link-button';remove.textContent='移除待发送附件';remove.hidden=true;
+    box.append(label,hint,status,remove);form.before(box);
+    const current=()=>main.isConnected&&main._conversationContext===context&&articleSelection===selection;
+    const show=record=>{if(!current())return;selection.record=record;status.textContent=record?`已选择：${record.filename}（${record.characters}字${record.excerpted?'，仅参考前6000字':''}；${record.image_positions}处配图需手动上传）`:'';remove.hidden=!record;};
+    input.onchange=async()=>{
+      const file=input.files?.[0];if(!file)return;
+      if(file.size>256*1024||!(/\.(html?|txt|md)$/i.test(file.name))){status.textContent='请选择256KB以内的HTML、TXT或MD文章。';return;}
+      input.disabled=true;remove.disabled=true;selection.busy=true;status.textContent='正在安全读取文章，请稍候再发送。';
+      try{
+        const body=new FormData();body.append('file',file);
+        const response=await fetchOriginal('/preview/api/v1/preview/article-references',{method:'POST',body});const record=await response.json();
+        if(!response.ok)throw Error(record.user_message||'文章上传失败，原附件未替换。');show(record);
+      }catch(error){if(current())status.textContent=error.message;}
+      finally{selection.busy=false;if(current()){input.disabled=false;remove.disabled=false;input.value='';}}
+    };
+    remove.onclick=()=>{show(null);input.value='';};
+    if(context.conversationId){
+      input.disabled=true;
+      selection.busy=true;
+      fetchOriginal('/preview/api/v1/preview/article-references?conversation_id='+encodeURIComponent(context.conversationId),{cache:'no-store'})
+        .then(async response=>{const value=await response.json();if(!response.ok)throw Error(value.user_message||'对标文章恢复失败。');show(value.reference);})
+        .catch(error=>{if(current())status.textContent=error.message;})
+        .finally(()=>{selection.busy=false;if(current())input.disabled=false;});
+    }
+  }
   window.enhancePreviewKnowledge = (main, items) => {
     const zone = main.querySelector('.upload-zone');
     if (!zone) return;
@@ -181,8 +233,10 @@
       const main=document.querySelector('#main');
       if(main?.dataset.page==='knowledge'&&main.querySelector('.upload-zone')&&!main.querySelector('#preview-knowledge-file'))window.enhancePreviewKnowledge(main,[]);
       markImageUnavailable();
+      enhanceArticleReference();
     });
     observer.observe(document.querySelector('#app'),{childList:true,subtree:true,attributes:true,attributeFilter:['disabled']});
     markImageUnavailable();
+    enhanceArticleReference();
   });
 })();

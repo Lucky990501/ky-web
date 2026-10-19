@@ -148,6 +148,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     if image_authorization is None and authorization_path.is_file():
         image_authorization = json.loads(authorization_path.read_text(encoding='utf-8'))
     image_executor = PreviewImageExecution(main, budget, prices, image_authorization)
+    from app.preview_article_references import PreviewArticleReferences, AGENT as ARTICLE_AGENT
+    from contextvars import ContextVar
+    article_references = PreviewArticleReferences(main, budget)
+    article_submission = ContextVar('preview_article_submission',default=None)
     original_execute = main.task_service.execute
     async def execute_preview_task(task):
         if image_executor.owns_task(task['id']):
@@ -156,6 +160,15 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             main.product_store.set_task(task['id'], task['tenant_id'], 'failed', 'failed',
                 '图片任务缺少独立执行授权关联，没有自动重试。', error_code='image_submission_unconfirmed')
             return
+        if task.get('agent_id') == ARTICLE_AGENT and article_submission.get() is not None:
+            actor, reference_id = article_submission.get()
+            # create_agent_task schedules asyncio.create_task BEFORE sending
+            # its response. Context inheritance binds the real Task before its
+            # executor starts, never racing the first model request.
+            try: article_references.bind(actor,reference_id,task['id'])
+            except (LookupError,PermissionError):
+                main.product_store.set_task(task['id'],task['tenant_id'],'failed','failed','对标文章关联失败，未调用模型。',error_code='preview_article_reference_invalid')
+                return
         return await original_execute(task)
     main.task_service.execute = execute_preview_task
     original_public_task, original_public_file = main._public_task, main._public_knowledge_file
@@ -211,7 +224,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             body, dropped = plaintext_history(await request.json())
             body, namespaces = TestTextGate.provider_tools(body)
             with main.store.connection() as conn:
-                running_task = conn.execute("SELECT id,agent_id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
+                running_task = conn.execute("SELECT id,agent_id,tenant_id,user_id,conversation_id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
             # An anonymous Preview receives only the existing tenant-scoped
             # business MCP tools, never shell/file/browser/server-side tools.
             body['tools'] = [tool for tool in body.get('tools', [])
@@ -222,6 +235,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             if not body['tools']:
                 raise PermissionError('未取得合法业务工具定义；未调用模型。')
             body['instructions'] = (body.get('instructions') or '') + '\nPreview执行要求：读取上下文中真实工具返回；同一轮已取得企业配置或充分的同一事实检索结果后不要重复查询。信息足够时直接完成用户要求。工具返回报错时如实说明，不伪造结果，不改用其他执行通道。'
+            if running_task and running_task['agent_id'] == ARTICLE_AGENT:
+                reference = article_references.for_task(dict(running_task))
+                if reference:
+                    body['instructions'] += article_references.instructions(reference)
             wire = json.dumps(body, ensure_ascii=False).encode()
             if len(wire) > 65536:
                 raise PermissionError("本轮模型上下文超过体验费用边界，请缩短会话。")
@@ -303,7 +320,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
             if path.startswith(denied):
                 return await JSONResponse({"user_message": "体验版不开放平台管理或账号接口"}, 403)(scope, receive, send)
-            if path.startswith("/api/") and not path.startswith(("/api/v1/me", "/api/v1/workspace", "/api/v1/agents", "/api/v1/tasks", "/api/v1/conversations", "/api/v1/generations", "/api/v1/enterprise-config", "/api/v1/knowledge", "/api/v1/assets", "/api/v1/storage", "/api/v1/chat-images", "/api/v1/documents")):
+            if path.startswith("/api/") and not path.startswith(("/api/v1/me", "/api/v1/workspace", "/api/v1/agents", "/api/v1/tasks", "/api/v1/conversations", "/api/v1/generations", "/api/v1/enterprise-config", "/api/v1/knowledge", "/api/v1/assets", "/api/v1/storage", "/api/v1/chat-images", "/api/v1/documents", "/api/v1/preview/article-references")):
                 return await JSONResponse({"user_message": "体验版未开放此接口"}, 403)(scope, receive, send)
             if path.startswith("/api/v1/agents/") and path.endswith("/runs") and scope["method"] == "POST" and path != '/api/v1/agents/image-agent/runs':
                 if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
@@ -332,6 +349,38 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
+            if path.startswith('/api/v1/preview/article-references'):
+                try:
+                    principal = main.current_user(token)
+                    request = Request(scope, receive)
+                    if path == '/api/v1/preview/article-references' and scope['method'] == 'POST':
+                        if request.headers.get('origin') != str(request.base_url).rstrip('/'):
+                            raise PermissionError('请从当前Preview页面上传对标文章。')
+                        from app.preview_article_references import MAX_BYTES
+                        # Bound the entire multipart body before parsing it.
+                        raw = bytearray()
+                        async for chunk in request.stream():
+                            raw.extend(chunk)
+                            if len(raw) > MAX_BYTES + 8192: raise ValueError('对标文章最大256KB。')
+                        async def body_once():
+                            return {'type':'http.request','body':bytes(raw),'more_body':False}
+                        form = await Request(scope, body_once).form()
+                        upload = form.get('file')
+                        if set(form) != {'file'} or not hasattr(upload, 'read'): raise ValueError('请选择一份对标文章。')
+                        try: record = article_references.upload(principal, upload.filename or '', await upload.read(MAX_BYTES + 1))
+                        finally: await upload.close()
+                        return await JSONResponse(record, 201)(scope, receive, with_cookie)
+                    if path == '/api/v1/preview/article-references' and scope['method'] == 'GET':
+                        cid = request.query_params.get('conversation_id')
+                        if not cid: raise ValueError('请指定本人会话。')
+                        return await JSONResponse({'reference':article_references.for_conversation(principal,cid)})(scope, receive, with_cookie)
+                    return await JSONResponse({'user_message':'对标文章接口不存在。'},404)(scope,receive,with_cookie)
+                except LookupError:
+                    return await JSONResponse({'user_message':'文章或会话不存在或无权访问。'},404)(scope,receive,with_cookie)
+                except PermissionError:
+                    return await JSONResponse({'user_message':'当前会话无权执行此操作。'},403)(scope,receive,with_cookie)
+                except (ValueError,TypeError):
+                    return await JSONResponse({'user_message':'请选择256KB以内UTF-8 HTML、TXT或MD文章，且文件中需有正文。'},422)(scope,receive,with_cookie)
             if path in {'/api/v1/agents/image-agent/runs', '/api/v1/agents/image-agent/plan'} and scope['method'] == 'POST':
                 try:
                     from fastapi import HTTPException
@@ -350,7 +399,13 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                         from app.image_request_contract import image_plan
                         count = len(image_plan(payload.get('message', ''), payload.get('message', ''), '1:1', None))
                         budget.check_capacity('image', count, Decimal(str(prices['image_request_max_cny'])))
-                        return await JSONResponse({'count':count,'max_reserved_cny':str(Decimal(str(prices['image_request_max_cny'])) * count)}, 200)(scope, receive, with_cookie)
+                        context_fee = Decimal('0')
+                        if payload.get('use_enterprise_context') is True:
+                            from app.preview_image_context import check_context_capacity
+                            check_context_capacity(main,budget,prices,principal.tenant_id)
+                            context_fee = Decimal(str(prices['embedding_request_max_cny']))
+                        return await JSONResponse({'count':count,'max_reserved_cny':str(Decimal(str(prices['image_request_max_cny'])) * count),
+                            'knowledge_requests':int(context_fee>0),'knowledge_max_reserved_cny':str(context_fee)}, 200)(scope, receive, with_cookie)
                     async with submission_lock:
                         task = image_executor.submit(principal, payload)
                         image_executor.schedule(task)
@@ -376,13 +431,40 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     html = html.replace(marker, hashlib.sha256((main.STATIC_DIR / name).read_bytes()).hexdigest()[:16])
                 html = html.replace('src="/static/', 'src="/preview/static/').replace('href="/static/', 'href="/preview/static/')
                 preview_script = hashlib.sha256((main.STATIC_DIR / "customer-preview.js").read_bytes()).hexdigest()[:16]
-                html = html.replace("<head>", f'<head><script src="/preview/static/customer-preview.js?v={preview_script}"></script><link rel="stylesheet" href="/preview/static/customer-preview.css">')
+                preview_style = hashlib.sha256((main.STATIC_DIR / "customer-preview.css").read_bytes()).hexdigest()[:16]
+                html = html.replace("<head>", f'<head><script src="/preview/static/customer-preview.js?v={preview_script}"></script><link rel="stylesheet" href="/preview/static/customer-preview.css?v={preview_style}">')
                 return await HTMLResponse(html)(scope, receive, with_cookie)
             if path.startswith('/api/v1/agents/') and path.endswith('/runs') and scope['method']=='POST':
                 async with submission_lock:
                     with main.store.connection() as conn:
                         busy = conn.execute("SELECT count(*) FROM tasks WHERE status IN ('queued','running')").fetchone()[0]
                     if busy: return await JSONResponse({"user_message": "体验服务当前正在生成，请稍后再提交。"}, 429)(scope, receive, with_cookie)
+                    if path == f'/api/v1/agents/{ARTICLE_AGENT}/runs':
+                        request = Request(scope, receive)
+                        raw = await request.body()
+                        if len(raw)>30000:
+                            return await JSONResponse({'user_message':'文章任务请求过大。'},422)(scope,receive,with_cookie)
+                        try:
+                            payload = json.loads(raw)
+                            reference_selected = 'preview_article_reference_id' in payload
+                            reference_id = payload.pop('preview_article_reference_id', None)
+                            principal = main.current_user(token)
+                            if reference_id:
+                                article_references.get(principal,reference_id)
+                        except (LookupError,PermissionError):
+                            return await JSONResponse({'user_message':'对标文章不存在或无权访问。'},404)(scope,receive,with_cookie)
+                        except (ValueError,TypeError,AttributeError):
+                            return await JSONResponse({'user_message':'文章任务请求无效。'},422)(scope,receive,with_cookie)
+                        body = json.dumps(payload,ensure_ascii=False).encode()
+                        replayed = False
+                        async def replay():
+                            nonlocal replayed
+                            if replayed: return await receive()
+                            replayed = True
+                            return {'type':'http.request','body':body,'more_body':False}
+                        inherited = article_submission.set((principal,reference_id) if reference_selected else None)
+                        try:return await main.app(scope, replay, with_cookie)
+                        finally:article_submission.reset(inherited)
                     return await main.app(scope, receive, with_cookie)
             return await main.app(scope, receive, with_cookie)
     return Preview()

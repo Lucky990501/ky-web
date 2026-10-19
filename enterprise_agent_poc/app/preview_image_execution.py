@@ -86,8 +86,9 @@ class PreviewImageExecution:
     def submit(self, principal, payload):
         if not self.authorized() or not principal.tenant_id.startswith('preview-'):
             raise PermissionError('尚未取得Preview独立图片业务授权。')
-        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id', 'edit_generation_id'}:
+        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id', 'edit_generation_id', 'use_enterprise_context'}:
             raise ValueError('图片执行身份及配置只能由服务端确定。')
+        if not isinstance(payload.get('use_enterprise_context',False),bool):raise ValueError('知识使用选项无效。')
         if payload.get('preview_image_confirmed') is not True:
             raise PermissionError('请先明确确认图片生成费用。')
         request_id = str(UUID(str(payload.get('preview_image_request_id', ''))))
@@ -143,6 +144,9 @@ class PreviewImageExecution:
             if conn.execute("select count(*) from tasks where status in ('queued','running')").fetchone()[0]:
                 raise PermissionError('体验服务当前正在生成，请稍后再提交。')
         self.budget.check_capacity('image', len(plan), Decimal(str(self.pricing['image_request_max_cny'])))
+        if payload.get('use_enterprise_context'):
+            from app.preview_image_context import check_context_capacity
+            check_context_capacity(self.main,self.budget,self.pricing,principal.tenant_id)
         if not self.main.product_store.agent_enabled(principal.tenant_id, 'image-agent'):
             raise PermissionError('图片智能体尚未为当前企业启用。')
         if parent:
@@ -162,7 +166,8 @@ class PreviewImageExecution:
         self.budget.observe({'event': 'preview_image_submission', 'authorization_id': AUTHORIZATION_ID,
                              'tenant_id': principal.tenant_id, 'user_id': principal.user_id,
                              'request_id': request_id, 'fingerprint': fingerprint, 'task_id': task['id'],
-                             'references': attachments, 'edit_parent_generation_id': parent_id, 'requested_outputs': len(plan), 'aspect_ratio': source_ratio})
+                             'references': attachments, 'edit_parent_generation_id': parent_id, 'requested_outputs': len(plan), 'aspect_ratio': source_ratio,
+                             'use_enterprise_context':payload.get('use_enterprise_context',False)})
         return task
 
     def schedule(self, task):
@@ -176,8 +181,11 @@ class PreviewImageExecution:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
         issuer = self.main.token_issuer
+        submission = self.submission(task['id'])
+        use_context = submission.get('use_enterprise_context') is True
+        scopes = ('image:generate','knowledge:search','assets:search') if use_context else ('image:generate',)
         token = issuer.issue(RuntimePrincipal(task['tenant_id'], 'image-agent', MODE,
-                                             ('image:generate',), int(time.time()) + 900))
+                                             scopes, int(time.time()) + 900))
         scope = issuer.issue_task_scope(task['tenant_id'], task['id'])
         # This is the normal authenticated MCP transport, without a Codex client.
         async with streamablehttp_client(self.main.settings.platform_mcp_url,
@@ -186,9 +194,15 @@ class PreviewImageExecution:
             async with ClientSession(reader, writer) as session:
                 await session.initialize()
                 attachment = self.main.product_store.task_chat_image_attachment(task['id'], task['tenant_id'])
-                submission = self.submission(task['id'])
+                prompt = task['input_text']
+                if use_context:
+                    from app.preview_image_context import collect_context
+                    self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'knowledge_retrieving','started')
+                    prompt, context = await collect_context(session,task,self.budget)
+                    self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'knowledge_retrieving','completed')
+                self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'generating','started')
                 result = await session.call_tool('image_generation', {
-                    'prompt': task['input_text'], 'references': [],
+                    'prompt': prompt, 'references': [],
                     'reference_images': [attachment['id']] if attachment else [],
                     'reference_role': (submission.get('references') or [{}])[0].get('role', 'subject'),
                     'aspect_ratio': plan['aspect_ratio'], 'size': plan['size'],
@@ -201,6 +215,7 @@ class PreviewImageExecution:
                           if getattr(item, 'type', '') == 'text'), None)
         if not isinstance(value, dict) or not isinstance(value.get('results'), list) or not value['results']:
             raise RuntimeError('image_business_result_invalid')
+        if use_context:value['enterprise_context']=context
         return value
 
     async def execute(self, task):
@@ -237,7 +252,6 @@ class PreviewImageExecution:
             main.store.create_run_trace(run_id, conversation_id, tenant, 'image-agent', None, trace)
             products.attach_task_run(tid, tenant, run_id, conversation_id, user_id=task['user_id'])
             products.set_task(tid, tenant, 'running', 'generating', '正在生成图片，不会自动重试', run_id=run_id, conversation_id=conversation_id)
-            products.add_task_activity(tid, tenant, 'generating', 'started')
             if products.cancellation_requested(tid, tenant):
                 raise asyncio.CancelledError()
             plan = image_plan(task['input_text'], task['input_text'], self.submission(tid).get('aspect_ratio', '1:1'), None)[0]
@@ -267,6 +281,9 @@ class PreviewImageExecution:
                 response += f"\n部分图片失败：{len(result['failures'])}张；已保留成功结果，没有自动重试。"
             if result.get('delivery', {}).get('status') == 'partial':
                 response += '\n提示：供应商实际尺寸与请求不一致，请查看卡片中的实际像素。'
+            if result.get('enterprise_context'):
+                trace['enterprise_context'] = result['enterprise_context']
+                response += '\n企业知识来源：'+'、'.join(dict.fromkeys(item['filename'] for item in result['enterprise_context']['sources']))
             trace.update(mcp_calls=[{'server': 'platform', 'tool': 'image_generation', 'status': 'completed',
                                     'artifact': artifacts[0], 'artifacts': artifacts, 'execution_mode': MODE}],
                          image_delivery=result.get('delivery'), runtime_completed=True, runtime_status='completed',
@@ -285,10 +302,13 @@ class PreviewImageExecution:
             products.finalize_task_cancellation(tid, tenant, run_id=run_id, conversation_id=conversation_id)
         except Exception as error:
             code = ('PREVIEW_MODEL_BUDGET_EXHAUSTED' if isinstance(error, PreviewBudgetExceeded)
+                    else 'image_knowledge_unavailable' if str(error).startswith(('preview_context_','preview_image_knowledge_'))
                     else 'image_business_error')
             trace.update(status='failed', error_code=code, error_type=type(error).__name__,
                          result_persistence_status='failed' if trace.get('runtime_completed') else 'pending')
             main.store.finish_run_trace(run_id, 'failed', trace)
-            products.set_task(tid, tenant, 'failed', 'failed', '图片生成或保存未完成；没有自动重试，请保留诊断ID。', error_code=code,
+            message = ('企业知识未能返回可核验的文件依据，未继续生图；检索可能已消耗额度，没有自动重试。'
+                       if code=='image_knowledge_unavailable' else '图片生成或保存未完成；没有自动重试，请保留诊断ID。')
+            products.set_task(tid, tenant, 'failed', 'failed', message, error_code=code,
                               run_id=run_id, conversation_id=conversation_id)
             products.add_task_activity(tid, tenant, 'failed', 'completed')
