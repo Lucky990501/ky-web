@@ -67,6 +67,12 @@
     if (anchor) anchor.href = url(anchor.href);
   }, true);
   const imageUnavailable = '图片生成暂不可用：未取得独立业务授权或体验额度已用完。';
+  const enhanceCopywritingPrompt=()=>{
+    const main=document.querySelector('#main');
+    if(main?.dataset.agentId!=='copywriting-agent')return;
+    const input=main.querySelector('#prompt');
+    if(input)input.placeholder='描述视频主题、出镜人物、目标观众和真实故事，帮你生成可直接录制的口播逐字稿。';
+  };
   const markImageUnavailable = () => {
     const enabled=imageCapability?.enabled===true;
     document.querySelectorAll('.side-nav [data-page="image"] span').forEach(label => {
@@ -252,9 +258,11 @@
       if(main?.dataset.page==='knowledge'&&main.querySelector('.upload-zone')&&!main.querySelector('#preview-knowledge-file'))window.enhancePreviewKnowledge(main,[]);
       markImageUnavailable();
       enhanceArticleReference();
+      enhanceCopywritingPrompt();
     });
     observer.observe(document.querySelector('#app'),{childList:true,subtree:true,attributes:true,attributeFilter:['disabled']});
     markImageUnavailable();
     enhanceArticleReference();
+    enhanceCopywritingPrompt();
   });
 })();

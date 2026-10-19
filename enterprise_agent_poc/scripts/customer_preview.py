@@ -119,6 +119,8 @@ def metered_clients(root, pricing):
 
 def add_preview_agent():
     from app.agent_catalog import CATALOG, AgentDefinition
+    from app.preview_copywriting_prompt import install
+    install()
     # An explicit Preview-only Legacy catalog entry, not a fake published
     # Revision or Runtime Test. Existing Skill bytes are reused unchanged.
     CATALOG["preview-wechat-agent"] = AgentDefinition(
@@ -292,6 +294,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                                   or running_task and running_task['agent_id']=='image-agent')]
             if not body['tools']:
                 raise PermissionError('未取得合法业务工具定义；未调用模型。')
+            from app.preview_copywriting_prompt import provider_request
+            body,copywriting_prompt_sha=provider_request(body,running_task)
             body['instructions'] = (body.get('instructions') or '') + '\nPreview执行要求：读取上下文中真实工具返回；同一轮已取得企业配置或充分的同一事实检索结果后不要重复查询。信息足够时直接完成用户要求。工具返回报错时如实说明，不伪造结果，不改用其他执行通道。'
             if running_task and running_task['agent_id'] == ARTICLE_AGENT:
                 reference = article_references.for_task(dict(running_task))
@@ -314,6 +318,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 raise PermissionError('Preview付费请求已暂停；未调用供应商。')
             text_guard.reserve(running_task,cost)
             budget.observe({"event": "text_dispatch", "task_id": running_task['id'],
+                            'copywriting_prompt_sha256':copywriting_prompt_sha,
                             'max_output_tokens':body['max_output_tokens'],'reserved_ceiling_cny':str(cost),
                             "input_types": [item.get("type", "message") for item in body.get("input", []) if isinstance(item, dict)],
                             "tool_names": [tool['name'] for tool in body['tools']],
