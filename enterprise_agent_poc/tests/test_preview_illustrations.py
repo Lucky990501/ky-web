@@ -267,6 +267,17 @@ def test_url_response_reuses_only_verified_host_download(monkeypatch):
     assert metadata['response_format']=='url' and seen==[('https://approved.example/fixture.png',('approved.example',))]
 
 
+def test_transport_failure_is_classified_without_secret_or_retry(monkeypatch):
+    calls=[]
+    def failure(request):calls.append(request);raise httpx.ConnectError('PRIVATE sk-do-not-print')
+    monkeypatch.setattr(httpx,'AsyncHTTPTransport',lambda **kwargs:httpx.MockTransport(failure))
+    with pytest.raises(IllustrationError) as error:
+        asyncio.run(IllustrationProvider(IllustrationConfig(key='FIXTURE_ONLY',enabled=True)).generate('FIXTURE_ONLY',lambda *x:pytest.fail('No HTTP response')))
+    assert len(calls)==1 and error.value.code=='ILLUSTRATION_PROVIDER_UNKNOWN'
+    assert error.value.safe_details=={'failure_phase':'connect','error_type':'ConnectError'}
+    assert 'PRIVATE' not in str(error.value) and 'sk-' not in json.dumps(error.value.safe_details)
+
+
 def test_http_owned_routes_and_reject_client_html_tenant_secret(setup,monkeypatch):
     service,actors,old,budget=setup;task=completed_task(service,actors[0]);enable_fixture_provider(service,monkeypatch)
     async def run():

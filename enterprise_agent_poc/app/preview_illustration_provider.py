@@ -118,7 +118,7 @@ class IllustrationProvider:
         body={'prompt':prompt,'model':MODEL,'provider':{'sort':'success_rate'},'size':config.size,
               'watermark':True,'prompt_extend':True,'prompt_extend_mode':'direct'}
         try:
-            async with httpx.AsyncClient(timeout=180,trust_env=False,follow_redirects=False,transport=httpx.AsyncHTTPTransport(retries=0)) as client:
+            async with asyncio.timeout(180), httpx.AsyncClient(timeout=httpx.Timeout(180,connect=10),trust_env=False,follow_redirects=False,transport=httpx.AsyncHTTPTransport(retries=0)) as client:
                 async with client.stream('POST',config.base_url+'/v1/images/generations?sort=success_rate',
                     headers={'Authorization':'Bearer '+config.key,'Content-Type':'application/json'},json=body) as response:
                     request_id=response.headers.get('x-request-id','')
@@ -139,4 +139,9 @@ class IllustrationProvider:
                 content=await asyncio.to_thread(download_vetted_image,picture['url'],config.asset_hosts);format_used='url'
             return content,{**validated_image(content),'response_format':format_used}
         except IllustrationError:raise
+        except (httpx.TransportError,TimeoutError) as error:
+            error_type=type(error).__name__
+            phase='connect' if isinstance(error,(httpx.ConnectError,httpx.ConnectTimeout)) else 'response_or_transport'
+            raise IllustrationError('ILLUSTRATION_PROVIDER_UNKNOWN','配图网络或结果未确认，保留本次预留，不自动重试。',
+                                    {'failure_phase':phase,'error_type':error_type}) from None
         except Exception:raise IllustrationError('ILLUSTRATION_PROVIDER_UNKNOWN','配图结果未确认，保留本次预留，不自动重试。') from None
