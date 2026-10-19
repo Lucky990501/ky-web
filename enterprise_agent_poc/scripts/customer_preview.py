@@ -179,6 +179,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             except (ValueError,PermissionError):result['attachment_warning']='部分参考图已失效，不影响已保存的生成结果。'
             submission=image_executor.submission(task['id'])
             result['image_request']={k:submission.get(k) for k in ('size','quality','parameter_spec')}
+            if task.get('error_code')=='preview_image_provider_rejected':
+                result.update(error_code='IMAGE_PROVIDER_REJECTED',user_message=task['user_message'])
         if task.get('status') == 'failed' and task.get('error_code') in {'runtime_error','runtime_start_error','mcp_error','required_tool_dependency_error','worker_interrupted','result_persistence_error'}:
             with main.store.connection() as conn:
                 row = conn.execute('SELECT payload FROM run_traces WHERE run_id=?', (task.get('run_id'),)).fetchone()

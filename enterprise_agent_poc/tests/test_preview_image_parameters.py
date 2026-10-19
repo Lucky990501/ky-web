@@ -63,6 +63,15 @@ def test_duplicate_and_foreign_secondary_upload_rejected(image_fixture):
     assert calls==[]
 
 
+def test_provider_rejection_fields_never_expose_body_credentials_or_paths():
+    from app.preview_image_parameters import provider_error_fields
+    response=httpx.Response(400,json={'error':{'code':'invalid_request','type':'invalid_request_error','param':'size','message':'unsupported size; sk-fixture-secret https://private.invalid /opt/private data:image/png;base64,private'}})
+    safe=provider_error_fields(response)
+    assert safe=={'category':'SIZE_REJECTED','code':'invalid_request','type':'invalid_request_error','param':'size'}
+    hostile=httpx.Response(400,json={'error':{'code':'sk-private','param':'/opt/private','message':'private'}})
+    assert provider_error_fields(hostile)=={'category':'UNCLASSIFIED'}
+
+
 @pytest.mark.parametrize('count,size,quality',[(0,'3840x2160','high'),(1,'2048x2048','medium'),(2,'2160x3840','low'),(5,'1024x1024','high')])
 def test_real_service_fixture_wire_array_quality_pixels_and_mismatch(image_fixture,monkeypatch,count,size,quality):
     executor,actors,calls=image_fixture;actor=actors[0]

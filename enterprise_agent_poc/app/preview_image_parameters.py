@@ -6,6 +6,7 @@ No changes to Production defaults, no resize/upscale or automatic paid retry.
 """
 import json
 import sqlite3
+import re
 
 from app.image_request_contract import image_plan, ImageRequestError
 
@@ -23,6 +24,30 @@ def quality_value(value):
 
 def preview_plan(message,aspect_ratio='1:1',size=None):
     return image_plan(message,message,aspect_ratio,size,provider_sizes=SIZES)
+
+
+def provider_error_fields(response):
+    """Never store a Provider body/message, token, URL or image data."""
+    try:
+        if len(response.content)>65536:return {'category':'UNCLASSIFIED'}
+        body=response.json();error=body.get('error',{}) if isinstance(body,dict) else {}
+        if not isinstance(error,dict):return {'category':'UNCLASSIFIED'}
+    except (ValueError,TypeError):return {'category':'UNCLASSIFIED'}
+    safe={'category':'UNCLASSIFIED'}
+    for key in ('code','type'):
+        value=error.get(key)
+        if isinstance(value,str) and re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',value) and not re.search(r'sk-|token|secret|password',value,re.I):safe[key]=value
+    if error.get('param') in ('image','image[]','images','size','quality','model','n','output_format','response_format'):safe['param']=error['param']
+    message=str(error.get('message','')).lower()
+    for pattern,category in [
+        (r'(?:unmarshal|array).{0,100}image.{0,50}(?:string|unsupported)|image.{0,50}array.{0,50}(?:invalid|unsupported)','IMAGE_ARRAY_REJECTED'),
+        (r'(?:size|resolution).{0,120}(?:invalid|unsupported|not support|not allowed)|(?:unsupported|invalid).{0,30}(?:size|resolution)','SIZE_REJECTED'),
+        (r'quality.{0,100}(?:invalid|unsupported|not support)','QUALITY_REJECTED'),
+        (r'(?:image|base64|data.url).{0,100}(?:decode|invalid|unsupported|not valid)','REFERENCE_ENCODING_REJECTED'),
+        (r'model.{0,100}(?:not found|not available|unsupported)','MODEL_REJECTED'),
+    ]:
+        if re.search(pattern,message):safe['category']=category;break
+    return safe
 
 
 class PreviewReferenceBindings:

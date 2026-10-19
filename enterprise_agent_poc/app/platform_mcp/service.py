@@ -322,6 +322,9 @@ class PlatformMCPService:
                                       "provider": {"sort": "success_rate"}, "size": item["size"], "n": 1,
                                       "output_format": "jpeg", "response_format": "b64_json", **({'quality':quality} if quality else {})})
                     if response.status_code >= 400:
+                        if preview:
+                            from app.preview_image_parameters import provider_error_fields
+                            audit['preview_provider_error']=provider_error_fields(response)
                         raise ImageToolExecutionFailure(response.status_code, audit)
                     try:
                         gateway = response.json()
@@ -394,6 +397,7 @@ class PlatformMCPService:
                         "reference_ids": [record['id'] for record in attachments], "quality":quality,
                         "provider_status": response.status_code if response is not None else None,
                         "error_type": type(exc).__name__,
+                        **({'provider_error':audit.get('preview_provider_error')} if preview else {}),
                     })
                     if len(plan) == 1:
                         raise

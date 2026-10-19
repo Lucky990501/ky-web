@@ -221,6 +221,15 @@ class PreviewImageExecution:
                 if submission.get('quality'):arguments['quality']=submission['quality']
                 result = await session.call_tool('image_generation', arguments, read_timeout_seconds=timedelta(seconds=660))
         if result.isError:
+            value=result.structuredContent or {}
+            dependency=value.get('_tool_dependency',{}) if isinstance(value,dict) else {}
+            status=dependency.get('provider_http_status')
+            if type(status) is int and 400<=status<=599:
+                self.budget.observe({'event':'preview_image_provider_rejected','task_id':task['id'],
+                    'provider_status':status,'provider_error':dependency.get('preview_provider_error',{})})
+                error=RuntimeError('image_provider_rejected')
+                error.preview_provider_status=status
+                raise error
             raise RuntimeError('image_business_tool_failed')
         value = result.structuredContent
         if not isinstance(value, dict):
@@ -318,11 +327,15 @@ class PreviewImageExecution:
             code = ('PREVIEW_MODEL_BUDGET_EXHAUSTED' if isinstance(error, PreviewBudgetExceeded)
                     else 'image_knowledge_unavailable' if str(error).startswith(('preview_context_','preview_image_knowledge_'))
                     else 'image_business_error')
+            provider_status=getattr(error,'preview_provider_status',None)
+            if provider_status:code='preview_image_provider_rejected'
             trace.update(status='failed', error_code=code, error_type=type(error).__name__,
+                         runtime_status='failed',provider_http_status=provider_status,
                          result_persistence_status='failed' if trace.get('runtime_completed') else 'pending')
             main.store.finish_run_trace(run_id, 'failed', trace)
             message = ('企业知识未能返回可核验的文件依据，未继续生图；检索可能已消耗额度，没有自动重试。'
                        if code=='image_knowledge_unavailable' else '图片生成或保存未完成；没有自动重试，请保留诊断ID。')
+            if provider_status:message=f'图片供应商未接受或完成本次请求（HTTP {provider_status}）；未自动重试，请保留诊断ID。'
             products.set_task(tid, tenant, 'failed', 'failed', message, error_code=code,
                               run_id=run_id, conversation_id=conversation_id)
             products.add_task_activity(tid, tenant, 'failed', 'completed')
