@@ -1,7 +1,8 @@
 """Owner-supplied Preview image specification, not Provider certification.
 
-2026-10-19: Owner confirmed image is an array and each allowed size/quality
-costs at most CNY1. Existing v2 authorization and durable 20-call budget remain.
+2026-10-19: Owner confirmed repeated multipart image parts apply to the current
+sunburst-c model and each allowed size/quality costs at most CNY1.
+Existing v2 authorization and durable 20-call budget remain.
 No changes to Production defaults, no resize/upscale or automatic paid retry.
 """
 import json
@@ -16,10 +17,10 @@ QUALITIES=('high','medium','low')
 SPEC_ID='owner-preview-image-parameters-20261019-v1'
 # Actual QA Task c64988dc-e21a-4cbf-acd7-ebf064a06f75 reached the gateway
 # with image:[data-URLs] and received HTTP400. Owner subsequently supplied a
-# repeated multipart image example for gpt-image-2-all, a DIFFERENT model.
-# Its wire adapter is fixture-tested; current sunburst-c compatibility remains
-# unverified. Keep paused until authorized real validation; never auto-retry.
-MULTI_REFERENCE_PAUSED=True
+# repeated multipart image example and explicitly confirmed the same contract
+# for the unchanged sunburst-c model. This enables normal confirmed customer
+# submissions, NOT an automatic paid retest or a claim of real Provider PASS.
+MULTI_REFERENCE_PAUSED=False
 
 
 def reference_limit():return 1 if MULTI_REFERENCE_PAUSED else 5

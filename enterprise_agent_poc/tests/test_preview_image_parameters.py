@@ -78,11 +78,28 @@ def test_duplicate_and_foreign_secondary_upload_rejected(image_fixture):
     assert calls==[]
 
 
+def test_owner_confirmed_current_model_contract_default_is_enabled_not_real_pass(image_fixture,monkeypatch):
+    import importlib
+    import app.preview_image_parameters as parameters
+    # Fixture normally forces the switch on: execute the source in a separate
+    # module to verify the shipped default without changing global state.
+    specification=importlib.util.spec_from_file_location('preview_parameters_default_fixture',parameters.__file__)
+    shipped=importlib.util.module_from_spec(specification);specification.loader.exec_module(shipped)
+    assert shipped.MULTI_REFERENCE_PAUSED is False and shipped.MODEL=='gpt-image-2.5-sunburst-c'
+    executor,actors,calls=image_fixture
+    assert executor.capability()['max_reference_images']==5
+    assert executor.capability()['multi_reference_status']=='OWNER_CONFIRMED_MULTIPART_NOT_PROVIDER_VERIFIED'
+    refs=wire_references(executor,actors[0],2)
+    task=executor.submit(actors[0],payload(attachments=[{'type':'image','id':ref['id']} for ref in refs]))
+    assert task['status']=='queued' and calls==[]
+    assert executor.budget.summary()['image']['requests']==0
+
+
 def test_unverified_multi_wire_is_paused_before_task_or_budget(image_fixture,monkeypatch):
     executor,actors,calls=image_fixture
     monkeypatch.setattr('app.preview_image_parameters.MULTI_REFERENCE_PAUSED',True)
     refs=[upload_reference(executor,actors[0]) for _ in range(2)]
-    with pytest.raises(ValueError,match='HTTP400'):
+    with pytest.raises(ValueError,match='多参考图当前暂不可用'):
         executor.submit(actors[0],payload(attachments=[{'type':'image','id':r['id']} for r in refs]))
     assert executor.capability()['max_reference_images']==1 and calls==[]
     assert executor.budget.summary()['image']['requests']==0
