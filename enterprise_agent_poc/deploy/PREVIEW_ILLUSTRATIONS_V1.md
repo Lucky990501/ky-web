@@ -26,6 +26,10 @@ Adapter 对 data[0].b64_json 和 data[0].url 分支做隔离测试；不代表�
 
 URL 仅接受独立 ENV `N1N_ILLUSTRATION_ASSET_HOSTS` 中已经核实的精确域名。域名为空或响应出现新域名则 Fail Closed，不按前端输入抓取外部 URL。HTTPS 公网 IP 固定连接、TLS/SNI 校验、拒绝跳转、凭据不转发至图片域名。需先取得真实资源合同后再配置；不得为追求 PASS 放开任意 URL。返回原始 Body、签名 URL、Key 不入日志和报告，仅保留 HTTP、受限请求 ID 与必要域名诊断。
 
+2026-10-19 本次 HTTP 200 的受控响应诊断记录精确主机 `dashscope-463f.oss-accelerate.aliyuncs.com`。阿里云[千问文生图官方文档](https://help.aliyun.com/zh/model-studio/qwen-image-api)确认 `dashscope-{标识}.oss-accelerate.aliyuncs.com` 格式及 Bucket 动态性；这不是允许通配的理由。本次从 Preview 主机核验其全部 DNS 为公网地址，使用默认信任根、CERT_REQUIRED 和 SNI 验证证书/主机名成功，不带凭据 HEAD 根路径返回403且不跟随跳转。只允许将上述精确主机加入本次独立 ENV，后续其他 Bucket 仍拒绝并重新核验。根路径403只证明主机连通及TLS，不证明缺失的签名图片URL仍有效。
+
+下载要求明确 PNG/JPEG MIME 与实际文件一致，最多读取2MB+1字节以检测超限；超限会拒绝整个文件，不截断、不自动压缩或放大上限。若后续真实1024x1024结果超过2MB，需单独核定原文件及可接受的无损/有损转换方案，不付费重试来规避问题。原失败响应没有持久化完整URL或上游 task_id，当前没有经过确认的网关恢复查询合同；不能把 HTTP 请求跟踪 ID 当作阿里云异步任务ID，也不能把新POST当恢复。
+
 ## 测试与发布边界
 
 定向 pytest 覆盖计划映射、两种响应分支、预算预检、归属拒绝、去重、未知/失败不重发、真实嵌入 DOCX、ZIP 和安全 HTML。`customer_preview_illustration_fixture.py` 与 `customer_preview_illustrations.cjs` 是明确 FIXTURE_ONLY 的本地 HTTP/SQLite/Chrome 验证，不是 Provider E2E。

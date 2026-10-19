@@ -104,9 +104,12 @@ def download_vetted_image(url,allowed_hosts):
         try:
             client.request('GET',parsed.path+('?' +parsed.query if parsed.query else ''),headers={'Accept':'image/png,image/jpeg'})
             response=client.getresponse()
-            if response.status!=200:raise ValueError()
-            if int(response.getheader('content-length','0'))>MAX_IMAGE:raise ValueError()
-            content=response.read(MAX_IMAGE+1);mime=response.getheader('content-type','')
+            if response.status!=200:raise IllustrationError('ILLUSTRATION_DOWNLOAD_FAILED','配图资源未返回200，未跟随跳转或重试。',{'failure_phase':'asset_http','http_status':response.status})
+            if int(response.getheader('content-length','0'))>MAX_IMAGE:
+                raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图超过当前Word支持的2MB限制，未截断保存。')
+            mime=response.getheader('content-type','').split(';')[0].strip().lower()
+            if mime not in {'image/png','image/jpeg'}:raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图MIME缺失或不是受支持的PNG/JPEG。')
+            content=response.read(MAX_IMAGE+1)
             validated_image(content,mime);return content
         finally:client.close()
     except IllustrationError:raise
