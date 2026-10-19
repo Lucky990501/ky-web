@@ -302,7 +302,7 @@ def test_wechat_safe_positions_assets_zip_and_no_raw_model_urls(setup,monkeypatc
     service,actors,old,budget=setup;actor=actors[0];task=completed_task(service,actor,'wechat');plan=service.plan(actor,task['id'])
     calls=enable_fixture_provider(service,monkeypatch);service.confirm(actor,plan['id'],plan['digest'],True);asyncio.run(service.execute(actor,plan['id']))
     done=service.get(actor,plan['id']);assert done['status']=='completed' and len(done['assets'])==3
-    assert done['html'].count('<img ')==3 and '#fff3c4' in done['html'] and '保留原正文事实' in done['html']
+    assert done['html'].count('<img ')==3 and '#FFCA00' in done['html'] and '保留原正文事实' in done['html']
     assert all(asset['url'].startswith(PREFIX+'/assets/') and 'storage_key' not in asset for asset in done['assets'])
     archive_bytes=service.export_article(actor,plan['id'],True)
     with ZipFile(io.BytesIO(archive_bytes)) as archive:

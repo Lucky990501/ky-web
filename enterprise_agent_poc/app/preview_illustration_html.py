@@ -25,14 +25,16 @@ def unwrap_article(content):
 
 
 class ArticleTree(HTMLParser):
-    def __init__(self,content):
+    def __init__(self,content,preserve_images=False):
         super().__init__(convert_charrefs=True)
         if not isinstance(content,str) or not 0<len(content)<=256*1024:raise ValueError('文章正文无效或过大。')
         content=unwrap_article(content)
-        self.root=ET.Element('article');self.stack=[self.root];self.skip=[];self.count=0
+        self.root=ET.Element('article');self.stack=[self.root];self.skip=[];self.count=0;self.preserve_images=preserve_images
         match=re.fullmatch(r'\s*```html\s*\n([\s\S]*?)\n```\s*',content,re.I)
         self.feed(match[1] if match else content);self.close()
         if not ''.join(self.root.itertext()).strip():raise ValueError('文章没有可用正文。')
+        from app.preview_wechat_article import normalize_tree
+        normalize_tree(self.root)
 
     def handle_starttag(self,tag,attrs):
         self.count+=1
@@ -41,7 +43,14 @@ class ArticleTree(HTMLParser):
             if tag in DISCARD:self.skip.append(tag)
             return
         if tag in DISCARD:self.skip.append(tag);return
-        if tag=='img':return  # Only our persisted asset map can insert images.
+        if tag=='img':
+            # Normal illustration exports still use the persisted asset map.
+            # The Preview article renderer may retain same-site guarded images;
+            # actual reading remains subject to their normal authorization.
+            src=dict(attrs).get('src','')
+            if self.preserve_images and re.fullmatch(r'/(?:preview/)?api/v1/(?:storage/(?:generated|assets)/[A-Za-z0-9_./-]+|chat-images/[A-Za-z0-9_-]+)',src) and '..' not in src:
+                ET.SubElement(self.stack[-1],'img',{'src':src,'alt':clean_text(dict(attrs).get('alt','文章图片'))[:200],'style':'width:100%;height:auto'})
+            return
         if tag not in TAGS:return
         element=ET.SubElement(self.stack[-1],tag)
         styles=[]
@@ -92,4 +101,4 @@ class ArticleTree(HTMLParser):
 def full_document(body,title,portable=False):
     # UI preview has its own opaque sandbox; this is a safe downloadable file.
     policy="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'"+(' file:' if portable else '')+"; base-uri 'none'; form-action 'none'"
-    return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+policy+'"><title>'+escape(title)+'</title><style>body{max-width:680px;margin:0 auto;padding:24px;font:16px/1.8 sans-serif;color:#333}img{max-width:100%;height:auto}table{max-width:100%;overflow-wrap:anywhere}*{box-sizing:border-box;overflow-wrap:anywhere}</style></head><body>'+body+'</body></html>'
+    return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+policy+'"><title>'+escape(title)+'</title><style>body{max-width:680px;margin:0 auto;padding:24px;font:17px/1.95 sans-serif;color:#222;background:#fff}img{max-width:100%;height:auto}table{max-width:100%;overflow-wrap:anywhere}*{box-sizing:border-box;overflow-wrap:anywhere}@media(max-width:480px){body{padding:20px 16px}h1,h2{font-size:28px!important}p{font-size:16px!important}}</style></head><body>'+body+'</body></html>'

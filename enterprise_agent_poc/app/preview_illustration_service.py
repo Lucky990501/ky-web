@@ -82,20 +82,25 @@ class PreviewIllustrationService:
         with self.db() as conn:
             rows=conn.execute('select ceiling,status,http_status from illustration_requests').fetchall()
         configured=bool(self.config.enabled and self.config.key)
+        used=sum((Decimal(r['ceiling']) for r in rows),Decimal(0))
+        reason=('ILLUSTRATION_NOT_CONFIGURED' if not configured else
+                'ILLUSTRATION_TENANT_NOT_AUTHORIZED' if actor is not None and not self.actor_allowed(actor) else
+                'ILLUSTRATION_BUDGET_PENDING' if not limits else
+                'ILLUSTRATION_BUDGET_EXHAUSTED' if len(rows)>=limits[2] or used+limits[0]>limits[1] else None)
+        explanations={'ILLUSTRATION_NOT_CONFIGURED':'配图模型未就绪；正文仍可阅读、复制及导出。',
+          'ILLUSTRATION_TENANT_NOT_AUTHORIZED':'当前体验企业尚未获得Qwen配图授权；这不影响正文阅读。请Owner为当前Tenant单独授权。',
+          'ILLUSTRATION_BUDGET_PENDING':'配图费用及调用预算尚未批准；正文仍可阅读。',
+          'ILLUSTRATION_BUDGET_EXHAUSTED':'Qwen全局配图额度不足，未发起新请求；已有正文及图片仍可查看。'}
         return {'model':MODEL,'configured':configured,'key_status':'CONFIGURED' if self.config.key else 'PENDING',
-                'budget_status':'APPROVED' if limits else 'PENDING','enabled':configured and bool(limits) and (actor is None or self.actor_allowed(actor)),
+                'budget_status':'APPROVED' if limits else 'PENDING','enabled':reason is None,'eligibility_code':reason,
                 'request_max_cny':str(limits[0]) if limits else None,
                 'max_images_per_task':limits[3] if limits else 0,'max_requests':limits[2] if limits else 0,
                 'reserved_requests':len(rows),'provider_attempts':sum(r['status']!='reserved' for r in rows),
                 'provider_http_responses':sum(r['http_status'] is not None for r in rows),
-                'reserved_ceiling_cny':str(sum((Decimal(r['ceiling']) for r in rows),Decimal(0))),
+                'reserved_ceiling_cny':str(used),
                 'remaining_requests':max(0,limits[2]-len(rows)) if limits else 0,
                 'gateway_response_contract':'NOT_REAL_VERIFIED','automatic_paid_retries':0,
-                'user_message':('配图模型未配置；纯文字生成与导出仍可使用。' if not self.config.key else
-                                '配图功能尚未启用；纯文字生成与导出仍可使用。' if not self.config.enabled else
-                                '本轮配图预算仅限受控验收，当前访客未取得调用资格。' if actor is not None and not self.actor_allowed(actor) else
-                                '配图费用及调用预算尚未批准；未调用新模型。' if not limits else
-                                '请先确认整个配图计划与最高费用；不会自动重试。')}
+                'user_message':explanations.get(reason,'请一次确认整组配图张数与最高费用；生成后自动插入当前文章，不会自动重试。')}
 
     def source(self,actor,task_id,require_enabled=True):
         if not actor.tenant_id.startswith('preview-'):raise PermissionError()
@@ -230,6 +235,14 @@ class PreviewIllustrationService:
                       assets=public_assets,capability=self.capability(actor),
                       maximum_cost_cny=str(limits[0]*len(payload['items'])) if limits else None,
                       user_message=self.capability(actor)['user_message'])
+        if row['status']=='planned' and limits and result['capability']['enabled']:
+            count=len(payload['items'])
+            if count>limits[3]:
+                result.update(can_generate=False,blocker_code='ILLUSTRATION_TASK_LIMIT',user_message=f'本计划需要{count}张，超过当前单任务{limits[3]}张上限；没有静默删减配图。')
+            elif count>result['capability']['remaining_requests'] or Decimal(result['capability']['reserved_ceiling_cny'])+limits[0]*count>limits[1]:
+                result.update(can_generate=False,blocker_code='ILLUSTRATION_BUDGET_EXHAUSTED',user_message=f'完整计划需要{count}张，当前全局额度不足；未生成任何新配图。')
+            else:result['can_generate']=bool(count)
+        elif row['status']=='planned':result['can_generate']=False
         if row['document_json']:result['document']=json.loads(row['document_json'])
         if row['status']=='completed' and payload['kind']=='wechat':
             result['html']=ArticleTree(payload['html']).html([{**a,'url':'/preview'+a['url']} for a in public_assets])

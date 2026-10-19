@@ -129,6 +129,8 @@ def add_preview_agent():
         {"wechat-official-account-writing": "1.0.1"}, 3, False,
         (ROOT / "skill_packages/wechat-official-account-writing/1.0.1/SKILL.md").read_text(encoding="utf-8"),
     )
+    from app.preview_wechat_article import install as install_wechat
+    install_wechat()
 
 
 def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, pricing=None, local_http=False, image_authorization=None,
@@ -296,6 +298,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 raise PermissionError('未取得合法业务工具定义；未调用模型。')
             from app.preview_copywriting_prompt import provider_request
             body,copywriting_prompt_sha=provider_request(body,running_task)
+            from app.preview_wechat_article import provider_request as wechat_request
+            body=wechat_request(body,running_task)
             body['instructions'] = (body.get('instructions') or '') + '\nPreview执行要求：读取上下文中真实工具返回；同一轮已取得企业配置或充分的同一事实检索结果后不要重复查询。信息足够时直接完成用户要求。工具返回报错时如实说明，不伪造结果，不改用其他执行通道。'
             if running_task and running_task['agent_id'] == ARTICLE_AGENT:
                 reference = article_references.for_task(dict(running_task))
@@ -484,6 +488,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     payload = json.loads(raw)
                     if not isinstance(payload, dict): raise ValueError('图片请求格式无效。')
                     if path.endswith('/plan'):
+                        image_executor.credit_preflight(principal)
                         from app.preview_image_parameters import preview_plan, quality_value
                         quality_value(payload.get('quality'))
                         planned=preview_plan(payload.get('message',''),size=payload.get('size'))
@@ -501,16 +506,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                         task = image_executor.submit(principal, payload)
                         image_executor.schedule(task)
                     return await JSONResponse(main._public_task(task), 202)(scope, receive, with_cookie)
-                except PreviewBudgetExceeded:
-                    return await JSONResponse({'user_message':'图片体验额度不足，没有发起新请求。'}, 429)(scope, receive, with_cookie)
-                except PermissionError as error:
-                    return await JSONResponse({'user_message': str(error)}, 403)(scope, receive, with_cookie)
-                except LookupError:
-                    return await JSONResponse({'user_message':'会话不存在或无权访问。'}, 404)(scope, receive, with_cookie)
-                except (ValueError, TypeError) as error:
-                    from app.image_request_contract import ImageRequestError
-                    message = str(error) if isinstance(error, ImageRequestError) else '图片请求未通过校验：请检查参考图片、费用确认、张数与尺寸；多参考图及高清能力尚未核验。'
-                    return await JSONResponse({'user_message':message}, 422)(scope, receive, with_cookie)
+                except (PermissionError,LookupError,ValueError,TypeError) as error:
+                    from app.preview_image_errors import image_admission_error
+                    status,value=image_admission_error(error)
+                    return await JSONResponse(value,status)(scope,receive,with_cookie)
             if not path.startswith("/api/"):
                 if path == "/":
                     return await Response(status_code=307, headers={"location": BASE + "/agents/copywriting"})(scope, receive, with_cookie)
@@ -521,9 +520,13 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 for name, marker in (("workbench.js", "__JS_SHA256_V1__"), ("workbench.css", "__CSS_SHA256_V1_")):
                     html = html.replace(marker, hashlib.sha256((main.STATIC_DIR / name).read_bytes()).hexdigest()[:16])
                 html = html.replace('src="/static/', 'src="/preview/static/').replace('href="/static/', 'href="/preview/static/')
+                article_version=hashlib.sha256((main.STATIC_DIR/'wechat-article-ui.js').read_bytes()).hexdigest()[:16]
+                html=re.sub(r'wechat-article-ui\.js\?v=[A-Za-z0-9_-]+','wechat-article-ui.js?v='+article_version,html)
                 preview_script = hashlib.sha256((main.STATIC_DIR / "customer-preview.js").read_bytes()).hexdigest()[:16]
                 preview_style = hashlib.sha256((main.STATIC_DIR / "customer-preview.css").read_bytes()).hexdigest()[:16]
                 html = html.replace("<head>", f'<head><script src="/preview/static/customer-preview.js?v={preview_script}"></script><link rel="stylesheet" href="/preview/static/customer-preview.css?v={preview_style}">')
+                reading=hashlib.sha256((main.STATIC_DIR/'preview-wechat-style.js').read_bytes()).hexdigest()[:16]
+                html=html.replace('</head>',f'<script src="/preview/static/preview-wechat-style.js?v={reading}"></script></head>')
                 illustration_script=hashlib.sha256((main.STATIC_DIR/'preview-illustrations.js').read_bytes()).hexdigest()[:16]
                 html=html.replace('</body>',f'<script src="/preview/static/preview-illustrations.js?v={illustration_script}"></script></body>')
                 return await HTMLResponse(html)(scope, receive, with_cookie)

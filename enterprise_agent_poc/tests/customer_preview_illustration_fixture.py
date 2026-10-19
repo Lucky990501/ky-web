@@ -46,13 +46,17 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--data-dir',required=True);parser.add_argument('--port',type=int,default=18948);parser.add_argument('--unconfigured',action='store_true');args=parser.parse_args()
     prepare(args.data_dir,args.port,args.port+1)
     from app.product_service import TaskService
+    from app.preview_image_execution import PreviewImageExecution,AUTHORIZATION_ID,MODE
+    from customer_preview_image_fixture import fixture_image
     TaskService.execute=fixture_task
+    PreviewImageExecution.call_image=fixture_image
     IllustrationProvider.generate=fixture_generate
     grant={'approved':True,'pricing_verified':True,'authorization_id':'FIXTURE_ONLY_NOT_AUTHORIZATION','model':'qwen-image-3.0',
            'request_max_cny':'0.10','max_total_cny':'5','max_requests':50,'max_images_per_task':5,'automatic_paid_retries':0}
     config=IllustrationConfig() if args.unconfigured else IllustrationConfig(key='FIXTURE_ONLY_NOT_A_KEY',enabled=True)
     app=create_preview(args.data_dir,args.port,args.port+1,local_http=True,
-        credentials={'DEEPSEEK_API_KEY':'FIXTURE_ONLY_NOT_A_KEY'},pricing={'text_pricing_verified':True},
+        credentials={'DEEPSEEK_API_KEY':'FIXTURE_ONLY_NOT_A_KEY'},pricing={'text_pricing_verified':True,'image_pricing_verified':True,'image_request_max_cny':'1'},
+        image_authorization={'authorization_id':AUTHORIZATION_ID,'approved':True,'execution_mode':MODE,'model':'gpt-image-2.5-sunburst-c','max_provider_calls':70,'request_max_cny':'1'},
         illustration_config=config,illustration_authorization=grant)
     from app import main
     assert main.settings.database_url=='sqlite:///'+str(Path(args.data_dir).resolve()/'preview.sqlite')

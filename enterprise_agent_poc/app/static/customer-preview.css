@@ -22,3 +22,10 @@ html[data-customer-preview] .preview-illustration-gallery{display:grid;grid-temp
 html[data-customer-preview] .preview-illustration-gallery figure{margin:0;min-width:0;}
 html[data-customer-preview] .preview-illustration-gallery img{width:100%;height:auto;max-height:240px;object-fit:contain;}
 @media(max-width:600px){html[data-customer-preview] .preview-illustration-gallery{grid-template-columns:minmax(0,1fr);}}
+html[data-customer-preview] .wechat-article-actions{margin-top:20px;font-size:13px;}
+html[data-customer-preview] .wechat-article-actions details{margin-top:12px;color:#52627c;}
+html[data-customer-preview] .wechat-article-actions summary{cursor:pointer;min-height:36px;padding:8px 0;}
+html[data-customer-preview] .wechat-article-buttons{display:flex;flex-wrap:wrap;gap:8px;}
+html[data-customer-preview] .wechat-article-buttons .button{min-height:44px;}
+html[data-customer-preview] .preview-illustrations>ul{font-size:13px;}
+html[data-customer-preview] .wechat-inline-article{max-height:none;border:0;border-radius:0;}

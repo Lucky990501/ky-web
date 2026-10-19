@@ -16,7 +16,7 @@ import sqlite3
 import time
 from uuid import UUID, uuid4
 
-from app.image_request_contract import image_plan
+from app.image_request_contract import image_plan,ImageRequestError
 from app.preview_budget import PreviewBudgetExceeded
 from app.security import RuntimePrincipal
 from app.preview_image_parameters import PreviewReferenceBindings, preview_plan, quality_value, reference_limit, MODEL, SIZES, QUALITIES, SPEC_ID
@@ -88,6 +88,14 @@ class PreviewImageExecution:
                 return self.main.product_store.task(item['task_id'], principal.tenant_id, principal.user_id)
         return None
 
+    def credit_preflight(self,principal):
+        if not principal.tenant_id.startswith('preview-') or not self.authorized():raise PermissionError()
+        if not self.main.product_store.agent_enabled(principal.tenant_id,'image-agent'):raise PermissionError()
+        from app.agent_catalog import get_agent
+        with self.main.store.connection() as conn:
+            account=conn.execute('select balance from credit_accounts where tenant_id=?',(principal.tenant_id,)).fetchone()
+        if not account or account['balance']<get_agent('image-agent').credit_cost:raise ValueError('insufficient_credit')
+
     def submit(self, principal, payload):
         if not self.authorized() or not principal.tenant_id.startswith('preview-'):
             raise PermissionError('尚未取得Preview独立图片业务授权。')
@@ -121,7 +129,7 @@ class PreviewImageExecution:
                 raise ValueError('参考图片用途无效。')
             record = self.main.product_store.chat_image_attachment(principal.tenant_id, principal.user_id, str(item.get('id', '')))
             if not record or record.get('task_id') or self.references.claimed(principal,record['id']):
-                raise ValueError('参考图不存在、已发送或无权访问。')
+                raise ImageRequestError('IMAGE_REFERENCE_INVALID','参考图片无效。')
             primary_record = primary_record or record
         parent_id = payload.get('edit_generation_id')
         parent = None
@@ -135,15 +143,15 @@ class PreviewImageExecution:
                 raise ImageRequestError('preview_edit_base_required','请先点击需要修改图片的“基于此图继续修改”，或上传参考图。没有把编辑请求偷偷改为文字生图，也没有调用图片服务。')
         if parent_id:
             if attachments:
-                raise ValueError('请选择已有图片或上传参考图，不要同时提交。')
+                raise ImageRequestError('IMAGE_EDIT_BASE_CONFLICT','编辑基图冲突。')
             with self.main.store.connection() as conn:
                 row = conn.execute('SELECT * FROM generations WHERE id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL',
                                    (parent_id, principal.tenant_id, principal.user_id)).fetchone()
             if not row:
-                raise LookupError('编辑基图不存在或无权访问。')
+                raise ImageRequestError('IMAGE_EDIT_BASE_MISSING','编辑基图不可用。')
             parent = dict(row)
             if parent.get('conversation_id') != payload.get('conversation_id'):
-                raise ValueError('编辑基图必须属于当前会话。')
+                raise ImageRequestError('IMAGE_EDIT_BASE_CONFLICT','编辑基图不属于当前会话。')
         from fractions import Fraction
         source_ratio = '1:1'
         source_record = parent or (primary_record if len(attachments)==1 else {})
@@ -164,6 +172,7 @@ class PreviewImageExecution:
             check_context_capacity(self.main,self.budget,self.pricing,principal.tenant_id)
         if not self.main.product_store.agent_enabled(principal.tenant_id, 'image-agent'):
             raise PermissionError('图片智能体尚未为当前企业启用。')
+        self.credit_preflight(principal)
         if parent:
             # An owner-checked immutable copy through the existing upload store;
             # no arbitrary URL/path, original Generation never overwritten.

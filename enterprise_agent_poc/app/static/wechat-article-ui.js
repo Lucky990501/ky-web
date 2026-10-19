@@ -60,17 +60,18 @@
     clean(template.content);
     return template.innerHTML;
   }
-  function previewDocument(html, previewImages) {
+  function previewDocument(html, previewImages, loading=false) {
     const safe = sanitizeArticle(html);
     const parsed = document.createElement('template'); parsed.innerHTML = safe;
     if (previewImages) for (const node of parsed.content.querySelectorAll('img')) {
       const raster = previewImages.get(node.getAttribute('src'));
       if (typeof raster === 'string' && raster.length <= 14 * 1024 * 1024 && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(raster)) node.setAttribute('src', raster);
-      else node.replaceWith(document.createTextNode('[图片暂不可用，请在公众号后台手动上传]'));
+      else node.replaceWith(document.createTextNode(loading?'[图片正在安全加载…]':'[图片暂不可用，请在公众号后台手动上传]'));
     }
     const images = [...new Set([...parsed.content.querySelectorAll('img')].map(node => node.getAttribute('src')))];
     const imagePolicy = images.length ? previewImages ? 'data:' : images.join(' ') : "'none'";
-    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src ${imagePolicy}; base-uri 'none'; form-action 'none'"><style>html{overflow-wrap:anywhere}body{box-sizing:border-box;max-width:680px;margin:0 auto;padding:24px 20px;color:#3E3E3E;font:16px/1.6 system-ui,sans-serif}*{box-sizing:border-box;max-width:100%}img{height:auto}table{display:block;overflow:auto;border-collapse:collapse}pre{white-space:pre-wrap}a{color:inherit}</style></head><body>${parsed.innerHTML}</body></html>`;
+    const documentHtml=`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src ${imagePolicy}; base-uri 'none'; form-action 'none'"><style>html{overflow-wrap:anywhere}body{box-sizing:border-box;max-width:680px;margin:0 auto;padding:24px 20px;color:#3E3E3E;font:16px/1.6 system-ui,sans-serif}*{box-sizing:border-box;max-width:100%}img{height:auto}table{display:block;overflow:auto;border-collapse:collapse}pre{white-space:pre-wrap}a{color:inherit}</style></head><body>${parsed.innerHTML}</body></html>`;
+    return window.WORKBENCH_PREVIEW_BASE?documentHtml.replace('</style>','body{font:17px/1.95 system-ui,sans-serif;color:#222;background:#fff}@media(max-width:480px){body{padding:20px 16px}h1,h2{font-size:28px!important}p{font-size:16px!important}}</style>'):documentHtml;
   }
   async function mountSafePreview(frame, result, isCurrent) {
     const parsed = document.createElement('template'); parsed.innerHTML = sanitizeArticle(result.html);
@@ -81,12 +82,12 @@
     // Incoming HTML still cannot contain data/blob/file or arbitrary URLs;
     // exported/clipboard HTML retains the authorized server address, not bytes.
     const images = new Map(), controller = new AbortController();
-    frame.srcdoc = previewDocument(result.html, images);
+    frame.srcdoc = previewDocument(result.html, images, Boolean(window.WORKBENCH_PREVIEW_BASE));
     const current = () => frame.isConnected && isCurrent();
     const cleanup = () => { controller.abort(); clearTimeout(timer); observer.disconnect(); images.clear(); };
     const observer = new MutationObserver(() => { if (!current()) cleanup(); });
     observer.observe(document.documentElement, {childList: true, subtree: true});
-    const timer = setTimeout(() => controller.abort(), 10000);
+    const timer = setTimeout(() => controller.abort(), window.WORKBENCH_PREVIEW_BASE?30000:10000);
     for (const url of sources.slice(0, 12)) {
       if (!current()) { cleanup(); return; }
       try {
@@ -168,6 +169,7 @@
     const imageCount = input.content.querySelectorAll('img,picture').length;
     // Reuse the reviewed sanitizer. Do not export the preview's stylesheet.
     const safe = document.createElement('template'); safe.innerHTML = sanitizeArticle(raw);
+    if(window.WORKBENCH_PREVIEW_BASE&&window.previewWechatStyle)window.previewWechatStyle(safe.content);
     // Match over contiguous DOM text as well: inline tags/entities must not
     // split an internal path and evade removal. Only text nodes are rewritten.
     const nodes = [], chunks = [], blockTags = new Set('section article div p h1 h2 h3 h4 h5 h6 blockquote ul ol li table tr th td pre br hr'.split(' '));
@@ -196,7 +198,7 @@
       const style = [inlineDefaults[node.localName], ...kept].filter(Boolean).join(';');
       if (style) node.setAttribute('style', style);
     }
-    const wrapper = document.createElement('section'); wrapper.setAttribute('style', inlineDefaults.section); wrapper.append(safe.content);
+    const wrapper = document.createElement('section'); wrapper.setAttribute('style', window.WORKBENCH_PREVIEW_BASE&&window.previewWechatSectionStyle||inlineDefaults.section); wrapper.append(safe.content);
     const text = plainArticle(wrapper);
     if (!text) throw new Error('ARTICLE_INVALID');
     const field = value => redactPaths(String(value || '').replace(/[\u0000-\u001f]/g, ' ').trim());
@@ -248,11 +250,15 @@
     slot.setAttribute('aria-label', '公众号文章人工导出');
     slot.innerHTML = '<div class="wechat-article-buttons"><button type="button" class="button secondary" data-article-preview>预览文章</button><button type="button" class="button primary" data-copy-rich>复制富文本</button><button type="button" class="button secondary" data-copy-source>复制HTML源码</button><button type="button" class="button secondary" data-copy-plain>复制纯文本</button><button type="button" class="button secondary" data-download-html>下载 HTML</button></div><dl class="wechat-manual-metadata"><div><dt>建议标题</dt><dd data-manual-title></dd></div><div><dt>摘要</dt><dd data-manual-digest></dd></div><div><dt>封面</dt><dd data-manual-cover></dd></div></dl><p class="wechat-article-feedback" role="status" aria-live="polite"></p><p class="wechat-manual-notice">请自行打开目标公众号后台，粘贴正文后保存草稿。标题、摘要和封面需单独填写／上传；正文图片请在后台手动上传。复制不会连接公众号或创建草稿。</p><div data-copy-recovery hidden><label>复制失败，可选中下方内容后按 Ctrl+C（Mac：⌘C）<textarea readonly aria-label="手动复制内容"></textarea></label></div>';
     article.append(slot);
+    if(window.WORKBENCH_PREVIEW_BASE){
+      const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='稿件设置与使用说明';
+      details.append(summary,slot.querySelector('.wechat-manual-metadata'),slot.querySelector('.wechat-manual-notice'));slot.append(details);
+    }
     const feedback = slot.querySelector('[role="status"]'), buttons = [...slot.querySelectorAll('button')], preview = slot.querySelector('[data-article-preview]');
     let result, busy = false;
     try { result = buildManualExport(content, markdown, metadata); }
     catch { buttons.forEach(button => button.disabled = true); feedback.textContent = '文章内容过大或无效，暂无法导出。'; return null; }
-    if (inlineBody && hasArticleHtml(content)) {
+    if (inlineBody && (hasArticleHtml(content)||window.WORKBENCH_PREVIEW_BASE)) {
       const body = article.querySelector('.chat-message-content');
       if (body) {
         // Reuse the exact existing sandbox/CSP preview, now inside the reply.
@@ -260,6 +266,11 @@
         const frame = document.createElement('iframe'); frame.className = 'wechat-inline-article';
         frame.title = '公众号文章正文'; frame.setAttribute('sandbox', ''); frame.setAttribute('referrerpolicy', 'no-referrer');
         frame.style.height = `${Math.min(640, Math.max(160, 48 + result.text.split('\n').length * 28 + Math.ceil(result.text.length / 32) * 12))}px`;
+        if(window.WORKBENCH_PREVIEW_BASE){
+          const parsed=document.createElement('template');parsed.innerHTML=result.html;
+          const columns=Math.max(12,Math.floor(((body.clientWidth||375)-48)/17));
+          frame.style.height=Math.min(24000,Math.max(320,100+Math.ceil(result.text.length/columns)*34+parsed.content.querySelectorAll('p').length*24+parsed.content.querySelectorAll('h2').length*120+parsed.content.querySelectorAll('img').length*480))+'px';
+        }
         body.replaceChildren(frame); body.classList.remove('chat-message-content-markdown'); body.classList.add('wechat-inline-message-content');
         mountSafePreview(frame, result, current).catch(() => { if (current()) frame.srcdoc = previewDocument('<p>文章预览暂不可用，请重试。</p>'); });
         // The manual controls already provide safe rich/source/plain copying.

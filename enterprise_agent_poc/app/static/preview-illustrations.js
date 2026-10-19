@@ -14,7 +14,7 @@
     const actions=document.createElement('div'),items=document.createElement('ul'),assets=document.createElement('div');assets.className='preview-illustration-gallery';
     const notice=document.createElement('p');notice.textContent='配图为AI示意，不是真实现场照片；正文与纯文字导出仍可使用。';
     slot.append(title,feedback,items,actions,assets,notice);article.append(slot);
-    let plan=null,timer=null,polls=0,busy=false;
+    let plan=null,capability=null,timer=null,polls=0,busy=false;
     const current=()=>slot.isConnected&&main.isConnected&&article.closest('#main')===main;
     const stop=()=>{clearTimeout(timer);observer.disconnect();};
     const observer=new MutationObserver(()=>{if(!current())stop();});observer.observe(document.documentElement,{childList:true,subtree:true});
@@ -31,7 +31,10 @@
     function render() {
       if(!current())return;
       actions.replaceChildren();items.replaceChildren();assets.replaceChildren();
-      if(!plan){button('查看自动配图计划',async()=>{plan=await api(prefix+'/plans',{task_id:taskId});render();});return;}
+      if(!plan){
+        if(capability&&!capability.enabled){feedback.textContent=capability.user_message;return;}
+        button('查看自动配图计划',async()=>{plan=await api(prefix+'/plans',{task_id:taskId});render();});return;
+      }
       for(const item of plan.items){const li=document.createElement('li');li.textContent=item.label+'：'+item.requirement;items.append(li);}
       for(const asset of plan.assets){
         const figure=document.createElement('figure'),image=document.createElement('img'),caption=document.createElement('figcaption');
@@ -63,17 +66,24 @@
         feedback.textContent=`配图未完整完成（${plan.error_code||'结果未确认'}），已保存${plan.assets.length}/${plan.count}张。没有自动重试或把部分结果称为完整成功。`;
         if(plan.assets.length===plan.count&&plan.count)button('仅重试文档整理（不重新生图）',async()=>{plan=await api(prefix+'/plans/'+plan.id+'/export',{});});
       } else {
-        feedback.textContent=plan.capability.enabled?`共${plan.count}张，最高费用预留¥${plan.maximum_cost_cny}；预留不是供应商实际账单。`:plan.user_message;
+        const eligible=plan.can_generate??plan.capability.enabled;
+        feedback.textContent=eligible?`共${plan.count}张，最高费用预留¥${plan.maximum_cost_cny}；确认一次后自动生成并插入。预留不是实际账单。`:plan.user_message;
         button(plan.kind==='activity'?'确认配图并导出图文 Word':'确认生成文章配图',async()=>{
           if(!window.confirm(`本计划共${plan.count}张配图，最多预留¥${plan.maximum_cost_cny}。使用qwen-image-3.0，保留水印，无自动付费重试。是否一次确认整个计划？`))return;
           plan=await api(prefix+'/plans/'+plan.id+'/generate',{confirmed:true,digest:plan.digest});render();
-        },!plan.capability.enabled||!plan.count);
+        },!eligible||!plan.count);
       }
     }
     feedback.textContent='正在查询当前文章的已保存配图…';
     api(prefix+'/tasks/'+encodeURIComponent(taskId)).then(async value=>{
       if(!current())return;plan=value.plan;
-      if(!plan){const capability=await api(prefix+'/capability');if(current())feedback.textContent=capability.user_message;}
+      if(!plan){
+        capability=await api(prefix+'/capability');if(!current())return;
+        feedback.textContent=capability.user_message;
+        // Planning is zero-provider and idempotent. Paid generation still
+        // requires the one explicit whole-group confirmation below.
+        if(capability.enabled)plan=await api(prefix+'/plans',{task_id:taskId});
+      }
       render();
     }).catch(error=>{if(current()){feedback.textContent=error.message;render();}});
   }
