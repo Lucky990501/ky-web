@@ -10,6 +10,17 @@ import re
 
 import httpx
 
+ORDINARY_TEXT_AGENTS=frozenset({'copywriting-agent','preview-wechat-agent','campaign-agent'})
+TEXT_REQUEST_CEILING_CNY=Decimal('5.00')
+CONTROLLED_TEXT_REQUEST_CEILING_CNY=Decimal('0.60')
+
+
+def text_request_ceiling(agent_id=None,*,controlled=False):
+    # Only authenticated ordinary text-Agent tasks receive the new allowance.
+    # Controlled, unknown and image-orchestration requests retain their boundary.
+    return (TEXT_REQUEST_CEILING_CNY if not controlled and agent_id in ORDINARY_TEXT_AGENTS
+            else CONTROLLED_TEXT_REQUEST_CEILING_CNY)
+
 
 def plaintext_history(body):
     """Preview compatibility only: omit opaque reasoning, retain real tool IO.
@@ -98,7 +109,7 @@ def preview_task_failure(task, trace, denied):
 
 
 def bounded_text_output(body,prices,agent_id,*,controlled=False):
-    """One bounded request, same <=0.60 ceiling. No retry or global limit raise."""
+    """One estimated request; ordinary text and controlled ceilings stay distinct."""
     from app.test_text_gate import TestTextGate
     body=dict(body)
     article=agent_id=='preview-wechat-agent'
@@ -111,6 +122,7 @@ def bounded_text_output(body,prices,agent_id,*,controlled=False):
     minimum=min(requested or (4096 if article else 2048),4096 if article else 2048)
     body['max_output_tokens']=min(requested or cap,cap)
     desired_output=body['max_output_tokens']
+    ceiling=text_request_ceiling(agent_id,controlled=controlled)
     rate_in=Decimal(str(prices['text_input_cny_per_million']));rate_out=Decimal(str(prices['text_output_cny_per_million']))
     if not rate_in.is_finite() or not rate_out.is_finite() or rate_in<0 or rate_out<=0:raise PreviewBudgetExceeded('费率尚未核实。')
     def cost_refusal():
@@ -133,18 +145,25 @@ def bounded_text_output(body,prices,agent_id,*,controlled=False):
             'complete_output_reserved_cny':str(Decimal(desired_output)*rate_out/1_000_000),
             'minimum_total_cny':str((Decimal(bound)*rate_in+Decimal(minimum)*rate_out)/1_000_000),
             'complete_total_cny':str((Decimal(bound)*rate_in+Decimal(desired_output)*rate_out)/1_000_000),
-            'request_ceiling_cny':'0.60',
+            'request_ceiling_cny':str(ceiling),
         }
         return exc
+    if not controlled and agent_id in ORDINARY_TEXT_AGENTS:
+        bounds=TestTextGate.request_bound(body)
+        cost=(Decimal(bounds['input_tokens_upper'])*rate_in+Decimal(desired_output)*rate_out)/1_000_000
+        if cost>ceiling:raise cost_refusal()
+        # The new ordinary allowance must not be made to fit by cutting the
+        # complete article/script/structured-plan output reservation.
+        return body,cost
     for _ in range(2):
         bounds=TestTextGate.request_bound(body)
-        available=Decimal('.60')*1_000_000-Decimal(bounds['input_tokens_upper'])*rate_in
+        available=ceiling*1_000_000-Decimal(bounds['input_tokens_upper'])*rate_in
         body['max_output_tokens']=min(body['max_output_tokens'],max(0,int(available/rate_out)))
         if body['max_output_tokens']<minimum:
             raise cost_refusal()
     bounds=TestTextGate.request_bound(body)
     cost=(Decimal(bounds['input_tokens_upper'])*rate_in+Decimal(body['max_output_tokens'])*rate_out)/1_000_000
-    if body['max_output_tokens']<minimum or cost>Decimal('.60'):
+    if body['max_output_tokens']<minimum or cost>ceiling:
         raise cost_refusal()
     return body,cost
 
@@ -163,10 +182,10 @@ def observe_text_terminal(budget,task_id,block):
 
 
 class PreviewBudget:
-    # Owner-approved additions: 200 Text/120 CNY, 50 Image/50 CNY,
-    # 200 Embedding/10 CNY. Existing reservations are never reset.
-    LIMITS = {"text": (354, Decimal("204")), "image": (70, Decimal("70")), "embedding": (271, Decimal("15"))}
-    TOTAL_LIMIT_CNY = Decimal("289")
+    # Owner-approved cumulative ceilings, NOT additions to prior limits.
+    # Image/Embedding grants and every historical reservation remain unchanged.
+    LIMITS = {"text": (1000, Decimal("600")), "image": (70, Decimal("70")), "embedding": (271, Decimal("15"))}
+    TOTAL_LIMIT_CNY = Decimal("685")
 
     def __init__(self, root: Path):
         self.path = root / "preview-budget.sqlite"
@@ -179,11 +198,11 @@ class PreviewBudget:
         with sqlite3.connect(self.path) as conn:
             conn.execute("INSERT INTO observations VALUES(?,?)", (time.time(), json.dumps(payload)))
 
-    def reserve(self, kind: str, ceiling: Decimal, *, controlled=None):
+    def reserve(self, kind: str, ceiling: Decimal, *, controlled=None, agent_id=None):
         if kind not in self.LIMITS or not ceiling.is_finite() or ceiling <= 0:
             raise PreviewBudgetExceeded("调用费用上限尚未核实；没有发起付费请求。")
-        if kind == 'text' and ceiling > Decimal('0.60'):
-            raise PreviewBudgetExceeded("本次请求预留费用超过单次授权上限；请缩短输入，未调用模型。", "PREVIEW_INPUT_REJECTED")
+        if kind == 'text' and ceiling > text_request_ceiling(agent_id,controlled=controlled is not None):
+            raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'], 'PREVIEW_CONTEXT_COST_LIMIT')
         with sqlite3.connect(self.path, timeout=10) as conn:
             conn.execute("BEGIN IMMEDIATE")
             if controlled is not None:

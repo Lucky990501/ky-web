@@ -50,15 +50,15 @@ def test_unknown_or_opaque_inputs_fail_closed(item):
 
 def test_budget_count_persists_across_restart(tmp_path):
     meter=PreviewBudget(tmp_path)
-    seed_ledger(meter,'text',353,'.1');meter.reserve('text',Decimal('.1'))
+    seed_ledger(meter,'text',999,'.1');meter.reserve('text',Decimal('.1'))
     with pytest.raises(PreviewBudgetExceeded): PreviewBudget(tmp_path).reserve("text",Decimal('0.1'))
-    assert PreviewBudget(tmp_path).summary()['text']['requests']==354
+    assert PreviewBudget(tmp_path).summary()['text']['requests']==1000
 
 
 def test_customer_trial_approved_limits_and_prior_ledger_are_preserved(tmp_path):
     meter=PreviewBudget(tmp_path)
-    assert meter.LIMITS=={'text':(354,Decimal('204')),'image':(70,Decimal('70')),'embedding':(271,Decimal('15'))}
-    assert meter.TOTAL_LIMIT_CNY==Decimal('289')
+    assert meter.LIMITS=={'text':(1000,Decimal('600')),'image':(70,Decimal('70')),'embedding':(271,Decimal('15'))}
+    assert meter.TOTAL_LIMIT_CNY==Decimal('685')
     seed_ledger(meter,'text',49,'.1');seed_ledger(meter,'embedding',30,'.05')
     resumed=PreviewBudget(tmp_path)
     assert resumed.summary()['text']['requests']==49
@@ -99,14 +99,14 @@ def test_per_request_text_cost_cap_rejects_before_counting(tmp_path):
     assert meter.summary()['text']['requests']==0
 
 
-def test_aggregate_cap_is289_for_dispatch_and_preflight(tmp_path,monkeypatch):
+def test_aggregate_cap_is685_for_dispatch_and_preflight(tmp_path,monkeypatch):
     # Broader individual limit is a fixture only, to isolate the aggregate guard.
-    monkeypatch.setattr(PreviewBudget,'LIMITS',{**PreviewBudget.LIMITS,'text':(500,Decimal('300'))})
+    monkeypatch.setattr(PreviewBudget,'LIMITS',{**PreviewBudget.LIMITS,'text':(1500,Decimal('700')),'embedding':(500,Decimal('20'))})
     meter=PreviewBudget(tmp_path);meter.reserve('image',Decimal('70'))
-    seed_ledger(meter,'text',364,'.60');seed_ledger(meter,'embedding',12,'.05')
+    seed_ledger(meter,'text',1000,'.60');seed_ledger(meter,'embedding',300,'.05')
     with pytest.raises(PreviewBudgetExceeded):meter.check_capacity('embedding',1,Decimal('.05'))
     with pytest.raises(PreviewBudgetExceeded):meter.reserve('embedding',Decimal('.05'))
-    assert meter.summary()['embedding']['requests']==12
+    assert meter.summary()['embedding']['requests']==300
 
 
 def test_safe_error_categories_never_include_internal_text():

@@ -401,7 +401,13 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             if image_submission_blocked(path, scope["method"], image_executor.authorized()):
                 return await JSONResponse({"error_code": "IMAGE_APPROVAL_EXTERNAL_BLOCKED", "user_message": IMAGE_BLOCK_MESSAGE}, 503)(scope, receive, send)
             if path in {"/api/health", "/api/v1/preview-status"}:
-                return await JSONResponse({"status": "preview", **identity, "budget": budget.summary(), "image_business": image_executor.capability(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
+                from app.preview_budget import TEXT_REQUEST_CEILING_CNY,CONTROLLED_TEXT_REQUEST_CEILING_CNY,ORDINARY_TEXT_AGENTS
+                return await JSONResponse({"status": "preview", **identity, "budget": budget.summary(),
+                    "text_budget_policy":{"ordinary_agent_ids":sorted(ORDINARY_TEXT_AGENTS),
+                        "request_ceiling_cny":str(TEXT_REQUEST_CEILING_CNY),
+                        "controlled_request_ceiling_cny":str(CONTROLLED_TEXT_REQUEST_CEILING_CNY),
+                        "global_total_limit_cny":str(budget.TOTAL_LIMIT_CNY)},
+                    "image_business": image_executor.capability(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
             if path.startswith(denied):
                 return await JSONResponse({"user_message": "体验版不开放平台管理或账号接口"}, 403)(scope, receive, send)

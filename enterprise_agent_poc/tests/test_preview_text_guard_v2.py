@@ -129,7 +129,7 @@ def test_bounded_compact_wechat_output_and_safe_incomplete_evidence(setup):
     assert normal['max_output_tokens']==4096 and normal['instructions']==body['instructions']
     short,_=bounded_text_output({**body,'max_output_tokens':1024},PRICES,'copywriting-agent')
     assert short['max_output_tokens']==1024
-    with pytest.raises(PreviewBudgetExceeded):bounded_text_output({**body,'instructions':'x'*40000},{**PRICES,'text_input_cny_per_million':'50'},'preview-wechat-agent')
+    with pytest.raises(PreviewBudgetExceeded):bounded_text_output({**body,'instructions':'x'*40000},{**PRICES,'text_input_cny_per_million':'50'},'preview-wechat-agent',controlled=True)
     observe_text_terminal(budget,TASK['id'],b'data: '+json.dumps({'type':'response.incomplete','response':{'status':'incomplete','incomplete_details':{'reason':'max_output_tokens'},'output':[{'text':'DO_NOT_STORE'}],'usage':{'input_tokens':100,'output_tokens':4096}}}).encode())
     with sqlite3.connect(budget.path) as c:p=json.loads(c.execute('select payload from observations order by rowid desc limit 1').fetchone()[0])
     assert p['incomplete_reason']=='max_output_tokens' and 'DO_NOT_STORE' not in str(p)

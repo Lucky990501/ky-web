@@ -25,7 +25,7 @@ def test_short_activity_keeps_complete_json_output_space():
     assert original==before and accepted['tools']==original['tools']
 
 
-def test_realistic_accumulated_tool_results_fail_closed_not_short_input():
+def test_accumulated_tool_results_accept_ordinary_but_not_controlled():
     original=request()
     original['instructions']='FIXTURE_ONLY system/Skill context '+('规则'*2100)
     # Four five-chunk searches: keep every fact and citation in the fixture.
@@ -36,11 +36,15 @@ def test_realistic_accumulated_tool_results_fail_closed_not_short_input():
              'output':json.dumps({'result':[{'chunk_id':f'{number}-{i}','content':'资料'*170} for i in range(5)]},ensure_ascii=False)},
         ]
     before=copy.deepcopy(original)
+    accepted,cost=bounded_text_output(original,PRICES,'campaign-agent')
+    assert accepted['max_output_tokens']==8192 and Decimal('.60')<cost<=Decimal('5')
+    assert accepted['input']==original['input'] and original==before
     with pytest.raises(PreviewBudgetExceeded) as caught:
-        bounded_text_output(original,PRICES,'campaign-agent')
+        bounded_text_output(original,PRICES,'campaign-agent',controlled=True)
     exc=caught.value;d=exc.cost_diagnostics
     assert exc.code=='PREVIEW_CONTEXT_COST_LIMIT' and original==before
     assert d['desired_output_tokens']==8192 and d['minimum_output_tokens']==2048
+    assert d['request_ceiling_cny']=='0.60'
     assert Decimal(d['minimum_total_cny'])>Decimal('.60')
     bound=TestTextGate.request_bound({**original,'max_output_tokens':8192})['input_tokens_upper']
     assert d['input_tokens_upper']==bound

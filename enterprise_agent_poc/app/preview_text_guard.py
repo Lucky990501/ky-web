@@ -100,7 +100,7 @@ class PreviewTextGuard:
 
     def reserve(self,task,cost):
         control=self.check(task)
-        self.budget.reserve('text',cost,**({'controlled':control} if control else {}))
+        self.budget.reserve('text',cost,agent_id=task['agent_id'],**({'controlled':control} if control else {}))
         return control
 
 class PreviewTaskTextGate:
