@@ -36,6 +36,7 @@ def test_not_loaded_into_production(monkeypatch):
  '不得把未填写的占位符当作真实素材','不要求每次填写所有字段',
  '不主动输出：镜头说明、背景音乐、拍摄建议、营销分析、写作方法、说明性前言',
  '直接输出完整成稿','不机械调用企业配置、知识库和素材搜索',
+ '讲师身份并不证明讲师曾有同样困扰','不得补写“我以前也老这样”',
 ])
 def test_owner_rules_loaded_verbatim_as_semantic_requirements(rule):
     assert rule in prompt()
