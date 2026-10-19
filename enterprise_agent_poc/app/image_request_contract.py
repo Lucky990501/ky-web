@@ -59,18 +59,18 @@ def requested_count(text: str) -> int:
     return count
 
 
-def pixel_size(value: str) -> tuple[str, str]:
+def pixel_size(value: str, *, provider_sizes=()) -> tuple[str, str]:
     match = re.fullmatch(r"\s*(\d{3,4})\s*[xX]\s*(\d{3,4})\s*", normalized(value))
     if not match:
         raise ImageRequestError("image_size_invalid", "尺寸请使用明确像素，例如1024x1024。")
     width, height = map(int, match.groups())
-    if not (256 <= width <= 1536 and 256 <= height <= 1536 and width % 8 == height % 8 == 0):
+    if not (256 <= width <= 1536 and 256 <= height <= 1536 and width % 8 == height % 8 == 0) and f'{width}x{height}' not in provider_sizes:
         raise ImageRequestError("image_size_not_verified", "该像素尺寸尚未完成当前图片模型能力核验，未发送生成请求；当前候选上限为1536像素且边长为8的倍数。")
     ratio = Fraction(width, height)
     return f"{width}x{height}", f"{ratio.numerator}:{ratio.denominator}"
 
 
-def resolve_size(user_text: str, prompt: str, aspect_ratio: str, size: str | None) -> tuple[str, str]:
+def resolve_size(user_text: str, prompt: str, aspect_ratio: str, size: str | None, *, provider_sizes=()) -> tuple[str, str]:
     """Trusted current user input wins; never silently replace explicit pixels."""
     source = normalized(user_text or prompt)
     # Source-image geometry describes input, not the desired output canvas.
@@ -78,7 +78,7 @@ def resolve_size(user_text: str, prompt: str, aspect_ratio: str, size: str | Non
     source = re.sub(r'(?:参考图|原图|源图|上传图片)(?:本身)?(?:的)?(?:宽(?:度)?|高(?:度)?)\s*(?:为|是|[:=])?\s*\d{3,4}\s*(?:px|像素)?(?:[，,\s]*(?:宽(?:度)?|高(?:度)?)\s*(?:为|是|[:=])?\s*\d{3,4}\s*(?:px|像素)?)?', '参考图', source, flags=re.I)
     resolution_text = re.sub(r'[“「『][^”」』\n]*[”」』]|"[^"\n]*"', '', source)
     resolution_text = re.sub(r"[24]k\s*(?:显示器|屏幕|电视|摄像头|投影仪|设备|型号)", "设备", resolution_text, flags=re.I)
-    if re.search(r"(?:生成|制作|输出|分辨率|尺寸|要|改成|改为|调整为).{0,12}(?:2k|4k)|(?:2k|4k).{0,8}(?:图片|海报|分辨率|画质|尺寸)|^\s*[24]k\s*$", resolution_text, re.I) and not re.search(r"(?:不要|无需|不需要)\s*[24]k", resolution_text, re.I):
+    if re.search(r"(?:生成|制作|输出|分辨率|尺寸|要|改成|改为|调整为).{0,12}(?:2k|4k)|(?:2k|4k).{0,8}(?:图片|海报|分辨率|画质|尺寸)|^\s*[24]k\s*$", resolution_text, re.I) and not re.search(r"(?:不要|无需|不需要)\s*[24]k", resolution_text, re.I) and not (provider_sizes and (size or re.search(r'\d{3,4}\s*[xX]\s*\d{3,4}',resolution_text))):
         raise ImageRequestError("image_size_not_verified", "当前模型的显式2K/4K能力尚未核验，不能保证；请确认改用明确像素候选后再生成。")
     explicit = re.search(r"(?<!\d)(\d{3,4})\s*[xX]\s*(\d{3,4})(?!\d)", source)
     widths = re.findall(r'宽(?:度)?\s*(?:为|是|[:=])?\s*(\d{3,4})\s*(px|像素|厘米|毫米|cm|mm)?', source, re.I)
@@ -95,8 +95,8 @@ def resolve_size(user_text: str, prompt: str, aspect_ratio: str, size: str | Non
     ratio_match = re.search(r"(?<!\d)(1:1|9:16|16:9|4:5|3:2|2:3)(?!\d)", source)
     desired_ratio = ratio_match.group(1) if ratio_match else None
     if explicit or labelled:
-        requested, actual_ratio = pixel_size("x".join(labelled or explicit.groups()))
-        if size and pixel_size(size)[0] != requested:
+        requested, actual_ratio = pixel_size("x".join(labelled or explicit.groups()),provider_sizes=provider_sizes)
+        if size and pixel_size(size,provider_sizes=provider_sizes)[0] != requested:
             raise ImageRequestError("image_size_conflict", "Tool尺寸与用户明确指定的像素不一致，未发送生成请求。")
         if desired_ratio and actual_ratio != desired_ratio:
             raise ImageRequestError("image_aspect_ratio_conflict", "用户指定的像素和比例互相冲突，请确认优先要求。")
@@ -108,7 +108,7 @@ def resolve_size(user_text: str, prompt: str, aspect_ratio: str, size: str | Non
                 desired_ratio = value
                 break
     if size:
-        requested, actual_ratio = pixel_size(size)
+        requested, actual_ratio = pixel_size(size,provider_sizes=provider_sizes)
         if desired_ratio and actual_ratio != desired_ratio:
             raise ImageRequestError("image_aspect_ratio_conflict", "Tool尺寸不符合用户要求的比例，未发送生成请求。")
         return requested, actual_ratio
@@ -119,9 +119,9 @@ def resolve_size(user_text: str, prompt: str, aspect_ratio: str, size: str | Non
 
 
 def image_plan(user_text: str, prompt: str, aspect_ratio: str, size: str | None,
-               outputs: list[dict] | None = None) -> list[dict]:
+               outputs: list[dict] | None = None, *, provider_sizes=()) -> list[dict]:
     count = requested_count(user_text or prompt)
-    resolved_size, ratio = resolve_size(user_text, prompt, aspect_ratio, size)
+    resolved_size, ratio = resolve_size(user_text, prompt, aspect_ratio, size,provider_sizes=provider_sizes)
     if outputs is not None and (len(outputs) != count or not all(isinstance(item, dict) and set(item) == {"purpose", "prompt"}
             and all(isinstance(item[key], str) and item[key].strip() for key in item) for item in outputs)):
         raise ImageRequestError("image_output_plan_conflict", "每张图片的用途和Prompt必须完整，数量须与用户要求一致。")

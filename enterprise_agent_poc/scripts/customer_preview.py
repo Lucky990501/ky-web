@@ -174,6 +174,11 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     original_public_task, original_public_file = main._public_task, main._public_knowledge_file
     def public_task(task, **kwargs):
         result = original_public_task(task, **kwargs)
+        if task.get('agent_id')=='image-agent':
+            try:result['attachments']=image_executor.references.public(task)
+            except (ValueError,PermissionError):result['attachment_warning']='部分参考图已失效，不影响已保存的生成结果。'
+            submission=image_executor.submission(task['id'])
+            result['image_request']={k:submission.get(k) for k in ('size','quality','parameter_spec')}
         if task.get('status') == 'failed' and task.get('error_code') in {'runtime_error','runtime_start_error','mcp_error','required_tool_dependency_error','worker_interrupted','result_persistence_error'}:
             with main.store.connection() as conn:
                 row = conn.execute('SELECT payload FROM run_traces WHERE run_id=?', (task.get('run_id'),)).fetchone()
@@ -191,6 +196,18 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             result.update(error_code=code, user_message=PREVIEW_ERRORS[code])
         return result
     main._public_task, main._public_knowledge_file = public_task, public_file
+    original_conversation_detail=main.product_store.conversation_detail
+    def conversation_detail(tenant_id,user_id,conversation_id):
+        detail=original_conversation_detail(tenant_id,user_id,conversation_id)
+        if detail and detail['agent_id']=='image-agent':
+            for message in detail.get('messages',[]):
+                if message.get('role')!='user' or not message.get('task_id'):continue
+                task=main.product_store.task(message['task_id'],tenant_id,user_id)
+                if not task:continue
+                try:message['attachments']=image_executor.references.public(task)
+                except (ValueError,PermissionError):message['attachment_warning']='部分参考图已失效。'
+        return detail
+    main.product_store.conversation_detail=conversation_detail
     identity_path=ROOT.parent/'preview-source.json'
     identity=json.loads(identity_path.read_text()) if identity_path.is_file() else {'source':'LOCAL_CANDIDATE','base_source':'8eb2fa7061de17fe355d64c03fa5451b547dae85'}
     submission_lock = asyncio.Lock()
@@ -349,6 +366,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
+            if path.startswith('/api/v1/chat-images/') and scope['method']=='DELETE':
+                actor=main.current_user(token)
+                if image_executor.references.claimed(actor,path.rsplit('/',1)[1]):
+                    return await JSONResponse({'user_message':'参考图已用于任务，保留历史记录，不能作为未发送附件删除。'},409)(scope,receive,with_cookie)
             if path.startswith('/api/v1/preview/article-references'):
                 try:
                     principal = main.current_user(token)
@@ -396,8 +417,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     payload = json.loads(raw)
                     if not isinstance(payload, dict): raise ValueError('图片请求格式无效。')
                     if path.endswith('/plan'):
-                        from app.image_request_contract import image_plan
-                        count = len(image_plan(payload.get('message', ''), payload.get('message', ''), '1:1', None))
+                        from app.preview_image_parameters import preview_plan, quality_value
+                        quality_value(payload.get('quality'))
+                        planned=preview_plan(payload.get('message',''),size=payload.get('size'))
+                        count = len(planned)
                         budget.check_capacity('image', count, Decimal(str(prices['image_request_max_cny'])))
                         context_fee = Decimal('0')
                         if payload.get('use_enterprise_context') is True:
@@ -405,7 +428,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                             check_context_capacity(main,budget,prices,principal.tenant_id)
                             context_fee = Decimal(str(prices['embedding_request_max_cny']))
                         return await JSONResponse({'count':count,'max_reserved_cny':str(Decimal(str(prices['image_request_max_cny'])) * count),
-                            'knowledge_requests':int(context_fee>0),'knowledge_max_reserved_cny':str(context_fee)}, 200)(scope, receive, with_cookie)
+                            'knowledge_requests':int(context_fee>0),'knowledge_max_reserved_cny':str(context_fee),
+                            'size':planned[0]['size'],'quality':payload.get('quality')}, 200)(scope, receive, with_cookie)
                     async with submission_lock:
                         task = image_executor.submit(principal, payload)
                         image_executor.schedule(task)

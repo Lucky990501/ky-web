@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 from app.image_request_contract import image_plan
 from app.preview_budget import PreviewBudgetExceeded
 from app.security import RuntimePrincipal
+from app.preview_image_parameters import PreviewReferenceBindings, preview_plan, quality_value, MODEL, SIZES, QUALITIES, SPEC_ID
 
 
 MODE = 'preview_direct_image_business_v1'
@@ -30,6 +31,7 @@ class PreviewImageExecution:
         self.main, self.budget, self.pricing = main, budget, pricing
         self.authorization = authorization or {}
         self.pending = set()
+        self.references = PreviewReferenceBindings(main.product_store,budget)
 
     def authorized(self):
         grant = self.authorization
@@ -64,8 +66,9 @@ class PreviewImageExecution:
         return {'enabled': enabled, 'execution_mode': MODE,
                 'request_max_cny': str(self.pricing.get('image_request_max_cny', '0')),
                 'remaining_requests': max(0, quota['max_requests'] - quota['requests']),
-                'max_outputs': 5, 'max_reference_images': 1,
-                'native_high_resolution': 'NOT_VERIFIED',
+                'max_outputs': 5, 'max_reference_images': 5 if self.main.settings.image_model_id==MODEL else 1,
+                'sizes':list(SIZES), 'qualities':list(QUALITIES), 'parameter_spec':SPEC_ID,
+                'native_high_resolution': 'OWNER_SPECIFIED_NOT_PROVIDER_VERIFIED',
                 'user_message': ('独立体验图片生成：每任务1～5张，参考图编辑及版本保留；不自动重试。'
                                  if enabled else '图片生成暂不可用：未取得独立执行授权或体验额度已用完。')}
 
@@ -86,12 +89,13 @@ class PreviewImageExecution:
     def submit(self, principal, payload):
         if not self.authorized() or not principal.tenant_id.startswith('preview-'):
             raise PermissionError('尚未取得Preview独立图片业务授权。')
-        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id', 'edit_generation_id', 'use_enterprise_context'}:
+        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id', 'edit_generation_id', 'use_enterprise_context', 'size', 'quality'}:
             raise ValueError('图片执行身份及配置只能由服务端确定。')
         if not isinstance(payload.get('use_enterprise_context',False),bool):raise ValueError('知识使用选项无效。')
         if payload.get('preview_image_confirmed') is not True:
             raise PermissionError('请先明确确认图片生成费用。')
         request_id = str(UUID(str(payload.get('preview_image_request_id', ''))))
+        quality = quality_value(payload.get('quality'))
         prompt = payload.get('message')
         if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000:
             raise ValueError('请输入1～4000字的图片需求。')
@@ -100,16 +104,20 @@ class PreviewImageExecution:
         if prior:
             return prior
         attachments = payload.get('attachments') or []
-        if not isinstance(attachments, list) or len(attachments) > 1:
-            raise ValueError('当前供应商多参考图合同尚未核实；请仅选择1张，不会丢弃额外图片。')
+        if not isinstance(attachments, list) or len(attachments) > 5:
+            raise ValueError('当前每任务最多支持5张参考图，不会丢弃额外图片。')
+        ids=[item.get('id') for item in attachments if isinstance(item,dict)]
+        if len(ids)!=len(attachments) or len(set(str(x) for x in ids))!=len(ids):raise ValueError('参考图片不能重复。')
+        primary_record = None
         for item in attachments:
             if not isinstance(item, dict) or set(item) - {'type', 'id', 'role'} or item.get('type') != 'image':
                 raise ValueError('参考图片格式无效。')
             if item.get('role', 'subject') not in {'subject', 'style', 'background', 'composition', 'brand', 'reference', 'front', 'back'}:
                 raise ValueError('参考图片用途无效。')
             record = self.main.product_store.chat_image_attachment(principal.tenant_id, principal.user_id, str(item.get('id', '')))
-            if not record or record.get('task_id'):
+            if not record or record.get('task_id') or self.references.claimed(principal,record['id']):
                 raise ValueError('参考图不存在、已发送或无权访问。')
+            primary_record = primary_record or record
         parent_id = payload.get('edit_generation_id')
         parent = None
         if not parent_id and not attachments and payload.get('conversation_id') and re.search(
@@ -133,13 +141,15 @@ class PreviewImageExecution:
                 raise ValueError('编辑基图必须属于当前会话。')
         from fractions import Fraction
         source_ratio = '1:1'
-        source_record = parent or (record if attachments else {})
+        source_record = parent or (primary_record if len(attachments)==1 else {})
         if source_record and source_record.get('width') and source_record.get('height'):
             fraction = Fraction(source_record['width'], source_record['height'])
             candidate = f'{fraction.numerator}:{fraction.denominator}'
             if candidate in {'1:1','9:16','16:9','4:5','3:2','2:3'}:
                 source_ratio = candidate
-        plan = image_plan(prompt, prompt, source_ratio, None)
+        plan = preview_plan(prompt,source_ratio,payload.get('size'))
+        if (quality or len(attachments)>1 or any(int(x)>1536 for x in plan[0]['size'].split('x'))) and self.main.settings.image_model_id!=MODEL:
+            raise ValueError('新增图片参数仅适用于Owner已确认的模型。')
         with self.main.store.connection() as conn:
             if conn.execute("select count(*) from tasks where status in ('queued','running')").fetchone()[0]:
                 raise PermissionError('体验服务当前正在生成，请稍后再提交。')
@@ -162,12 +172,13 @@ class PreviewImageExecution:
                 key, '编辑基图' + ext, mime, len(source), width, height)
             attachments = [{'type': 'image', 'id': record['id'], 'role': 'subject'}]
         task = self.main.product_store.create_task(principal.tenant_id, principal.user_id, 'image-agent', prompt,
-            payload.get('conversation_id'), attachment_ids=[item['id'] for item in attachments])
+            payload.get('conversation_id'), attachment_ids=[attachments[0]['id']] if attachments else [])
         self.budget.observe({'event': 'preview_image_submission', 'authorization_id': AUTHORIZATION_ID,
                              'tenant_id': principal.tenant_id, 'user_id': principal.user_id,
                              'request_id': request_id, 'fingerprint': fingerprint, 'task_id': task['id'],
                              'references': attachments, 'edit_parent_generation_id': parent_id, 'requested_outputs': len(plan), 'aspect_ratio': source_ratio,
-                             'use_enterprise_context':payload.get('use_enterprise_context',False)})
+                             'use_enterprise_context':payload.get('use_enterprise_context',False),
+                             'size':plan[0]['size'],'quality':quality,'parameter_spec':SPEC_ID})
         return task
 
     def schedule(self, task):
@@ -193,7 +204,7 @@ class PreviewImageExecution:
                 timeout=timedelta(seconds=660), sse_read_timeout=timedelta(seconds=660)) as (reader, writer, _):
             async with ClientSession(reader, writer) as session:
                 await session.initialize()
-                attachment = self.main.product_store.task_chat_image_attachment(task['id'], task['tenant_id'])
+                attachments = self.references.resolve(task)
                 prompt = task['input_text']
                 if use_context:
                     from app.preview_image_context import collect_context
@@ -201,12 +212,14 @@ class PreviewImageExecution:
                     prompt, context = await collect_context(session,task,self.budget)
                     self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'knowledge_retrieving','completed')
                 self.main.product_store.add_task_activity(task['id'],task['tenant_id'],'generating','started')
-                result = await session.call_tool('image_generation', {
+                arguments = {
                     'prompt': prompt, 'references': [],
-                    'reference_images': [attachment['id']] if attachment else [],
+                    'reference_images': [item['id'] for item in attachments],
                     'reference_role': (submission.get('references') or [{}])[0].get('role', 'subject'),
                     'aspect_ratio': plan['aspect_ratio'], 'size': plan['size'],
-                }, read_timeout_seconds=timedelta(seconds=660))
+                }
+                if submission.get('quality'):arguments['quality']=submission['quality']
+                result = await session.call_tool('image_generation', arguments, read_timeout_seconds=timedelta(seconds=660))
         if result.isError:
             raise RuntimeError('image_business_tool_failed')
         value = result.structuredContent
@@ -254,10 +267,11 @@ class PreviewImageExecution:
             products.set_task(tid, tenant, 'running', 'generating', '正在生成图片，不会自动重试', run_id=run_id, conversation_id=conversation_id)
             if products.cancellation_requested(tid, tenant):
                 raise asyncio.CancelledError()
-            plan = image_plan(task['input_text'], task['input_text'], self.submission(tid).get('aspect_ratio', '1:1'), None)[0]
+            submission = self.submission(tid)
+            plan = preview_plan(task['input_text'],submission.get('aspect_ratio','1:1'),submission.get('size'))[0]
             result = await self.call_image(task, plan)
             artifacts = result['results']
-            if len(artifacts) > len(image_plan(task['input_text'], task['input_text'], '1:1', None)):
+            if len(artifacts) > len(preview_plan(task['input_text'],submission.get('aspect_ratio','1:1'),submission.get('size'))):
                 raise ValueError('image_business_result_count_invalid')
             submission = self.submission(tid)
             trace['edit_parent_generation_id'] = submission.get('edit_parent_generation_id')

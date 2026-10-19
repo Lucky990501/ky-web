@@ -117,6 +117,7 @@ class PlatformMCPService:
                                size: str | None = None,
                                outputs: list[dict] | None = None,
                                reference_role: str = 'subject',
+                               quality: str | None = None,
                                include_brand_logo: bool = False) -> dict:
         pilot_gate = None
         if getattr(self._settings, "test_text_gate_enabled", False):
@@ -131,7 +132,7 @@ class PlatformMCPService:
         }
         if reference_images is not None:
             submitted_args["reference_images"] = reference_images
-        for key, value in (("size", size), ("outputs", outputs)):
+        for key, value in (("size", size), ("outputs", outputs), ("quality", quality)):
             if value is not None:
                 submitted_args[key] = value
         if include_brand_logo:
@@ -155,22 +156,45 @@ class PlatformMCPService:
         size = effective_args.get("size")
         outputs = effective_args.get("outputs")
         include_brand_logo = effective_args.get("include_brand_logo", False)
+        quality = effective_args.get('quality')
+        preview = os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true'
+        if quality is not None:
+            if not preview:raise ImageRequestError('image_quality_invalid','当前正式运行合同未开启此质量参数。')
+            from app.preview_image_parameters import quality_value, MODEL
+            quality_value(quality)
+            if self._settings.image_model_id!=MODEL:raise ValueError('图片参数模型身份不匹配。')
         self._audit(principal.tenant_id, "image_generation", "started")
-        if len(reference_images) > 1:
+        if len(reference_images) > (5 if preview else 1):
             raise ValueError("当前最多支持一张参考图片。")
         # Only a signed current Task + its immutable attachment can attest the
         # single reference-image result requirement. Model arguments cannot.
         raw_scope = execution_scope.removeprefix("runtime:") if execution_scope.startswith("runtime:") else ""
         task_id = self._tokens.verify_task_scope(raw_scope, principal.tenant_id) if "." in raw_scope else ""
         attachment = ProductStore(self._store).task_chat_image_attachment(task_id, principal.tenant_id) if task_id else None
-        if reference_images and (not attachment or reference_images != [attachment["id"]]):
+        attachments = [attachment] if attachment else []
+        task = ProductStore(self._store).task_for_worker(task_id) if task_id else None
+        from pathlib import Path
+        ledger_root=Path(os.environ.get('ENTERPRISE_POC_DATA_DIR',''))
+        bound_preview=preview and task and principal.tenant_id.startswith('preview-') and (ledger_root/'preview-budget.sqlite').is_file()
+        if preview and len(reference_images)>1 and not bound_preview:
+            raise ValueError('多参考图只开放给合法独立Preview任务。')
+        if bound_preview:
+            from app.preview_image_parameters import PreviewReferenceBindings, SIZES, MODEL
+            from app.preview_budget import PreviewBudget
+            attachments = PreviewReferenceBindings(ProductStore(self._store),PreviewBudget(ledger_root)).resolve(task,reference_images)
+            attachment = attachments[0] if attachments else None
+            if len(attachments)>1 and self._settings.image_model_id!=MODEL:raise ValueError('多参考图模型身份不匹配。')
+        elif reference_images and (not attachment or reference_images != [attachment["id"]]):
             raise ValueError("参考图片与当前任务不匹配。")
-        image_dependency = reference_image_dependency(principal.tenant_id, task_id, attachment["id"]) if attachment else None
-        preview = os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true'
+        image_dependency = reference_image_dependency(principal.tenant_id, task_id, attachment["id"]) if len(attachments)==1 else None
+        provider_sizes = ()
+        if preview:
+            from app.preview_image_parameters import SIZES, MODEL
+            if self._settings.image_model_id==MODEL:provider_sizes=SIZES
         custom_pixel_ratio = None
         if preview and size:
             from app.image_request_contract import pixel_size
-            _, custom_pixel_ratio = pixel_size(size)
+            _, custom_pixel_ratio = pixel_size(size,provider_sizes=provider_sizes)
         if aspect_ratio not in {"1:1", "9:16", "16:9", "4:5", "3:2", "2:3"} and not (custom_pixel_ratio is not None and aspect_ratio == custom_pixel_ratio):
             self._audit(principal.tenant_id, "image_generation", "failed")
             error = ToolInputValidationError(
@@ -189,11 +213,10 @@ class PlatformMCPService:
             )
             error.image_dependency = image_dependency
             raise error
-        task = ProductStore(self._store).task_for_worker(task_id) if task_id else None
         if task and (task["tenant_id"] != principal.tenant_id or task["agent_id"] != "image-agent"):
             raise PermissionError("图片任务身份不匹配。")
         user_text = task["input_text"] if task else prompt
-        plan = image_plan(user_text, prompt, aspect_ratio, size, outputs)
+        plan = image_plan(user_text, prompt, aspect_ratio, size, outputs,provider_sizes=provider_sizes)
         preview = os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true'
         if reference_role not in {'subject','style','background','composition','brand','reference','front','back'}:
             raise ValueError('参考图用途无效。')
@@ -220,14 +243,19 @@ class PlatformMCPService:
         if not api_key:
             raise RuntimeError(f"未配置图片服务 API Key 环境变量：{self._settings.image_api_key_env}。")
         source_image = None
-        if attachment:
+        source_images = []
+        for reference in attachments:
             try:
-                source_image = storage_provider(self._settings).get(attachment["storage_key"])
-                _actual_format, _extension, actual_mime = _validated_image_metadata(source_image)
-                if actual_mime != attachment["mime_type"]:
+                content = storage_provider(self._settings).get(reference["storage_key"])
+                _actual_format, _extension, actual_mime = _validated_image_metadata(content)
+                if actual_mime != reference["mime_type"]:
                     raise ValueError("Stored reference format changed")
+                source_images.append(content)
             except Exception as exc:
                 raise RuntimeError("参考图片暂时无法读取，请重新上传。") from exc
+        if source_images:source_image=source_images[0]
+        if preview and sum(map(len,source_images))>20*1024*1024:
+            raise ImageRequestError('image_reference_size_limit','本次参考图总大小超过20MB，未发送图片请求。')
         try:
             import httpx
         except ImportError as exc:  # pragma: no cover - environment dependency
@@ -254,6 +282,8 @@ class PlatformMCPService:
                     item_prompt += '\n企业已保存配置（事实只以这些资料和用户要求为准，不编造价格、师资或承诺）：' + preview_brand_context
                     if attachment:
                         item_prompt += '\n本请求实际附带原始图片字节，用途：' + reference_role + '。'
+                        if len(attachments)>1:
+                            item_prompt += '\n图片数组顺序与用途：'+json.dumps([{'index':i+1,'role':record.get('role','subject')} for i,record in enumerate(attachments)],ensure_ascii=False)+'。用途通过本提示说明，不代表供应商有独立角色控制参数。'
                         if reference_role == 'subject':
                             item_prompt += '以原图人物为主体，保留五官、发型、服饰、姿势和辨识度；不要重新创造相似人物；只改变用户明确要求的区域。保持人物完整，避免不必要的裁切。'
                         item_prompt += '模型不能保证局部编辑绝对不变，忠实执行用户保持不变的约束。'
@@ -262,11 +292,17 @@ class PlatformMCPService:
                 response = None
                 try:
                     async with image_transport_guard("edits" if attachment else "generations"):
-                        if attachment:
+                        if preview and len(attachments)>1:
+                            payload={"prompt":item_prompt,"model":self._settings.image_model_id,"n":1,
+                                     "image":[f'data:{record["mime_type"]};base64,'+base64.b64encode(content).decode('ascii') for record,content in zip(attachments,source_images)],
+                                     "size":item['size'],"output_format":"jpeg","response_format":"b64_json","provider":{"sort":"success_rate"}}
+                            if quality:payload['quality']=quality
+                            response=await client.post('https://llm-api.net/v1/images/edits',headers={'Authorization':f'Bearer {api_key}'},json=payload)
+                        elif attachment:
                             response = await client.post(
                                 "https://llm-api.net/v1/images/edits", headers={"Authorization": f"Bearer {api_key}"},
                                 data={"prompt": item_prompt, "model": self._settings.image_model_id,
-                                      "n": "1", "size": item["size"], "output_format": "jpeg"},
+                                      "n": "1", "size": item["size"], "output_format": "jpeg", **({'quality':quality} if quality else {})},
                                 files={"image": (attachment["filename"], source_image, attachment["mime_type"])})
                         elif pilot_gate:
                             payload = {"prompt": item_prompt, "model": self._settings.image_model_id,
@@ -284,7 +320,7 @@ class PlatformMCPService:
                                 "https://llm-api.net/v1/images/generations", headers={"Authorization": f"Bearer {api_key}"},
                                 json={"prompt": item_prompt, "model": self._settings.image_model_id,
                                       "provider": {"sort": "success_rate"}, "size": item["size"], "n": 1,
-                                      "output_format": "jpeg", "response_format": "b64_json"})
+                                      "output_format": "jpeg", "response_format": "b64_json", **({'quality':quality} if quality else {})})
                     if response.status_code >= 400:
                         raise ImageToolExecutionFailure(response.status_code, audit)
                     try:
@@ -336,7 +372,8 @@ class PlatformMCPService:
                         "format": actual_format, "size": item["size"], "requested_size": item["size"],
                         "actual_size": f"{actual_width}x{actual_height}", "width": actual_width, "height": actual_height,
                         "mime_type": mime_type, "request_id": request_id,
-                        "references_used": references, "reference_images_used": [attachment["id"]] if attachment else [],
+                        "references_used": references, "reference_images_used": [record['id'] for record in attachments],
+                        "requested_quality":quality, "reference_roles":[record.get('role',reference_role) for record in attachments],
                         "index": item["index"], "purpose": item["purpose"], "requested_aspect_ratio": item["aspect_ratio"],
                         "dimension_match": dimension_match, "warnings": [] if dimension_match else ["PROVIDER_DIMENSION_MISMATCH"],
                         "original_storage_key": provider_key, "brand_logo_applied": logo_bytes is not None,
@@ -346,7 +383,7 @@ class PlatformMCPService:
                         "tenant_id": principal.tenant_id, "task_id": task_id, "index": item["index"],
                         "prompt_version": item["prompt_version"], "prompt_sha256": hashlib.sha256(item_prompt.encode()).hexdigest(),
                         "requested_count": len(plan), "size": item["size"], "actual_width": actual_width, "actual_height": actual_height,
-                        "reference_ids": [attachment["id"]] if attachment else [], "provider_status": response.status_code,
+                        "reference_ids": [record['id'] for record in attachments], "quality":quality, "provider_status": response.status_code,
                     })
                 except Exception as exc:
                     self._audit(principal.tenant_id, "image_generation", "failed")
@@ -354,7 +391,7 @@ class PlatformMCPService:
                         "tenant_id": principal.tenant_id, "task_id": task_id, "index": item["index"],
                         "prompt_version": item["prompt_version"], "prompt_sha256": hashlib.sha256(item_prompt.encode()).hexdigest(),
                         "requested_count": len(plan), "size": item["size"],
-                        "reference_ids": [attachment["id"]] if attachment else [],
+                        "reference_ids": [record['id'] for record in attachments], "quality":quality,
                         "provider_status": response.status_code if response is not None else None,
                         "error_type": type(exc).__name__,
                     })

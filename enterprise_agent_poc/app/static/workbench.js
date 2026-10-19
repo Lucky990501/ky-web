@@ -336,7 +336,8 @@ function bindChatImageComposer(main){
   // UI staging supports five independent files. The frozen server request
   // still accepts ONE: never silently truncate or invent a capability flag.
   const owner=main._conversationContext?.owner||principalSnapshot();
-  const attachment={items:[],locked:false,error:'',get status(){return this.items.some(item=>item.status==='uploading')?'uploading':this.items.some(item=>item.status==='failed')?'failed':this.items.length>1?'blocked':this.items.length?'ready':'idle';},get record(){return this.items.length===1&&this.items[0].status==='ready'?this.items[0].record:null;}};main._chatImage=attachment;
+  const referenceLimit=()=>Math.min(5,Math.max(1,Number(window.workbenchPreviewReferenceLimit?.())||1));
+  const attachment={items:[],locked:false,error:'',get status(){return this.items.some(item=>item.status==='uploading')?'uploading':this.items.some(item=>item.status==='failed')?'failed':this.items.length>referenceLimit()?'blocked':this.items.length?'ready':'idle';},get records(){return this.status==='ready'?this.items.map(item=>item.record):[];},get record(){return this.records[0]||null;}};main._chatImage=attachment;
   let nextId=0,replacing=null;
   const current=()=>main._chatImage===attachment&&main.isConnected!==false&&principalIsCurrent(owner);
   const releasePreview=item=>{if(item.previewUrl)URL.revokeObjectURL(item.previewUrl);item.previewUrl=null;};
@@ -929,9 +930,9 @@ async function submitAgentTaskV2(event,agentId,main){
   if(main._conversationContext?.taskOnly||main._conversationContext?.canRun===false)return;
   const submittedAt=Date.now();if(attachment?.record){attachment.locked=true;attachment.render();}
   input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
-  body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${userMessageAttachmentHtml(attachment?.record?[attachment.record]:[])}${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
+  body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${userMessageAttachmentHtml(attachment?.records||[])}${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
   const node=main.querySelector('#task-status'),state=createStreamingState();state.main=main;state.owner=main._conversationContext?.owner||principalSnapshot();main._submittingState=state;state.conversationStartedAt=submittedAt;state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
-  const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;if(attachment?.record)payload.attachments=[{type:'image',id:attachment.record.id}];
+  const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;if(attachment?.record)payload.attachments=attachment.records.map(record=>({type:'image',id:record.id}));
   const key=agentSelectionKey(agentId),pending={owner:state.owner,promise:null};
   pending.promise=api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)}).then(task=>{
     if(!principalIsCurrent(state.owner))throw Error('登录会话已变化，请从历史记录查询任务。');

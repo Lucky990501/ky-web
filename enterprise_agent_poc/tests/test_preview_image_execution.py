@@ -165,10 +165,10 @@ def test_reference_other_visitor_never_binds(image_fixture,peer):
     assert calls==[]
 
 
-def test_multiple_references_fail_explicitly_without_dispatch(image_fixture):
+def test_excessive_references_fail_explicitly_without_dispatch(image_fixture):
     executor,actors,calls=image_fixture
-    refs=[upload_reference(executor,actors[0]) for _ in range(2)]
-    with pytest.raises(ValueError,match='多参考图合同'):
+    refs=[upload_reference(executor,actors[0]) for _ in range(6)]
+    with pytest.raises(ValueError,match='最多支持5张'):
         executor.submit(actors[0],payload(attachments=[{'type':'image','id':r['id']} for r in refs]))
     assert calls==[] and executor.budget.summary()['image']['requests']==0
 

@@ -14,9 +14,9 @@ from scripts.customer_preview import create_preview
 async def fixture_image(self,task,plan):
     from PIL import Image
     from app.storage import storage_provider
-    from app.image_request_contract import image_plan
+    from app.preview_image_parameters import preview_plan
     results=[]
-    for item in image_plan(task['input_text'],task['input_text'],plan['aspect_ratio'],None):
+    for item in preview_plan(task['input_text'],plan['aspect_ratio'],plan['size']):
         self.budget.reserve('image',Decimal('1'))
         width,height=map(int,item['size'].split('x'))
         output=io.BytesIO();Image.new('RGB',(width,height),(30,80,140)).save(output,format='PNG')

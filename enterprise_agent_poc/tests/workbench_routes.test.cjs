@@ -49,8 +49,8 @@ test('result URL validation rejects scripts, external hosts, traversal and inter
 test('display and response-copy redact known paths without deriving gallery from model URLs',()=>{
   const h=harness();const html=h.run("messageHtml({role:'assistant',content:'正面 /api/v1/storage/generated/t/a.png；业务 https://example.com/business'},'')");assert.ok(!html.includes('/api/v1/storage/generated/'));assert.ok(html.includes('https://example.com/business'));assert.ok(!html.includes('data-result-image'));
 });
-test('reference staging is bounded and submit contract remains single-image fail closed',()=>{
-  assert.ok(source.includes('attachment.items.length+files.length>5'));assert.ok(source.includes("this.items.length>1?'blocked'"));assert.ok(source.includes('revision!==item.revision'));assert.ok(source.includes('principalIsCurrent(owner)'));assert.ok(source.includes('用途与顺序仅用于准备'));assert.ok(!source.includes('attachments.slice(0,1)'));
+test('reference staging is bounded; Production stays scalar without Preview capability',()=>{
+  assert.ok(source.includes('attachment.items.length+files.length>5'));assert.ok(source.includes("this.items.length>referenceLimit()?'blocked'"));assert.ok(source.includes('Number(window.workbenchPreviewReferenceLimit?.())||1'));assert.ok(source.includes('revision!==item.revision'));assert.ok(source.includes('principalIsCurrent(owner)'));assert.ok(source.includes('用途与顺序仅用于准备'));assert.ok(!source.includes('attachments.slice(0,1)'));
 });
 test('illustration briefs accept only formal execution contract and supported ratios',()=>{
   const h=harness();h.run("brief={purpose:'会场示意图',prompt:'可信方案',aspect_ratio:'16:9',execution:'requires_separate_image_agent_task_and_budget'}");assert.equal(h.run('validIllustrationBriefs([brief]).length'),1);assert.equal(h.run("validIllustrationBriefs([{...brief,execution:'auto'}]).length"),0);assert.equal(h.run("validIllustrationBriefs([{...brief,aspect_ratio:'0:0'}]).length"),0);
@@ -454,7 +454,7 @@ test('user history renders all explicitly attached private images in contract or
 
 test('chat image send uses only a ready current attachment and never changes plain text payload',()=>{
   const source=fs.readFileSync(path.join(__dirname,'../app/static/workbench.js'),'utf8');
-  assert.ok(source.includes("if(attachment?.record)payload.attachments=[{type:'image',id:attachment.record.id}]"));
+  assert.ok(source.includes("if(attachment?.record)payload.attachments=attachment.records.map(record=>({type:'image',id:record.id}))"));
   assert.ok(source.includes("if(attachment?.record)attachment.consume()"));
   assert.ok(source.includes("if(attachment?.record){attachment.locked=true;attachment.render();}"));
   assert.ok(source.includes("attachment.status!=='idle'&&attachment.status!=='ready'"));

@@ -24,6 +24,7 @@
   };
   const fetchOriginal = window.fetch.bind(window);
   let imageCapability=null,imageConsent=null,editGeneration=null,confirming=false,confirmedSubmit=false;
+  window.workbenchPreviewReferenceLimit=()=>imageCapability?.max_reference_images||1;
   let articleSelection=null;
   window.fetch = (input, options) => {
     const target=input instanceof Request?new Request(url(input.url),input):url(input);
@@ -33,7 +34,8 @@
         const items=document.querySelector('#main')?._chatImage?.items||[];
         if(body.attachments)body.attachments=body.attachments.map(item=>({...item,role:items.find(x=>x.record?.id===item.id)?.role||'subject'}));
         if(editGeneration)body.edit_generation_id=editGeneration.id;
-        options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id,use_enterprise_context:imageConsent.useContext})};
+        options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id,use_enterprise_context:imageConsent.useContext,
+          ...(imageConsent.size?{size:imageConsent.size}:{}),...(imageConsent.quality?{quality:imageConsent.quality}:{})})};
       }
       imageConsent=null;
     }
@@ -73,6 +75,20 @@
     const main=document.querySelector('#main');if(main?.dataset.agentId!=='image-agent'){editGeneration=null;return;}
     if(editGeneration&&editGeneration.context!==main._conversationContext)editGeneration=null;
     const form=main.querySelector('#composer');if(!form)return;
+    if(!form.querySelector('[data-preview-image-options]')){
+      const fields=document.createElement('fieldset');fields.dataset.previewImageOptions='true';fields.className='preview-image-options';
+      const legend=document.createElement('legend');legend.textContent='图片输出设置';fields.append(legend);
+      for(const [id,title,values] of [['preview-image-size','尺寸',imageCapability?.sizes||[]],['preview-image-quality','质量',imageCapability?.qualities||[]]]){
+        const label=document.createElement('label');label.textContent=title;const select=document.createElement('select');select.id=id;
+        const option=document.createElement('option');option.value='';option.textContent=id.endsWith('size')?'按需求与比例':'供应商默认';select.append(option);
+        for(const value of values){const item=document.createElement('option');item.value=value;item.textContent=value;select.append(item);}label.append(select);fields.append(label);
+      }
+      form.prepend(fields);
+    }
+    for(const [id,values] of [['preview-image-size',imageCapability?.sizes||[]],['preview-image-quality',imageCapability?.qualities||[]]]){
+      const select=form.querySelector('#'+id),known=new Set([...select.options].map(option=>option.value));
+      for(const value of values)if(!known.has(value)){const option=document.createElement('option');option.value=value;option.textContent=value;select.append(option);}
+    }
     if(!form.querySelector('#preview-use-image-context')){
       const label=document.createElement('label');label.className='preview-context-option';
       const input=document.createElement('input');input.type='checkbox';input.id='preview-use-image-context';
@@ -81,7 +97,7 @@
     let notice=main.querySelector('[data-preview-image-notice]');
     if(!notice){notice=document.createElement('p');notice.dataset.previewImageNotice='true';notice.className='composer-run-feedback';notice.setAttribute('role','status');form.before(notice);}
     notice.id=enabled?'preview-image-direct-notice':'preview-image-unavailable';
-    const text=enabled?`独立图片体验：每任务1～5张，剩余${imageCapability.remaining_requests}次；每张费用预留不超过¥${imageCapability.request_max_cny}，逐请求计数，不自动重试。支持1张参考图；多参考图、原生2K/4K尚未核验。${editGeneration?'当前已选编辑基图；未指定部分不能保证绝对不变。':''}`:imageUnavailable;
+    const text=enabled?`独立图片体验：每任务1～5张，剩余${imageCapability.remaining_requests}次；每张费用预留不超过¥${imageCapability.request_max_cny}，逐请求计数，不自动重试。支持最多${imageCapability.max_reference_images}张参考图；高清按返回实际像素校验，不保证供应商必定满足。${editGeneration?'当前已选编辑基图；未指定部分不能保证绝对不变。':''}`:imageUnavailable;
     if(notice.textContent!==text)notice.textContent=text;
     const send=form.querySelector('#composer-submit');
     if(send?.type==='button')return; // Never disable an active Stop control.
@@ -101,7 +117,8 @@
       button.onclick=()=>{editGeneration=editGeneration?.id===card.dataset.resultImage?null:{id:card.dataset.resultImage,context:main._conversationContext};main.querySelector('#prompt')?.focus();markImageUnavailable();};
       card.querySelector('.message-generation-actions')?.append(button);
     });
-    const slot=main.querySelector('.reference-limit');if(slot&&slot.textContent!=='最多独立管理5张；当前Edit合同仅允许提交1张。多张会明确阻止，不会静默丢弃。')slot.textContent='最多独立管理5张；当前Edit合同仅允许提交1张。多张会明确阻止，不会静默丢弃。';
+    const slot=main.querySelector('.reference-limit'),limitText=`最多${imageCapability?.max_reference_images||1}张参考图，按当前顺序与用途提交；用途通过提示词说明，不能保证局部完全不变。`;
+    if(slot&&slot.textContent!==limitText)slot.textContent=limitText;
     main.querySelectorAll('[data-reference-role]').forEach(select=>{
       if(select.dataset.previewRoles)return;select.dataset.previewRoles='true';
       for(const [value,label] of [['style','风格参考'],['background','背景参考'],['composition','构图参考'],['brand','品牌素材']]){const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option);}
@@ -123,11 +140,12 @@
       confirming=true;
       try{
         const useContext=!!main.querySelector('#preview-use-image-context')?.checked;
-        const response=await fetchOriginal('/preview/api/v1/agents/image-agent/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:prompt,use_enterprise_context:useContext})}),plan=await response.json();
+        const size=main.querySelector('#preview-image-size')?.value||'',quality=main.querySelector('#preview-image-quality')?.value||'';
+        const response=await fetchOriginal('/preview/api/v1/agents/image-agent/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:prompt,use_enterprise_context:useContext,...(size?{size}:{}),...(quality?{quality}:{})})}),plan=await response.json();
         if(!response.ok)throw Error(plan.user_message||'图片计划校验失败，未提交生成。');
-        if(!main.isConnected||document.querySelector('#prompt')?.value.trim()!==prompt||useContext!==!!main.querySelector('#preview-use-image-context')?.checked)return;
-        if(!window.confirm(`确认生成${plan.count}张图片？图片最多预留¥${plan.max_reserved_cny}，按每张实际请求计数。${plan.knowledge_requests?`另含1次企业知识语义检索，最多预留¥${plan.knowledge_max_reserved_cny}；无可核验资料时停止生图。`:''}参考图会进入Edit接口；人物及局部编辑不能保证完全不变。失败或结果未知不会自动重试。`))return;
-        imageConsent={prompt,id:crypto.randomUUID(),useContext};confirmedSubmit=true;event.target.requestSubmit();
+        if(!main.isConnected||document.querySelector('#prompt')?.value.trim()!==prompt||useContext!==!!main.querySelector('#preview-use-image-context')?.checked||size!==(main.querySelector('#preview-image-size')?.value||'')||quality!==(main.querySelector('#preview-image-quality')?.value||''))return;
+        if(!window.confirm(`确认生成${plan.count}张图片（${plan.size}，质量${plan.quality||'供应商默认'}，参考图${attachment?.items.length||Number(!!editGeneration)}张）？图片最多预留¥${plan.max_reserved_cny}，按每张实际请求计数。${plan.knowledge_requests?`另含1次企业知识语义检索，最多预留¥${plan.knowledge_max_reserved_cny}；无可核验资料时停止生图。`:''}参考图会进入Edit接口；人物及局部编辑不能保证完全不变。失败或结果未知不会自动重试。`))return;
+        imageConsent={prompt,id:crypto.randomUUID(),useContext,size,quality};confirmedSubmit=true;event.target.requestSubmit();
       }catch(error){
         let feedback=main.querySelector('#preview-image-error');
         if(!feedback){feedback=document.createElement('p');feedback.id='preview-image-error';feedback.className='image-delivery-warning';feedback.setAttribute('role','alert');feedback.tabIndex=-1;event.target.before(feedback);}
