@@ -164,7 +164,7 @@ class AgentService:
             if cancellation_requested and cancellation_requested():
                 raise GenerationCancelled()
             if is_resume:
-                recovery_context = self._recovery_context(conversation_id, tenant_id, message)
+                recovery_context = self._recovery_context(conversation_id, tenant_id, message, agent_id=agent_id)
                 session = await self._runtime.resume_session(
                     profile,
                     existing["runtime_thread_id"],
@@ -377,10 +377,13 @@ class AgentService:
             return []
         return [dict(event) for event in getter(profile)]
 
-    def _recovery_context(self, conversation_id: str, tenant_id: str, current_message: str) -> str:
+    def _recovery_context(self, conversation_id: str, tenant_id: str, current_message: str, *, agent_id: str | None = None) -> str:
         messages = self._store.conversation_messages(conversation_id, tenant_id)
         if messages and messages[-1]["role"] == "user" and messages[-1]["content"] == current_message:
             messages = messages[:-1]
+        if os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true' and agent_id == 'copywriting-agent':
+            from app.preview_copywriting_prompt import conversation_editing_context
+            return conversation_editing_context(self._store,conversation_id,tenant_id,messages,current_message)
         lines = [f"{item['role']}: {item['content']}" for item in messages]
         return "\n".join(lines)[-12000:]
 
