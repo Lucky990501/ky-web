@@ -128,6 +128,75 @@ def test_plan_maps_all_requirements_and_reuses_identity(setup):
     assert old==[] and budget.summary()['image']['requests']==0
 
 
+def authorized_successor(setup,monkeypatch):
+    service,actors,old,budget=setup;actor=actors[0]
+    task=completed_task(service,actor);prior=service.plan(actor,task['id'])
+    calls=enable_fixture_provider(service,monkeypatch,fail_index=0)
+    service.confirm(actor,prior['id'],prior['digest'],True);asyncio.run(service.execute(actor,prior['id']))
+    grant={'prior_plan_id':prior['id'],'task_id':task['id'],'user_id':actor.user_id,
+           'authorization_id':'FIXTURE_ONLY_EXPLICIT_SUCCESSOR','max_images':2,'request_max_cny':'0.1',
+           'model':MODEL,'base_url':service.config.base_url}
+    service.authorization={**GRANT,'successor_plan_authorizations':[grant]}
+    return service,actors,prior,calls,grant
+
+
+def test_successor_creates_exactly_one_new_plan_preserves_old_and_reserves_separately(setup,monkeypatch):
+    service,actors,prior,calls,grant=authorized_successor(setup,monkeypatch);actor=actors[0]
+    with service.db() as c:
+        old_plan=tuple(c.execute('select * from illustration_plans where id=?',(prior['id'],)).fetchone())
+        old_requests=[tuple(r) for r in c.execute('select * from illustration_requests where plan_id=? order by id',(prior['id'],))]
+    new=service.successor(actor,prior['id'],prior['digest'],True)
+    assert new['id']!=prior['id'] and new['status']=='planned' and new['count']==2 and len(calls)==1
+    assert service.successor(actor,prior['id'],prior['digest'],True)['id']==new['id']
+    assert service.current(actor,prior['task_id'])['id']==new['id']
+    generated=enable_fixture_provider(service,monkeypatch)
+    service.confirm(actor,new['id'],new['digest'],True);asyncio.run(service.execute(actor,new['id']))
+    assert service.get(actor,new['id'])['status']=='completed' and len(generated)==2
+    service.confirm(actor,new['id'],new['digest'],True);asyncio.run(service.execute(actor,new['id']))
+    assert len(generated)==2 and service.capability()['reserved_requests']==4
+    with service.db() as c:
+        assert tuple(c.execute('select * from illustration_plans where id=?',(prior['id'],)).fetchone())==old_plan
+        assert [tuple(r) for r in c.execute('select * from illustration_requests where plan_id=? order by id',(prior['id'],))]==old_requests
+
+
+@pytest.mark.parametrize('mismatch',['missing','actor','source','gateway','fee','count','confirmation'])
+def test_successor_rejects_missing_or_mismatched_explicit_authority(setup,monkeypatch,mismatch):
+    service,actors,prior,calls,grant=authorized_successor(setup,monkeypatch);actor=actors[0]
+    digest=prior['digest'];confirmed=True
+    if mismatch=='missing':service.authorization={**GRANT}
+    elif mismatch=='actor':actor=actors[1]
+    elif mismatch=='source':grant['task_id']='not-the-source'
+    elif mismatch=='gateway':grant['base_url']='https://llm-api.net'
+    elif mismatch=='fee':grant['request_max_cny']='0.2'
+    elif mismatch=='count':grant['max_images']=1
+    elif mismatch=='confirmation':confirmed=False
+    with pytest.raises((PermissionError,LookupError)):service.successor(actor,prior['id'],digest,confirmed)
+    assert len(calls)==1 and service.capability()['reserved_requests']==2
+    with service.db() as c:assert c.execute('select count(*) from illustration_plans').fetchone()[0]==1
+
+
+def test_successor_rechecks_revocation_before_paid_dispatch(setup,monkeypatch):
+    service,actors,prior,calls,grant=authorized_successor(setup,monkeypatch);actor=actors[0]
+    new=service.successor(actor,prior['id'],prior['digest'],True)
+    service.authorization={**GRANT}
+    with pytest.raises(PermissionError):service.confirm(actor,new['id'],new['digest'],True)
+    assert service.get(actor,new['id'])['status']=='planned' and len(calls)==1 and service.capability()['reserved_requests']==2
+
+
+def test_successor_enforces_remaining_whole_plan_budget_and_source_integrity(setup,monkeypatch):
+    service,actors,prior,calls,grant=authorized_successor(setup,monkeypatch);actor=actors[0]
+    new=service.successor(actor,prior['id'],prior['digest'],True)
+    service.authorization['max_requests']=3
+    with pytest.raises(IllustrationError) as error:service.confirm(actor,new['id'],new['digest'],True)
+    assert error.value.code=='ILLUSTRATION_BUDGET_EXHAUSTED' and len(calls)==1 and service.capability()['reserved_requests']==2
+    with service.main.store.connection() as c:
+        metadata=json.loads(c.execute('select result_json from task_results where task_id=?',(prior['task_id'],)).fetchone()[0])
+        metadata['structured_result']['data']['document_title']='FIXTURE_CHANGED_VERSION'
+        c.execute('update task_results set result_json=? where task_id=?',(json.dumps(metadata),prior['task_id']))
+    with pytest.raises(IllustrationError) as error:service.get(actor,new['id'])
+    assert error.value.code=='ILLUSTRATION_SOURCE_CHANGED'
+
+
 @pytest.mark.parametrize('other',[1,2])
 def test_cross_user_and_tenant_cannot_plan_read_confirm_or_asset(setup,monkeypatch,other):
     service,actors,old,budget=setup;actor=actors[0];task=completed_task(service,actor);plan=service.plan(actor,task['id'])

@@ -14,7 +14,9 @@
 
 活动或公众号完整回复后可查看自动配图计划、所需张数和最高预留费用。确认后后台生成、转存，全部完成才出现图文 Word 或图文 HTML/ZIP。各张图片可独立下载。
 
-历史查询和下载永不调用模型。部分失败保留成功资产及费用记录，不宣称整套方案完成；仅文档整理失败时可以用既有图片重做导出，绝不重做图片。当前版本不自动接受“重新生成配图”并计费；此操作需新的明确计划与授权。
+历史查询和下载永不调用模型。部分失败保留成功资产及费用记录，不宣称整套方案完成；仅文档整理失败时可以用既有图片重做导出，绝不重做图片。没有自动重试或通用重新生图开关。
+
+若 Owner 在结果未知后明确批准新计划，受限授权文件需增加 `successor_plan_authorizations`：精确 `prior_plan_id`、`task_id`、`user_id`、唯一 `authorization_id`、`model`、`base_url`、`max_images` 和 `request_max_cny`。本人以原 digest 及 confirmed=true 调用 POST plans/{prior_id}/successor，只创建一个幂等的新 planned Plan；旧 Plan 与所有预留不可变。新计划仍需既有整组确认/预算预检才会调用；没有白名单、身份/来源不符、网关/费用变更、授权撤销均拒绝。原结果未知并不因此被确认为失败退款，原预留继续计入上限。
 
 公众号图文结果复用既有 sanitizer、opaque sandbox、CSP、双 MIME 剪贴板。HTML 不采信模型图片 URL，只插入本次私有存储映射。ZIP 包含 article.html 和 images 实际文件，解压可离线查看。单独 HTML 的私有图片地址需要对应 Preview 会话，不能保证粘贴到公众号后加载；微信后台仍需人工上传图片，不是 draft/add 或发布。
 
