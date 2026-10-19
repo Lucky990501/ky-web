@@ -19,6 +19,7 @@ from app.store import POCStore
 
 @pytest.fixture
 def image_fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr('app.preview_image_parameters.MULTI_REFERENCE_PAUSED',False)  # Isolated adapter fixtures only.
     monkeypatch.setenv('ENTERPRISE_POC_OBJECT_STORAGE_PROVIDER', 'local')
     monkeypatch.setenv('ENTERPRISE_POC_OBJECT_STORAGE_DIR', str(tmp_path/'objects'))
     settings = Settings.from_env()

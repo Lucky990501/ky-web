@@ -63,6 +63,16 @@ def test_duplicate_and_foreign_secondary_upload_rejected(image_fixture):
     assert calls==[]
 
 
+def test_unverified_multi_wire_is_paused_before_task_or_budget(image_fixture,monkeypatch):
+    executor,actors,calls=image_fixture
+    monkeypatch.setattr('app.preview_image_parameters.MULTI_REFERENCE_PAUSED',True)
+    refs=[upload_reference(executor,actors[0]) for _ in range(2)]
+    with pytest.raises(ValueError,match='HTTP400'):
+        executor.submit(actors[0],payload(attachments=[{'type':'image','id':r['id']} for r in refs]))
+    assert executor.capability()['max_reference_images']==1 and calls==[]
+    assert executor.budget.summary()['image']['requests']==0
+
+
 def test_provider_rejection_fields_never_expose_body_credentials_or_paths():
     from app.preview_image_parameters import provider_error_fields
     response=httpx.Response(400,json={'error':{'code':'invalid_request','type':'invalid_request_error','param':'size','message':'unsupported size; sk-fixture-secret https://private.invalid /opt/private data:image/png;base64,private'}})

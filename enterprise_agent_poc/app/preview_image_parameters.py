@@ -14,6 +14,13 @@ MODEL='gpt-image-2.5-sunburst-c'
 SIZES=('1024x1024','1536x1024','1024x1536','2048x2048','2048x1152','3840x2160','2160x3840')
 QUALITIES=('high','medium','low')
 SPEC_ID='owner-preview-image-parameters-20261019-v1'
+# Actual QA Task c64988dc-e21a-4cbf-acd7-ebf064a06f75 reached the gateway
+# with image:[data-URLs] and received HTTP400. Array ELEMENT encoding remains
+# unverified. Pause this NEW feature, never repeat paid probes automatically.
+MULTI_REFERENCE_PAUSED=True
+
+
+def reference_limit():return 1 if MULTI_REFERENCE_PAUSED else 5
 
 
 def quality_value(value):

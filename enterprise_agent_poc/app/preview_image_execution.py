@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 from app.image_request_contract import image_plan
 from app.preview_budget import PreviewBudgetExceeded
 from app.security import RuntimePrincipal
-from app.preview_image_parameters import PreviewReferenceBindings, preview_plan, quality_value, MODEL, SIZES, QUALITIES, SPEC_ID
+from app.preview_image_parameters import PreviewReferenceBindings, preview_plan, quality_value, reference_limit, MODEL, SIZES, QUALITIES, SPEC_ID
 
 
 MODE = 'preview_direct_image_business_v1'
@@ -66,7 +66,8 @@ class PreviewImageExecution:
         return {'enabled': enabled, 'execution_mode': MODE,
                 'request_max_cny': str(self.pricing.get('image_request_max_cny', '0')),
                 'remaining_requests': max(0, quota['max_requests'] - quota['requests']),
-                'max_outputs': 5, 'max_reference_images': 5 if self.main.settings.image_model_id==MODEL else 1,
+                'max_outputs': 5, 'max_reference_images': reference_limit() if self.main.settings.image_model_id==MODEL else 1,
+                'multi_reference_status':'BLOCKED_CURRENT_WIRE_HTTP_400' if reference_limit()==1 else 'TEST_ONLY_NOT_PROVIDER_VERIFIED',
                 'sizes':list(SIZES), 'qualities':list(QUALITIES), 'parameter_spec':SPEC_ID,
                 'native_high_resolution': 'OWNER_SPECIFIED_NOT_PROVIDER_VERIFIED',
                 'user_message': ('独立体验图片生成：每任务1～5张，参考图编辑及版本保留；不自动重试。'
@@ -106,6 +107,9 @@ class PreviewImageExecution:
         attachments = payload.get('attachments') or []
         if not isinstance(attachments, list) or len(attachments) > 5:
             raise ValueError('当前每任务最多支持5张参考图，不会丢弃额外图片。')
+        if len(attachments)>reference_limit():
+            from app.image_request_contract import ImageRequestError
+            raise ImageRequestError('preview_multi_reference_pending','多参考图真实接口返回HTTP400，数组元素格式待确认；暂不提交新请求，请仅使用1张参考图。')
         ids=[item.get('id') for item in attachments if isinstance(item,dict)]
         if len(ids)!=len(attachments) or len(set(str(x) for x in ids))!=len(ids):raise ValueError('参考图片不能重复。')
         primary_record = None

@@ -117,7 +117,7 @@
       button.onclick=()=>{editGeneration=editGeneration?.id===card.dataset.resultImage?null:{id:card.dataset.resultImage,context:main._conversationContext};main.querySelector('#prompt')?.focus();markImageUnavailable();};
       card.querySelector('.message-generation-actions')?.append(button);
     });
-    const slot=main.querySelector('.reference-limit'),limitText=`最多${imageCapability?.max_reference_images||1}张参考图，按当前顺序与用途提交；用途通过提示词说明，不能保证局部完全不变。`;
+    const slot=main.querySelector('.reference-limit'),limitText=imageCapability?.multi_reference_status==='BLOCKED_CURRENT_WIRE_HTTP_400'?'多参考图尚未通过真实接口验收（HTTP400），暂限提交1张；2～5张仍可整理，但不会发起收费请求。':`最多${imageCapability?.max_reference_images||1}张参考图，按当前顺序与用途提交；用途通过提示词说明，不能保证局部完全不变。`;
     if(slot&&slot.textContent!==limitText)slot.textContent=limitText;
     main.querySelectorAll('[data-reference-role]').forEach(select=>{
       if(select.dataset.previewRoles)return;select.dataset.previewRoles='true';

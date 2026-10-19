@@ -36,6 +36,8 @@ if __name__=='__main__':
     # Settings has a module-level singleton: prepare BEFORE importing any
     # module that imports settings, never touch the default worktree database.
     prepare(args.data_dir,args.port,args.port+1)
+    import app.preview_image_parameters as parameters
+    parameters.MULTI_REFERENCE_PAUSED=False  # Local Fixture tests, NEVER the customer launcher.
     from app.product_service import TaskService
     TaskService.execute=fixture_article
     PreviewImageExecution.call_image=fixture_image
