@@ -293,11 +293,19 @@ class PlatformMCPService:
                 try:
                     async with image_transport_guard("edits" if attachment else "generations"):
                         if preview and len(attachments)>1:
-                            payload={"prompt":item_prompt,"model":self._settings.image_model_id,"n":1,
-                                     "image":[f'data:{record["mime_type"]};base64,'+base64.b64encode(content).decode('ascii') for record,content in zip(attachments,source_images)],
-                                     "size":item['size'],"output_format":"jpeg","response_format":"b64_json","provider":{"sort":"success_rate"}}
+                            # Gateway example uses repeated multipart image file
+                            # parts, not a JSON array or an image[] field. Keep
+                            # order and original owned bytes; httpx supplies the
+                            # multipart Content-Type boundary. Model unchanged.
+                            payload={"prompt":item_prompt,"model":self._settings.image_model_id,"n":"1",
+                                     "size":item['size'],"output_format":"jpeg","response_format":"b64_json"}
                             if quality:payload['quality']=quality
-                            response=await client.post('https://llm-api.net/v1/images/edits',headers={'Authorization':f'Bearer {api_key}'},json=payload)
+                            response=await client.post(
+                                'https://llm-api.net/v1/images/edits',
+                                headers={'Authorization':f'Bearer {api_key}','Accept':'application/json'},
+                                data=payload,
+                                files=[('image',(record['filename'],content,record['mime_type']))
+                                       for record,content in zip(attachments,source_images)])
                         elif attachment:
                             response = await client.post(
                                 "https://llm-api.net/v1/images/edits", headers={"Authorization": f"Bearer {api_key}"},

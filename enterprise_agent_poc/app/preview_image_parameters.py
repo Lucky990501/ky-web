@@ -15,8 +15,10 @@ SIZES=('1024x1024','1536x1024','1024x1536','2048x2048','2048x1152','3840x2160','
 QUALITIES=('high','medium','low')
 SPEC_ID='owner-preview-image-parameters-20261019-v1'
 # Actual QA Task c64988dc-e21a-4cbf-acd7-ebf064a06f75 reached the gateway
-# with image:[data-URLs] and received HTTP400. Array ELEMENT encoding remains
-# unverified. Pause this NEW feature, never repeat paid probes automatically.
+# with image:[data-URLs] and received HTTP400. Owner subsequently supplied a
+# repeated multipart image example for gpt-image-2-all, a DIFFERENT model.
+# Its wire adapter is fixture-tested; current sunburst-c compatibility remains
+# unverified. Keep paused until authorized real validation; never auto-retry.
 MULTI_REFERENCE_PAUSED=True
 
 
