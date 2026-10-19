@@ -238,6 +238,7 @@ def test_preview_bound_reference_multi_output_uses_bytes_and_reports_partial(cha
     token=issuer.issue(RuntimePrincipal('tenant-a','image-agent','fixture',('image:generate',),int(time.time())+60))
     scope='runtime:'+issuer.issue_task_scope('tenant-a',task['id'])
     monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true');monkeypatch.setenv(settings.image_api_key_env,'fixture-not-a-key')
+    monkeypatch.setattr(store,'enterprise_config',lambda tenant:{'brand_name':'Fixture教育','primary_color':'#123456','required_rules':['不得承诺学习效果'],'forbidden_claims':['保分']})
     calls=[]
     class Client:
         def __init__(self,**kwargs):pass
@@ -252,6 +253,7 @@ def test_preview_bound_reference_multi_output_uses_bytes_and_reports_partial(cha
     assert len(calls)==2
     assert all(url.endswith('/images/edits') and kwargs['files']['image'][1]==source for url,kwargs in calls)
     assert all(kwargs['data']['size']==size for _,kwargs in calls)
+    assert all('#123456' in kwargs['data']['prompt'] and '不得承诺学习效果' in kwargs['data']['prompt'] and '保分' in kwargs['data']['prompt'] for _,kwargs in calls)
     assert len(result['results'])==(1 if partial else 2)
     assert result['delivery']['failed']==(1 if partial else 0)
     assert all(item['reference_images_used']==[uploaded['id']] for item in result['results'])

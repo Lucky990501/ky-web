@@ -205,6 +205,14 @@ class PlatformMCPService:
             or bool(config.get("brand_logo") and re.search(r"企业|品牌|招生|宣传|海报|三折页", user_text)))
         if preview and not omit_logo and re.search(r'logo', user_text, re.I):
             logo_required = True
+        preview_brand_context = ''
+        if preview:
+            preview_brand_context = json.dumps({k:config[k] for k in (
+                'brand_name','description','brand_voice','brand_colors','rules',
+                'company_intro','primary_color','secondary_color','slogan','brand_tags',
+                'target_users','required_rules','forbidden_claims','custom_rules') if k in config},ensure_ascii=False)
+            if len(preview_brand_context) > 6000:
+                raise ImageRequestError('image_brand_context_too_large','企业图片规则过长，未调用图片服务；请先精简企业设置中的规则。')
         logo_bytes = None
         if logo_required:
             logo_bytes = BrandLogoService(storage_provider(self._settings), ProductStore(self._store)).current_bytes(principal.tenant_id, config)
@@ -243,7 +251,7 @@ class PlatformMCPService:
                     break
                 item_prompt = item["prompt"]
                 if preview:
-                    item_prompt += '\n企业已保存配置（事实只以这些资料和用户要求为准，不编造价格、师资或承诺）：' + json.dumps({k:config[k] for k in ('brand_name','description','brand_voice','brand_colors','rules') if k in config}, ensure_ascii=False)[:3000]
+                    item_prompt += '\n企业已保存配置（事实只以这些资料和用户要求为准，不编造价格、师资或承诺）：' + preview_brand_context
                     if attachment:
                         item_prompt += '\n本请求实际附带原始图片字节，用途：' + reference_role + '。'
                         if reference_role == 'subject':
