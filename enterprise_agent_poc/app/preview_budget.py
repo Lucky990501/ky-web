@@ -83,7 +83,7 @@ def preview_task_failure(task, trace, denied):
 
 
 class PreviewBudget:
-    LIMITS = {"text": (54, Decimal("24")), "image": (2, Decimal("20")), "embedding": (31, Decimal("5"))}
+    LIMITS = {"text": (154, Decimal("84")), "image": (2, Decimal("20")), "embedding": (71, Decimal("5"))}
 
     def __init__(self, root: Path):
         self.path = root / "preview-budget.sqlite"
@@ -107,7 +107,7 @@ class PreviewBudget:
             count, limit = self.LIMITS[kind]
             if (sum(k == kind for k, _ in rows) >= count
                 or sum((Decimal(v) for k, v in rows if k == kind), Decimal(0)) + ceiling > limit
-                or sum((Decimal(v) for _, v in rows), Decimal(0)) + ceiling > Decimal("45")):
+                or sum((Decimal(v) for _, v in rows), Decimal(0)) + ceiling > Decimal("109")):
                 raise PreviewBudgetExceeded("本次体验调用额度已用完，请联系Owner；不会自动重试。")
             # Reserve the verified worst-case amount before network dispatch.
             # Unknown outcomes remain reserved; restart never resets this file.
@@ -121,7 +121,7 @@ class PreviewBudget:
         cost = ceiling * count
         if (sum(t == kind for t,v in rows) + count > maximum
                 or sum((Decimal(v) for t,v in rows if t == kind), Decimal(0)) + cost > money
-                or sum((Decimal(v) for t,v in rows), Decimal(0)) + cost > Decimal("45")):
+                or sum((Decimal(v) for t,v in rows), Decimal(0)) + cost > Decimal("109")):
             code = "PREVIEW_EMBEDDING_BUDGET_EXHAUSTED" if kind == "embedding" else "PREVIEW_MODEL_BUDGET_EXHAUSTED"
             raise PreviewBudgetExceeded(PREVIEW_ERRORS[code], code)
 

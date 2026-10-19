@@ -32,9 +32,22 @@ def test_unknown_or_opaque_inputs_fail_closed(item):
 
 def test_budget_count_persists_across_restart(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(54): meter.reserve("text",Decimal('0.1'))
+    for _ in range(154): meter.reserve("text",Decimal('0.1'))
     with pytest.raises(PreviewBudgetExceeded): PreviewBudget(tmp_path).reserve("text",Decimal('0.1'))
-    assert PreviewBudget(tmp_path).summary()['text']['requests']==54
+    assert PreviewBudget(tmp_path).summary()['text']['requests']==154
+
+
+def test_customer_trial_approved_limits_and_prior_ledger_are_preserved(tmp_path):
+    meter=PreviewBudget(tmp_path)
+    assert meter.LIMITS=={'text':(154,Decimal('84')),'image':(2,Decimal('20')),'embedding':(71,Decimal('5'))}
+    for _ in range(49):meter.reserve('text',Decimal('.1'))
+    for _ in range(30):meter.reserve('embedding',Decimal('.05'))
+    resumed=PreviewBudget(tmp_path)
+    assert resumed.summary()['text']['requests']==49
+    assert resumed.summary()['embedding']['requests']==30
+    resumed.reserve('text',Decimal('.1'));resumed.reserve('embedding',Decimal('.05'))
+    assert resumed.summary()['text']['requests']==50
+    assert resumed.summary()['embedding']['requests']==31
 
 
 def test_embedding_batches_use_wire_bytes_without_loss():
@@ -56,10 +69,10 @@ def test_embedding_oversized_single_chunk_is_rejected_without_payment():
 
 def test_full_file_preflight_preserves_budget_and_rejects_partial_spend(tmp_path):
     meter=PreviewBudget(tmp_path)
-    for _ in range(19):meter.reserve('embedding',Decimal('.05'))
+    for _ in range(59):meter.reserve('embedding',Decimal('.05'))
     with pytest.raises(PreviewBudgetExceeded) as raised:meter.check_capacity('embedding',13,Decimal('.05'))
     assert raised.value.code=='PREVIEW_EMBEDDING_BUDGET_EXHAUSTED'
-    assert meter.summary()['embedding']['requests']==19
+    assert meter.summary()['embedding']['requests']==59
 
 
 def test_per_request_text_cost_cap_rejects_before_counting(tmp_path):
@@ -68,11 +81,15 @@ def test_per_request_text_cost_cap_rejects_before_counting(tmp_path):
     assert meter.summary()['text']['requests']==0
 
 
-def test_aggregate_cap_stays45_despite_individual_text_extension(tmp_path):
+def test_aggregate_cap_is109_for_dispatch_and_preflight(tmp_path,monkeypatch):
+    # Broader individual limit is a fixture only, to isolate the aggregate guard.
+    monkeypatch.setattr(PreviewBudget,'LIMITS',{**PreviewBudget.LIMITS,'text':(200,Decimal('100'))})
     meter=PreviewBudget(tmp_path);meter.reserve('image',Decimal('20'))
-    for _ in range(40):meter.reserve('text',Decimal('.60'))
-    for _ in range(20):meter.reserve('embedding',Decimal('.05'))
+    for _ in range(148):meter.reserve('text',Decimal('.60'))
+    for _ in range(4):meter.reserve('embedding',Decimal('.05'))
+    with pytest.raises(PreviewBudgetExceeded):meter.check_capacity('embedding',1,Decimal('.05'))
     with pytest.raises(PreviewBudgetExceeded):meter.reserve('embedding',Decimal('.05'))
+    assert meter.summary()['embedding']['requests']==4
 
 
 def test_safe_error_categories_never_include_internal_text():
