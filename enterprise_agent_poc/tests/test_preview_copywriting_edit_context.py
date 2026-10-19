@@ -21,31 +21,36 @@ def test_edit_priority_latest_full_draft_and_user_fact_boundary(monkeypatch,edit
     messages=[{'role':'user','content':'易明教育高考冲刺文案，仅已确认：整理错题与复习计划。'},
               {'role':'assistant','content':draft}]
     context=editing_context(messages,edit_request);value=data(context)
-    assert value['operation']=='EDIT_PREVIOUS_DRAFT'
+    assert set(value)=={'original_user_goal','user_provided_materials_and_requests','previous_draft','latest_user_request'}
     assert value['previous_draft']==draft and value['latest_user_request']==edit_request
     assert len(value['previous_draft'])>12000
     assert value['user_provided_materials_and_requests']==[messages[0]['content']]
-    assert '模型旧稿，不是已核验企业事实' in context
+    assert '旧稿不是已核验企业事实' in context
 
 
-def test_video_default_then_thirty_seconds_uses_second_draft(monkeypatch):
+def test_format_conversion_and_local_edits_use_latest_draft_without_router(monkeypatch):
     monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true')
     messages=[{'role':'user','content':'生成易明教育高考冲刺文案；仅提供复习计划指导，不承诺提分。'},
               {'role':'assistant','content':'FIXTURE_FIRST_DRAFT'}]
-    second=data(editing_context(messages,'写一个短视频脚本'))
-    assert second['target_seconds']=='45-60'
-    messages += [{'role':'user','content':'写一个短视频脚本'},
-                 {'role':'assistant','content':'FIXTURE_SECOND_VIDEO_DRAFT'}]
-    third=data(editing_context(messages,'再缩短到30秒，开头更有冲突'))
-    assert third['target_seconds']==30 and third['previous_draft']=='FIXTURE_SECOND_VIDEO_DRAFT'
-    assert third['operation']=='EDIT_PREVIOUS_DRAFT'
-    assert '不承诺提分' in third['original_user_goal']
+    requests=['根据这个内容再生成一份短视频脚本','只要口播内容，不要画面说明',
+              '第二段不够自然，修改一下','换个完全不同的开头，其他内容保持不变']
+    previous='FIXTURE_FIRST_DRAFT'
+    for index,user_request in enumerate(requests,2):
+        context=editing_context(messages,user_request);value=data(context)
+        assert value['previous_draft']==previous and value['latest_user_request']==user_request
+        assert '不承诺提分' in value['original_user_goal']
+        assert not {'operation','target_seconds','format'} & value.keys()
+        assert '不设默认视频、口播、时长或模板' in context
+        previous=f'FIXTURE_DRAFT_{index}'
+        messages.extend([{'role':'user','content':user_request},{'role':'assistant','content':previous}])
 
 
 def test_explicit_new_topic_does_not_force_old_draft(monkeypatch):
     monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true')
     value=data(editing_context([{'role':'assistant','content':'高考旧稿'}],'换个主题，写家庭阅读口播'))
-    assert value['operation']=='NEW_TOPIC' and value['previous_draft'] is None
+    assert value['previous_draft']=='高考旧稿'
+    assert value['latest_user_request']=='换个主题，写家庭阅读口播'
+    assert 'operation' not in value  # Context preserved; meaning is not hard-coded by keywords.
 
 
 def test_preview_only_and_prompt_not_duplicated(monkeypatch):
@@ -55,11 +60,13 @@ def test_preview_only_and_prompt_not_duplicated(monkeypatch):
     body={'instructions':prompt(),'input':[]}
     result,_=provider_request(body,{'agent_id':'copywriting-agent'})
     assert result['instructions'].count(prompt())==1
-    for rule in ['多轮修改优先规则','EDIT_PREVIOUS_DRAFT','150～220','不回退到第一版','不是简单缩短或同义词替换']:
+    for rule in ['连续编辑与形式转换','不设默认交付形式','不回退到更早版本','而非仅压缩和替换同义词']:
         assert rule in prompt()
+    for stale in ['EDIT_PREVIOUS_DRAFT','150～220','默认45','模式A','模式B']:
+        assert stale not in prompt()
 
 
-def test_actual_service_three_turn_fixture_and_tenant_boundary(monkeypatch,tmp_path):
+def test_actual_service_five_turn_fixture_and_tenant_boundary(monkeypatch,tmp_path):
     from app.agent_catalog import CATALOG
     from app.domain import RuntimeSession,RuntimeTurn
     from app.service import AgentService
@@ -84,16 +91,19 @@ def test_actual_service_three_turn_fixture_and_tenant_boundary(monkeypatch,tmp_p
     first=asyncio.run(service.run('preview-edit-fixture','copywriting-agent','生成易明教育高考冲刺文案，真实素材：复习计划指导。'))
     # The real TaskService owns persistence; this isolated service Fixture supplies it.
     products.add_message(first.conversation_id,'user',turns[0]);products.add_message(first.conversation_id,'assistant',first.text)
-    second=asyncio.run(service.run('preview-edit-fixture','copywriting-agent','写一个短视频脚本',first.conversation_id))
-    products.add_message(first.conversation_id,'user',turns[1]);products.add_message(first.conversation_id,'assistant',second.text)
-    third=asyncio.run(service.run('preview-edit-fixture','copywriting-agent','再缩短到30秒，开头更有冲突',first.conversation_id))
-    assert first.conversation_id==second.conversation_id==third.conversation_id
-    assert [v['previous_draft'] for v in contexts]==['FIXTURE_DRAFT_1','FIXTURE_DRAFT_2']
-    assert [v['target_seconds'] for v in contexts]==['45-60',30]
-    assert all(v['operation']=='EDIT_PREVIOUS_DRAFT' for v in contexts)
-    assert len(turns)==3  # No automatic replay.
+    requests=['根据这个内容再生成一份短视频脚本','只要口播内容，不要画面说明',
+              '第二段不够自然，修改一下','换个完全不同的开头，其他内容保持不变']
+    for user_request in requests:
+        result=asyncio.run(service.run('preview-edit-fixture','copywriting-agent',user_request,first.conversation_id))
+        assert result.conversation_id==first.conversation_id
+        products.add_message(first.conversation_id,'user',user_request)
+        products.add_message(first.conversation_id,'assistant',result.text)
+    assert [v['previous_draft'] for v in contexts]==[f'FIXTURE_DRAFT_{i}' for i in range(1,5)]
+    assert [v['latest_user_request'] for v in contexts]==requests
+    assert all('operation' not in v and 'target_seconds' not in v for v in contexts)
+    assert len(turns)==5  # No automatic replay. Canned drafts prove wiring, not writing quality.
     with pytest.raises(LookupError):asyncio.run(service.run('preview-other-fixture','copywriting-agent','改短',first.conversation_id))
-    assert len(turns)==3
+    assert len(turns)==5
     # Other agents and non-Preview retain the exact historical recovery path.
     old=service._recovery_context(first.conversation_id,'preview-edit-fixture','x',agent_id='campaign-agent')
     assert not old.startswith('Preview文案多轮编辑上下文')

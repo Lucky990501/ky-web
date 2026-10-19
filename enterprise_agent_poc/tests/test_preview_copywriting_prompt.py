@@ -31,13 +31,14 @@ def test_not_loaded_into_production(monkeypatch):
 
 
 @pytest.mark.parametrize('rule',[
- '先共情，再表达价值','讲师引导型课程口播','人物故事型成长证言',
- '人物证言必须有实际素材依据','如果没有足够故事材料，不能虚构一段第一人称亲身经历',
- '不得把未填写的占位符当作真实素材','不要求每次填写所有字段',
- '不主动输出：镜头说明、背景音乐、拍摄建议、营销分析、写作方法、说明性前言',
- '直接输出完整成稿','不机械调用企业配置、知识库和素材搜索',
- '讲师身份并不证明讲师曾有同样困扰','不得补写“我以前也老这样”',
- '不得用“这里不介绍课程”取消用户明确的课程介绍目标','只问至多两个阻碍成稿的核心问题',
+ '不设默认交付形式','不强制文案类型、叙事结构、时长、营销风格或输出模板',
+ '最新要求优先于旧稿的表达方式','重新组织适合视频拍摄执行的脚本',
+ '应有恰当的镜头、画面和台词','去掉画面、镜头与制作说明',
+ '不擅自指定秒数或字数','不依据关键词强行路由',
+ '主要修改该段，保留其他段落与事实','其他内容按用户要求保持原文',
+ '模型旧稿不是已核验事实来源','不得编造客户',
+ '仅当用户要求视频口播或适宜的成长叙事风格时',
+ '只有缺少的关键信息确实会明显改变交付结果时',
 ])
 def test_owner_rules_loaded_verbatim_as_semantic_requirements(rule):
     assert rule in prompt()
@@ -45,10 +46,10 @@ def test_owner_rules_loaded_verbatim_as_semantic_requirements(rule):
 
 def test_old_skill_formats_cannot_override_new_default(preview):
     install();text=CATALOG[AGENT].instructions
-    assert '强制标题、标签、传统营销结构和机械工具调用流程不适用于本任务' in text
+    assert '固定标题、标签、传统营销结构或机械工具流程，不得覆盖当前用户的具体要求' in text
     assert '必须先调用 enterprise_config_get，再调用 knowledge_search 和 asset_search' not in text
     assert '教育类文案默认采用强观点' not in text
-    assert '不得泄露密钥、跨Tenant/用户资料' in text
+    assert 'Tenant和用户权限，不泄露密钥' in text
 
 
 def test_provider_request_contains_authoritative_prompt_exactly_once(preview):
@@ -98,5 +99,5 @@ def test_placeholder_and_launcher_are_preview_only():
     root=PROMPT_PATH.parent.parent
     script=(root/'app/static/customer-preview.js').read_text(encoding='utf-8')
     assert "main?.dataset.agentId!=='copywriting-agent'" in script
-    assert '描述视频主题、出镜人物、目标观众和真实故事，帮你生成可直接录制的口播逐字稿。' in script
+    assert '告诉我你想创作什么，或直接说明如何修改、转换当前内容。' in script
     assert 'preview_copywriting_prompt' not in (root/'app/main.py').read_text(encoding='utf-8')

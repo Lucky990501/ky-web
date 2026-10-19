@@ -71,7 +71,7 @@
     const main=document.querySelector('#main');
     if(main?.dataset.agentId!=='copywriting-agent')return;
     const input=main.querySelector('#prompt');
-    if(input)input.placeholder='描述视频主题、出镜人物、目标观众和真实故事，帮你生成可直接录制的口播逐字稿。';
+    if(input)input.placeholder='告诉我你想创作什么，或直接说明如何修改、转换当前内容。';
   };
   const markImageUnavailable = () => {
     const enabled=imageCapability?.enabled===true;
