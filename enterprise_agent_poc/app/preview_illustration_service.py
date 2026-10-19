@@ -25,6 +25,7 @@ from app.storage import storage_provider
 
 PREFIX='/api/v1/preview/illustrations'
 MAX_CONCURRENT_ILLUSTRATIONS=4
+MAX_CONCURRENT_ILLUSTRATIONS_PER_TENANT=2
 
 
 def canonical(value):return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
@@ -35,6 +36,7 @@ class PreviewIllustrationService:
         self.main=main;self.root=Path(root);self.config=config or IllustrationConfig()
         self.authorization=authorization or {};self.provider=IllustrationProvider(self.config)
         self.generation_slots=asyncio.Semaphore(MAX_CONCURRENT_ILLUSTRATIONS)
+        self.tenant_generation_slots={}
         self.storage=storage_provider(main.settings);self.path=self.root/'illustrations.sqlite';self.jobs=set()
         with self.db() as conn:
             conn.executescript('''
@@ -100,7 +102,10 @@ class PreviewIllustrationService:
 
     def actor_allowed(self,actor):
         tenants=self.authorization.get('allowed_tenant_ids')
-        return tenants is None or isinstance(tenants,list) and actor.tenant_id in tenants
+        return (isinstance(tenants,list)
+                and all(isinstance(t,str) and t.startswith('preview-') for t in tenants)
+                and isinstance(actor.tenant_id,str) and actor.tenant_id.startswith('preview-')
+                and actor.tenant_id in tenants)
 
     def task_restriction(self,actor,task_id):
         scoped=self.authorization.get('task_scoped_tenant_ids',[])
@@ -413,9 +418,20 @@ class PreviewIllustrationService:
         with self.db() as conn:
             if conn.execute("update illustration_plans set status='generating' where id=? and status='queued'",(identifier,)).rowcount!=1:return
         try:
+            tenant_slots=self.tenant_generation_slots.get(actor.tenant_id)
+            if tenant_slots is None:
+                tenant_slots=asyncio.Semaphore(MAX_CONCURRENT_ILLUSTRATIONS_PER_TENANT)
+                self.tenant_generation_slots[actor.tenant_id]=tenant_slots
+            failed=asyncio.Event()
             async def one(index,item):
-                async with self.generation_slots:
-                    await self.generate_one(actor,identifier,row,payload,index,item)
+                # Tenant slot first: a busy tenant must not occupy all global
+                # permits while waiting for its own per-tenant limit.
+                async with tenant_slots:
+                    async with self.generation_slots:
+                        if failed.is_set():return
+                        try:await self.generate_one(actor,identifier,row,payload,index,item)
+                        except BaseException:
+                            failed.set();raise
             # Validate/save the first picture before bounded parallel batches.
             # On error finish in-flight work, but never start another batch.
             items=list(enumerate(payload['items']))

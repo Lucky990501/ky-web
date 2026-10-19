@@ -65,9 +65,9 @@ def test_bounded_parallelism_partial_images_visible_and_failure_stops_new_batche
         while len(calls)<3:await asyncio.sleep(.005)
         partial=service.get(actor,result['id']);assert len(partial['assets'])==1 and partial['status']=='generating'
         await asyncio.gather(*list(service.jobs))
-        done=service.get(actor,result['id']);assert done['status']=='failed' and len(done['assets'])==4
+        done=service.get(actor,result['id']);assert done['status']=='failed' and len(done['assets'])==2
         assert service.main.product_store.task(task['id'],actor.tenant_id,actor.user_id)['status']=='completed'
-    asyncio.run(run());assert peak==4 and len(calls)==5
+    asyncio.run(run());assert peak==2 and len(calls)==3
 
 
 @pytest.mark.parametrize('label,terms',[

@@ -23,7 +23,8 @@ from test_preview_image_execution import image_fixture
 
 GRANT={'approved':True,'pricing_verified':True,'authorization_id':'FIXTURE_ONLY_NOT_AUTHORIZATION',
        'model':MODEL,'request_max_cny':'0.1','max_total_cny':'1','max_requests':10,
-       'max_images_per_task':5,'automatic_paid_retries':0}
+       'max_images_per_task':5,'automatic_paid_retries':0,
+       'allowed_tenant_ids':['preview-fixture-a','preview-fixture-b']}
 
 
 def picture(color='blue',size=(640,400)):
@@ -84,7 +85,7 @@ def test_env_is_independent_blank_disabled_and_parameter_contract(tmp_path):
 def test_disabled_or_missing_budget_never_reserves_or_calls(setup,monkeypatch):
     service,actors,old,budget=setup;actor=actors[0];calls=enable_fixture_provider(service,monkeypatch)
     task=completed_task(service,actor);plan=service.plan(actor,task['id'])
-    for config,grant,code in [(IllustrationConfig(),GRANT,'ILLUSTRATION_NOT_CONFIGURED'),(service.config,{},'ILLUSTRATION_BUDGET_PENDING')]:
+    for config,grant,code in [(IllustrationConfig(),GRANT,'ILLUSTRATION_NOT_CONFIGURED'),(service.config,{'allowed_tenant_ids':GRANT['allowed_tenant_ids']},'ILLUSTRATION_BUDGET_PENDING')]:
         service.config=config;service.authorization=grant
         with pytest.raises(IllustrationError) as error:service.confirm(actor,plan['id'],plan['digest'],True)
         assert error.value.code==code

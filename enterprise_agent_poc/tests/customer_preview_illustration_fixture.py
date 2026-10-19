@@ -9,6 +9,7 @@ from uuid import uuid4
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from scripts.customer_preview import prepare,create_preview
 from app.preview_illustration_provider import IllustrationConfig,IllustrationProvider,validated_image
+FIXTURE_AUTHORIZED_TENANTS=[]  # Local harness only, never a live grant.
 
 
 async def fixture_generate(self,prompt,record_http,**kwargs):
@@ -21,6 +22,7 @@ async def fixture_generate(self,prompt,record_http,**kwargs):
 
 
 async def fixture_task(self,task):
+    if task['tenant_id'] not in FIXTURE_AUTHORIZED_TENANTS:FIXTURE_AUTHORIZED_TENANTS.append(task['tenant_id'])
     from app import main
     from app.document_generator import ActivityPlanContent
     from app.activity_plan_runtime import render_markdown,result_envelope
@@ -54,7 +56,8 @@ if __name__=='__main__':
     PreviewImageExecution.call_image=fixture_image
     IllustrationProvider.generate=fixture_generate
     grant={'approved':True,'pricing_verified':True,'authorization_id':'FIXTURE_ONLY_NOT_AUTHORIZATION','model':'qwen-image-3.0',
-           'request_max_cny':'0.10','max_total_cny':'5','max_requests':50,'max_images_per_task':5,'automatic_paid_retries':0,'automatic_after_text':True}
+           'request_max_cny':'0.10','max_total_cny':'5','max_requests':50,'max_images_per_task':5,'automatic_paid_retries':0,'automatic_after_text':True,
+           'allowed_tenant_ids':FIXTURE_AUTHORIZED_TENANTS}
     config=IllustrationConfig() if args.unconfigured else IllustrationConfig(key='FIXTURE_ONLY_NOT_A_KEY',enabled=True)
     app=create_preview(args.data_dir,args.port,args.port+1,local_http=True,
         credentials={'DEEPSEEK_API_KEY':'FIXTURE_ONLY_NOT_A_KEY'},pricing={'text_pricing_verified':True,'image_pricing_verified':True,'image_request_max_cny':'1'},
