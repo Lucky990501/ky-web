@@ -25,9 +25,9 @@ COOKIE = "workbench_preview_session"
 IMAGE_BLOCK_MESSAGE = "图片生成暂不可用：自动审批服务处理中。请先体验其他功能。"
 
 
-def image_submission_blocked(path, method):
+def image_submission_blocked(path, method, authorized=False):
     """Temporary Preview admission stop, not an approval-policy override."""
-    return method == "POST" and path == "/api/v1/agents/image-agent/runs"
+    return not authorized and method == "POST" and path == "/api/v1/agents/image-agent/runs"
 
 
 def load_provider_values(path):
@@ -127,7 +127,7 @@ def add_preview_agent():
     )
 
 
-def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, pricing=None, local_http=False):
+def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, pricing=None, local_http=False, image_authorization=None):
     keys, prices = load_provider_values(credentials), pricing or {}
     root = prepare(root, api_port, mcp_port, keys, prices)
     metered_clients(root, prices)
@@ -136,13 +136,28 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     os.environ.pop('EMBEDDING_API_KEY', None)
     from app.auth import UserPrincipal
     from app.agent_catalog import CATALOG
-    from app.preview_budget import PreviewBudget, plaintext_history, PREVIEW_ERRORS, preview_task_failure
+    from app.preview_budget import PreviewBudget, PreviewBudgetExceeded, plaintext_history, PREVIEW_ERRORS, preview_task_failure
     from app.test_text_gate import TestTextGate
     from starlette.requests import Request
     from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
     import httpx
 
     budget = PreviewBudget(root)
+    from app.preview_image_execution import PreviewImageExecution
+    authorization_path = ROOT.parent / 'preview-image-authorization.json'
+    if image_authorization is None and authorization_path.is_file():
+        image_authorization = json.loads(authorization_path.read_text(encoding='utf-8'))
+    image_executor = PreviewImageExecution(main, budget, prices, image_authorization)
+    original_execute = main.task_service.execute
+    async def execute_preview_task(task):
+        if image_executor.owns_task(task['id']):
+            return await image_executor.execute(task)
+        if task.get('agent_id') == 'image-agent':
+            main.product_store.set_task(task['id'], task['tenant_id'], 'failed', 'failed',
+                '图片任务缺少独立执行授权关联，没有自动重试。', error_code='image_submission_unconfirmed')
+            return
+        return await original_execute(task)
+    main.task_service.execute = execute_preview_task
     original_public_task, original_public_file = main._public_task, main._public_knowledge_file
     def public_task(task, **kwargs):
         result = original_public_task(task, **kwargs)
@@ -271,16 +286,16 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 return await JSONResponse({"user_message": "Preview路径不匹配"}, 404)(scope, receive, send)
             scope = dict(scope, path=path[len(BASE):], raw_path=scope.get("raw_path", b"")[len(BASE):])
             path = scope["path"]
-            if image_submission_blocked(path, scope["method"]):
+            if image_submission_blocked(path, scope["method"], image_executor.authorized()):
                 return await JSONResponse({"error_code": "IMAGE_APPROVAL_EXTERNAL_BLOCKED", "user_message": IMAGE_BLOCK_MESSAGE}, 503)(scope, receive, send)
             if path in {"/api/health", "/api/v1/preview-status"}:
-                return await JSONResponse({"status": "preview", **identity, "budget": budget.summary(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
+                return await JSONResponse({"status": "preview", **identity, "budget": budget.summary(), "image_business": image_executor.capability(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
             if path.startswith(denied):
                 return await JSONResponse({"user_message": "体验版不开放平台管理或账号接口"}, 403)(scope, receive, send)
             if path.startswith("/api/") and not path.startswith(("/api/v1/me", "/api/v1/workspace", "/api/v1/agents", "/api/v1/tasks", "/api/v1/conversations", "/api/v1/generations", "/api/v1/enterprise-config", "/api/v1/knowledge", "/api/v1/assets", "/api/v1/storage", "/api/v1/chat-images", "/api/v1/documents")):
                 return await JSONResponse({"user_message": "体验版未开放此接口"}, 403)(scope, receive, send)
-            if path.startswith("/api/v1/agents/") and path.endswith("/runs") and scope["method"] == "POST":
+            if path.startswith("/api/v1/agents/") and path.endswith("/runs") and scope["method"] == "POST" and path != '/api/v1/agents/image-agent/runs':
                 if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
                     return await JSONResponse({"user_message": "Preview模型凭据或费率尚未就绪，未发起付费任务。"}, 503)(scope, receive, send)
                 quota=budget.summary()['text']
@@ -307,6 +322,32 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
+            if path == '/api/v1/agents/image-agent/runs' and scope['method'] == 'POST':
+                try:
+                    from fastapi import HTTPException
+                    try:
+                        principal = main.current_user(token)
+                    except HTTPException:
+                        return await JSONResponse({'user_message':'当前体验会话权限已失效，请刷新页面。'}, 401)(scope, receive, with_cookie)
+                    request = Request(scope, receive)
+                    if request.headers.get('origin') != str(request.base_url).rstrip('/'):
+                        raise PermissionError('图片生成只接受当前Preview页面的明确提交。')
+                    raw = await request.body()
+                    if len(raw) > 20000: raise ValueError('图片请求过大。')
+                    payload = json.loads(raw)
+                    if not isinstance(payload, dict): raise ValueError('图片请求格式无效。')
+                    async with submission_lock:
+                        task = image_executor.submit(principal, payload)
+                        image_executor.schedule(task)
+                    return await JSONResponse(main._public_task(task), 202)(scope, receive, with_cookie)
+                except PreviewBudgetExceeded:
+                    return await JSONResponse({'user_message':'图片体验额度不足，没有发起新请求。'}, 429)(scope, receive, with_cookie)
+                except PermissionError as error:
+                    return await JSONResponse({'user_message': str(error)}, 403)(scope, receive, with_cookie)
+                except LookupError:
+                    return await JSONResponse({'user_message':'会话不存在或无权访问。'}, 404)(scope, receive, with_cookie)
+                except (ValueError, TypeError):
+                    return await JSONResponse({'user_message':'图片请求未通过校验：请确认费用、仅生成1张且不附参考图；输入有效比例或像素。'}, 422)(scope, receive, with_cookie)
             if not path.startswith("/api/"):
                 if path == "/":
                     return await Response(status_code=307, headers={"location": BASE + "/agents/copywriting"})(scope, receive, with_cookie)

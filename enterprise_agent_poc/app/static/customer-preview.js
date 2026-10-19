@@ -23,7 +23,16 @@
     return /^<(?:div|section|article)(?:\s|>)/i.test(text)&&/<\/(?:div|section|article)>\s*$/i.test(text)?text:content;
   };
   const fetchOriginal = window.fetch.bind(window);
-  window.fetch = (input, options) => fetchOriginal(input instanceof Request ? new Request(url(input.url), input) : url(input), options);
+  let imageCapability=null,imageConsent=null;
+  window.fetch = (input, options) => {
+    const target=input instanceof Request?new Request(url(input.url),input):url(input);
+    if(options?.method==='POST'&&new URL(input instanceof Request?input.url:String(target),location.href).pathname==='/preview/api/v1/agents/image-agent/runs'&&imageConsent){
+      const body=JSON.parse(options.body||'{}');
+      if(body.message===imageConsent.prompt)options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id})};
+      imageConsent=null;
+    }
+    return fetchOriginal(target,options);
+  };
   const Source = window.EventSource;
   window.EventSource = class extends Source { constructor(value, options) { super(url(value), options); } };
   for (const name of ['pushState', 'replaceState']) {
@@ -36,21 +45,37 @@
     const anchor = event.target.closest?.('a[href]');
     if (anchor) anchor.href = url(anchor.href);
   }, true);
-  const imageUnavailable = '图片生成暂不可用：自动审批服务处理中。请先体验其他功能。';
+  const imageUnavailable = '图片生成暂不可用：未取得独立业务授权或体验额度已用完。';
   const markImageUnavailable = () => {
+    const enabled=imageCapability?.enabled===true;
     document.querySelectorAll('.side-nav [data-page="image"] span').forEach(label => {
-      if(label.textContent!=='图片生成（暂不可用）')label.textContent='图片生成（暂不可用）';
+      const text=enabled?'图片生成':'图片生成（暂不可用）';if(label.textContent!==text)label.textContent=text;
     });
     const main=document.querySelector('#main');if(main?.dataset.agentId!=='image-agent')return;
     const form=main.querySelector('#composer');if(!form)return;
-    let notice=main.querySelector('#preview-image-unavailable');
-    if(!notice){notice=document.createElement('p');notice.id='preview-image-unavailable';notice.className='composer-run-feedback';notice.setAttribute('role','status');notice.textContent=imageUnavailable;form.before(notice);}
-    form.querySelectorAll('button,input,textarea').forEach(control=>{if(!control.disabled)control.disabled=true;control.setAttribute('aria-describedby',notice.id);});
-    const send=form.querySelector('#composer-submit');if(send){send.title=imageUnavailable;send.setAttribute('aria-label','图片生成暂不可用');}
+    let notice=main.querySelector('[data-preview-image-notice]');
+    if(!notice){notice=document.createElement('p');notice.dataset.previewImageNotice='true';notice.className='composer-run-feedback';notice.setAttribute('role','status');form.before(notice);}
+    notice.id=enabled?'preview-image-direct-notice':'preview-image-unavailable';
+    const text=enabled?`独立图片体验：每次1张，单次费用预留不超过¥${imageCapability.request_max_cny}；提交前需确认，不自动重试。暂不支持参考图编辑。`:imageUnavailable;
+    if(notice.textContent!==text)notice.textContent=text;
+    const send=form.querySelector('#composer-submit');
+    if(send?.type==='button')return; // Never disable an active Stop control.
+    form.querySelectorAll('button,input,textarea').forEach(control=>{
+      if(!enabled&&!control.disabled){control.dataset.previewDisabled='true';control.disabled=true;}
+      if(enabled&&control.dataset.previewDisabled){delete control.dataset.previewDisabled;control.disabled=false;}
+      control.setAttribute('aria-describedby',notice.id);
+    });
+    if(send&&!enabled){send.title=imageUnavailable;send.setAttribute('aria-label','图片生成暂不可用');}
+    if(send&&enabled&&send.title===imageUnavailable){send.title='发送';send.setAttribute('aria-label','发送消息');}
   };
   document.addEventListener('submit',event=>{
     if(event.target.id==='composer'&&document.querySelector('#main')?.dataset.agentId==='image-agent'){
-      event.preventDefault();event.stopImmediatePropagation();markImageUnavailable();
+      const prompt=document.querySelector('#prompt')?.value.trim();
+      if(!imageCapability?.enabled||!prompt){event.preventDefault();event.stopImmediatePropagation();markImageUnavailable();return;}
+      if(!window.confirm(`确认生成1张图片？单次费用预留不超过¥${imageCapability.request_max_cny}。请求失败或结果未知时不会自动重试。`)){
+        event.preventDefault();event.stopImmediatePropagation();return;
+      }
+      imageConsent={prompt,id:crypto.randomUUID()};
     }
   },true);
   window.enhancePreviewKnowledge = (main, items) => {
@@ -109,6 +134,7 @@
     main.querySelectorAll('.trow .status').forEach((node,i)=>{node.className='status '+(items[i]?.status==='ready'?'ready':'');});
   };
   document.addEventListener('DOMContentLoaded',()=>{
+    fetchOriginal('/preview/api/health',{cache:'no-store'}).then(r=>r.json()).then(value=>{imageCapability=value.image_business;markImageUnavailable();}).catch(()=>{imageCapability=null;markImageUnavailable();});
     const observer=new MutationObserver(()=>{
       const main=document.querySelector('#main');
       if(main?.dataset.page==='knowledge'&&main.querySelector('.upload-zone')&&!main.querySelector('#preview-knowledge-file'))window.enhancePreviewKnowledge(main,[]);
