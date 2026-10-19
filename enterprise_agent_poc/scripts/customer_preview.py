@@ -271,6 +271,14 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 reference = article_references.for_task(dict(running_task))
                 if reference:
                     body['instructions'] += article_references.instructions(reference)
+            controlled=illustration_service.authorization.get('controlled_text_acceptance')
+            scoped_control=(isinstance(controlled,dict) and running_task and all(
+                controlled.get(field)==running_task[field] for field in ('tenant_id','user_id','agent_id')))
+            if scoped_control:
+                # This one approved acceptance excludes paid knowledge/image
+                # tools. Ordinary visitors keep their existing tool contract.
+                body['tools']=[tool for tool in body['tools'] if tool.get('name') not in {
+                    'mcp__platform__knowledge_search','mcp__platform__asset_search','mcp__platform__image_generation'}]
             wire = json.dumps(body, ensure_ascii=False).encode()
             if len(wire) > 65536:
                 raise PermissionError("本轮模型上下文超过体验费用边界，请缩短会话。")
@@ -293,7 +301,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'], 'PREVIEW_CONTEXT_COST_LIMIT')
                 body['max_output_tokens'] = min(body['max_output_tokens'], fitted)
                 cost = (Decimal(bounds['input_tokens_upper']) * Decimal(str(prices['text_input_cny_per_million'])) + Decimal(body['max_output_tokens']) * Decimal(str(prices['text_output_cny_per_million']))) / Decimal(1_000_000)
-            budget.reserve("text", cost)
+            if scoped_control:
+                budget.reserve('text',cost,controlled={'authorization_id':controlled.get('authorization_id'),
+                    'task_id':running_task['id'],'max_requests':controlled.get('max_requests')})
+            else:budget.reserve("text", cost)
             with main.store.connection() as conn:
                 task = conn.execute("SELECT id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
             budget.observe({"event": "text_dispatch", "task_id": task["id"] if task else None,

@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import time
 import json
+import re
 
 import httpx
 
@@ -106,13 +107,23 @@ class PreviewBudget:
         with sqlite3.connect(self.path) as conn:
             conn.execute("INSERT INTO observations VALUES(?,?)", (time.time(), json.dumps(payload)))
 
-    def reserve(self, kind: str, ceiling: Decimal):
+    def reserve(self, kind: str, ceiling: Decimal, *, controlled=None):
         if kind not in self.LIMITS or not ceiling.is_finite() or ceiling <= 0:
             raise PreviewBudgetExceeded("调用费用上限尚未核实；没有发起付费请求。")
         if kind == 'text' and ceiling > Decimal('0.60'):
             raise PreviewBudgetExceeded("本次请求预留费用超过单次授权上限；请缩短输入，未调用模型。", "PREVIEW_INPUT_REJECTED")
         with sqlite3.connect(self.path, timeout=10) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if controlled is not None:
+                if (kind!='text' or not isinstance(controlled,dict)
+                    or not re.fullmatch(r'[a-zA-Z0-9_-]{1,120}',str(controlled.get('authorization_id','')))
+                    or not re.fullmatch(r'[a-zA-Z0-9_-]{1,120}',str(controlled.get('task_id','')))
+                    or type(controlled.get('max_requests')) is not int or not 1<=controlled['max_requests']<=4):
+                    raise PreviewBudgetExceeded('受控验收授权无效；未调用模型。')
+                markers=[json.loads(row[0]) for row in conn.execute('SELECT payload FROM observations')]
+                markers=[m for m in markers if m.get('event')=='controlled_text_reservation' and m.get('authorization_id')==controlled['authorization_id']]
+                if len(markers)>=controlled['max_requests'] or any(m.get('task_id')!=controlled['task_id'] for m in markers):
+                    raise PreviewBudgetExceeded('本轮受控文章请求上限已达到；没有自动重试。')
             rows = conn.execute("SELECT kind,ceiling FROM requests").fetchall()
             count, limit = self.LIMITS[kind]
             if (sum(k == kind for k, _ in rows) >= count
@@ -122,6 +133,8 @@ class PreviewBudget:
             # Reserve the verified worst-case amount before network dispatch.
             # Unknown outcomes remain reserved; restart never resets this file.
             conn.execute("INSERT INTO requests VALUES(?,?,?)", (kind, str(ceiling), time.time()))
+            if controlled is not None:
+                conn.execute('INSERT INTO observations VALUES(?,?)',(time.time(),json.dumps({'event':'controlled_text_reservation',**controlled})))
 
     def check_capacity(self, kind, count, ceiling):
         """Preflight the whole file without charging; each dispatch still reserves."""
