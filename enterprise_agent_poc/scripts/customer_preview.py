@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextvars import ContextVar
 from decimal import Decimal
 import hashlib
 from http.cookies import SimpleCookie
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import sys
@@ -144,6 +146,30 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     import httpx
 
     budget = PreviewBudget(root)
+    from app.preview_text_guard import PreviewTextGuard,PreviewTaskTextGate
+    text_guard=PreviewTextGuard(budget,Path(root).parent/'illustration-budget-authorization.json')
+    text_gate=PreviewTaskTextGate(main.store,text_guard,f'http://127.0.0.1:{api_port}/_preview_model')
+    text_task_context=ContextVar('preview_text_task_context',default=None)
+    if main.manager._test_gate is not None:
+        raise RuntimeError('Preview task gate cannot replace a formal Test/Stage2 gate')
+    main.manager._test_gate=text_gate
+    original_prepare_profile=main.manager._prepare_profile
+    def task_prepare_profile(profile,*,task_id=None,gate_url=None):
+        home,workspace,token,expiry=original_prepare_profile(profile,task_id=task_id,gate_url=gate_url)
+        token=text_gate.protect_mcp_token(main.token_issuer,task_id,token)
+        return home,workspace,token,expiry
+    main.manager._prepare_profile=task_prepare_profile
+    original_create_session,original_resume_session=main.runtime.create_session,main.runtime.resume_session
+    def task_options(options):
+        current=text_task_context.get()
+        if not current or options.get('task_id',current)!=current:
+            raise PreviewBudgetExceeded('缺少准确Preview任务上下文。','PREVIEW_CONTROLLED_ACCEPTANCE_DENIED')
+        return {**options,'task_id':current}
+    async def task_create_session(*args,**options):
+        return await original_create_session(*args,**task_options(options))
+    async def task_resume_session(*args,**options):
+        return await original_resume_session(*args,**task_options(options))
+    main.runtime.create_session,main.runtime.resume_session=task_create_session,task_resume_session
     from app.preview_image_execution import PreviewImageExecution
     authorization_path = ROOT.parent / 'preview-image-authorization.v2.json'
     if image_authorization is None and authorization_path.is_file():
@@ -162,7 +188,6 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             # A bad optional ENV must never take down the six existing tools.
             illustration_service=PreviewIllustrationService(main,root,IllustrationConfig())
     from app.preview_article_references import PreviewArticleReferences, AGENT as ARTICLE_AGENT
-    from contextvars import ContextVar
     article_references = PreviewArticleReferences(main, budget)
     article_submission = ContextVar('preview_article_submission',default=None)
     original_execute = main.task_service.execute
@@ -182,7 +207,9 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             except (LookupError,PermissionError):
                 main.product_store.set_task(task['id'],task['tenant_id'],'failed','failed','对标文章关联失败，未调用模型。',error_code='preview_article_reference_invalid')
                 return
-        return await original_execute(task)
+        context=text_task_context.set(task['id'])
+        try:return await original_execute(task)
+        finally:text_task_context.reset(context)
     main.task_service.execute = execute_preview_task
     original_public_task, original_public_file = main._public_task, main._public_knowledge_file
     def public_task(task, **kwargs):
@@ -245,18 +272,17 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
         user = main.product_store.user_by_email(email)
         return main.sessions.issue(UserPrincipal(user["id"], tenant, user["role"], main.sessions.credential_version(user["password_hash"])), lifetime_seconds=72*3600)
 
-    async def text_request(scope, receive, send):
+    async def text_request(scope, receive, send,task_id):
         request = Request(scope, receive)
-        if not secrets.compare_digest(request.headers.get("authorization", ""), "Bearer " + os.environ["PREVIEW_TEXT_GATE_TOKEN"]):
-            return await JSONResponse({"error": {"message": "Preview model authorization required"}}, 403)(scope, receive, send)
         running_task = None
         try:
+            bearer=request.headers.get('authorization','')
+            if not bearer.startswith('Bearer '):raise PermissionError('Task credential required')
+            running_task=text_gate.resolve(task_id,bearer[7:])
             if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
                 raise PermissionError("Preview文本供应商配置或费率尚未核实。")
             body, dropped = plaintext_history(await request.json())
             body, namespaces = TestTextGate.provider_tools(body)
-            with main.store.connection() as conn:
-                running_task = conn.execute("SELECT id,agent_id,tenant_id,user_id,conversation_id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
             # An anonymous Preview receives only the existing tenant-scoped
             # business MCP tools, never shell/file/browser/server-side tools.
             body['tools'] = [tool for tool in body.get('tools', [])
@@ -271,9 +297,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 reference = article_references.for_task(dict(running_task))
                 if reference:
                     body['instructions'] += article_references.instructions(reference)
-            controlled=illustration_service.authorization.get('controlled_text_acceptance')
-            scoped_control=(isinstance(controlled,dict) and running_task and all(
-                controlled.get(field)==running_task[field] for field in ('tenant_id','user_id','agent_id')))
+            scoped_control=text_guard.check(running_task)
             if scoped_control:
                 # This one approved acceptance excludes paid knowledge/image
                 # tools. Ordinary visitors keep their existing tool contract.
@@ -284,30 +308,13 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 raise PermissionError("本轮模型上下文超过体验费用边界，请缩短会话。")
             if body.get("model") != main.settings.model_id:
                 raise PermissionError("模型身份不匹配。")
-            output_cap = 8192 if running_task and running_task['agent_id']=='campaign-agent' else 4096
-            body["max_output_tokens"] = min(int(body.get("max_output_tokens") or output_cap), output_cap)
-            bounds = TestTextGate.request_bound(body)
+            from app.preview_budget import bounded_text_output
+            body,cost=bounded_text_output(body,prices,running_task['agent_id'],controlled=bool(scoped_control))
             if prices.get('text_dispatch_paused'):
                 raise PermissionError('Preview付费请求已暂停；未调用供应商。')
-            cost = (Decimal(bounds['input_tokens_upper']) * Decimal(str(prices["text_input_cny_per_million"]))
-                    + Decimal(body["max_output_tokens"]) * Decimal(str(prices["text_output_cny_per_million"]))) / Decimal(1_000_000)
-            if cost > Decimal('.60'):
-                # Keep the same conservative input proof and currency cap.
-                # Fit only the supported output token limit, never undercount
-                # input or retry a paid request. Refuse if no useful answer fits.
-                available = Decimal('.60') * 1_000_000 - Decimal(bounds['input_tokens_upper']) * Decimal(str(prices['text_input_cny_per_million']))
-                fitted = int(available / Decimal(str(prices['text_output_cny_per_million'])))
-                if fitted < 2048:
-                    raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'], 'PREVIEW_CONTEXT_COST_LIMIT')
-                body['max_output_tokens'] = min(body['max_output_tokens'], fitted)
-                cost = (Decimal(bounds['input_tokens_upper']) * Decimal(str(prices['text_input_cny_per_million'])) + Decimal(body['max_output_tokens']) * Decimal(str(prices['text_output_cny_per_million']))) / Decimal(1_000_000)
-            if scoped_control:
-                budget.reserve('text',cost,controlled={'authorization_id':controlled.get('authorization_id'),
-                    'task_id':running_task['id'],'max_requests':controlled.get('max_requests')})
-            else:budget.reserve("text", cost)
-            with main.store.connection() as conn:
-                task = conn.execute("SELECT id FROM tasks WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
-            budget.observe({"event": "text_dispatch", "task_id": task["id"] if task else None,
+            text_guard.reserve(running_task,cost)
+            budget.observe({"event": "text_dispatch", "task_id": running_task['id'],
+                            'max_output_tokens':body['max_output_tokens'],'reserved_ceiling_cny':str(cost),
                             "input_types": [item.get("type", "message") for item in body.get("input", []) if isinstance(item, dict)],
                             "tool_names": [tool['name'] for tool in body['tools']],
                             "opaque_reasoning_items_omitted": dropped})
@@ -319,8 +326,20 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             code=getattr(exc,'code','PREVIEW_INPUT_REJECTED')
             return await JSONResponse({"error": {"code":code,"message":PREVIEW_ERRORS.get(code,PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE'])}}, 429)(scope, receive, send)
         client = httpx.AsyncClient(timeout=180, trust_env=False, transport=httpx.AsyncHTTPTransport(retries=0))
-        upstream = await client.send(client.build_request("POST", prices["text_base_url"].rstrip("/") + "/responses",
-            headers={"Authorization": "Bearer " + keys["DEEPSEEK_API_KEY"]}, json=body), stream=True)
+        # Recheck revocation/permissions after reservation, immediately before IO.
+        try:text_gate.resolve(task_id,bearer[7:])
+        except PermissionError:
+            await client.aclose()
+            return await JSONResponse({'error':{'code':'PREVIEW_CONTROLLED_ACCEPTANCE_DENIED'}},429)(scope,receive,send)
+        budget.observe({'event':'text_http_attempt','task_id':task_id})
+        try:
+            upstream = await client.send(client.build_request("POST", prices["text_base_url"].rstrip("/") + "/responses",
+                headers={"Authorization": "Bearer " + keys["DEEPSEEK_API_KEY"]}, json=body), stream=True)
+        except httpx.HTTPError as exc:
+            budget.observe({'event':'text_http_unknown','task_id':task_id,'error_type':type(exc).__name__})
+            await client.aclose()
+            return await JSONResponse({'error':{'code':'MODEL_TOOL_UNAVAILABLE'}},502)(scope,receive,send)
+        budget.observe({'event':'text_http_response','task_id':task_id,'status':upstream.status_code})
         if upstream.status_code >= 400:
             await upstream.aclose(); await client.aclose()
             return await JSONResponse({"error": {"message": "Preview供应商请求未成功；不会自动重试。"}}, upstream.status_code)(scope, receive, send)
@@ -333,10 +352,20 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                         pending = pending.replace(b'\r\n', b'\n')
                         while b'\n\n' in pending:
                             block, pending = pending.split(b'\n\n', 1)
+                            from app.preview_budget import observe_text_terminal
+                            observe_text_terminal(budget,task_id,block)
                             yield TestTextGate.sdk_tools('text/event-stream', block + b'\n\n', namespaces)
-                    if pending: yield TestTextGate.sdk_tools('text/event-stream', pending, namespaces)
+                    if pending:
+                        from app.preview_budget import observe_text_terminal
+                        observe_text_terminal(budget,task_id,pending)
+                        yield TestTextGate.sdk_tools('text/event-stream', pending, namespaces)
                 else:
-                    yield TestTextGate.sdk_tools(upstream.headers.get('content-type',''), await upstream.aread(), namespaces)
+                    raw=await upstream.aread()
+                    from app.preview_budget import observe_text_terminal
+                    parsed=json.loads(raw)
+                    if parsed.get('status') in {'completed','incomplete','failed'}:
+                        observe_text_terminal(budget,task_id,b'data: '+json.dumps({'type':'response.'+parsed['status'],'response':parsed}).encode())
+                    yield TestTextGate.sdk_tools(upstream.headers.get('content-type',''), raw, namespaces)
             finally:
                 await upstream.aclose(); await client.aclose()
         return await StreamingResponse(chunks(), media_type=upstream.headers.get("content-type", "application/json"))(scope, receive, send)
@@ -348,8 +377,11 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             path = scope["path"]
             # This route is private to the backend Codex client, never advertised
             # in the browser and requires a distinct transient bearer token.
-            if path == "/_preview_model/responses" and scope["method"] == "POST":
-                return await text_request(scope, receive, send)
+            match=re.fullmatch(r'/_preview_model/tasks/([A-Za-z0-9_-]{1,120})/responses',path)
+            if match and scope["method"] == "POST":
+                return await text_request(scope, receive, send,match[1])
+            if path.startswith('/_preview_model'):
+                return await JSONResponse({'error':{'code':'PREVIEW_TASK_CONTEXT_REQUIRED'}},403)(scope,receive,send)
             if path == BASE: return await Response(status_code=307, headers={"location": BASE + "/"})(scope, receive, send)
             # Nginx must preserve /preview/; unprefixed APIs fail closed.
             if not path.startswith(BASE + "/"):

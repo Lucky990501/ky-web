@@ -66,6 +66,8 @@ PREVIEW_ERRORS = {
     "KNOWLEDGE_PROCESSING_FAILED": "资料处理失败，原文件已保留，可重新处理，无需重复上传。",
     "MODEL_TOOL_UNAVAILABLE": "模型或工具暂不可用，请稍后再试。",
     "CONTENT_SAVE_FAILED": "内容保存失败，请保留诊断ID联系Owner，不要重复生成。",
+    "PREVIEW_CONTROLLED_ACCEPTANCE_DENIED": "本轮受控验收授权缺失、失效或已关闭，未发起额外模型请求。",
+    "MODEL_OUTPUT_INCOMPLETE": "模型输出达到本轮长度上限，文章尚未完整保存；不会自动收费重试。",
 }
 
 
@@ -90,7 +92,50 @@ def preview_task_failure(task, trace, denied):
         return denied.get("code") or ("PREVIEW_MODEL_BUDGET_EXHAUSTED" if denied.get("reason") == "PreviewBudgetExceeded" else "PREVIEW_INPUT_REJECTED")
     if trace.get("result_persistence_error_stage"):
         return "CONTENT_SAVE_FAILED"
+    if 'Incomplete response returned, reason: max_output_tokens' in str(trace.get('error','')):
+        return 'MODEL_OUTPUT_INCOMPLETE'
     return "MODEL_TOOL_UNAVAILABLE"
+
+
+def bounded_text_output(body,prices,agent_id,*,controlled=False):
+    """One bounded request, same <=0.60 ceiling. No retry or global limit raise."""
+    from app.test_text_gate import TestTextGate
+    body=dict(body)
+    article=agent_id=='preview-wechat-agent'
+    cap=8192 if article or agent_id=='campaign-agent' else 4096
+    if article and controlled:
+        body['instructions']=(body.get('instructions') or '')+'\n本轮受控文章约600中文字，6至8个短段落、2个小标题和一处引用即可。遵循已绑定1.0.1 Skill输出简洁Markdown正文；平台会确定性生成安全内联HTML，不重复逐段CSS或输出第二份HTML，不附制作过程。不要检索知识或调用图片工具；信息充分后直接完成。'
+    requested=body.get('max_output_tokens')
+    if requested is not None and (type(requested) is not int or requested<=0):
+        raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_INPUT_REJECTED'],'PREVIEW_INPUT_REJECTED')
+    minimum=min(requested or (4096 if article else 2048),4096 if article else 2048)
+    body['max_output_tokens']=min(requested or cap,cap)
+    rate_in=Decimal(str(prices['text_input_cny_per_million']));rate_out=Decimal(str(prices['text_output_cny_per_million']))
+    if not rate_in.is_finite() or not rate_out.is_finite() or rate_in<0 or rate_out<=0:raise PreviewBudgetExceeded('费率尚未核实。')
+    for _ in range(2):
+        bounds=TestTextGate.request_bound(body)
+        available=Decimal('.60')*1_000_000-Decimal(bounds['input_tokens_upper'])*rate_in
+        body['max_output_tokens']=min(body['max_output_tokens'],max(0,int(available/rate_out)))
+        if body['max_output_tokens']<minimum:
+            raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'],'PREVIEW_CONTEXT_COST_LIMIT')
+    bounds=TestTextGate.request_bound(body)
+    cost=(Decimal(bounds['input_tokens_upper'])*rate_in+Decimal(body['max_output_tokens'])*rate_out)/1_000_000
+    if body['max_output_tokens']<minimum or cost>Decimal('.60'):
+        raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'],'PREVIEW_CONTEXT_COST_LIMIT')
+    return body,cost
+
+
+def observe_text_terminal(budget,task_id,block):
+    """Safe HTTP response evidence; no article, tool arguments or reasoning text."""
+    for line in block.splitlines():
+        if not line.startswith(b'data:'):continue
+        try:event=json.loads(line[5:].strip())
+        except (ValueError,UnicodeError):continue
+        if event.get('type') not in {'response.completed','response.incomplete','response.failed'}:continue
+        response=event.get('response') or {};usage=response.get('usage') or {}
+        budget.observe({'event':'text_http_terminal','task_id':task_id,'type':event['type'],
+                        'status':response.get('status'),'incomplete_reason':(response.get('incomplete_details') or {}).get('reason'),
+                        'usage':{k:v for k,v in usage.items() if k in {'input_tokens','output_tokens','total_tokens'} and type(v) is int}})
 
 
 class PreviewBudget:
