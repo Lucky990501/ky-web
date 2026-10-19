@@ -257,7 +257,7 @@
     const feedback = slot.querySelector('[role="status"]'), buttons = [...slot.querySelectorAll('button')], preview = slot.querySelector('[data-article-preview]');
     let result, busy = false;
     try { result = buildManualExport(content, markdown, metadata); }
-    catch { buttons.forEach(button => button.disabled = true); feedback.textContent = '文章内容过大或无效，暂无法导出。'; return null; }
+    catch(error) { buttons.forEach(button => button.disabled = true); feedback.textContent = error.message==='ARTICLE_BODY_UNCONFIRMED'?'该历史回复包含策划内容，正文边界不明确，未将其当作正文导出。原回复已保留；请明确要求仅返回完整文章正文。':'文章内容过大或无效，暂无法导出。'; return null; }
     if (inlineBody && (hasArticleHtml(content)||window.WORKBENCH_PREVIEW_BASE)) {
       const body = article.querySelector('.chat-message-content');
       if (body) {

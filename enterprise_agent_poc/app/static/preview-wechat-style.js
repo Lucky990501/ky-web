@@ -18,6 +18,9 @@
       if(index>0&&nodes.slice(index+1).some(node=>node.tagName==='H1')&&/标题候选|标题建议|写作思路|文章结构说明/.test(nodes.slice(0,index).map(n=>n.textContent).join('\n')))
         nodes.slice(0,index+1).forEach(node=>node.remove());
     }
+    const firstHeading=root.querySelector('h1,h2,h3');
+    if(firstHeading&&/^(?:三个)?(?:标题候选|标题建议|写作思路|文章结构说明|营销分析|创作过程)[：:]?$/.test(firstHeading.textContent.trim()))
+      throw Error('ARTICLE_BODY_UNCONFIRMED');
     root.querySelectorAll('article,section,div').forEach(node=>node.setAttribute('style',body));
     for(const [tag,style] of Object.entries(styles))root.querySelectorAll(tag).forEach(node=>node.setAttribute('style',style));
     root.querySelectorAll('h2').forEach((node,index)=>{
