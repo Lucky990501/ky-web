@@ -20,6 +20,7 @@ import httpx
 from PIL import Image
 
 MODEL='qwen-image-3.0'
+APPROVED_BASE_URLS=frozenset({'https://api.n1n.ai','https://llm-api.net'})
 MAX_IMAGE=2*1024*1024  # Existing Word image contract, checked before storage.
 
 
@@ -52,13 +53,16 @@ class IllustrationConfig:
         for line in private_file(path).read_text(encoding='utf-8-sig').splitlines():
             key,separator,value=line.partition('=')
             if separator and key.startswith('N1N_ILLUSTRATION_'):values[key]=value.strip()
-        expected={'BASE_URL':'https://api.n1n.ai','MODEL':MODEL,'DEFAULT_SIZE':'1024x1024',
+        base_url=values.get('N1N_ILLUSTRATION_BASE_URL','https://api.n1n.ai')
+        if base_url not in APPROVED_BASE_URLS:
+            raise IllustrationError('ILLUSTRATION_CONFIG_INVALID','配图接口必须使用本轮明确授权的完整Base URL。')
+        expected={'MODEL':MODEL,'DEFAULT_SIZE':'1024x1024',
                   'WATERMARK':'true','PROMPT_EXTEND':'true','PROMPT_EXTEND_MODE':'direct','SORT':'success_rate'}
         if any(values.get('N1N_ILLUSTRATION_'+key,value)!=value for key,value in expected.items()):
             raise IllustrationError('ILLUSTRATION_CONFIG_INVALID','配图模型或固定参数不符合本轮合同。')
         hosts=tuple(filter(None,values.get('N1N_ILLUSTRATION_ASSET_HOSTS','').split(',')))
         if any(not re.fullmatch(r'[a-z0-9.-]+',h) or '*' in h for h in hosts):raise IllustrationError('ILLUSTRATION_CONFIG_INVALID','图片资源域名合同无效。')
-        return cls(key=values.get('N1N_ILLUSTRATION_API_KEY',''),enabled=values.get('N1N_ILLUSTRATION_ENABLED','false')=='true',asset_hosts=hosts)
+        return cls(key=values.get('N1N_ILLUSTRATION_API_KEY',''),enabled=values.get('N1N_ILLUSTRATION_ENABLED','false')=='true',base_url=base_url,asset_hosts=hosts)
 
 
 def validated_image(content,mime=None):
@@ -115,6 +119,7 @@ class IllustrationProvider:
     async def generate(self,prompt,record_http):
         config=self.config
         if not config.enabled or not config.key:raise IllustrationError('ILLUSTRATION_NOT_CONFIGURED','配图模型未配置；纯文字生成与导出仍可使用。')
+        if config.base_url not in APPROVED_BASE_URLS:raise IllustrationError('ILLUSTRATION_CONFIG_INVALID','配图接口未获本轮授权。')
         body={'prompt':prompt,'model':MODEL,'provider':{'sort':'success_rate'},'size':config.size,
               'watermark':True,'prompt_extend':True,'prompt_extend_mode':'direct'}
         try:

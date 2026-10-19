@@ -90,6 +90,33 @@ def test_disabled_or_missing_budget_never_reserves_or_calls(setup,monkeypatch):
     assert service.capability()['reserved_requests']==0 and calls==old==[] and budget.summary()['image']['requests']==0
 
 
+@pytest.mark.parametrize('base',['https://api.n1n.ai','https://llm-api.net'])
+def test_explicit_approved_base_keeps_exact_model_body_and_no_fallback(tmp_path,monkeypatch,base):
+    path=tmp_path/'.env.illustration'
+    path.write_text('N1N_ILLUSTRATION_BASE_URL='+base+'\nN1N_ILLUSTRATION_API_KEY=FIXTURE_ONLY\nN1N_ILLUSTRATION_ENABLED=true\n',encoding='utf-8');path.chmod(0o600)
+    config=IllustrationConfig.load(path);assert config.base_url==base and config.model==MODEL
+    client_type=httpx.AsyncClient;requests=[]
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(503,json={'error':'FIXTURE_ONLY rejection'})
+    monkeypatch.setattr(httpx,'AsyncClient',lambda **kwargs:client_type(**{**kwargs,'transport':httpx.MockTransport(respond)}))
+    with pytest.raises(IllustrationError) as error:
+        asyncio.run(IllustrationProvider(config).generate('FIXTURE_ONLY',lambda *args:None))
+    assert error.value.code=='ILLUSTRATION_PROVIDER_REJECTED' and len(requests)==1
+    assert str(requests[0].url)==base+'/v1/images/generations?sort=success_rate'
+    assert json.loads(requests[0].content)=={'prompt':'FIXTURE_ONLY','model':MODEL,'provider':{'sort':'success_rate'},'size':'1024x1024','watermark':True,'prompt_extend':True,'prompt_extend_mode':'direct'}
+
+
+@pytest.mark.parametrize('base',['http://llm-api.net','https://llm-api.net/v1/images/generations','https://llm-api.net/','https://llm-api.net.evil.invalid','https://user@llm-api.net','https://127.0.0.1','https://unapproved.invalid'])
+def test_unapproved_or_non_base_endpoint_is_rejected_before_transport(tmp_path,base):
+    path=tmp_path/'.env.illustration';path.write_text('N1N_ILLUSTRATION_BASE_URL='+base+'\n',encoding='utf-8');path.chmod(0o600)
+    with pytest.raises(IllustrationError) as error:IllustrationConfig.load(path)
+    assert error.value.code=='ILLUSTRATION_CONFIG_INVALID'
+    with pytest.raises(IllustrationError) as error:
+        asyncio.run(IllustrationProvider(IllustrationConfig(key='FIXTURE_ONLY',enabled=True,base_url=base)).generate('FIXTURE_ONLY',lambda *args:None))
+    assert error.value.code=='ILLUSTRATION_CONFIG_INVALID'
+
+
 def test_plan_maps_all_requirements_and_reuses_identity(setup):
     service,actors,old,budget=setup;actor=actors[0];task=completed_task(service,actor)
     first=service.plan(actor,task['id']);second=service.plan(actor,task['id'])

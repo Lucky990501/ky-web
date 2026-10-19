@@ -5,7 +5,7 @@
 ## 配置
 
 - 后端从数据目录上一级的 `.env.illustration` 读取独立配置，或使用 `PREVIEW_ILLUSTRATION_ENV` 指定受限文件。服务器文件必须为 0600，归属 Preview 用户。不可提交实际文件、输出 Key 或复用原生图 Key。
-- 新模型固定 `qwen-image-3.0`，`https://api.n1n.ai`，1024x1024，保留 watermark、prompt_extend、direct、success_rate。示例默认禁用且空 Key。
+- 新模型固定 `qwen-image-3.0`，1024x1024，保留 watermark、prompt_extend、direct、success_rate。Base URL 仅允许 `https://api.n1n.ai` 或 Owner 明确提供的 `https://llm-api.net`；配置不含 `/v1`，服务追加 `/v1/images/generations?sort=success_rate`。无自动域名回退、无自动重发，切换前须确认网络及同模型/单价合同。示例默认禁用且空 Key。
 - 独立 `illustration-budget-authorization.json` 参照 example。必须由 Owner 批准单价、次数、累计金额、每任务上限和用途；验收授权写入准确 `allowed_tenant_ids`，不能自动开放全部客户。
 - 独立 `illustrations.sqlite` 存在 Preview 数据目录，仅增自身配图计划/请求/资产映射，不改共享数据库 Schema，不执行 Migration。
 - 一次确认对整个计划原子预留。预留不等于账单；HTTP/未知结果不会退款或自动重试。重启后中断的计划标记失败，不重放。
