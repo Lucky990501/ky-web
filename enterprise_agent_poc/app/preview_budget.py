@@ -60,7 +60,7 @@ PREVIEW_ERRORS = {
     "PREVIEW_MODEL_BUDGET_EXHAUSTED": "模型体验额度不足，请联系Owner追加授权；不会自动重试。",
     "PREVIEW_EMBEDDING_BUDGET_EXHAUSTED": "知识处理额度不足，原文件已保留；追加授权后可重新处理。",
     "PREVIEW_INPUT_REJECTED": "模型上下文未通过安全或费用校验，并非一定是文字过长；请保留诊断ID。",
-    "PREVIEW_CONTEXT_COST_LIMIT": "本轮会话上下文超过单请求费用上限，未调用模型；请新建会话或联系Owner。",
+    "PREVIEW_CONTEXT_COST_LIMIT": "当前完整方案预计超过单次费用上限，本次请求尚未调用模型；请联系Owner核对费用额度，不要反复重试。",
     "KNOWLEDGE_EMBEDDING_BATCH_TOO_LARGE": "资料向量请求超过大小限制，原文件已保留，请重新处理。",
     "KNOWLEDGE_EMBEDDING_VALIDATION_FAILED": "资料向量请求未通过校验，原文件已保留，请重新处理；仍失败时请联系Owner。",
     "KNOWLEDGE_PROCESSING_FAILED": "资料处理失败，原文件已保留，可重新处理，无需重复上传。",
@@ -110,18 +110,42 @@ def bounded_text_output(body,prices,agent_id,*,controlled=False):
         raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_INPUT_REJECTED'],'PREVIEW_INPUT_REJECTED')
     minimum=min(requested or (4096 if article else 2048),4096 if article else 2048)
     body['max_output_tokens']=min(requested or cap,cap)
+    desired_output=body['max_output_tokens']
     rate_in=Decimal(str(prices['text_input_cny_per_million']));rate_out=Decimal(str(prices['text_output_cny_per_million']))
     if not rate_in.is_finite() or not rate_out.is_finite() or rate_in<0 or rate_out<=0:raise PreviewBudgetExceeded('费率尚未核实。')
+    def cost_refusal():
+        # Measure the unchanged complete request, not the rejected/clamped
+        # output value. Log only numeric structure, never prompt/tool contents.
+        probe={**body,'max_output_tokens':desired_output}
+        bound=TestTextGate.request_bound(probe)['input_tokens_upper']
+        size=lambda value:len(json.dumps(value,ensure_ascii=True,allow_nan=False).encode('ascii'))
+        exc=PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'],'PREVIEW_CONTEXT_COST_LIMIT')
+        exc.cost_diagnostics={
+            'encoded_bytes':size(probe),
+            'utf8_bytes':len(json.dumps(probe,ensure_ascii=False,allow_nan=False).encode('utf-8')),
+            'instructions_encoded_bytes':size(probe.get('instructions','')),
+            'tools_encoded_bytes':size(probe.get('tools',[])),
+            'input_encoded_bytes':size(probe.get('input',[])),
+            'input_tokens_upper':bound,'minimum_output_tokens':minimum,
+            'desired_output_tokens':desired_output,
+            'input_reserved_cny':str(Decimal(bound)*rate_in/1_000_000),
+            'minimum_output_reserved_cny':str(Decimal(minimum)*rate_out/1_000_000),
+            'complete_output_reserved_cny':str(Decimal(desired_output)*rate_out/1_000_000),
+            'minimum_total_cny':str((Decimal(bound)*rate_in+Decimal(minimum)*rate_out)/1_000_000),
+            'complete_total_cny':str((Decimal(bound)*rate_in+Decimal(desired_output)*rate_out)/1_000_000),
+            'request_ceiling_cny':'0.60',
+        }
+        return exc
     for _ in range(2):
         bounds=TestTextGate.request_bound(body)
         available=Decimal('.60')*1_000_000-Decimal(bounds['input_tokens_upper'])*rate_in
         body['max_output_tokens']=min(body['max_output_tokens'],max(0,int(available/rate_out)))
         if body['max_output_tokens']<minimum:
-            raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'],'PREVIEW_CONTEXT_COST_LIMIT')
+            raise cost_refusal()
     bounds=TestTextGate.request_bound(body)
     cost=(Decimal(bounds['input_tokens_upper'])*rate_in+Decimal(body['max_output_tokens'])*rate_out)/1_000_000
     if body['max_output_tokens']<minimum or cost>Decimal('.60'):
-        raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_CONTEXT_COST_LIMIT'],'PREVIEW_CONTEXT_COST_LIMIT')
+        raise cost_refusal()
     return body,cost
 
 

@@ -331,6 +331,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             budget.observe({'event':'text_denied','reason':getattr(exc,'branch_id',type(exc).__name__),
                             'task_id':running_task['id'] if running_task else None,
                             'code':getattr(exc,'code','PREVIEW_INPUT_REJECTED'),
+                            'cost':getattr(exc,'cost_diagnostics',None),
                             'structure':getattr(exc,'safe_structure',None)})
             code=getattr(exc,'code','PREVIEW_INPUT_REJECTED')
             return await JSONResponse({"error": {"code":code,"message":PREVIEW_ERRORS.get(code,PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE'])}}, 429)(scope, receive, send)
