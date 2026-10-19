@@ -75,15 +75,27 @@ def resolve_size(user_text: str, prompt: str, aspect_ratio: str, size: str | Non
     source = normalized(user_text or prompt)
     # Source-image geometry describes input, not the desired output canvas.
     source = re.sub(r"(?:参考图|原图|源图|上传图片)(?:本身)?(?:的)?(?:尺寸|比例|分辨率)?(?:为|是|[:：])\s*(?:\d{3,4}\s*[xX]\s*\d{3,4}|\d{1,2}:\d{1,2}|[24][kK])", "参考图", source)
+    source = re.sub(r'(?:参考图|原图|源图|上传图片)(?:本身)?(?:的)?(?:宽(?:度)?|高(?:度)?)\s*(?:为|是|[:=])?\s*\d{3,4}\s*(?:px|像素)?(?:[，,\s]*(?:宽(?:度)?|高(?:度)?)\s*(?:为|是|[:=])?\s*\d{3,4}\s*(?:px|像素)?)?', '参考图', source, flags=re.I)
     resolution_text = re.sub(r'[“「『][^”」』\n]*[”」』]|"[^"\n]*"', '', source)
     resolution_text = re.sub(r"[24]k\s*(?:显示器|屏幕|电视|摄像头|投影仪|设备|型号)", "设备", resolution_text, flags=re.I)
     if re.search(r"(?:生成|制作|输出|分辨率|尺寸|要|改成|改为|调整为).{0,12}(?:2k|4k)|(?:2k|4k).{0,8}(?:图片|海报|分辨率|画质|尺寸)|^\s*[24]k\s*$", resolution_text, re.I) and not re.search(r"(?:不要|无需|不需要)\s*[24]k", resolution_text, re.I):
         raise ImageRequestError("image_size_not_verified", "当前模型的显式2K/4K能力尚未核验，不能保证；请确认改用明确像素候选后再生成。")
     explicit = re.search(r"(?<!\d)(\d{3,4})\s*[xX]\s*(\d{3,4})(?!\d)", source)
+    widths = re.findall(r'宽(?:度)?\s*(?:为|是|[:=])?\s*(\d{3,4})\s*(px|像素|厘米|毫米|cm|mm)?', source, re.I)
+    heights = re.findall(r'(?<!身)(?<!字)高(?:度)?\s*(?:为|是|[:=])?\s*(\d{3,4})\s*(px|像素|厘米|毫米|cm|mm)?', source, re.I)
+    labelled = None
+    if widths or heights:
+        if not widths or not heights or any(unit.lower() not in {'','px','像素'} for _,unit in widths+heights):
+            raise ImageRequestError('image_size_invalid','请同时提供宽和高的明确像素，不会猜测纸张尺寸或默认为方图。')
+        if len({value for value,_ in widths}) != 1 or len({value for value,_ in heights}) != 1:
+            raise ImageRequestError('image_size_conflict','本轮给出了不同宽高，请确认最终像素。')
+        labelled = (widths[-1][0], heights[-1][0])
+        if explicit and tuple(explicit.groups()) != labelled:
+            raise ImageRequestError('image_size_conflict','宽高说明与像素表达式冲突，请确认最终尺寸。')
     ratio_match = re.search(r"(?<!\d)(1:1|9:16|16:9|4:5|3:2|2:3)(?!\d)", source)
     desired_ratio = ratio_match.group(1) if ratio_match else None
-    if explicit:
-        requested, actual_ratio = pixel_size("x".join(explicit.groups()))
+    if explicit or labelled:
+        requested, actual_ratio = pixel_size("x".join(labelled or explicit.groups()))
         if size and pixel_size(size)[0] != requested:
             raise ImageRequestError("image_size_conflict", "Tool尺寸与用户明确指定的像素不一致，未发送生成请求。")
         if desired_ratio and actual_ratio != desired_ratio:

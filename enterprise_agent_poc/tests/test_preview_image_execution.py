@@ -187,6 +187,15 @@ def test_saved_generation_edit_creates_new_version_keeps_original(image_fixture)
     assert len(history['generations'])==2
 
 
+def test_followup_edit_cannot_silently_become_text_generation(image_fixture):
+    executor,actors,calls=image_fixture;actor=actors[0]
+    first=executor.submit(actor,payload());asyncio.run(executor.execute(first))
+    done=executor.main.product_store.task(first['id'],actor.tenant_id,actor.user_id)
+    with pytest.raises(ValueError,match='基于此图继续修改'):
+        executor.submit(actor,payload(message='人物不要变，背景换成蓝色',conversation_id=done['conversation_id']))
+    assert len(calls)==1 and executor.budget.summary()['image']['requests']==1
+
+
 @pytest.mark.parametrize('count',[2,3,5])
 def test_multi_output_all_results_and_full_budget_preflight(image_fixture,count):
     executor,actors,calls=image_fixture;original=executor.call_image
@@ -214,3 +223,11 @@ def test_per_side_single_image_is_not_a_conflicting_total():
     from app.image_request_contract import requested_count
     assert requested_count('生成2张图片，正面和背面，每面单独一张，不要拼图')==2
     with pytest.raises(ValueError):requested_count('生成2张图片，另外生成3张图片')
+
+
+def test_natural_width_height_are_not_silently_replaced():
+    from app.image_request_contract import resolve_size
+    assert resolve_size('海报宽1024像素，高1408像素','','1:1',None)==('1024x1408','8:11')
+    assert resolve_size('参考图宽1120高1680，输出9:16长图','','1:1',None)==('864x1536','9:16')
+    for prompt in ['海报宽1024像素','宽1024高1408，尺寸1024x1024','海报宽297mm高210mm']:
+        with pytest.raises(ValueError):resolve_size(prompt,'','1:1',None)

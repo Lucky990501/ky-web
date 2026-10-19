@@ -11,6 +11,7 @@ from datetime import timedelta
 from decimal import Decimal
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from uuid import UUID, uuid4
@@ -110,6 +111,14 @@ class PreviewImageExecution:
                 raise ValueError('参考图不存在、已发送或无权访问。')
         parent_id = payload.get('edit_generation_id')
         parent = None
+        if not parent_id and not attachments and payload.get('conversation_id') and re.search(
+                r'(?:标题|背景|人物|排版|比例).{0,12}(?:改|换|保持|不变)|(?:刚才|上一张|这张).{0,12}(?:改|换|修改|调整)|重新生成|再生成', prompt):
+            with self.main.store.connection() as conn:
+                saved = conn.execute('SELECT id FROM generations WHERE conversation_id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL LIMIT 1',
+                    (payload['conversation_id'], principal.tenant_id, principal.user_id)).fetchone()
+            if saved:
+                from app.image_request_contract import ImageRequestError
+                raise ImageRequestError('preview_edit_base_required','请先点击需要修改图片的“基于此图继续修改”，或上传参考图。没有把编辑请求偷偷改为文字生图，也没有调用图片服务。')
         if parent_id:
             if attachments:
                 raise ValueError('请选择已有图片或上传参考图，不要同时提交。')

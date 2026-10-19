@@ -8,7 +8,7 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
  if(real){assert.equal(process.env.PREVIEW_CAPABILITY_APPROVAL,'owner-v2-four-image-requests');assert.ok(!fs.existsSync(path.join(out,'submission-guard.json')),'Never repeat the paid acceptance run');}
  const browser=await chromium.launch({executablePath:process.env.WECHAT_UI_BROWSER,headless:true});
  const context=await browser.newContext({viewport:{width:1440,height:960},acceptDownloads:true});
- const page=await context.newPage(),report={mode:real?'REAL_PROVIDER':'FIXTURE_ONLY',tasks:[],errors:[]};
+ const page=await context.newPage(),report={mode:real?'REAL_PROVIDER':'FIXTURE_ONLY',tasks:[],errors:[]};let consumed=0;
  page.setDefaultTimeout(20000);page.on('pageerror',e=>report.errors.push(e.message));
  page.on('dialog',dialog=>dialog.accept());
  let posts=0;page.on('request',r=>{if(r.method()==='POST'&&new URL(r.url()).pathname.endsWith('/agents/image-agent/runs'))posts++;});
@@ -37,6 +37,9 @@ const {chromium}=require('playwright'),fs=require('node:fs'),path=require('node:
      await link.click();const item=await download;await item.saveAs(path.join(out,item.suggestedFilename()));
      image.browser_download_filename=item.suggestedFilename();image.browser_large_preview=true;
    }
+   consumed+=result.generations.length;
+   await page.waitForFunction(remaining=>document.querySelector('#preview-image-direct-notice')?.textContent.includes('剩余'+remaining+'次'),report.before.image_business.remaining_requests-consumed);
+   entry.live_remaining_without_refresh=true;
    return result;
  }
  try{

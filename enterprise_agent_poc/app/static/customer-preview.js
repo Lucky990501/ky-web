@@ -38,10 +38,16 @@
     }
     const pending=fetchOriginal(target,options);
     if(options?.method==='POST'&&String(target).includes('/agents/image-agent/runs'))pending.then(response=>{if(response.ok)editGeneration=null;}).catch(()=>{});
+    if((!options?.method||options.method==='GET')&&/\/api\/v1\/tasks\/[^/?]+(?:\?.*)?$/.test(String(target))){
+      pending.then(response=>response.ok?response.clone().json():null).then(task=>{if(task?.agent_id==='image-agent'&&['completed','failed','cancelled'].includes(task.status))refreshPreviewImageCapability();}).catch(()=>{});
+    }
     return pending;
   };
   const Source = window.EventSource;
-  window.EventSource = class extends Source { constructor(value, options) { super(url(value), options); } };
+  window.EventSource = class extends Source { constructor(value, options) { super(url(value), options);for(const name of ['complete','cancelled','failed'])this.addEventListener(name,refreshPreviewImageCapability);this.addEventListener('error',event=>{if(event.data)refreshPreviewImageCapability();}); } };
+  function refreshPreviewImageCapability(){
+    fetchOriginal('/preview/api/health',{cache:'no-store'}).then(r=>r.json()).then(value=>{imageCapability=value.image_business;markImageUnavailable();}).catch(()=>{});
+  }
   for (const name of ['pushState', 'replaceState']) {
     const original = history[name].bind(history);
     history[name] = (state, title, value) => original(state, title, value == null ? value : url(value));
