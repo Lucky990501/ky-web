@@ -55,11 +55,14 @@ const {chromium}=require('playwright'),fs=require('node:fs'),assert=require('nod
  cases.cycle={agent:'copywriting-agent',route:'copywriting',message:'使用本企业知识库中已上传的天文观察课资料，先真实调用企业配置、知识检索和素材工具。输出一段60字的周三课程报名文案，品牌名称取企业配置，课程时间取检索结果。不要输出工具调用源码。'};
  cases.imageApproved={...cases.image,message:'Owner已获知上次image_generation被托管审批429拒绝、图片Provider调用0次，现明确批准通过同一正式工具再验收一次，保持全部原审批、租户隔离及预算。请为星河体验教育生成仅1张1024x1024亲子天文观察海报，中文标题“亲子天文观察”，副标题“周三19点”，星空亲子剪影，不加Logo不写价格。只调用1次image_generation；若审批再次拒绝立即停止，不走其他接口。'};
  cases.copySecond={...cases.copy,conversation:JSON.parse(fs.readFileSync(dir+'/cycle.json')).final.conversation_id,message:'把上一版文案改为温和、自然、不催促的家长邀请，去掉未经资料确认的“名额有限”，保留品牌、周三19点和星图手工。请使用最新知识和企业设置，60字左右。'};
+ cases.closureCopy={...cases.copySecond,message:'请在同一会话中完成上一版的修改：温和自然，不催促，不使用“名额有限”，保留周三19点和星图手工，60字左右。读取最新企业配置，并仅一次语义检索天文观察课资料。末尾署名最新品牌名，再用一句简短来源说明标明实际参考文件名。信息足够后直接完成，不重复检索。'};
  cases.resumeDiagnostic={...cases.copySecond,message:'继续修改为温和邀请，保留周三19点，并读取本企业最新设置。'};
  cases.campaignQuestion={...cases.campaign,message:'我想为企业策划亲子天文招生活动，先帮我明确还需要提供哪些关键活动信息，不要编造时间地点。'};
  if(fs.existsSync(dir+'/campaignQuestion.json'))cases.campaign={...cases.campaign,conversation:JSON.parse(fs.readFileSync(dir+'/campaignQuestion.json')).final.conversation_id};
  cases.campaignVerified={...cases.campaign,message:'补充关键信息：活动为天文观察课招生活动，2026年10月25日19:00到20:30，测试体验教室，6到9岁亲子20组，预算800元。流程含星图手工、基础观察、课程咨询。先读取最新企业配置，并一次检索天文观察课。请输出简洁但完整的正式活动方案，表格和邀约文案完整，不生图。'};
  cases.campaignFinal={...cases.campaignVerified};
+ cases.closureCampaign={...cases.campaignVerified};
+ cases.closurePlanExport={...cases.campaignVerified,message:'请生成完整活动方案。活动内容：亲子天文观察课招生活动，包含星图手工、基础观察体验和课程咨询。活动时间：2026年10月25日19:00到20:30。活动地点：测试体验教室。活动对象：6至9岁儿童及家长，共20组。预算：800元。主办：使用企业配置中的当前正式品牌名称。请读取最新企业配置，并仅一次检索天文观察课资料，不编造课程价格或师资。生成简洁但完整可执行的正式方案，必须含完整流程表和邀请文案，不生成图片。'};
  const resumed=kind.startsWith('resume:'),name=resumed?kind.slice(7):kind,c=cases[name];if(!c)throw Error('Unknown case');const out=dir+'/'+name+'.json';if(fs.existsSync(out)&&!resumed)throw Error('Existing real case evidence; will not submit a duplicate Task');
  await page.goto(base+'/agents/'+c.route);await page.locator('#prompt').waitFor();
  if(c.conversation){await page.evaluate(({agent,id})=>selectAgentConversation(agent,id),{agent:c.agent,id:c.conversation});await page.locator('#prompt').waitFor();}

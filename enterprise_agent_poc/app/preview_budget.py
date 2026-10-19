@@ -44,7 +44,7 @@ class PreviewBudgetExceeded(PermissionError):
 
 
 class PreviewBudget:
-    LIMITS = {"text": (24, Decimal("10")), "image": (2, Decimal("20")), "embedding": (8, Decimal("5"))}
+    LIMITS = {"text": (40, Decimal("20")), "image": (2, Decimal("20")), "embedding": (12, Decimal("5"))}
 
     def __init__(self, root: Path):
         self.path = root / "preview-budget.sqlite"
@@ -66,7 +66,7 @@ class PreviewBudget:
             count, limit = self.LIMITS[kind]
             if (sum(k == kind for k, _ in rows) >= count
                 or sum((Decimal(v) for k, v in rows if k == kind), Decimal(0)) + ceiling > limit
-                or sum((Decimal(v) for _, v in rows), Decimal(0)) + ceiling > Decimal("35")):
+                or sum((Decimal(v) for _, v in rows), Decimal(0)) + ceiling > Decimal("45")):
                 raise PreviewBudgetExceeded("本次体验调用额度已用完，请联系Owner；不会自动重试。")
             # Reserve the verified worst-case amount before network dispatch.
             # Unknown outcomes remain reserved; restart never resets this file.
