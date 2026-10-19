@@ -127,7 +127,8 @@ def add_preview_agent():
     )
 
 
-def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, pricing=None, local_http=False, image_authorization=None):
+def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, pricing=None, local_http=False, image_authorization=None,
+                   illustration_config=None, illustration_authorization=None):
     keys, prices = load_provider_values(credentials), pricing or {}
     root = prepare(root, api_port, mcp_port, keys, prices)
     metered_clients(root, prices)
@@ -148,6 +149,18 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     if image_authorization is None and authorization_path.is_file():
         image_authorization = json.loads(authorization_path.read_text(encoding='utf-8'))
     image_executor = PreviewImageExecution(main, budget, prices, image_authorization)
+    from app.preview_illustration_service import PreviewIllustrationService
+    from app.preview_illustration_provider import IllustrationConfig
+    if illustration_config is not None:
+        illustration_service=PreviewIllustrationService(main,root,illustration_config,illustration_authorization)
+    else:
+        try:
+            illustration_service=PreviewIllustrationService.configured(main,root,
+                os.environ.get('PREVIEW_ILLUSTRATION_ENV',str(Path(root).parent/'.env.illustration')),
+                Path(root).parent/'illustration-budget-authorization.json')
+        except (ValueError,OSError):
+            # A bad optional ENV must never take down the six existing tools.
+            illustration_service=PreviewIllustrationService(main,root,IllustrationConfig())
     from app.preview_article_references import PreviewArticleReferences, AGENT as ARTICLE_AGENT
     from contextvars import ContextVar
     article_references = PreviewArticleReferences(main, budget)
@@ -339,7 +352,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
             if path.startswith(denied):
                 return await JSONResponse({"user_message": "体验版不开放平台管理或账号接口"}, 403)(scope, receive, send)
-            if path.startswith("/api/") and not path.startswith(("/api/v1/me", "/api/v1/workspace", "/api/v1/agents", "/api/v1/tasks", "/api/v1/conversations", "/api/v1/generations", "/api/v1/enterprise-config", "/api/v1/knowledge", "/api/v1/assets", "/api/v1/storage", "/api/v1/chat-images", "/api/v1/documents", "/api/v1/preview/article-references")):
+            if path.startswith("/api/") and not path.startswith(("/api/v1/me", "/api/v1/workspace", "/api/v1/agents", "/api/v1/tasks", "/api/v1/conversations", "/api/v1/generations", "/api/v1/enterprise-config", "/api/v1/knowledge", "/api/v1/assets", "/api/v1/storage", "/api/v1/chat-images", "/api/v1/documents", "/api/v1/preview/article-references", "/api/v1/preview/illustrations")):
                 return await JSONResponse({"user_message": "体验版未开放此接口"}, 403)(scope, receive, send)
             if path.startswith("/api/v1/agents/") and path.endswith("/runs") and scope["method"] == "POST" and path != '/api/v1/agents/image-agent/runs':
                 if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
@@ -368,6 +381,10 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
+            if path.startswith('/api/v1/preview/illustrations'):
+                from app.preview_illustration_routes import illustration_request
+                actor=main.current_user(token)
+                return await illustration_request(illustration_service,actor,scope,receive,with_cookie)
             if path.startswith('/api/v1/chat-images/') and scope['method']=='DELETE':
                 actor=main.current_user(token)
                 if image_executor.references.claimed(actor,path.rsplit('/',1)[1]):
@@ -459,6 +476,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 preview_script = hashlib.sha256((main.STATIC_DIR / "customer-preview.js").read_bytes()).hexdigest()[:16]
                 preview_style = hashlib.sha256((main.STATIC_DIR / "customer-preview.css").read_bytes()).hexdigest()[:16]
                 html = html.replace("<head>", f'<head><script src="/preview/static/customer-preview.js?v={preview_script}"></script><link rel="stylesheet" href="/preview/static/customer-preview.css?v={preview_style}">')
+                illustration_script=hashlib.sha256((main.STATIC_DIR/'preview-illustrations.js').read_bytes()).hexdigest()[:16]
+                html=html.replace('</body>',f'<script src="/preview/static/preview-illustrations.js?v={illustration_script}"></script></body>')
                 return await HTMLResponse(html)(scope, receive, with_cookie)
             if path.startswith('/api/v1/agents/') and path.endswith('/runs') and scope['method']=='POST':
                 async with submission_lock:

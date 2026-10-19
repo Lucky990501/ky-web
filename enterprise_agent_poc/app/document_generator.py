@@ -289,6 +289,7 @@ class ActivityPlanDocxRenderer:
         presentation: DocumentPresentationOptions,
         *,
         logo_bytes: bytes | None = None,
+        illustration_bytes: dict[int, bytes] | None = None,
     ) -> bytes:
         document = Document()
         self._configure_document(document, content, presentation)
@@ -299,7 +300,7 @@ class ActivityPlanDocxRenderer:
         self._add_text_section(document, "活动地点", content.activity_location)
         self._add_text_section(document, "活动对象", content.target_audience)
         self._add_list_section(document, "活动宣发途径", content.promotion_channels)
-        self._add_execution_table(document, content.activity_items, presentation)
+        self._add_execution_table(document, content.activity_items, presentation, illustration_bytes or {})
         self._add_text_section(document, "邀约文案", content.invitation_copy)
         if content.pending_items:
             self._add_list_section(document, "待确认事项", content.pending_items, pending=True)
@@ -444,7 +445,8 @@ class ActivityPlanDocxRenderer:
                 paragraph.paragraph_format.keep_with_next = index < len(values) - 1
 
     def _add_execution_table(
-        self, document: Document, items: list[ActivityPlanItem], presentation: DocumentPresentationOptions
+        self, document: Document, items: list[ActivityPlanItem], presentation: DocumentPresentationOptions,
+        illustration_bytes: dict[int, bytes] | None = None,
     ) -> None:
         self._heading(document, "活动执行表")
         table = document.add_table(rows=1, cols=4)
@@ -486,6 +488,15 @@ class ActivityPlanDocxRenderer:
                 paragraph.paragraph_format.space_after = Pt(2)
                 paragraph.paragraph_format.line_spacing = 1.15
                 _add_text(paragraph, value, size=9.5)
+                if index == 3 and illustration_bytes and row_index in illustration_bytes:
+                    image = Image.from_blob(illustration_bytes[row_index])
+                    # Inline, bounded in BOTH directions; never crop or stretch.
+                    scale = min(Mm(34) / image.width, Mm(45) / image.height)
+                    picture = cell.add_paragraph()
+                    picture.paragraph_format.space_after = Pt(3)
+                    picture.add_run().add_picture(io.BytesIO(illustration_bytes[row_index]),
+                        width=Emu(round(image.width * scale)), height=Emu(round(image.height * scale)))
+                    _add_text(cell.add_paragraph(), "AI生成的执行示意图，非真实活动照片", size=8)
 
 
 def sanitize_filename_component(value: str, *, max_length: int = 60) -> str:
@@ -617,7 +628,12 @@ class ActivityPlanDocumentService:
                     logo_bytes = self._storage.get(logo_key)
                     if not logo_bytes or len(logo_bytes) > MAX_LOGO_BYTES:
                         raise DocumentGenerationError("Logo 文件为空或超过 2MB。")
-                value = self._renderer.render(content, presentation, logo_bytes=logo_bytes)
+                illustrations = self._illustrations(tenant_id, content, presentation)
+                if illustrations:
+                    value = self._renderer.render(content, presentation, logo_bytes=logo_bytes,
+                                                  illustration_bytes=illustrations)
+                else:
+                    value = self._renderer.render(content, presentation, logo_bytes=logo_bytes)
         except DocumentGenerationError:
             raise
         except (StorageObjectNotFound, StorageUnavailable):

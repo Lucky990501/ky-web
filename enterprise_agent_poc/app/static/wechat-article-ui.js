@@ -13,7 +13,8 @@
       const url = new URL(value, location.origin);
       if (url.origin !== location.origin || url.search || url.hash || url.username || url.password) return '';
       if (window.WORKBENCH_PREVIEW_BASE) url.pathname = url.pathname.replace(/^\/preview(?=\/)/, '');
-      if (!/^\/api\/v1\/(?:storage\/(?:generated|assets)\/[A-Za-z0-9_./-]+|chat-images\/[A-Za-z0-9_-]+)$/.test(url.pathname) || value.includes('..') || value.includes('%') || value.includes('\\')) return '';
+      const illustration = window.WORKBENCH_PREVIEW_BASE && /^\/api\/v1\/preview\/illustrations\/assets\/[0-9a-f]{32}$/.test(url.pathname);
+      if ((!illustration && !/^\/api\/v1\/(?:storage\/(?:generated|assets)\/[A-Za-z0-9_./-]+|chat-images\/[A-Za-z0-9_-]+)$/.test(url.pathname)) || value.includes('..') || value.includes('%') || value.includes('\\')) return '';
       return window.workbenchPreviewUrl ? window.workbenchPreviewUrl(url.href) : url.href;
     } catch { return ''; }
   }
