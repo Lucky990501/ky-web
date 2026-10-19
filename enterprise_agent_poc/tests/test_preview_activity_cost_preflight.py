@@ -55,7 +55,7 @@ def test_accumulated_tool_results_accept_ordinary_but_not_controlled():
     assert '输入文字过长' not in str(exc) and '反复重试' in str(exc)
 
 
-@pytest.mark.parametrize('agent,cap',[('copywriting-agent',4096),('preview-wechat-agent',8192)])
+@pytest.mark.parametrize('agent,cap',[('copywriting-agent',8192),('preview-wechat-agent',8192)])
 def test_other_agents_and_prices_unchanged(agent,cap):
     original=request();before=copy.deepcopy(original)
     accepted,cost=bounded_text_output(original,PRICES,agent)

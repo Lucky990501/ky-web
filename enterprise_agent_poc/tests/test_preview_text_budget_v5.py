@@ -35,7 +35,7 @@ def known_context():
 def test_three_agents_accept_known_context_and_persistent_reserve(tmp_path,agent):
     original=known_context();before=copy.deepcopy(original)
     accepted,cost=bounded_text_output(original,PRICES,agent)
-    expected_output=4096 if agent=='copywriting-agent' else 8192
+    expected_output=8192
     assert accepted['max_output_tokens']==expected_output
     assert cost==Decimal(66998*9+expected_output*27)/1_000_000
     assert Decimal('.60')<cost<=Decimal('5')

@@ -126,7 +126,7 @@ def test_bounded_compact_wechat_output_and_safe_incomplete_evidence(setup):
     assert 4096<=article['max_output_tokens']<=8192 and cost<=Decimal('.60')
     assert 'Original Skill 1.0.1' in article['instructions'] and 'Markdown' in article['instructions']
     normal,_=bounded_text_output(body,PRICES,'copywriting-agent')
-    assert normal['max_output_tokens']==4096 and normal['instructions']==body['instructions']
+    assert normal['max_output_tokens']==8192 and normal['instructions']==body['instructions']
     short,_=bounded_text_output({**body,'max_output_tokens':1024},PRICES,'copywriting-agent')
     assert short['max_output_tokens']==1024
     with pytest.raises(PreviewBudgetExceeded):bounded_text_output({**body,'instructions':'x'*40000},{**PRICES,'text_input_cny_per_million':'50'},'preview-wechat-agent',controlled=True)

@@ -143,7 +143,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     os.environ.pop('EMBEDDING_API_KEY', None)
     from app.auth import UserPrincipal
     from app.agent_catalog import CATALOG
-    from app.preview_budget import PreviewBudget, PreviewBudgetExceeded, plaintext_history, PREVIEW_ERRORS, preview_task_failure
+    from app.preview_budget import (PreviewBudget, PreviewBudgetExceeded, plaintext_history, PREVIEW_ERRORS,
+        preview_task_failure,PreviewInputRejected,preview_text_wire,preview_input_message)
     from app.test_text_gate import TestTextGate
     from starlette.requests import Request
     from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -229,8 +230,12 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             with main.store.connection() as conn:
                 row = conn.execute('SELECT payload FROM run_traces WHERE run_id=?', (task.get('run_id'),)).fetchone()
             trace = json.loads(row['payload']) if row else {}
-            code = preview_task_failure(task, trace, budget.task_denial(task))
+            denial=budget.task_denial(task)
+            code = preview_task_failure(task, trace, denial)
             result.update(error_code=code, user_message=PREVIEW_ERRORS.get(code, PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE']))
+            if code=='PREVIEW_INPUT_REJECTED' and denial:
+                result.update(validation_branch=denial.get('branch_id') or denial.get('reason'),
+                    user_message=preview_input_message(denial.get('branch_id') or denial.get('reason')))
         return result
     def public_file(item):
         result = original_public_file(item)
@@ -284,7 +289,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             if not bearer.startswith('Bearer '):raise PermissionError('Task credential required')
             running_task=text_gate.resolve(task_id,bearer[7:])
             if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
-                raise PermissionError("Preview文本供应商配置或费率尚未核实。")
+                raise PreviewInputRejected('preview_provider_config_unverified')
             body, dropped = plaintext_history(await request.json())
             body, namespaces = TestTextGate.provider_tools(body)
             # An anonymous Preview receives only the existing tenant-scoped
@@ -295,7 +300,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                              and (tool.get('name') != 'mcp__platform__image_generation'
                                   or running_task and running_task['agent_id']=='image-agent')]
             if not body['tools']:
-                raise PermissionError('未取得合法业务工具定义；未调用模型。')
+                raise PreviewInputRejected('preview_business_tools_missing',body)
             from app.preview_copywriting_prompt import provider_request
             body,copywriting_prompt_sha=provider_request(body,running_task)
             from app.preview_wechat_article import provider_request as wechat_request
@@ -311,30 +316,37 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 # tools. Ordinary visitors keep their existing tool contract.
                 body['tools']=[tool for tool in body['tools'] if tool.get('name') not in {
                     'mcp__platform__knowledge_search','mcp__platform__asset_search','mcp__platform__image_generation'}]
-            wire = json.dumps(body, ensure_ascii=False).encode()
-            if len(wire) > 65536:
-                raise PermissionError("本轮模型上下文超过体验费用边界，请缩短会话。")
+            preview_text_wire(body)
             if body.get("model") != main.settings.model_id:
-                raise PermissionError("模型身份不匹配。")
+                raise PreviewInputRejected('preview_model_mismatch',body)
             from app.preview_budget import bounded_text_output
             body,cost=bounded_text_output(body,prices,running_task['agent_id'],controlled=bool(scoped_control))
             if prices.get('text_dispatch_paused'):
-                raise PermissionError('Preview付费请求已暂停；未调用供应商。')
+                raise PreviewInputRejected('preview_dispatch_paused',body)
+            wire_size=len(preview_text_wire(body))
+            input_bound=TestTextGate.request_bound(body)['input_tokens_upper']
             text_guard.reserve(running_task,cost)
             budget.observe({"event": "text_dispatch", "task_id": running_task['id'],
                             'copywriting_prompt_sha256':copywriting_prompt_sha,
+                            'wire_utf8_bytes':wire_size,
+                            'input_tokens_upper':input_bound,
                             'max_output_tokens':body['max_output_tokens'],'reserved_ceiling_cny':str(cost),
                             "input_types": [item.get("type", "message") for item in body.get("input", []) if isinstance(item, dict)],
                             "tool_names": [tool['name'] for tool in body['tools']],
                             "opaque_reasoning_items_omitted": dropped})
         except (PermissionError, ValueError, KeyError) as exc:
+            branch=getattr(exc,'branch_id',None)
+            if branch is None and type(exc).__name__=='TestTextGateDenied' and re.fullmatch(r'test_text_gate_[a-z0-9_]{1,80}',str(exc)):branch=str(exc)
+            if not isinstance(branch,str) or not re.fullmatch(r'[a-z0-9_]{1,100}',branch):branch=None
             budget.observe({'event':'text_denied','reason':getattr(exc,'branch_id',type(exc).__name__),
                             'task_id':running_task['id'] if running_task else None,
                             'code':getattr(exc,'code','PREVIEW_INPUT_REJECTED'),
+                            'branch_id':branch,'validation_stage':getattr(exc,'validation_stage',None),
                             'cost':getattr(exc,'cost_diagnostics',None),
                             'structure':getattr(exc,'safe_structure',None)})
             code=getattr(exc,'code','PREVIEW_INPUT_REJECTED')
-            return await JSONResponse({"error": {"code":code,"message":PREVIEW_ERRORS.get(code,PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE'])}}, 429)(scope, receive, send)
+            message=preview_input_message(branch) if code=='PREVIEW_INPUT_REJECTED' else PREVIEW_ERRORS.get(code,PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE'])
+            return await JSONResponse({"error": {"code":code,"validation_branch":branch,"message":message}}, 429)(scope, receive, send)
         client = httpx.AsyncClient(timeout=180, trust_env=False, transport=httpx.AsyncHTTPTransport(retries=0))
         # Recheck revocation/permissions after reservation, immediately before IO.
         try:text_gate.resolve(task_id,bearer[7:])
@@ -401,12 +413,14 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             if image_submission_blocked(path, scope["method"], image_executor.authorized()):
                 return await JSONResponse({"error_code": "IMAGE_APPROVAL_EXTERNAL_BLOCKED", "user_message": IMAGE_BLOCK_MESSAGE}, 503)(scope, receive, send)
             if path in {"/api/health", "/api/v1/preview-status"}:
-                from app.preview_budget import TEXT_REQUEST_CEILING_CNY,CONTROLLED_TEXT_REQUEST_CEILING_CNY,ORDINARY_TEXT_AGENTS
+                from app.preview_budget import TEXT_REQUEST_CEILING_CNY,CONTROLLED_TEXT_REQUEST_CEILING_CNY,ORDINARY_TEXT_AGENTS,COPYWRITING_MAX_OUTPUT_TOKENS
+                from app.test_text_gate import MAX_REQUEST_BYTES
                 return await JSONResponse({"status": "preview", **identity, "budget": budget.summary(),
                     "text_budget_policy":{"ordinary_agent_ids":sorted(ORDINARY_TEXT_AGENTS),
                         "request_ceiling_cny":str(TEXT_REQUEST_CEILING_CNY),
                         "controlled_request_ceiling_cny":str(CONTROLLED_TEXT_REQUEST_CEILING_CNY),
-                        "global_total_limit_cny":str(budget.TOTAL_LIMIT_CNY)},
+                        "global_total_limit_cny":str(budget.TOTAL_LIMIT_CNY),
+                        "wire_limit_bytes":MAX_REQUEST_BYTES,"copywriting_max_output_tokens":COPYWRITING_MAX_OUTPUT_TOKENS},
                     "image_business": image_executor.capability(), "knowledge": main.settings.embedding_provider, "production_db_used": False})(scope, receive, send)
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
             if path.startswith(denied):

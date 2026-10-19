@@ -13,6 +13,7 @@ import httpx
 ORDINARY_TEXT_AGENTS=frozenset({'copywriting-agent','preview-wechat-agent','campaign-agent'})
 TEXT_REQUEST_CEILING_CNY=Decimal('5.00')
 CONTROLLED_TEXT_REQUEST_CEILING_CNY=Decimal('0.60')
+COPYWRITING_MAX_OUTPUT_TOKENS=8192
 
 
 def text_request_ceiling(agent_id=None,*,controlled=False):
@@ -20,6 +21,39 @@ def text_request_ceiling(agent_id=None,*,controlled=False):
     # Controlled, unknown and image-orchestration requests retain their boundary.
     return (TEXT_REQUEST_CEILING_CNY if not controlled and agent_id in ORDINARY_TEXT_AGENTS
             else CONTROLLED_TEXT_REQUEST_CEILING_CNY)
+
+
+class PreviewInputRejected(PermissionError):
+    code='PREVIEW_INPUT_REJECTED'
+    def __init__(self,branch,payload=None):
+        from app.test_text_gate import input_shape
+        super().__init__('Preview request rejected before Provider dispatch')
+        self.branch_id=branch
+        self.validation_stage='preview_text_preflight'
+        self.safe_structure=input_shape(payload)
+
+
+def preview_text_wire(body):
+    from app.test_text_gate import MAX_REQUEST_BYTES
+    wire=json.dumps(body,ensure_ascii=False,allow_nan=False).encode('utf-8')
+    if len(wire)>MAX_REQUEST_BYTES:
+        exc=PreviewInputRejected('preview_wire_too_large',body)
+        exc.safe_structure.update(encoded_bytes=len(wire),wire_limit_bytes=MAX_REQUEST_BYTES)
+        raise exc
+    return wire
+
+
+def preview_input_message(branch):
+    messages={
+        'preview_wire_too_large':'模型请求超过已验证的接口大小上限，本次请求未调用模型；请保留诊断ID联系Owner。',
+        'test_text_gate_request_too_large':'模型请求的安全编码大小超过接口上限，本次请求未调用模型；请保留诊断ID。',
+        'message_unknown_field':'模型消息包含尚未兼容的字段，本次请求未调用模型；请保留诊断ID。',
+        'preview_business_tools_missing':'当前请求缺少已授权的业务工具定义，本次请求未调用模型。',
+        'preview_model_mismatch':'当前请求的模型身份不匹配，本次请求未调用模型。',
+        'preview_provider_config_unverified':'文本供应商配置或费率未核验，本次请求未调用模型。',
+        'preview_dispatch_paused':'Preview模型请求当前已暂停，本次请求未调用模型。',
+    }
+    return messages.get(branch,PREVIEW_ERRORS['PREVIEW_INPUT_REJECTED'])
 
 
 def plaintext_history(body):
@@ -113,7 +147,8 @@ def bounded_text_output(body,prices,agent_id,*,controlled=False):
     from app.test_text_gate import TestTextGate
     body=dict(body)
     article=agent_id=='preview-wechat-agent'
-    cap=8192 if article or agent_id=='campaign-agent' else 4096
+    cap=(COPYWRITING_MAX_OUTPUT_TOKENS if agent_id=='copywriting-agent' and not controlled
+         else 8192 if article or agent_id=='campaign-agent' else 4096)
     if article and controlled:
         body['instructions']=(body.get('instructions') or '')+'\n本轮受控文章约600中文字，6至8个短段落、2个小标题和一处引用即可。遵循已绑定1.0.1 Skill输出简洁Markdown正文；平台会确定性生成安全内联HTML，不重复逐段CSS或输出第二份HTML，不附制作过程。不要检索知识或调用图片工具；信息充分后直接完成。'
     requested=body.get('max_output_tokens')
