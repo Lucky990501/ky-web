@@ -77,6 +77,26 @@ class PreviewIllustrationService:
         tenants=self.authorization.get('allowed_tenant_ids')
         return tenants is None or isinstance(tenants,list) and actor.tenant_id in tenants
 
+    def task_restriction(self,actor,task_id):
+        scoped=self.authorization.get('task_scoped_tenant_ids',[])
+        if not isinstance(scoped,list):raise IllustrationError('ILLUSTRATION_TASK_NOT_AUTHORIZED','配图任务授权格式无效；正文仍可使用。')
+        if actor.tenant_id not in scoped:return None
+        records=self.authorization.get('tenant_task_restrictions',[])
+        matches=[r for r in records if isinstance(r,dict) and r.get('tenant_id')==actor.tenant_id
+                 and r.get('user_id')==actor.user_id and r.get('task_id')==task_id] if isinstance(records,list) else []
+        if (len(matches)!=1 or type(matches[0].get('max_images')) is not int or matches[0]['max_images']!=3
+                or matches[0].get('max_reserved_cny')!='0.60'):
+            raise IllustrationError('ILLUSTRATION_TASK_NOT_AUTHORIZED','当前授权仅限Owner已确认的那篇文章；此任务未获配图授权，正文仍可使用。')
+        return matches[0]
+
+    def check_task_allowance(self,actor,task_id,count,fee,connection):
+        grant=self.task_restriction(actor,task_id)
+        if grant is None:return
+        prior=connection.execute('select r.ceiling from illustration_requests r join illustration_plans p on p.id=r.plan_id where p.tenant_id=? and p.user_id=? and p.task_id=?',
+                                 (actor.tenant_id,actor.user_id,task_id)).fetchall()
+        if len(prior)+count>grant['max_images'] or sum((Decimal(r[0]) for r in prior),Decimal(0))+fee*count>Decimal(grant['max_reserved_cny']):
+            raise IllustrationError('ILLUSTRATION_TASK_BUDGET_EXHAUSTED','这篇文章最多授权3张、最高¥0.60；已预留请求不重置，也不会自动重试。')
+
     def capability(self,actor=None):
         limits=self.limits()
         with self.db() as conn:
@@ -242,6 +262,11 @@ class PreviewIllustrationService:
             elif count>result['capability']['remaining_requests'] or Decimal(result['capability']['reserved_ceiling_cny'])+limits[0]*count>limits[1]:
                 result.update(can_generate=False,blocker_code='ILLUSTRATION_BUDGET_EXHAUSTED',user_message=f'完整计划需要{count}张，当前全局额度不足；未生成任何新配图。')
             else:result['can_generate']=bool(count)
+            if result.get('can_generate'):
+                try:
+                    with self.db() as conn:self.check_task_allowance(actor,row['task_id'],count,limits[0],conn)
+                except IllustrationError as error:
+                    result.update(can_generate=False,blocker_code=error.code,user_message=str(error))
         elif row['status']=='planned':result['can_generate']=False
         if row['document_json']:result['document']=json.loads(row['document_json'])
         if row['status']=='completed' and payload['kind']=='wechat':
@@ -273,6 +298,7 @@ class PreviewIllustrationService:
             conn.execute('begin immediate')
             if conn.execute('select status from illustration_plans where id=?',(identifier,)).fetchone()[0]!='planned':return self.get(actor,identifier)
             rows=conn.execute('select ceiling from illustration_requests').fetchall()
+            self.check_task_allowance(actor,row['task_id'],count,fee,conn)
             if count>per_task or len(rows)+count>maximum or sum((Decimal(r[0]) for r in rows),Decimal(0))+fee*count>total:
                 raise IllustrationError('ILLUSTRATION_BUDGET_EXHAUSTED',f'本方案需要{count}张配图，超出单任务或累计额度；未生成任何配图。')
             for index in range(count):
@@ -291,6 +317,7 @@ class PreviewIllustrationService:
         try:
             for index,item in enumerate(payload['items']):
                 self.row(actor,identifier);self.source(actor,row['task_id'])  # Recheck permissions AND source version.
+                self.task_restriction(actor,row['task_id'])
                 if payload.get('successor'):self.successor_authorization(actor,row,payload)
                 with self.db() as conn:
                     request=conn.execute('select * from illustration_requests where plan_id=? and item_index=?',(identifier,index)).fetchone()

@@ -587,6 +587,16 @@ class CodexRuntimeProvider(RuntimeProvider):
                    format_valid=candidate is not None, semantic_valid=valid,
                    correction_result=("PASS" if valid else "FAIL") if attempt == 2 else None,
                    issues=violations)
+            pending_annotation=False
+            if (not valid and candidate is not None and attempt==1
+                    and os.environ.get('CUSTOMER_PREVIEW_MODE')=='true'
+                    and profile.tenant_id.startswith('preview-')):
+                from app.preview_activity_pending import annotate_pending_benefit
+                repaired=annotate_pending_benefit(candidate,violations,grounding,profile.tenant_id)
+                if repaired is not None:
+                    candidate=repaired;violations=[];valid=True;pending_annotation=True
+                    record('LOCAL_PENDING_REVALIDATION',attempt,format_valid=True,semantic_valid=True,correction_result='PASS')
+                    attempt_trace[-1].update(correction_kind='explicit_pending_benefit_annotation',provider_calls_added=0)
             if valid:
                 yield RuntimeStreamEvent.activity("result_rendering", "started")
                 markdown = render_markdown(candidate)
@@ -599,7 +609,8 @@ class CodexRuntimeProvider(RuntimeProvider):
                 yield RuntimeStreamEvent.completed(replace(
                     last_turn, text=markdown, structured_result=result_envelope(candidate), structured_diagnostic=None,
                     structured_attempt_trace=tuple(attempt_trace),
-                    structured_result_status="validated_after_retry" if attempt == 2 else "validated_initial",
+                    structured_result_status=("validated_pending_annotation" if pending_annotation else
+                                              "validated_after_retry" if attempt == 2 else "validated_initial"),
                     structured_model_calls=model_calls,
                 ))
                 return
