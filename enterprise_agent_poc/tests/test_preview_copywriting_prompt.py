@@ -37,6 +37,7 @@ def test_not_loaded_into_production(monkeypatch):
  '不主动输出：镜头说明、背景音乐、拍摄建议、营销分析、写作方法、说明性前言',
  '直接输出完整成稿','不机械调用企业配置、知识库和素材搜索',
  '讲师身份并不证明讲师曾有同样困扰','不得补写“我以前也老这样”',
+ '不得用“这里不介绍课程”取消用户明确的课程介绍目标','只问至多两个阻碍成稿的核心问题',
 ])
 def test_owner_rules_loaded_verbatim_as_semantic_requirements(rule):
     assert rule in prompt()
