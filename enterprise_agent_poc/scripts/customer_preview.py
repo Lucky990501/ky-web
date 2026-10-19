@@ -278,6 +278,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status) VALUES(?,?,'enabled')", (tenant, agent))
         email = uuid4().hex + "@preview.invalid"
         main.product_store.create_user(tenant, email, main.hash_password(secrets.token_urlsafe(32)), "体验用户", "enterprise_admin")
+        from app.preview_credit_target import NEW_VISITOR_OPERATION, top_up_preview_credits
+        top_up_preview_credits(main.store, operation=NEW_VISITOR_OPERATION, tenant_id=tenant)
         user = main.product_store.user_by_email(email)
         return main.sessions.issue(UserPrincipal(user["id"], tenant, user["role"], main.sessions.credential_version(user["password_hash"])), lifetime_seconds=72*3600)
 
