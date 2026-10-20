@@ -254,6 +254,9 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             denial=budget.task_denial(task)
             code = preview_task_failure(task, trace, denial)
             result.update(error_code=code, user_message=PREVIEW_ERRORS.get(code, PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE']))
+            if code=='MODEL_OUTPUT_INCOMPLETE':
+                from app.preview_long_output import incomplete_message
+                result['user_message']=incomplete_message(task.get('agent_id'))
             if code=='PREVIEW_INPUT_REJECTED' and denial:
                 result.update(validation_branch=denial.get('branch_id') or denial.get('reason'),
                     user_message=preview_input_message(denial.get('branch_id') or denial.get('reason')))
@@ -324,7 +327,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                              and tool.get('name', '').startswith('mcp__platform__')
                              and (tool.get('name') != 'mcp__platform__image_generation'
                                   or running_task and running_task['agent_id']=='image-agent')]
-            if not body['tools']:
+            from app.preview_long_output import activity_schema_request
+            if not body['tools'] and not activity_schema_request(body,running_task['agent_id']):
                 raise PreviewInputRejected('preview_business_tools_missing',body)
             from app.preview_copywriting_prompt import provider_request
             body,copywriting_prompt_sha=provider_request(body,running_task)
@@ -351,6 +355,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             if body.get("model") != main.settings.model_id:
                 raise PreviewInputRejected('preview_model_mismatch',body)
             from app.preview_budget import bounded_text_output
+            from app.preview_long_output import apply_policy
+            _,output_policy=apply_policy(body,running_task['agent_id'],controlled=bool(scoped_control))
             body,cost=bounded_text_output(body,prices,running_task['agent_id'],controlled=bool(scoped_control))
             if prices.get('text_dispatch_paused'):
                 raise PreviewInputRejected('preview_dispatch_paused',body)
@@ -360,6 +366,9 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             budget.observe({"event": "text_dispatch", "task_id": running_task['id'],
                             'copywriting_prompt_sha256':copywriting_prompt_sha,
                             'context_compaction':context_compaction,
+                            'output_policy':output_policy,
+                            'model':body['model'],
+                            'reasoning_effort':(body.get('reasoning') or {}).get('effort') if (body.get('reasoning') or {}).get('effort') in {'none','low','high','max'} else 'DEFAULT_OR_UNKNOWN',
                             'wire_utf8_bytes':wire_size,
                             'input_tokens_upper':input_bound,
                             'max_output_tokens':body['max_output_tokens'],'reserved_ceiling_cny':str(cost),

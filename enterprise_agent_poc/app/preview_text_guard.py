@@ -108,6 +108,17 @@ class PreviewTaskTextGate:
     requires_mcp_observations=False
     forbid_server_tools=True
     preview_flash_allowed=True
+    def validate_completion(self, task_id):
+        """Never persist an SDK final message over a failed/incomplete HTTP turn."""
+        self.guard.check(self.task(task_id))
+        with sqlite3.connect(self.guard.budget.path) as c:
+            events=[json.loads(r[0]) for r in c.execute('select payload from observations order by rowid')]
+        events=[e for e in events if e.get('task_id')==task_id and e.get('event') in {'text_http_attempt','text_http_terminal','text_http_unknown','text_provider_rejection'}]
+        last=events[-1] if events else {}
+        if last.get('type')=='response.incomplete' or last.get('incomplete_message_count',0):
+            raise RuntimeError('Incomplete response returned, reason: max_output_tokens' if last.get('incomplete_reason')=='max_output_tokens' else 'Incomplete response returned, reason: content_filter')
+        if last.get('type')!='response.completed' or last.get('status')!='completed':
+            raise RuntimeError('Preview Provider final response not completed')
     def __init__(self,store,guard,base_url):
         self.store,self.guard,self.base_url=store,guard,base_url
         self.credentials={}

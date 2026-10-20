@@ -137,7 +137,7 @@ def preview_task_failure(task, trace, denied):
         return denied.get("code") or ("PREVIEW_MODEL_BUDGET_EXHAUSTED" if denied.get("reason") == "PreviewBudgetExceeded" else "PREVIEW_INPUT_REJECTED")
     if trace.get("result_persistence_error_stage"):
         return "CONTENT_SAVE_FAILED"
-    if 'Incomplete response returned, reason: max_output_tokens' in str(trace.get('error','')):
+    if 'Incomplete response returned, reason:' in str(trace.get('error','')):
         return 'MODEL_OUTPUT_INCOMPLETE'
     return "MODEL_TOOL_UNAVAILABLE"
 
@@ -154,6 +154,11 @@ def bounded_text_output(body,prices,agent_id,*,controlled=False):
     requested=body.get('max_output_tokens')
     if requested is not None and (type(requested) is not int or requested<=0):
         raise PreviewBudgetExceeded(PREVIEW_ERRORS['PREVIEW_INPUT_REJECTED'],'PREVIEW_INPUT_REJECTED')
+    from app.preview_long_output import apply_policy, LONG_OUTPUT_TOKENS
+    body,policy=apply_policy(body,agent_id,controlled=controlled)
+    if policy['phase']!='unchanged':
+        cap=LONG_OUTPUT_TOKENS
+        requested=body['max_output_tokens']
     minimum=min(requested or (4096 if article else 2048),4096 if article else 2048)
     body['max_output_tokens']=min(requested or cap,cap)
     desired_output=body['max_output_tokens']
@@ -211,8 +216,20 @@ def observe_text_terminal(budget,task_id,block):
         except (ValueError,UnicodeError):continue
         if event.get('type') not in {'response.completed','response.incomplete','response.failed'}:continue
         response=event.get('response') or {};usage=response.get('usage') or {}
+        details=usage.get('output_tokens_details') or {}
+        reasoning=details.get('reasoning_tokens')
+        total=usage.get('output_tokens')
+        text_chars=sum(len(part.get('text','')) for item in response.get('output',[]) if isinstance(item,dict) and item.get('type')=='message'
+                       for part in item.get('content',[]) if isinstance(part,dict) and part.get('type')=='output_text' and isinstance(part.get('text'),str))
         budget.observe({'event':'text_http_terminal','task_id':task_id,'type':event['type'],
-                        'status':response.get('status'),'incomplete_reason':(response.get('incomplete_details') or {}).get('reason'),
+                        'status':response.get('status') if response.get('status') in {'completed','incomplete','failed'} else 'UNKNOWN',
+                        'incomplete_reason':(response.get('incomplete_details') or {}).get('reason') if (response.get('incomplete_details') or {}).get('reason') in {'max_output_tokens','content_filter'} else None,
+                        'reasoning_tokens':reasoning if type(reasoning) is int and reasoning>=0 else None,
+                        # Not an exact visible-token count: tools/framing may
+                        # also consume non-reasoning output tokens.
+                        'non_reasoning_output_tokens':total-reasoning if type(total) is int and type(reasoning) is int and 0<=reasoning<=total else None,
+                        'visible_output_chars':text_chars,
+                        'incomplete_message_count':sum(isinstance(i,dict) and i.get('type')=='message' and i.get('status')=='incomplete' for i in response.get('output',[])),
                         'usage':{k:v for k,v in usage.items() if k in {'input_tokens','output_tokens','total_tokens'} and type(v) is int}})
 
 

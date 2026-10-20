@@ -859,6 +859,9 @@ class CodexRuntimeProvider(RuntimeProvider):
         if completed.status == TurnStatus.failed:
             message = getattr(getattr(completed, "error", None), "message", None)
             raise RuntimeError(message or "turn failed")
+        completion_guard = getattr(getattr(self._manager, '_test_gate', None), 'validate_completion', None)
+        if completion_guard is not None:
+            completion_guard(self._task_ids[session.thread_id])
         final_response = self._final_assistant_response(items or completed.items)
         result = SimpleNamespace(
             usage=usage,
