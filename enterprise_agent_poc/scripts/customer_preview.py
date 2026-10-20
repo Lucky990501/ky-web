@@ -395,6 +395,16 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             return await JSONResponse({'error':{'code':'MODEL_TOOL_UNAVAILABLE'}},502)(scope,receive,send)
         budget.observe({'event':'text_http_response','task_id':task_id,'status':upstream.status_code})
         if upstream.status_code >= 400:
+            from app.preview_provider_diagnostics import provider_error_diagnostic,request_diagnostic
+            error_bytes=bytearray()
+            async for piece in upstream.aiter_bytes():
+                if len(error_bytes)+len(piece)>65536:break
+                error_bytes.extend(piece)
+            try:error_value=json.loads(error_bytes)
+            except (ValueError,UnicodeError):error_value=None
+            budget.observe({'event':'text_provider_rejection','task_id':task_id,
+                'request':request_diagnostic(body),'provider':provider_error_diagnostic(upstream.status_code,error_value)})
+            del error_bytes,error_value
             await upstream.aclose(); await client.aclose()
             return await JSONResponse({"error": {"message": "Preview供应商请求未成功；不会自动重试。"}}, upstream.status_code)(scope, receive, send)
         async def chunks():

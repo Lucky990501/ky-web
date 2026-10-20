@@ -234,6 +234,7 @@ class PreviewImageExecution:
                     'aspect_ratio': plan['aspect_ratio'], 'size': plan['size'],
                 }
                 if submission.get('quality'):arguments['quality']=submission['quality']
+                self.budget.observe({'event':'preview_image_stage','task_id':task['id'],'stage':'image_tool_dispatch','status':'started'})
                 result = await session.call_tool('image_generation', arguments, read_timeout_seconds=timedelta(seconds=660))
         if result.isError:
             value=result.structuredContent or {}
@@ -321,7 +322,8 @@ class PreviewImageExecution:
                 response += '\n提示：供应商实际尺寸与请求不一致，请查看卡片中的实际像素。'
             if result.get('enterprise_context'):
                 trace['enterprise_context'] = result['enterprise_context']
-                response += '\n企业知识来源：'+'、'.join(dict.fromkeys(item['filename'] for item in result['enterprise_context']['sources']))
+                if result['enterprise_context']['sources']:
+                    response += '\n企业知识来源：'+'、'.join(dict.fromkeys(item['filename'] for item in result['enterprise_context']['sources']))
             trace.update(mcp_calls=[{'server': 'platform', 'tool': 'image_generation', 'status': 'completed',
                                     'artifact': artifacts[0], 'artifacts': artifacts, 'execution_mode': MODE}],
                          image_delivery=result.get('delivery'), runtime_completed=True, runtime_status='completed',
@@ -348,7 +350,7 @@ class PreviewImageExecution:
             if len(leaf_errors)==1:error=leaf_errors[0]
             self.budget.observe({'event':'preview_image_failure','task_id':tid,
                 'leaf_error_types':[type(leaf).__name__ for leaf in leaf_errors],
-                'stage':products.task_for_worker(tid).get('stage'),
+                'stage':getattr(error,'preview_image_stage',products.task_for_worker(tid).get('stage')),
                 'provider_http_status':getattr(error,'preview_provider_status',None)})
             code = ('PREVIEW_MODEL_BUDGET_EXHAUSTED' if isinstance(error, PreviewBudgetExceeded)
                     else 'image_knowledge_unavailable' if str(error).startswith(('preview_context_','preview_image_knowledge_'))

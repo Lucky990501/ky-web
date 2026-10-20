@@ -39,23 +39,40 @@ def check_context_capacity(main,budget,pricing,tenant_id):
 async def collect_context(session,task,budget,*,has_knowledge=True,enterprise_config=None):
     # Both tools enforce the signed tenant scope server-side. No owner/tenant
     # field supplied by the browser, no URL fetch or raw material transfer.
-    knowledge = tool_value(await session.call_tool('knowledge_search',{'query':task['input_text'][:1000],'limit':3})) if has_knowledge else []
+    stage='knowledge'
+    def mark(status,**counts):
+        budget.observe({'event':'preview_image_stage','task_id':task.get('id'),'stage':stage,'status':status,**counts})
+    def fail(code):
+        error=RuntimeError(code);error.preview_image_stage=stage
+        mark('failed',reason=code,leaf_error_type=type(error).__name__)
+        raise error
+    mark('started')
+    try:
+        knowledge = tool_value(await session.call_tool('knowledge_search',{'query':task['input_text'][:1000],'limit':3})) if has_knowledge else []
+    except Exception as error:
+        error.preview_image_stage=stage;mark('failed',leaf_error_type=type(error).__name__);raise
+    mark('completed',result_type=type(knowledge).__name__,result_count=len(knowledge) if isinstance(knowledge,list) else None)
     if not isinstance(knowledge,list):
-        raise RuntimeError('preview_image_knowledge_no_evidence')
+        fail('preview_image_knowledge_no_evidence')
     # A successful search with zero matches is not an unavailable tool. Image
     # requests often describe layout rather than a factual knowledge question.
     # Do not invent citations or implicitly reuse any photograph in that case.
     sources=[]
     for item in knowledge[:3]:
-        if not isinstance(item,dict):raise RuntimeError('preview_context_result_invalid')
+        if not isinstance(item,dict):fail('preview_context_result_invalid')
         if not item.get('file_id') or not item.get('chunk_id'):
-            raise RuntimeError('preview_image_knowledge_source_unverified')
+            fail('preview_image_knowledge_source_unverified')
         sources.append({k:clean_text(item.get(k,''))[:1200] for k in ('file_id','chunk_id','filename','content')})
-    materials = tool_value(await session.call_tool('asset_search',{'query':task['input_text'][:1000]}))
-    if not isinstance(materials,list):raise RuntimeError('preview_context_result_invalid')
+    stage='asset_search';mark('started')
+    try:materials = tool_value(await session.call_tool('asset_search',{'query':task['input_text'][:1000]}))
+    except Exception as error:
+        error.preview_image_stage=stage;mark('failed',leaf_error_type=type(error).__name__);raise
+    mark('completed',result_type=type(materials).__name__,result_count=len(materials) if isinstance(materials,list) else None)
+    if not isinstance(materials,list):fail('preview_context_result_invalid')
     # Names/types/tags only; no asset URL, private portrait bytes or storage key.
     descriptions=[{k:clean_text(item.get(k,''))[:200] for k in ('name','asset_type','tags')}
                   for item in materials[:5] if isinstance(item,dict)]
+    stage='context_build';mark('started')
     audit={'event':'preview_image_context','task_id':task['id'],'tenant_id':task['tenant_id'],
            'user_id':task['user_id'],'sources':sources,'asset_descriptions':descriptions,
            'knowledge_search_performed':has_knowledge,'raw_material_images_submitted':False}
@@ -66,4 +83,5 @@ async def collect_context(session,task,budget,*,has_knowledge=True,enterprise_co
                 +json.dumps({'knowledge':sources,'material_descriptions':descriptions,
                     'brand':{k:clean_text(str(v))[:1000] for k,v in (enterprise_config or {}).items()
                              if k in {'brand_name','description','brand_voice','brand_colors','rules'}}},ensure_ascii=False))
+    mark('completed',source_count=len(sources),asset_description_count=len(descriptions),appendix_bytes=len(appendix.encode()))
     return task['input_text']+appendix, audit
