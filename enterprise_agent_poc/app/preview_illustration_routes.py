@@ -28,6 +28,11 @@ async def illustration_request(service,actor,scope,receive,send):
         elif (match:=re.fullmatch(re.escape(PREFIX)+r'/plans/([0-9a-f]{32})/successor',path)) and method=='POST':
             if set(body)!={'confirmed','digest'}:raise ValueError()
             result=service.successor(actor,match[1],body['digest'],body['confirmed'])
+        elif (match:=re.fullmatch(re.escape(PREFIX)+r'/plans/([0-9a-f]{32})/recover',path)) and method=='POST':
+            if set(body)!={'confirmed','digest'}:raise ValueError()
+            result=service.recover(actor,match[1],body['digest'],body['confirmed'])
+            if result['status']=='queued':service.schedule(actor,result['id'])
+            return await JSONResponse(result,202)(scope,receive,send)
         elif (match:=re.fullmatch(re.escape(PREFIX)+r'/plans/([0-9a-f]{32})/generate',path)) and method=='POST':
             if set(body)!={'confirmed','digest'}:raise ValueError()
             result=service.confirm(actor,match[1],body['digest'],body['confirmed'])

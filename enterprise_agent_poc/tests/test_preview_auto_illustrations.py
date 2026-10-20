@@ -49,7 +49,7 @@ def test_unavailable_images_do_not_fail_text_or_reserve(setup,blocked):
     assert old==[]
 
 
-def test_bounded_parallelism_partial_images_visible_and_failure_stops_new_batches(setup,monkeypatch):
+def test_bounded_parallelism_partial_images_visible_and_independent_failure(setup,monkeypatch):
     service,actors,old,budget=setup;authorize(service,actors);actor=actors[0]
     task=activity(service,actor,7);calls=[];running=0;peak=0
     async def generate(prompt,record_http,**kwargs):
@@ -65,9 +65,9 @@ def test_bounded_parallelism_partial_images_visible_and_failure_stops_new_batche
         while len(calls)<3:await asyncio.sleep(.005)
         partial=service.get(actor,result['id']);assert len(partial['assets'])==1 and partial['status']=='generating'
         await asyncio.gather(*list(service.jobs))
-        done=service.get(actor,result['id']);assert done['status']=='failed' and len(done['assets'])==2
+        done=service.get(actor,result['id']);assert done['status']=='failed' and len(done['assets'])==6
         assert service.main.product_store.task(task['id'],actor.tenant_id,actor.user_id)['status']=='completed'
-    asyncio.run(run());assert peak==2 and len(calls)==3
+    asyncio.run(run());assert peak==2 and len(calls)==7
 
 
 @pytest.mark.parametrize('label,terms',[

@@ -5,6 +5,44 @@ import re
 from app.activity_plan_runtime import semantic_guard
 from app.document_generator import ActivityPlanContent
 
+PREVIEW_PLANNING_INSTRUCTION = (
+    '\nPreview策划事实边界：策划方案不等于资源已经落实。区分用户已确认事实、工具核验事实、执行建议与待确认条件。'
+    '人员、物料、服务、礼品与预算尚未确认时仍可提出完整建议，但相关环节须明确写为建议及执行条件。'
+    '例如“建议安排工作人员接待，具体人数及排班待校区确认”；“建议课程演示，师资和时段确认后执行”；'
+    '“可设计礼品环节，礼品及预算落实后执行，未落实则取消”。不得写成已安排、已落实或确定赠送。'
+    'pending_items列出未确认资源，且引用该资源的环节描述也必须有相应条件，不得只在文末列待确认。'
+    '保留用户明确的主题、日期、地点和对象，不把已确认的活动要求改成待确认。'
+)
+
+
+def annotate_pending_resources(plan, violations, grounding, tenant_id):
+    """Condition only Guard-identified clauses; never repair invented facts.
+
+    Complete schema + explicit pending resource + exact unambiguous field/clause
+    are prerequisites. Time/place/title, prices, past claims and contradictions
+    are deliberately not repairable by this zero-model annotation.
+    """
+    if os.environ.get('CUSTOMER_PREVIEW_MODE')!='true' or not tenant_id.startswith('preview-') or not violations:return None
+    labels={'staff':'执行人员及排班','material':'相关物料','service':'相关服务与资源','benefit':'相关礼品与权益'}
+    if any(v.type!='pending_dependency_committed' or v.dependency_kind not in labels
+           or not v.pending_item or not v.evidence or not any(p.startswith(v.pending_item) for p in plan.pending_items)
+           or not re.fullmatch(r'activity_items\.\d+\.(?:description|name)',v.field) for v in violations):return None
+    data=plan.model_dump();changed=set()
+    for field in {v.field for v in violations}:
+        index=int(field.split('.')[1]);attribute=field.split('.')[2];parts=re.split(r'([。！？；;\n])',data['activity_items'][index][attribute])
+        for n in range(0,len(parts),2):
+            clause=parts[n];matches=[v for v in violations if v.field==field and clause.startswith(v.evidence)]
+            if not matches:continue
+            if any(sum(parts[j].startswith(v.evidence) for j in range(0,len(parts),2))!=1 for v in matches):return None
+            if re.search(r'若|如果|假如|倘若|未.{0,25}仍|已(?:确认|安排|提供|采购|准备|落实)|\d[\d,.]*\s*元|保证|百分之百|100%',clause):return None
+            condition='、'.join(labels[k] for k in sorted({v.dependency_kind for v in matches}))
+            parts[n]=('【待确认提案】' if attribute=='name' else '【待确认提案】建议仅在'+condition+'确认落实后执行，具体安排待校区确认，未落实则取消该项：')+clause
+            changed.update((v.field,v.evidence) for v in matches)
+        data['activity_items'][index][attribute]=''.join(parts)
+    if changed!={(v.field,v.evidence) for v in violations}:return None
+    candidate=ActivityPlanContent.model_validate(data)
+    return candidate if not semantic_guard(candidate,grounding) else None
+
 
 def annotate_pending_benefit(plan,violations,grounding,tenant_id):
     if os.environ.get('CUSTOMER_PREVIEW_MODE')!='true' or not tenant_id.startswith('preview-') or not violations:

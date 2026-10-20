@@ -13,8 +13,7 @@
     const title=document.createElement('strong');title.textContent='自动配图';
     const feedback=document.createElement('p');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');feedback.setAttribute('aria-atomic','true');
     const actions=document.createElement('div'),assets=document.createElement('div');assets.className='preview-illustration-gallery';
-    const notice=document.createElement('p');notice.textContent='图片为AI概念示意，非真实现场照片。正文和纯文字导出始终可用；失败不自动重新生图。';
-    slot.append(title,feedback,actions,assets,notice);article.append(slot);
+    slot.append(title,feedback,actions,assets);article.append(slot);
     let plan=null,timer=null,polls=0,emptyPolls=0;
     const current=()=>slot.isConnected&&main.isConnected&&article.closest('#main')===main;
     const observer=new MutationObserver(()=>{if(!current()){clearTimeout(timer);observer.disconnect();}});observer.observe(document.documentElement,{childList:true,subtree:true});
@@ -51,7 +50,7 @@
         if(asset.role==='cover')continue;
         const figure=document.createElement('figure'),image=document.createElement('img'),caption=document.createElement('figcaption');
         image.src=window.workbenchPreviewUrl(asset.url);image.alt=asset.label;image.loading='lazy';image.width=asset.width;image.height=asset.height;
-        caption.textContent=asset.label+' · '+asset.width+'×'+asset.height+' · AI示意图';
+        caption.textContent=asset.label;
         image.onerror=()=>{caption.textContent=asset.label+' · 图片暂不可用；未触发重新生图。';};
         figure.append(image,caption,link('下载配图',asset.url,asset.filename));assets.append(figure);
       }
@@ -67,10 +66,20 @@
         if(plan.html_url)actions.append(link('下载图文 HTML',plan.html_url,'article.html'),link('下载文章与配图 ZIP',plan.package_url,'article-images.zip'));
       } else if(plan?.status==='failed') {
         feedback.textContent=`正文已完成，部分配图未生成（${plan.assets.length}/${plan.count}，${plan.error_code||'结果未确认'}）；正文及纯文版仍可导出。`;
+        const rejected=(plan.outcomes||[]).filter(o=>o.state==='REJECTED');
+        if(rejected.length)feedback.textContent+=` 供应商拒绝${rejected.length}张（HTTP ${[...new Set(rejected.map(o=>o.http_status))].join('/')}）。`;
         if(plan.assets.length===plan.count&&plan.count) {
           const retry=document.createElement('button');retry.type='button';retry.className='button secondary';retry.textContent='仅重试文档整理（不重新生图）';
           retry.onclick=async()=>{retry.disabled=true;try{plan=await api(prefix+'/plans/'+plan.id+'/export',{});render();}catch(e){feedback.textContent=e.message;retry.disabled=false;}};actions.append(retry);
+        } else if(plan.can_recover_missing) {
+          const recover=document.createElement('button');recover.type='button';recover.className='button secondary';recover.textContent='补齐缺失图片';
+          recover.onclick=async()=>{
+            if(recover.disabled)return;recover.disabled=true;feedback.textContent='正在检查缺图及已有预留…';
+            try{plan=await api(prefix+'/plans/'+plan.id+'/recover',{digest:plan.digest,confirmed:true});polls=0;render();}
+            catch(e){feedback.textContent=e.message;recover.disabled=false;}
+          };actions.append(recover);
         }
+        if(plan.unresolved_missing)feedback.textContent+=` ${plan.unresolved_missing}张请求结果未确认或需恢复原资产，未重新生图。`;
       } else if(plan?.status==='skipped') {
         feedback.textContent=/AUTHORIZ|BUDGET/.test(plan.error_code||'')?unavailable:'正文已完成，当前配图未执行：'+(plan.error_code==='ILLUSTRATION_NO_REQUIREMENTS'?'没有有效配图需求。':'配图条件未满足，纯文版仍可使用。');
       } else feedback.textContent='正文已完成，历史配图未执行；保留原正文和纯文字导出，不因刷新自动收费。';

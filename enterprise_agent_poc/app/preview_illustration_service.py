@@ -326,14 +326,92 @@ class PreviewIllustrationService:
         payload=json.loads(row['payload'])
         if payload.get('successor'):
             digest=hashlib.sha256((digest+'\nsuccessor:'+payload['successor']['authorization_id']).encode()).hexdigest()
+        if payload.get('recovery'):
+            prior=self.row(actor,payload['recovery']['prior_plan_id'])
+            if prior['task_id']!=row['task_id']:raise PermissionError()
+            digest=hashlib.sha256((digest+'\nmissing:'+prior['id']).encode()).hexdigest()
         if digest!=row['digest']:
             raise IllustrationError('ILLUSTRATION_SOURCE_CHANGED','原正文版本已变化，请重新核对配图计划；没有再次生图。')
         return dict(row)
 
+    def request_rows(self,identifier,conn=None,seen=()):
+        """Overlay new attempts over immutable prior attempts, by original index."""
+        if identifier in seen or len(seen)>=16:raise IllustrationError('ILLUSTRATION_RECOVERY_INVALID','补图关联无效。')
+        if conn is None:
+            with self.db() as connection:return self.request_rows(identifier,connection,seen)
+        row=conn.execute('select payload from illustration_plans where id=?',(identifier,)).fetchone()
+        payload=json.loads(row['payload']);prior=(payload.get('recovery') or {}).get('prior_plan_id')
+        records=self.request_rows(prior,conn,(*seen,identifier)) if prior else {}
+        records.update({r['item_index']:dict(r) for r in conn.execute('select * from illustration_requests where plan_id=?',(identifier,))})
+        return records
+
+    @staticmethod
+    def request_state(request):
+        if not request:return 'NOT_DISPATCHED'
+        if request['status']=='saved':return 'SAVED'
+        if request['status']=='reserved' and request['http_status'] is None:return 'NOT_DISPATCHED'
+        if isinstance(request['http_status'],int) and request['http_status']>=400:return 'REJECTED'
+        if request['http_status']==200:return 'STORAGE_FAILED'
+        return 'UNKNOWN'
+
     def assets(self,identifier):
-        with self.db() as conn:
-            return [json.loads(row['asset_json']) for row in conn.execute(
-                "select asset_json from illustration_requests where plan_id=? and status='saved' order by item_index",(identifier,))]
+        return [json.loads(r['asset_json']) for _,r in sorted(self.request_rows(identifier).items()) if r['status']=='saved']
+
+    def reservation_indices(self,payload,conn=None):
+        recovery=payload.get('recovery')
+        if not recovery:return list(range(len(payload['items'])))
+        prior=self.request_rows(recovery['prior_plan_id'],conn)
+        return [i for i in recovery['indices'] if not prior.get(i) or self.request_state(prior[i])=='REJECTED']
+
+    def restore_stored_asset(self,request,kind,actor):
+        """A verified original can repair only its Word copy, never call a model."""
+        asset=json.loads(request['asset_json']);key=asset['storage_key']
+        if not key.startswith('brand-assets/'+actor.tenant_id+'/activity-plan-images/'):raise PermissionError()
+        raw=self.storage.get(key)
+        if hashlib.sha256(raw).hexdigest()!=asset['sha256']:raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','已有图片Hash不匹配，未重新生图。')
+        if kind=='activity':
+            content,metadata=word_image_copy(raw);word_key=key
+            if content!=raw:
+                word_key=f'brand-assets/{actor.tenant_id}/activity-plan-images/{uuid4().hex}'+metadata['extension'];self.storage.put(word_key,content,metadata['mime_type'])
+            if hashlib.sha256(self.storage.get(word_key)).hexdigest()!=metadata['sha256']:raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','Word图片副本未通过回读校验。')
+            asset.update(word_storage_key=word_key,word_variant=metadata)
+        with self.db() as c:c.execute("update illustration_requests set status='saved',asset_json=? where id=? and status='attempted' and http_status=200",(canonical(asset),request['id']))
+
+    def recover(self,actor,prior_id,digest,confirmed):
+        """Explicit missing-only continuation; old unknown results are never sent."""
+        prior=self.row(actor,prior_id);payload=json.loads(prior['payload'])
+        if confirmed is not True or digest!=prior['digest'] or prior['status']!='failed':raise PermissionError()
+        if not self.actor_allowed(actor):raise PermissionError()
+        for asset in self.assets(prior_id):
+            # Existing images are reused only after verification, never
+            # regenerated to conceal an inaccessible/corrupt stored asset.
+            content=self.storage.get(asset['storage_key'])
+            if hashlib.sha256(content).hexdigest()!=asset['sha256']:
+                raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','已有配图无法通过校验，未重新生图。')
+        if len(self.assets(prior_id))==len(payload['items']):
+            self.finish_export(actor,prior_id);return self.get(actor,prior_id)
+        for request in self.request_rows(prior_id).values():
+            if self.request_state(request)=='STORAGE_FAILED' and request['asset_json']:
+                self.restore_stored_asset(request,payload['kind'],actor)
+        records=self.request_rows(prior_id)
+        indices=[i for i in range(len(payload['items'])) if self.request_state(records.get(i)) in {'NOT_DISPATCHED','REJECTED'}]
+        if not indices:
+            if len(self.assets(prior_id))==len(payload['items']):self.finish_export(actor,prior_id);return self.get(actor,prior_id)
+            raise IllustrationError('ILLUSTRATION_UNKNOWN_RESULT','缺图请求结果未知或资产无法恢复，未重新生图。')
+        payload.pop('safe_diagnostic',None);payload.pop('item_errors',None)
+        payload['recovery']={'prior_plan_id':prior_id,'indices':indices}
+        # Recovery of a legacy successor still validates that original grant.
+        task=self.source(actor,prior['task_id']);source=canonical(ActivityPlanContent.model_validate((task.get('structured_result') or {})['data']).model_dump()) if payload['kind']=='activity' else task['final_response']
+        base=hashlib.sha256((task['id']+'\n'+source).encode()).hexdigest()
+        if payload.get('successor'):base=hashlib.sha256((base+'\nsuccessor:'+payload['successor']['authorization_id']).encode()).hexdigest()
+        new_digest=hashlib.sha256((base+'\nmissing:'+prior_id).encode()).hexdigest()
+        with self.db() as c:
+            c.execute('begin immediate')
+            existing=c.execute('select id from illustration_plans where tenant_id=? and user_id=? and task_id=? and digest=?',(actor.tenant_id,actor.user_id,task['id'],new_digest)).fetchone()
+            identifier=existing['id'] if existing else uuid4().hex
+            if not existing:c.execute('insert into illustration_plans(id,tenant_id,user_id,task_id,digest,payload,status,created) values(?,?,?,?,?,?,?,?)',
+                (identifier,actor.tenant_id,actor.user_id,task['id'],new_digest,canonical(payload),'planned',time.time()))
+        return self.confirm(actor,identifier,new_digest,True)
 
     def get(self,actor,identifier):
         row=self.row(actor,identifier);payload=json.loads(row['payload']);assets=self.assets(identifier);limits=self.limits()
@@ -345,6 +423,16 @@ class PreviewIllustrationService:
                       assets=public_assets,capability=self.capability(actor),
                       maximum_cost_cny=str(limits[0]*len(payload['items'])) if limits else None,
                       user_message=self.capability(actor)['user_message'])
+        records=self.request_rows(identifier)
+        states=[{'item_index':i,'state':self.request_state(records.get(i)),'http_status':records[i]['http_status'] if i in records else None} for i in range(len(payload['items']))]
+        result['outcomes']=states
+        result['recoverable_missing']=sum(s['state'] in {'NOT_DISPATCHED','REJECTED'} for s in states)
+        result['unresolved_missing']=sum(s['state'] in {'UNKNOWN','STORAGE_FAILED'} for s in states)
+        result['can_recover_missing']=row['status']=='failed' and self.actor_allowed(actor) and bool(result['recoverable_missing'])
+        new_count=len(self.reservation_indices(payload))
+        if payload.get('recovery'):
+            result['new_reserved_requests_required']=new_count
+            result['maximum_cost_cny']=str(limits[0]*new_count) if limits else None
         if row['status']=='planned' and limits and result['capability']['enabled']:
             count=len(payload['items'])
             per_task,plan_cost=self.plan_limits(payload['kind'])
@@ -352,12 +440,12 @@ class PreviewIllustrationService:
                 result.update(can_generate=False,blocker_code='ILLUSTRATION_TASK_LIMIT',user_message=f'本计划需要{count}张，超过当前单任务{per_task}张上限；没有静默删减配图。')
             elif plan_cost is not None and limits[0]*count>plan_cost:
                 result.update(can_generate=False,blocker_code='ILLUSTRATION_PLAN_COST_LIMIT',user_message=f'完整计划最高预留¥{limits[0]*count}，超过单计划¥{plan_cost}上限；未生成任何新配图。')
-            elif count>result['capability']['remaining_requests'] or Decimal(result['capability']['reserved_ceiling_cny'])+limits[0]*count>limits[1]:
+            elif new_count>result['capability']['remaining_requests'] or Decimal(result['capability']['reserved_ceiling_cny'])+limits[0]*new_count>limits[1]:
                 result.update(can_generate=False,blocker_code='ILLUSTRATION_BUDGET_EXHAUSTED',user_message=f'完整计划需要{count}张，当前全局额度不足；未生成任何新配图。')
             else:result['can_generate']=bool(count)
             if result.get('can_generate'):
                 try:
-                    with self.db() as conn:self.check_task_allowance(actor,row['task_id'],count,limits[0],conn)
+                    with self.db() as conn:self.check_task_allowance(actor,row['task_id'],new_count,limits[0],conn)
                 except IllustrationError as error:
                     result.update(can_generate=False,blocker_code=error.code,user_message=str(error))
         elif row['status']=='planned':result['can_generate']=False
@@ -401,10 +489,11 @@ class PreviewIllustrationService:
             conn.execute('begin immediate')
             if conn.execute('select status from illustration_plans where id=?',(identifier,)).fetchone()[0]!='planned':return self.get(actor,identifier)
             rows=conn.execute('select ceiling from illustration_requests').fetchall()
+            indices=self.reservation_indices(payload,conn);count=len(indices)
             self.check_task_allowance(actor,row['task_id'],count,fee,conn)
             if len(rows)+count>maximum or sum((Decimal(r[0]) for r in rows),Decimal(0))+fee*count>total:
                 raise IllustrationError('ILLUSTRATION_BUDGET_EXHAUSTED',f'本方案需要{count}张配图，超出单任务或累计额度；未生成任何配图。')
-            for index in range(count):
+            for index in indices:
                 conn.execute('insert into illustration_requests(id,plan_id,item_index,ceiling,status,created) values(?,?,?,?,?,?)',
                              (uuid4().hex,identifier,index,str(fee),'reserved',time.time()))
             conn.execute("update illustration_plans set status='queued' where id=?",(identifier,))
@@ -422,24 +511,19 @@ class PreviewIllustrationService:
             if tenant_slots is None:
                 tenant_slots=asyncio.Semaphore(MAX_CONCURRENT_ILLUSTRATIONS_PER_TENANT)
                 self.tenant_generation_slots[actor.tenant_id]=tenant_slots
-            failed=asyncio.Event()
             async def one(index,item):
                 # Tenant slot first: a busy tenant must not occupy all global
                 # permits while waiting for its own per-tenant limit.
                 async with tenant_slots:
                     async with self.generation_slots:
-                        if failed.is_set():return
                         try:await self.generate_one(actor,identifier,row,payload,index,item)
-                        except BaseException:
-                            failed.set();raise
-            # Validate/save the first picture before bounded parallel batches.
-            # On error finish in-flight work, but never start another batch.
-            items=list(enumerate(payload['items']))
-            if items:await one(*items[0])
-            for offset in range(1,len(items),MAX_CONCURRENT_ILLUSTRATIONS):
-                results=await asyncio.gather(*(one(i,item) for i,item in items[offset:offset+MAX_CONCURRENT_ILLUSTRATIONS]),return_exceptions=True)
-                for result in results:
-                    if isinstance(result,BaseException):raise result
+                        except Exception as error:return index,error
+            indices=(payload.get('recovery') or {}).get('indices',range(len(payload['items'])))
+            results=await asyncio.gather(*(one(i,payload['items'][i]) for i in indices))
+            errors=[r for r in results if r is not None]
+            if errors:
+                payload['item_errors']={str(i):error.code if isinstance(error,IllustrationError) else 'ILLUSTRATION_SAVE_OR_EXPORT_FAILED' for i,error in errors}
+                raise errors[0][1]
             await asyncio.to_thread(self.finish_export,actor,identifier)
         except Exception as error:
             code=error.code if isinstance(error,IllustrationError) else 'ILLUSTRATION_SAVE_OR_EXPORT_FAILED'
@@ -452,9 +536,9 @@ class PreviewIllustrationService:
         self.task_restriction(actor,row['task_id'])
         if payload.get('successor'):self.successor_authorization(actor,row,payload)
         with self.db() as conn:
-            request=conn.execute('select * from illustration_requests where plan_id=? and item_index=?',(identifier,index)).fetchone()
-            if request['status']!='reserved':raise IllustrationError('ILLUSTRATION_UNKNOWN_RESULT','已有请求结果不确定，未自动重发。')
-            conn.execute("update illustration_requests set status='attempted' where id=?",(request['id'],))
+            conn.execute('begin immediate');request=self.request_rows(identifier,conn).get(index)
+            if not request or request['status']!='reserved':raise IllustrationError('ILLUSTRATION_UNKNOWN_RESULT','已有请求结果不确定，未自动重发。')
+            if conn.execute("update illustration_requests set status='attempted' where id=? and status='reserved'",(request['id'],)).rowcount!=1:raise IllustrationError('ILLUSTRATION_UNKNOWN_RESULT','请求已被处理，未重复调用。')
         def record_http(status,request_id):
             with self.db() as conn:conn.execute('update illustration_requests set http_status=?,request_id=? where id=?',(status,request_id,request['id']))
         if payload['kind']=='wechat':
@@ -494,6 +578,9 @@ class PreviewIllustrationService:
     def finish_export(self,actor,identifier):
         row=self.row(actor,identifier);payload=json.loads(row['payload']);assets=self.assets(identifier)
         if len(assets)!=len(payload['items']):raise IllustrationError('ILLUSTRATION_INCOMPLETE','部分配图尚未完成，不能标记图文方案成功。')
+        for asset in assets:
+            if hashlib.sha256(self.storage.get(asset['storage_key'])).hexdigest()!=asset['sha256']:
+                raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','图文导出前图片Hash校验失败。')
         document=None
         if payload['kind']=='activity':
             if row['document_json']:document=json.loads(row['document_json'])

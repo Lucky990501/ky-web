@@ -113,6 +113,7 @@ PREVIEW_ERRORS = {
     "CONTENT_SAVE_FAILED": "内容保存失败，请保留诊断ID联系Owner，不要重复生成。",
     "PREVIEW_CONTROLLED_ACCEPTANCE_DENIED": "本轮受控验收授权缺失、失效或已关闭，未发起额外模型请求。",
     "MODEL_OUTPUT_INCOMPLETE": "模型输出达到本轮长度上限，文章尚未完整保存；不会自动收费重试。",
+    "ACTIVITY_PLAN_VALIDATION_FAILED": "活动方案未通过结构或事实校验，未保存为正式方案；请保留诊断ID，不会自动收费重试。",
 }
 
 
@@ -133,6 +134,8 @@ def bounded_embedding_batches(texts, model):
 
 
 def preview_task_failure(task, trace, denied):
+    if task.get('agent_id')=='campaign-agent' and 'failed' in str(trace.get('structured_result_status','')):
+        return 'ACTIVITY_PLAN_VALIDATION_FAILED'
     if denied:
         return denied.get("code") or ("PREVIEW_MODEL_BUDGET_EXHAUSTED" if denied.get("reason") == "PreviewBudgetExceeded" else "PREVIEW_INPUT_REJECTED")
     if trace.get("result_persistence_error_stage"):

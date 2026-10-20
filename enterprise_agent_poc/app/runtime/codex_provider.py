@@ -514,6 +514,9 @@ class CodexRuntimeProvider(RuntimeProvider):
             return
 
         first_prompt = (brief["source"] if brief else message) + "\n\n" + STRUCTURED_INSTRUCTION
+        if os.environ.get('CUSTOMER_PREVIEW_MODE')=='true' and profile.tenant_id.startswith('preview-'):
+            from app.preview_activity_pending import PREVIEW_PLANNING_INSTRUCTION
+            first_prompt += PREVIEW_PLANNING_INSTRUCTION
         prompt = first_prompt
         original = None
         original_violations = []
@@ -593,12 +596,12 @@ class CodexRuntimeProvider(RuntimeProvider):
             if (not valid and candidate is not None and attempt==1
                     and os.environ.get('CUSTOMER_PREVIEW_MODE')=='true'
                     and profile.tenant_id.startswith('preview-')):
-                from app.preview_activity_pending import annotate_pending_benefit
-                repaired=annotate_pending_benefit(candidate,violations,grounding,profile.tenant_id)
+                from app.preview_activity_pending import annotate_pending_resources
+                repaired=annotate_pending_resources(candidate,violations,grounding,profile.tenant_id)
                 if repaired is not None:
                     candidate=repaired;violations=[];valid=True;pending_annotation=True
                     record('LOCAL_PENDING_REVALIDATION',attempt,format_valid=True,semantic_valid=True,correction_result='PASS')
-                    attempt_trace[-1].update(correction_kind='explicit_pending_benefit_annotation',provider_calls_added=0)
+                    attempt_trace[-1].update(correction_kind='explicit_pending_resource_annotation',provider_calls_added=0)
             if valid:
                 yield RuntimeStreamEvent.activity("result_rendering", "started")
                 markdown = render_markdown(candidate)
@@ -627,9 +630,12 @@ class CodexRuntimeProvider(RuntimeProvider):
                   "format_validation_failed_after_retry")
         record("FINAL", max_attempts, format_valid=candidate is not None,
                semantic_valid=False, correction_result="FAIL", issues=violations)
-        yield RuntimeStreamEvent.visible_delta(fallback)
+        preview_failed=os.environ.get('CUSTOMER_PREVIEW_MODE')=='true' and profile.tenant_id.startswith('preview-')
+        if not preview_failed:yield RuntimeStreamEvent.visible_delta(fallback)
         yield RuntimeStreamEvent.completed(replace(
-            last_turn, text=fallback, structured_result=None,
+            last_turn, text='' if preview_failed else fallback, structured_result=None,
+            status='failed' if preview_failed else last_turn.status,
+            error='ACTIVITY_PLAN_VALIDATION_FAILED' if preview_failed else last_turn.error,
             structured_diagnostic={"code": status, "violations": safe_violations(violations)},
             structured_attempt_trace=tuple(attempt_trace), structured_result_status=status,
             structured_model_calls=model_calls,
