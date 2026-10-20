@@ -34,7 +34,16 @@ def annotate_pending_resources(plan, violations, grounding, tenant_id):
             clause=parts[n];matches=[v for v in violations if v.field==field and clause.startswith(v.evidence)]
             if not matches:continue
             if any(sum(parts[j].startswith(v.evidence) for j in range(0,len(parts),2))!=1 for v in matches):return None
-            if re.search(r'若|如果|假如|倘若|未.{0,25}仍|已(?:确认|安排|提供|采购|准备|落实)|\d[\d,.]*\s*元|保证|百分之百|100%',clause):return None
+            # A whole negative resource assertion (e.g. a gift is NOT an
+            # implemented benefit) is not a past factual claim. Preserve its
+            # wording and add the same explicit pending marker; the full Guard
+            # still revalidates the entire candidate below. Never apply this
+            # exception to a mixed clause containing an affirmative promise.
+            negative_resource = bool(re.fullmatch(
+                r'\s*(?:礼品|赠品|奖品|权益|礼遇)(?:不|不得|不能)(?:作为|视为|当作|写成|标为)'
+                r'已(?:确认|落实)(?:的)?(?:事项|权益|福利|礼品|赠品|奖品|礼遇|资源)\s*', clause))
+            if (re.search(r'若|如果|假如|倘若|未.{0,25}仍|\d[\d,.]*\s*元|保证|百分之百|100%',clause)
+                    or not negative_resource and re.search(r'已(?:确认|安排|提供|采购|准备|落实)',clause)):return None
             condition='、'.join(labels[k] for k in sorted({v.dependency_kind for v in matches}))
             parts[n]=('【待确认提案】' if attribute=='name' else '【待确认提案】建议仅在'+condition+'确认落实后执行，具体安排待校区确认，未落实则取消该项：')+clause
             changed.update((v.field,v.evidence) for v in matches)

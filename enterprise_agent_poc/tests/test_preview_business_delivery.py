@@ -55,6 +55,28 @@ def test_historical_claim_price_and_contradiction_remain_blocked(monkeypatch,tex
     assert annotate_pending_resources(p,violations,(),'preview-fixture') is None
 
 
+@pytest.mark.parametrize('text',['礼品不作为已落实事项','礼品不作为已落实权益','权益不得视为已确认的权益'])
+def test_negative_resource_assertion_is_preserved_and_revalidated(monkeypatch,text):
+    monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true');p=resource_plan('benefit')
+    p.activity_items[0].description=text+'。建议家长自愿参与。'
+    violations=semantic_guard(p);assert violations
+    fixed=annotate_pending_resources(p,violations,(),'preview-fixture')
+    assert fixed and fixed.activity_items[0].description.endswith(p.activity_items[0].description)
+    assert fixed.pending_items==p.pending_items and not semantic_guard(fixed)
+
+
+@pytest.mark.parametrize('text',[
+    '礼品不作为已落实权益，但现场将赠送礼品',
+    '礼品已落实，现场将赠送礼品',
+    '礼品不作为已落实权益，保证所有家长可获得礼品',
+    '礼品不作为已落实权益，现场将赠送1999元课程',
+])
+def test_negative_prefix_does_not_hide_affirmative_or_priced_commitment(monkeypatch,text):
+    monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true');p=resource_plan('benefit');p.activity_items[0].description=text
+    violations=semantic_guard(p);assert violations
+    assert annotate_pending_resources(p,violations,(),'preview-fixture') is None
+
+
 def test_only_conflicting_activity_name_can_be_explicitly_pending(monkeypatch):
     monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true');p=resource_plan('benefit')
     p.activity_items[0].name='现场赠送礼品';p.activity_items[0].description='建议在礼品预算落实后执行，未落实则取消。'
