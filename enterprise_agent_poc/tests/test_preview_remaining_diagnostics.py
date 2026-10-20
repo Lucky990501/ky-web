@@ -72,3 +72,15 @@ def test_image_success_marks_context_and_keeps_fact_sources():
     stages=[c.args[0] for c in budget.observe.call_args_list if c.args[0]['event']=='preview_image_stage']
     assert [e['stage'] for e in stages]==['knowledge','knowledge','asset_search','asset_search','context_build','context_build']
     assert 'PRIVATE' not in json.dumps(stages) and audit['sources'][0]['file_id']=='f'
+
+
+def test_observed_successful_empty_knowledge_loop_stops_after_two_without_fake_facts():
+    from app.preview_request_context import compact_knowledge_history
+    body={'input':[{'role':'user','content':'FIXTURE_ONLY complete activity facts'}]}
+    for number in range(45):
+        body['input'] += [{'type':'function_call','name':'mcp__platform__knowledge_search','call_id':str(number),'arguments':'{}'},
+            {'type':'function_call_output','call_id':str(number),'output':'Output:\n{"result":[]}'}]
+        result,counts=compact_knowledge_history(body)
+        assert result==body and counts['redundant_search_tail']==number+1
+        if number==1:assert counts['redundant_search_tail']>=2
+    assert counts['repeated_source_bodies']==0

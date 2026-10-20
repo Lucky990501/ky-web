@@ -34,5 +34,7 @@ def compact_knowledge_history(payload):
             if len(marker.encode())>=len(text.encode()):continue
             record['content']=marker;removed+=len(text.encode())-len(marker.encode());repeated+=1;changed=True
         if changed:item['output']=raw[:match.start(1)]+json.dumps({'result':records} if wrapped else records,ensure_ascii=False,separators=(',',':'))+raw[match.end(1):]
-        redundant_tail=redundant_tail+1 if records and not novel else 0
+        # A successful empty result also adds no evidence. Previously it reset
+        # the tail to zero, allowing unlimited empty paid searches on a Task.
+        redundant_tail=redundant_tail+1 if not novel else 0
     return body,{'repeated_source_bodies':repeated,'source_bytes_saved':removed,'redundant_search_tail':redundant_tail}
