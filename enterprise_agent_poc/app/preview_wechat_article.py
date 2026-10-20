@@ -8,6 +8,7 @@ BODY_POLICY='''Preview公众号交付要求（优先于旧Skill中三个标题�
 直接输出一篇完整文章，只保留一个正式文章标题、导语、章节标题、正文和结尾。
 不要三个标题候选、写作思路、结构说明、创作过程、无关前言、营销分析或结尾AI说明。
 使用一个Markdown一级标题与自然的二级章节，正文段落清晰。不要输出第二份HTML或CSS；平台会安全排版。
+自然选择正文中真正重要的观点、结论或提醒，用Markdown **重点内容** 标记；每个主要章节通常1至2处，可强调核心整句，不要求每段都有，不扩大强调范围，不改写业务事实。
 标题建议、摘要、封面建议不是正文；用户没有要求时不主动生成这些字段。保留真实正文事实，不编造案例或效果。
 只有真实业务事实需要核验时调用相应企业工具；素材足够时直接完成。文章排版不代表创建了微信草稿。
 '''
@@ -37,9 +38,18 @@ def body_only_markdown(text):
 def normalize_tree(root):
     root.set('style',BODY)
     count=0
+    parents={child:parent for parent in root.iter() for child in parent}
     for node in root.iter():
         if node.tag in {'section','article','div'}:node.set('style',BODY)
         if node.tag in STYLES:node.set('style',STYLES[node.tag])
+        if node.tag in {'strong','b','span','em','i','u','s','code'}:
+            ancestors=[];parent=parents.get(node)
+            while parent is not None:
+                ancestors.append(parent.tag);parent=parents.get(parent)
+            if ('p' in ancestors and (node.tag in {'strong','b'} or any(tag in ancestors for tag in {'strong','b'}))
+                    and not any(tag in ancestors for tag in {'h1','h2','h3','h4','h5','h6','figcaption'})):
+                kept=[part for part in node.get('style','').split(';') if part and part.split(':')[0].strip().lower() not in {'color','font-weight'}]
+                node.set('style',';'.join(kept+['color:#FFCA00','font-weight:700']))
         if node.tag=='h2':
             count+=1;children=list(node)
             if (len(children)>=2 and children[0].tag=='span' and re.fullmatch(r'\d{2}',children[0].text or '')

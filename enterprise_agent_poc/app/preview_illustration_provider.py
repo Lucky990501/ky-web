@@ -14,10 +14,12 @@ import re
 import socket
 import ssl
 import stat
+import time
 from urllib.parse import urlsplit
 
 import httpx
 from PIL import Image
+from app.preview_illustration_timing import elapsed
 
 MODEL='qwen-image-3.0'
 WECHAT_DEFAULT_SIZE='1024x768'  # 4:3, no larger pixel budget than the old square.
@@ -153,27 +155,35 @@ class IllustrationProvider:
             raise IllustrationError('ILLUSTRATION_SIZE_UNSUPPORTED','配图比例不在当前已适配范围内；未请求模型。')
         body={'prompt':prompt,'model':MODEL,'provider':{'sort':'success_rate'},'size':requested_size,
               'watermark':False,'prompt_extend':True,'prompt_extend_mode':'direct'}
+        started=time.perf_counter();request_id='';outcome='failed'
         try:
             async with asyncio.timeout(180), httpx.AsyncClient(timeout=httpx.Timeout(180,connect=10),trust_env=False,follow_redirects=False,transport=httpx.AsyncHTTPTransport(retries=0)) as client:
                 async with client.stream('POST',config.base_url+'/v1/images/generations?sort=success_rate',
                     headers={'Authorization':'Bearer '+config.key,'Content-Type':'application/json'},json=body) as response:
                     request_id=response.headers.get('x-request-id','')
                     record_http(response.status_code,request_id if re.fullmatch(r'[a-zA-Z0-9_-]{1,100}',request_id) and not re.search('sk-|secret|token|key',request_id,re.I) else '')
+                    elapsed('provider_headers',started,request_id,str(response.status_code));reading=time.perf_counter()
                     if response.status_code!=200:raise IllustrationError('ILLUSTRATION_PROVIDER_REJECTED','配图供应商未成功返回；不自动重试。')
                     raw=bytearray()
                     async for chunk in response.aiter_bytes():
                         raw.extend(chunk)
                         if len(raw)>12*1024*1024:raise IllustrationError('ILLUSTRATION_IMAGE_INVALID','配图响应超过大小上限。')
-            value=json.loads(raw);data=value.get('data')
+                    elapsed('provider_response_body',reading,request_id)
+            decoding=time.perf_counter();value=await asyncio.to_thread(json.loads,raw);data=value.get('data')
             if not isinstance(data,list) or len(data)!=1 or not isinstance(data[0],dict):raise ValueError()
             picture=data[0]
             if bool(picture.get('b64_json'))==bool(picture.get('url')):raise ValueError()
             if picture.get('b64_json'):
-                content=base64.b64decode(picture['b64_json'],validate=True);format_used='b64_json'
+                content=await asyncio.to_thread(base64.b64decode,picture['b64_json'],validate=True);format_used='b64_json'
+                elapsed('response_decode',decoding,request_id)
             else:
                 if not isinstance(picture['url'],str):raise ValueError()
+                downloading=time.perf_counter()
                 content=await asyncio.to_thread(download_vetted_image,picture['url'],config.asset_hosts,max_bytes=MAX_ORIGINAL_IMAGE);format_used='url'
-            return content,{**validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE),'response_format':format_used,'requested_watermark':False}
+                elapsed('asset_download_verify',downloading,request_id)
+            verifying=time.perf_counter();metadata=await asyncio.to_thread(validated_image,content,max_bytes=MAX_ORIGINAL_IMAGE)
+            elapsed('provider_image_verify',verifying,request_id);outcome='ok'
+            return content,{**metadata,'response_format':format_used,'requested_watermark':False}
         except IllustrationError:raise
         except (httpx.TransportError,TimeoutError) as error:
             error_type=type(error).__name__
@@ -181,3 +191,4 @@ class IllustrationProvider:
             raise IllustrationError('ILLUSTRATION_PROVIDER_UNKNOWN','配图网络或结果未确认，保留本次预留，不自动重试。',
                                     {'failure_phase':phase,'error_type':error_type}) from None
         except Exception:raise IllustrationError('ILLUSTRATION_PROVIDER_UNKNOWN','配图结果未确认，保留本次预留，不自动重试。') from None
+        finally:elapsed('provider_total',started,request_id,outcome)

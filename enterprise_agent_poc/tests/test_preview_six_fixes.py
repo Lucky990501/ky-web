@@ -92,7 +92,8 @@ def test_preview_navigation_parallel_and_production_branch_retained():
     source=(Path(__file__).parents[1]/'app/static/workbench.js').read_text(encoding='utf-8')
     target=source[source.index('async function agentWorkspaceV2'):source.index('async function submitAgentTaskV2')]
     assert "window.WORKBENCH_PREVIEW_BASE==='/preview'" in target
-    assert 'Promise.all([' in target and 'textarea disabled' in target
+    import re
+    assert 'Promise.all([' in target and re.search(r'<textarea[^>]*\bdisabled',target)
     assert "principalIsCurrent(owner)" in target and 'selectedTask.id!==selectedTaskId' in target
 
 

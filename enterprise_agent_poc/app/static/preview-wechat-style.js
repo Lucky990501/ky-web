@@ -23,6 +23,12 @@
       throw Error('ARTICLE_BODY_UNCONFIRMED');
     root.querySelectorAll('article,section,div').forEach(node=>node.setAttribute('style',body));
     for(const [tag,style] of Object.entries(styles))root.querySelectorAll(tag).forEach(node=>node.setAttribute('style',style));
+    root.querySelectorAll('p strong,p b').forEach(node=>{
+      if(!node.closest('h1,h2,h3,h4,h5,h6,figcaption')){
+        node.setAttribute('style','color:#FFCA00;font-weight:700');
+        node.querySelectorAll('span,em,i,u,s,code').forEach(child=>{child.style.color='#FFCA00';child.style.fontWeight='700';});
+      }
+    });
     root.querySelectorAll('h2').forEach((node,index)=>{
       const first=node.firstElementChild;
       if(first?.tagName==='SPAN'&&/^\d{2}$/.test(first.textContent)&&first.nextElementSibling?.tagName==='BR'&&first.style.color==='rgb(255, 202, 0)'){first.setAttribute('style',number);return;}

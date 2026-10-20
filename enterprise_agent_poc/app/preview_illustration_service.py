@@ -22,6 +22,7 @@ from app.preview_illustration_html import ArticleTree,full_document
 from app.preview_illustration_provider import IllustrationConfig,IllustrationProvider,IllustrationError,MODEL,private_file,validated_image,word_image_copy,MAX_ORIGINAL_IMAGE,WECHAT_DEFAULT_SIZE,ILLUSTRATION_RATIO_SIZES
 from app.preview_article_references import clean_text
 from app.storage import storage_provider
+from app.preview_illustration_timing import elapsed
 
 PREFIX='/api/v1/preview/illustrations'
 MAX_CONCURRENT_ILLUSTRATIONS=4
@@ -514,17 +515,28 @@ class PreviewIllustrationService:
             async def one(index,item):
                 # Tenant slot first: a busy tenant must not occupy all global
                 # permits while waiting for its own per-tenant limit.
+                waiting=time.perf_counter()
                 async with tenant_slots:
+                    elapsed('tenant_permit_wait',waiting,identifier);waiting=time.perf_counter()
                     async with self.generation_slots:
+                        elapsed('global_permit_wait',waiting,identifier)
+                        working=time.perf_counter()
                         try:await self.generate_one(actor,identifier,row,payload,index,item)
-                        except Exception as error:return index,error
+                        except Exception as error:
+                            elapsed('image_pipeline',working,identifier,error.code if isinstance(error,IllustrationError) else type(error).__name__)
+                            return index,error
+                        else:elapsed('image_pipeline',working,identifier)
             indices=(payload.get('recovery') or {}).get('indices',range(len(payload['items'])))
             results=await asyncio.gather(*(one(i,payload['items'][i]) for i in indices))
             errors=[r for r in results if r is not None]
             if errors:
                 payload['item_errors']={str(i):error.code if isinstance(error,IllustrationError) else 'ILLUSTRATION_SAVE_OR_EXPORT_FAILED' for i,error in errors}
                 raise errors[0][1]
-            await asyncio.to_thread(self.finish_export,actor,identifier)
+            exporting=time.perf_counter()
+            try:await asyncio.to_thread(self.finish_export,actor,identifier)
+            except Exception:
+                elapsed('final_document_export',exporting,identifier,'failed');raise
+            else:elapsed('final_document_export',exporting,identifier)
         except Exception as error:
             code=error.code if isinstance(error,IllustrationError) else 'ILLUSTRATION_SAVE_OR_EXPORT_FAILED'
             if isinstance(error,IllustrationError) and error.safe_details:payload['safe_diagnostic']=error.safe_details
@@ -549,7 +561,8 @@ class PreviewIllustrationService:
         else:
             size=None
             content,provider_metadata=await self.provider.generate(item['prompt'],record_http)
-        metadata=validated_image(content,max_bytes=MAX_ORIGINAL_IMAGE)
+        verifying=time.perf_counter();metadata=await asyncio.to_thread(validated_image,content,max_bytes=MAX_ORIGINAL_IMAGE)
+        elapsed('service_image_verify',verifying,request['id'])
         if size:
             width,height=map(int,size.split('x'))
             metadata.update(requested_size=size,dimension_match=metadata['width']==width and metadata['height']==height)
@@ -557,9 +570,9 @@ class PreviewIllustrationService:
         if provider_metadata.get('requested_watermark') is False:metadata['requested_watermark']=False
         asset_id=uuid4().hex;filename=asset_id+metadata['extension']
         key=f'brand-assets/{actor.tenant_id}/activity-plan-images/{filename}'
-        self.storage.put(key,content,metadata['mime_type'])
-        if hashlib.sha256(self.storage.get(key)).hexdigest()!=metadata['sha256']:
-            raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','配图存储校验失败，保留费用记录，不重试生图。')
+        storing=time.perf_counter()
+        await asyncio.to_thread(self.store_verified_image,key,content,metadata)
+        elapsed('original_storage_verify',storing,request['id'])
         asset={**metadata,'id':asset_id,'position':item['position'],'label':item['label'],
                'filename':filename,'storage_key':key,'url':PREFIX+'/assets/'+asset_id}
         if item.get('role')=='cover':asset['role']='cover'
@@ -567,13 +580,19 @@ class PreviewIllustrationService:
         # fails. Status stays attempted, never presented as completed.
         with self.db() as conn:conn.execute('update illustration_requests set asset_json=? where id=?',(canonical(asset),request['id']))
         if payload['kind']=='activity':
-            word_bytes,word_meta=word_image_copy(content)
+            converting=time.perf_counter();word_bytes,word_meta=await asyncio.to_thread(word_image_copy,content)
             word_key=key if word_bytes==content else f'brand-assets/{actor.tenant_id}/activity-plan-images/{uuid4().hex}'+word_meta['extension']
-            if word_key!=key:self.storage.put(word_key,word_bytes,word_meta['mime_type'])
-            if hashlib.sha256(self.storage.get(word_key)).hexdigest()!=word_meta['sha256']:
-                raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','Word配图副本回读校验失败；不重试生图。')
+            await asyncio.to_thread(self.store_verified_image,word_key,word_bytes,word_meta,word_key!=key)
+            elapsed('word_image_copy_storage',converting,request['id'])
             asset.update(word_storage_key=word_key,word_variant=word_meta)
         with self.db() as conn:conn.execute("update illustration_requests set status='saved',asset_json=? where id=?",(canonical(asset),request['id']))
+
+    def store_verified_image(self,key,content,metadata,write=True):
+        # Called only while holding existing global + tenant generation permits.
+        # Storage is thread-safe; no SQLite connection crosses a thread boundary.
+        if write:self.storage.put(key,content,metadata['mime_type'])
+        if hashlib.sha256(self.storage.get(key)).hexdigest()!=metadata['sha256']:
+            raise IllustrationError('ILLUSTRATION_STORAGE_FAILED','配图存储回读校验失败；保留预留，不重试生图。')
 
     def finish_export(self,actor,identifier):
         row=self.row(actor,identifier);payload=json.loads(row['payload']);assets=self.assets(identifier)
