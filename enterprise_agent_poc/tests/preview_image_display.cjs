@@ -107,7 +107,7 @@ const p50=a=>[...a].sort((a,b)=>a-b)[Math.floor(a.length/2)];
       const card=workbench.split('\n').find(s=>s.startsWith('const image = '));
       const href=await page.evaluate(({display,card,url})=>{
        const create=new Function('escapeHtml','storageUrl','icon',display+'\n'+card+'\nreturn image;')(s=>String(s),()=>workbenchPreviewUrl(url),()=> '');
-       const host=document.createElement('div');host.id='fixture-result-card';host.innerHTML=create({id:'12345678-1234-4234-8234-123456789abc',storage_key:'FIXTURE'},'FIXTURE 高清图');document.querySelector('#main').append(host);host.scrollIntoView();return host.querySelector('a').href;
+       const host=document.createElement('div');host.id='fixture-result-card';host.innerHTML=create({id:'task:12345678-1234-4234-8234-123456789abc:generation:1',storage_key:'FIXTURE'},'FIXTURE 高清图');document.querySelector('#main').append(host);host.scrollIntoView();return host.querySelector('a').href;
       },{display,card,url:source(ids[0])});
       await page.waitForFunction(()=>document.querySelector('#fixture-result-card img')?.naturalWidth===720);
       const download=await context.request.get(href);assert.equal(download.status(),200);assert.deepEqual(await download.body(),original);

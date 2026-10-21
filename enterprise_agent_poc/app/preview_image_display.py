@@ -19,7 +19,7 @@ class PreviewImageDisplay:
         if not actor.tenant_id.startswith('preview-'):raise PermissionError()
         if kind=='illustrations':
             content,asset=self.illustrations.asset(actor,identifier)
-        elif kind=='generations' and re.fullmatch('[a-f0-9-]{36}',identifier):
+        elif kind=='generations' and re.fullmatch(r'(?:[a-f0-9-]{36}|task:[a-f0-9-]{36}:generation(?::[0-9]{1,3})?)',identifier):
             with self.main.store.connection() as c:
                 row=c.execute('select storage_key from generations where id=? and tenant_id=? and user_id=? and deleted_at is null',
                               (identifier,actor.tenant_id,actor.user_id)).fetchone()
@@ -29,7 +29,8 @@ class PreviewImageDisplay:
         # Authorization and original integrity are checked BEFORE derived-cache lookup.
         digest=hashlib.sha256(content).hexdigest()
         scope=hashlib.sha256((actor.tenant_id+':'+actor.user_id).encode()).hexdigest()
-        path=self.root/scope/(kind+'-'+identifier+'-'+digest+'.webp')
+        resource=hashlib.sha256(identifier.encode()).hexdigest()
+        path=self.root/scope/(kind+'-'+resource+'-'+digest+'.webp')
         if path.is_file():return path.read_bytes()
         if len(content)>16*1024*1024:raise ValueError('Image exceeds display decoding limit')
         with Image.open(io.BytesIO(content)) as source:

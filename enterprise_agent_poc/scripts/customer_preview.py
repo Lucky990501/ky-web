@@ -532,7 +532,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
             if path.startswith('/api/v1/preview/image-display/'):
-                match=re.fullmatch(r'/api/v1/preview/image-display/(illustrations|generations)/([a-f0-9-]{32,36})',path)
+                match=re.fullmatch(r'/api/v1/preview/image-display/(illustrations|generations)/([a-z0-9:_-]{1,100})',path)
                 if not match or scope['method']!='GET':return await Response(status_code=404)(scope,receive,with_cookie)
                 try:
                     actor=main.current_user(token)

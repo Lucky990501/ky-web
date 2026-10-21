@@ -57,10 +57,11 @@ def test_tampered_original_rejected_even_when_thumbnail_exists(saved):
     with pytest.raises(IllustrationError):display.render(actors[0],'illustrations',asset['id'])
 
 
-def test_concurrent_read_only_generation_thumbnail_and_deleted_access(saved):
+@pytest.mark.parametrize('style',['uuid','task','indexed_task'])
+def test_concurrent_read_only_generation_thumbnail_and_deleted_access(saved,style):
     service,actors,display,asset,plan,raw,*_=saved;actor=actors[0]
     task=service.main.product_store.create_task(actor.tenant_id,actor.user_id,'image-agent','FIXTURE existing saved result',None)
-    gid=str(uuid4())
+    gid=str(uuid4()) if style=='uuid' else f"task:{task['id']}:generation"+(':1' if style=='indexed_task' else '')
     with service.main.store.connection() as c:c.execute('insert into generations(id,tenant_id,user_id,conversation_id,task_id,storage_key,mime_type,width,height) values(?,?,?,?,?,?,?,?,?)',(gid,actor.tenant_id,actor.user_id,task['conversation_id'] or 'fixture',task['id'],asset['storage_key'],'image/png',1600,1200))
     with ThreadPoolExecutor(max_workers=2) as pool:results=list(pool.map(lambda _:display.render(actor,'generations',gid),range(2)))
     assert results[0]==results[1] and service.storage.get(asset['storage_key'])==raw
