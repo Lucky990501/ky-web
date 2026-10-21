@@ -13,11 +13,11 @@ from uuid import uuid4
 import httpx
 from PIL import Image
 from scripts.customer_preview import create_preview
-from app.auth import UserPrincipal
-from app.storage import storage_provider
 root=Path(sys.argv[1])/'customer-ai-preview-data'
 app=create_preview(root,credentials={},pricing={},local_http=True)
 from app import main
+from app.auth import UserPrincipal
+from app.storage import storage_provider
 def raster(color):
  b=io.BytesIO();Image.new('RGB',(180,120),color).save(b,'PNG');return b.getvalue()
 async def run():
