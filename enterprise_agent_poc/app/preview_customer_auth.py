@@ -28,6 +28,11 @@ BINDING_SCHEMA='''CREATE TABLE IF NOT EXISTS preview_customer_bindings(
  source_tenant_id TEXT NOT NULL,source_user_id TEXT NOT NULL,
  initial_password_pending INTEGER NOT NULL,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)'''
+SHARED_SCHEMA='''CREATE TABLE IF NOT EXISTS preview_customer_shared_identity(
+ operation_id TEXT PRIMARY KEY,credential_user_id TEXT NOT NULL UNIQUE,
+ tenant_id TEXT NOT NULL,target_user_id TEXT NOT NULL,
+ enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)'''
 
 
 class PreviewCustomerAuth:
@@ -35,7 +40,7 @@ class PreviewCustomerAuth:
         self.main=main;self.path=Path(root)/'preview.sqlite';self.secure=not local_http
         self.attempts=defaultdict(deque)
         self.dummy_hash=hash_password(secrets.token_urlsafe(24))
-        with self.db() as c:c.execute(SCHEMA);c.execute(BINDING_SCHEMA)
+        with self.db() as c:c.execute(SCHEMA);c.execute(BINDING_SCHEMA);c.execute(SHARED_SCHEMA)
 
     @contextmanager
     def db(self):
@@ -64,6 +69,31 @@ class PreviewCustomerAuth:
     def issue(self,user,setup=False):
         return self.main.sessions.issue(UserPrincipal(user['id'],user['tenant_id'],user['role'],
             ('setup:' if setup else '')+self.main.sessions.credential_version(user['password_hash'])),lifetime_seconds=600 if setup else SESSION_SECONDS)
+
+    def business_token(self,token):
+        """Preview-only, explicit same-account grant; authenticate before resolving.
+
+        The browser keeps its own password-bound login cookie. Every business
+        request revalidates the persistent grant and target, then uses a short
+        internal token for the exact Owner user. Never move historical records,
+        change either password, or expose this mechanism through an HTTP route.
+        Revoke by setting enabled=0; never silently fall back to member access.
+        """
+        principal=self.main.current_user(token)
+        with self.db() as c:
+            grant=c.execute('select * from preview_customer_shared_identity where credential_user_id=?',
+                            (principal.user_id,)).fetchone()
+            if not grant:return token
+            binding=c.execute('select * from preview_customer_bindings where user_id=?',(principal.user_id,)).fetchone()
+            target=c.execute('select * from users where id=? and tenant_id=?',
+                             (grant['target_user_id'],grant['tenant_id'])).fetchone()
+            if (not grant['enabled'] or not binding or binding['initial_password_pending']
+                or binding['tenant_id']!=grant['tenant_id'] or principal.tenant_id!=grant['tenant_id']
+                or not grant['tenant_id'].startswith('preview-') or not target
+                or target['account_status']!='enabled' or target['role']!='enterprise_admin'):
+                raise PermissionError('Preview shared identity unavailable')
+        return self.main.sessions.issue(UserPrincipal(target['id'],target['tenant_id'],target['role'],
+            self.main.sessions.credential_version(target['password_hash'])),lifetime_seconds=60)
 
     def cookie(self,response,token,setup=False):
         response.set_cookie(SETUP_COOKIE if setup else COOKIE,token,max_age=600 if setup else SESSION_SECONDS,
@@ -223,3 +253,35 @@ def bind_existing_customer(root,*,operation_id,source_operation_id,target_tenant
     return {'tenant_id':target_tenant_id,'user_id':user_id,'account':source['account'],'role':'member',
             'source_tenant_id':source['tenant_id'],'source_user_id':source['user_id'],
             'created':created,'credits':credits,'password_changed':False}
+
+
+def share_existing_owner_identity(root,*,operation_id,binding_operation_id,target_tenant_id,owner_user_id):
+    """Operator-only grant, after explicit Owner consent to ALL account history
+    and the same editing/deletion permissions. Keeps customer credentials and
+    every prior identity/history row intact. Does not grant Production access.
+    """
+    root=Path(root).resolve();path=root/'preview.sqlite'
+    if root.name!='customer-ai-preview-data' or not path.is_file() or not target_tenant_id.startswith('preview-'):
+        raise PermissionError('Independent Preview required')
+    if not all(re.fullmatch(r'[a-zA-Z0-9_-]{1,100}',v) for v in [operation_id,binding_operation_id,owner_user_id]):
+        raise ValueError('Invalid shared identity contract')
+    with sqlite3.connect(path,timeout=10) as c:
+        c.row_factory=sqlite3.Row;c.execute('BEGIN IMMEDIATE');c.execute(SHARED_SCHEMA)
+        binding=c.execute('select * from preview_customer_bindings where operation_id=?',(binding_operation_id,)).fetchone()
+        owner=c.execute("select id from users where id=? and tenant_id=? and role='enterprise_admin' and account_status='enabled'",
+                        (owner_user_id,target_tenant_id)).fetchone()
+        if not binding or not owner or binding['tenant_id']!=target_tenant_id or binding['initial_password_pending']:
+            raise PermissionError('Verified existing credentials and Owner required')
+        credential=c.execute("select id from users where id=? and tenant_id=? and account_status='enabled'",
+                             (binding['user_id'],target_tenant_id)).fetchone()
+        if not credential or credential['id']==owner_user_id:raise PermissionError('Separate login credentials required')
+        prior=c.execute('select * from preview_customer_shared_identity where operation_id=?',(operation_id,)).fetchone()
+        if prior:
+            if (prior['credential_user_id']!=credential['id'] or prior['target_user_id']!=owner_user_id
+                or prior['tenant_id']!=target_tenant_id or not prior['enabled']):
+                raise PermissionError('Shared identity contract changed or revoked')
+        else:
+            c.execute('insert into preview_customer_shared_identity(operation_id,credential_user_id,tenant_id,target_user_id,enabled) values(?,?,?,?,1)',
+                      (operation_id,credential['id'],target_tenant_id,owner_user_id))
+    return {'tenant_id':target_tenant_id,'user_id':owner_user_id,'credential_user_id':credential['id'],
+            'account':binding['account'],'created':not bool(prior),'password_changed':False}

@@ -505,7 +505,9 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             try: cookie.load(dict(scope["headers"]).get(b"cookie", b"").decode())
             except Exception: pass
             token = cookie[COOKIE].value if COOKIE in cookie else ""
+            browser_token = token
             try:
+                token = customer_auth.business_token(token)
                 principal = main.current_user(token)
                 if not principal.tenant_id.startswith("preview-"): raise PermissionError()
             except Exception:
@@ -513,7 +515,9 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     result=(JSONResponse({'error_code':'PREVIEW_LOGIN_REQUIRED','user_message':'请登录固定企业账号。','login_url':BASE+'/login'},401)
                             if path.startswith('/api/') else Response(status_code=303,headers={'location':BASE+'/login'}))
                     return await result(scope,receive,send)
-                try: token = new_session()
+                try:
+                    token = new_session()
+                    browser_token = token
                 except PermissionError as exc: return await JSONResponse({"user_message": str(exc)}, 429)(scope, receive, send)
             headers.append((b"cookie", ("workbench_session=" + token).encode()))
             scope["headers"] = headers
@@ -522,7 +526,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     # Shared handlers must never overwrite/delete Production's cookie.
                     message['headers']=[(k,v) for k,v in message.get('headers',[])
                                         if not (k.lower()==b'set-cookie' and v.lower().startswith(b'workbench_session='))]
-                    message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
+                    message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + browser_token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
             if path.startswith('/api/v1/preview/illustrations'):
