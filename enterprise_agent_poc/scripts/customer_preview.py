@@ -597,9 +597,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     if not isinstance(payload, dict): raise ValueError('图片请求格式无效。')
                     if path.endswith('/plan'):
                         image_executor.credit_preflight(principal)
-                        from app.preview_image_parameters import preview_plan, quality_value
-                        quality_value(payload.get('quality'))
-                        planned=preview_plan(payload.get('message',''),size=payload.get('size'))
+                        prepared=image_executor.prepare(principal,payload)
+                        planned=prepared['output_plan']
                         count = len(planned)
                         budget.check_capacity('image', count, Decimal(str(prices['image_request_max_cny'])))
                         context_fee = Decimal('0')
@@ -609,7 +608,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                             if has_knowledge is not False:context_fee = Decimal(str(prices['embedding_request_max_cny']))
                         return await JSONResponse({'count':count,'max_reserved_cny':str(Decimal(str(prices['image_request_max_cny'])) * count),
                             'knowledge_requests':int(context_fee>0),'knowledge_max_reserved_cny':str(context_fee),
-                            'size':planned[0]['size'],'quality':payload.get('quality')}, 200)(scope, receive, with_cookie)
+                            'size':planned[0]['size'],'quality':'high','plan_digest':prepared['plan_digest'],
+                            'action':prepared['action'],'note':prepared['note']}, 200)(scope, receive, with_cookie)
                     async with submission_lock:
                         task = image_executor.submit(principal, payload)
                         image_executor.schedule(task)

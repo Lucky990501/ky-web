@@ -37,7 +37,7 @@
         if(body.attachments)body.attachments=body.attachments.map(item=>({...item,role:items.find(x=>x.record?.id===item.id)?.role||'subject'}));
         if(editGeneration)body.edit_generation_id=editGeneration.id;
         options={...options,body:JSON.stringify({...body,preview_image_confirmed:true,preview_image_request_id:imageConsent.id,use_enterprise_context:imageConsent.useContext,
-          ...(imageConsent.size?{size:imageConsent.size}:{}),...(imageConsent.quality?{quality:imageConsent.quality}:{})})};
+          preview_plan_digest:imageConsent.digest,quality:'high'})};
       }
       imageConsent=null;
     }
@@ -83,17 +83,7 @@
     const main=document.querySelector('#main');if(main?.dataset.agentId!=='image-agent'){editGeneration=null;return;}
     if(editGeneration&&editGeneration.context!==main._conversationContext)editGeneration=null;
     const form=main.querySelector('#composer');if(!form)return;
-    if(!form.querySelector('[data-preview-image-options]')){
-      const fields=document.createElement('fieldset');fields.dataset.previewImageOptions='true';fields.className='preview-image-options';
-      const legend=document.createElement('legend');legend.textContent='图片输出设置';fields.append(legend);
-      const label=document.createElement('label');label.textContent='图片比例';
-      const select=document.createElement('select');select.id='preview-image-size';
-      for(const [value,text] of [['2048x2048','1:1'],['3840x2160','16:9（横版）'],['2160x3840','9:16（竖版）']]){
-        const option=document.createElement('option');option.value=value;option.textContent=text;select.append(option);
-      }
-      label.append(select);fields.append(label);
-      form.prepend(fields);
-    }
+    form.querySelector('[data-preview-image-options]')?.remove();
     let notice=main.querySelector('[data-preview-image-notice]');
     if(!notice){notice=document.createElement('p');notice.dataset.previewImageNotice='true';notice.className='composer-run-feedback';notice.setAttribute('role','status');form.before(notice);}
     notice.id=enabled?'preview-image-direct-notice':'preview-image-unavailable';
@@ -140,11 +130,11 @@
       confirming=true;
       try{
         const useContext=true;
-        const size=main.querySelector('#preview-image-size')?.value||'2048x2048',quality='high';
-        const response=await fetchOriginal('/preview/api/v1/agents/image-agent/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:prompt,use_enterprise_context:useContext,...(size?{size}:{}),...(quality?{quality}:{})})}),plan=await response.json();
-        if(!response.ok)throw Error(plan.user_message||'图片计划校验失败，未提交生成。');
-        if(!main.isConnected||main._conversationContext!==context||document.querySelector('#prompt')?.value.trim()!==prompt||size!==main.querySelector('#preview-image-size')?.value||references!==referenceKey()||parent!==editGeneration?.id)return;
-        imageConsent={prompt,id:crypto.randomUUID(),useContext,size,quality};confirmedSubmit=true;event.target.requestSubmit();
+        const attachments=(main._chatImage?.items||[]).map(x=>({type:'image',id:x.record.id,role:x.role||'subject'}));
+        const response=await fetchOriginal('/preview/api/v1/agents/image-agent/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:prompt,conversation_id:context?.conversationId||null,attachments,use_enterprise_context:useContext,quality:'high',...(parent?{edit_generation_id:parent}:{})})}),plan=await response.json();
+        if(!response.ok)throw Error(plan.user_message||'暂时无法开始，请检查需求和当前项目。');
+        if(!main.isConnected||main._conversationContext!==context||document.querySelector('#prompt')?.value.trim()!==prompt||references!==referenceKey()||parent!==editGeneration?.id)return;
+        imageConsent={prompt,id:crypto.randomUUID(),useContext,digest:plan.plan_digest};confirmedSubmit=true;event.target.requestSubmit();
       }catch(error){
         let feedback=main.querySelector('#preview-image-error');
         if(!feedback){feedback=document.createElement('p');feedback.id='preview-image-error';feedback.className='image-delivery-warning';feedback.setAttribute('role','alert');feedback.tabIndex=-1;event.target.before(feedback);}

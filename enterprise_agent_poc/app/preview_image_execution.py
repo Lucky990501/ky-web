@@ -16,10 +16,10 @@ import sqlite3
 import time
 from uuid import UUID, uuid4
 
-from app.image_request_contract import image_plan,ImageRequestError
+from app.image_request_contract import ImageRequestError
 from app.preview_budget import PreviewBudgetExceeded
 from app.security import RuntimePrincipal
-from app.preview_image_parameters import PreviewReferenceBindings, preview_plan, quality_value, reference_limit, MODEL, SIZES, QUALITIES, SPEC_ID
+from app.preview_image_parameters import PreviewReferenceBindings, quality_value, reference_limit, MODEL, SPEC_ID
 
 
 MODE = 'preview_direct_image_business_v1'
@@ -62,6 +62,7 @@ class PreviewImageExecution:
                          and p.get('task_id') == task_id), {})
 
     def capability(self):
+        from app.preview_image_intent import AUTO_SIZES
         quota = self.budget.summary()['image']
         enabled = self.authorized() and quota['requests'] < quota['max_requests']
         return {'enabled': enabled, 'execution_mode': MODE,
@@ -69,7 +70,7 @@ class PreviewImageExecution:
                 'remaining_requests': max(0, quota['max_requests'] - quota['requests']),
                 'max_outputs': 5, 'max_reference_images': reference_limit() if self.main.settings.image_model_id==MODEL else 1,
                 'multi_reference_status':'BLOCKED_CURRENT_WIRE_HTTP_400' if reference_limit()==1 else 'OWNER_CONFIRMED_MULTIPART_NOT_PROVIDER_VERIFIED',
-                'sizes':list(SIZES), 'qualities':list(QUALITIES), 'parameter_spec':SPEC_ID,
+                'sizes':list(AUTO_SIZES.values()), 'qualities':['high'], 'parameter_spec':SPEC_ID,
                 'native_high_resolution': 'OWNER_SPECIFIED_NOT_PROVIDER_VERIFIED',
                 'user_message': ('独立体验图片生成：每任务1～5张，参考图编辑及版本保留；不自动重试。'
                                  if enabled else '图片生成暂不可用：未取得独立执行授权或体验额度已用完。')}
@@ -96,16 +97,47 @@ class PreviewImageExecution:
             account=conn.execute('select balance from credit_accounts where tenant_id=?',(principal.tenant_id,)).fetchone()
         if not account or account['balance']<get_agent('image-agent').credit_cost:raise ValueError('insufficient_credit')
 
+    def prepare(self, principal, payload):
+        """The same read-only, owner-checked plan for browser and submission."""
+        from app.preview_image_intent import prepare_context, digest
+        prompt=payload.get('message')
+        if not isinstance(prompt,str) or not 1 <= len(prompt.strip()) <= 4000:
+            raise ValueError('请输入1～4000字的图片需求。')
+        quality_value(payload.get('quality'))
+        self.credit_preflight(principal)
+        attachments=payload.get('attachments') or []
+        if not isinstance(attachments,list) or len(attachments)>reference_limit():
+            raise ImageRequestError('IMAGE_REFERENCE_INVALID','参考图不合法。')
+        ids=[]
+        for item in attachments:
+            if not isinstance(item,dict) or set(item)-{'type','id','role'} or item.get('type')!='image' or item.get('role','subject') not in {'subject','style','background','composition','brand','reference','front','back'}:
+                raise ImageRequestError('IMAGE_REFERENCE_INVALID','参考图不合法。')
+            record=self.main.product_store.chat_image_attachment(principal.tenant_id,principal.user_id,str(item.get('id','')))
+            if not record or record.get('task_id') or self.references.claimed(principal,record['id']):
+                raise ImageRequestError('IMAGE_REFERENCE_INVALID','参考图不合法。')
+            ids.append(record['id'])
+        if len(set(ids))!=len(ids):raise ImageRequestError('IMAGE_REFERENCE_INVALID','参考图不能重复。')
+        prepared=prepare_context(self,principal,payload)
+        if payload.get('edit_generation_id') and attachments:raise ImageRequestError('IMAGE_EDIT_BASE_CONFLICT','编辑基图冲突。')
+        plan=prepared['output_plan']
+        self.budget.check_capacity('image',len(plan),Decimal(str(self.pricing['image_request_max_cny'])))
+        prepared['plan_digest']=digest({**{k:prepared[k] for k in ('output_plan','source_task_id','recovery_root_task_id','root_output_indices')},
+            'parent':prepared['parent']['id'] if prepared['parent'] and not attachments else None,'references':attachments})
+        if payload.get('preview_plan_digest') and payload['preview_plan_digest'] != prepared['plan_digest']:
+            raise ImageRequestError('preview_image_context_changed','当前项目已更新，请重新提交。')
+        return prepared
+
     def submit(self, principal, payload):
         if not self.authorized() or not principal.tenant_id.startswith('preview-'):
             raise PermissionError('尚未取得Preview独立图片业务授权。')
-        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id', 'edit_generation_id', 'use_enterprise_context', 'size', 'quality'}:
+        if set(payload) - {'message', 'conversation_id', 'attachments', 'preview_image_confirmed', 'preview_image_request_id', 'preview_plan_digest', 'edit_generation_id', 'use_enterprise_context', 'size', 'quality'}:
             raise ValueError('图片执行身份及配置只能由服务端确定。')
         if not isinstance(payload.get('use_enterprise_context',False),bool):raise ValueError('知识使用选项无效。')
         if payload.get('preview_image_confirmed') is not True:
             raise PermissionError('请通过当前Preview图片页面提交生成需求。')
         request_id = str(UUID(str(payload.get('preview_image_request_id', ''))))
-        quality = quality_value(payload.get('quality'))
+        quality_value(payload.get('quality'))
+        quality = 'high'
         prompt = payload.get('message')
         if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000:
             raise ValueError('请输入1～4000字的图片需求。')
@@ -130,35 +162,14 @@ class PreviewImageExecution:
             if not record or record.get('task_id') or self.references.claimed(principal,record['id']):
                 raise ImageRequestError('IMAGE_REFERENCE_INVALID','参考图片无效。')
             primary_record = primary_record or record
-        parent_id = payload.get('edit_generation_id')
-        parent = None
-        if not parent_id and not attachments and payload.get('conversation_id') and re.search(
-                r'(?:标题|背景|人物|排版|比例).{0,12}(?:改|换|保持|不变)|(?:刚才|上一张|这张).{0,12}(?:改|换|修改|调整)|重新生成|再生成', prompt):
-            with self.main.store.connection() as conn:
-                saved = conn.execute('SELECT id FROM generations WHERE conversation_id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL LIMIT 1',
-                    (payload['conversation_id'], principal.tenant_id, principal.user_id)).fetchone()
-            if saved:
-                raise ImageRequestError('preview_edit_base_required','请先点击需要修改图片的“基于此图继续修改”，或上传参考图。没有把编辑请求偷偷改为文字生图，也没有调用图片服务。')
-        if parent_id:
-            if attachments:
-                raise ImageRequestError('IMAGE_EDIT_BASE_CONFLICT','编辑基图冲突。')
-            with self.main.store.connection() as conn:
-                row = conn.execute('SELECT * FROM generations WHERE id=? AND tenant_id=? AND user_id=? AND deleted_at IS NULL',
-                                   (parent_id, principal.tenant_id, principal.user_id)).fetchone()
-            if not row:
-                raise ImageRequestError('IMAGE_EDIT_BASE_MISSING','编辑基图不可用。')
-            parent = dict(row)
-            if parent.get('conversation_id') != payload.get('conversation_id'):
-                raise ImageRequestError('IMAGE_EDIT_BASE_CONFLICT','编辑基图不属于当前会话。')
-        from fractions import Fraction
-        source_ratio = '1:1'
-        source_record = parent or (primary_record if len(attachments)==1 else {})
-        if source_record and source_record.get('width') and source_record.get('height'):
-            fraction = Fraction(source_record['width'], source_record['height'])
-            candidate = f'{fraction.numerator}:{fraction.denominator}'
-            if candidate in {'1:1','9:16','16:9','4:5','3:2','2:3'}:
-                source_ratio = candidate
-        plan = preview_plan(prompt,source_ratio,payload.get('size'))
+        prepared = self.prepare(principal,payload)
+        plan = prepared['output_plan']
+        parent = prepared['parent']
+        if payload.get('edit_generation_id') and attachments:
+            raise ImageRequestError('IMAGE_EDIT_BASE_CONFLICT','编辑基图冲突。')
+        if attachments: parent=None
+        parent_id = parent['id'] if parent else None
+        source_ratio = plan[0]['aspect_ratio']
         if (quality or len(attachments)>1 or any(int(x)>1536 for x in plan[0]['size'].split('x'))) and self.main.settings.image_model_id!=MODEL:
             raise ValueError('新增图片参数仅适用于Owner已确认的模型。')
         from app.preview_task_admission import require_task_capacity
@@ -171,18 +182,20 @@ class PreviewImageExecution:
         if not self.main.product_store.agent_enabled(principal.tenant_id, 'image-agent'):
             raise PermissionError('图片智能体尚未为当前企业启用。')
         self.credit_preflight(principal)
-        if parent:
+        parent_role='style' if prepared['action']=='series' and not re.search(r'人物|主体|同一个人|那个人',prompt) else 'subject'
+        clone_sources=[{**parent,'role':parent_role}] if parent else prepared['clone_references'] if not attachments else []
+        for source_record in clone_sources:
             # An owner-checked immutable copy through the existing upload store;
             # no arbitrary URL/path, original Generation never overwritten.
             from app.storage import storage_provider
             from app.chat_image_uploads import validate_chat_image
-            source = storage_provider(self.main.settings).get(parent['storage_key'])
-            ext, mime, width, height = validate_chat_image(source, parent['mime_type'])
+            source = storage_provider(self.main.settings).get(source_record['storage_key'])
+            ext, mime, width, height = validate_chat_image(source, source_record['mime_type'])
             key = f'chat-uploads/{principal.tenant_id}/{uuid4().hex}{ext}'
             storage_provider(self.main.settings).put(key, source, mime)
             record = self.main.product_store.create_chat_image_attachment(principal.tenant_id, principal.user_id,
                 key, '编辑基图' + ext, mime, len(source), width, height)
-            attachments = [{'type': 'image', 'id': record['id'], 'role': 'subject'}]
+            attachments.append({'type': 'image', 'id': record['id'], 'role': source_record.get('role','subject')})
         task = self.main.product_store.create_task(principal.tenant_id, principal.user_id, 'image-agent', prompt,
             payload.get('conversation_id'), attachment_ids=[attachments[0]['id']] if attachments else [])
         self.budget.observe({'event': 'preview_image_submission', 'authorization_id': AUTHORIZATION_ID,
@@ -191,6 +204,7 @@ class PreviewImageExecution:
                              'references': attachments, 'edit_parent_generation_id': parent_id, 'requested_outputs': len(plan), 'aspect_ratio': source_ratio,
                              'use_enterprise_context':payload.get('use_enterprise_context',False),
                              'knowledge_context_available':has_knowledge,
+                             **{k:prepared[k] for k in ('output_plan','creative_brief','action','source_task_id','recovery_root_task_id','root_output_indices','note','plan_digest')},
                              'size':plan[0]['size'],'quality':quality,'parameter_spec':SPEC_ID})
         return task
 
@@ -293,11 +307,15 @@ class PreviewImageExecution:
             if products.cancellation_requested(tid, tenant):
                 raise asyncio.CancelledError()
             submission = self.submission(tid)
-            plan = preview_plan(task['input_text'],submission.get('aspect_ratio','1:1'),submission.get('size'))[0]
-            result = await self.call_image(task, plan)
+            from app.preview_image_intent import stored_plan
+            plans=stored_plan(submission,task)
+            result = await self.call_image(task, plans[0])
             artifacts = result['results']
-            if len(artifacts) > len(preview_plan(task['input_text'],submission.get('aspect_ratio','1:1'),submission.get('size'))):
+            failures=result.get('failures',[])
+            if len(artifacts)+len(failures) != len(plans):
                 raise ValueError('image_business_result_count_invalid')
+            indices=[a.get('index',0) for a in artifacts]+[f.get('index') for f in failures]
+            if sorted(indices)!=list(range(len(plans))):raise ValueError('image_business_result_indices_invalid')
             submission = self.submission(tid)
             trace['edit_parent_generation_id'] = submission.get('edit_parent_generation_id')
             trace['reference_images_submitted'] = submission.get('references', [])
@@ -316,6 +334,9 @@ class PreviewImageExecution:
                 with Image.open(io.BytesIO(content)) as picture:
                     artifact['width'], artifact['height'] = picture.size
             response = f'已生成{len(artifacts)}张图片，请使用下方图片卡片查看大图或下载。'
+            action_label={'edit':'修改版本（原版保留）','series':'同项目系列续作','recovery':'补齐缺失图片（已有结果保留）'}.get(submission.get('action'))
+            if action_label:response=action_label+'。\n'+response
+            if submission.get('note'):response+='\n'+submission['note']
             if result.get('failures'):
                 response += f"\n部分图片失败：{len(result['failures'])}张；已保留成功结果，没有自动重试。"
             if result.get('delivery', {}).get('status') == 'partial':
@@ -326,7 +347,9 @@ class PreviewImageExecution:
                     response += '\n企业知识来源：'+'、'.join(dict.fromkeys(item['filename'] for item in result['enterprise_context']['sources']))
             trace.update(mcp_calls=[{'server': 'platform', 'tool': 'image_generation', 'status': 'completed',
                                     'artifact': artifacts[0], 'artifacts': artifacts, 'execution_mode': MODE}],
-                         image_delivery=result.get('delivery'), runtime_completed=True, runtime_status='completed',
+                         image_delivery=result.get('delivery'), image_failures=failures,
+                         image_continuation={k:submission.get(k) for k in ('action','source_task_id','recovery_root_task_id','root_output_indices')},
+                         runtime_completed=True, runtime_status='completed',
                          required_tool_calls_completed=True, final_response_received=True,
                          final_result=response, final_response_length=len(response), artifact_available=True)
             main.store.finish_run_trace(run_id, 'runtime_completed', trace)

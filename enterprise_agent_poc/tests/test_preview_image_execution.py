@@ -194,8 +194,9 @@ def test_followup_edit_cannot_silently_become_text_generation(image_fixture):
     executor,actors,calls=image_fixture;actor=actors[0]
     first=executor.submit(actor,payload());asyncio.run(executor.execute(first))
     done=executor.main.product_store.task(first['id'],actor.tenant_id,actor.user_id)
-    with pytest.raises(ValueError,match='基于此图继续修改'):
-        executor.submit(actor,payload(message='人物不要变，背景换成蓝色',conversation_id=done['conversation_id']))
+    next_task=executor.submit(actor,payload(message='人物不要变，背景换成蓝色',conversation_id=done['conversation_id']))
+    assert executor.submission(next_task['id'])['edit_parent_generation_id']==done['generations'][0]['id']
+    assert len(executor.references.resolve(next_task))==1
     assert len(calls)==1 and executor.budget.summary()['image']['requests']==1
 
 
@@ -204,7 +205,7 @@ def test_multi_output_all_results_and_full_budget_preflight(image_fixture,count)
     executor,actors,calls=image_fixture;original=executor.call_image
     async def batch(task,plan):
         values=[await original(task,plan) for _ in range(count)]
-        return {'results':[v['results'][0] for v in values], 'delivery':{'status':'completed','requested':count,'generated':count,'failed':0}}
+        return {'results':[{**v['results'][0],'index':i} for i,v in enumerate(values)], 'delivery':{'status':'completed','requested':count,'generated':count,'failed':0}}
     executor.call_image=batch
     task=executor.submit(actors[0],payload(message=f'生成{count}张不同用途的图片，不要Logo'))
     asyncio.run(executor.execute(task));done=executor.main.product_store.task(task['id'],actors[0].tenant_id,actors[0].user_id)

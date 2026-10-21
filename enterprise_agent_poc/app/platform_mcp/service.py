@@ -216,7 +216,23 @@ class PlatformMCPService:
         if task and (task["tenant_id"] != principal.tenant_id or task["agent_id"] != "image-agent"):
             raise PermissionError("图片任务身份不匹配。")
         user_text = task["input_text"] if task else prompt
-        plan = image_plan(user_text, prompt, aspect_ratio, size, outputs,provider_sizes=provider_sizes)
+        canonical_submission = None
+        if bound_preview:
+            canonical_submission = next((s for s in PreviewReferenceBindings(ProductStore(self._store),PreviewBudget(ledger_root)).submissions()
+                if s.get('task_id')==task_id and s.get('tenant_id')==task['tenant_id'] and s.get('user_id')==task['user_id'] and s.get('output_plan')),None)
+        if canonical_submission:
+            from app.preview_image_intent import stored_plan
+            plan = stored_plan(canonical_submission,task)
+            if retry_of or outputs is not None or size != plan[0]['size'] or aspect_ratio != plan[0]['aspect_ratio'] or quality != 'high':
+                raise ValueError('preview_image_canonical_plan_mismatch')
+            # Only the existing owner-scoped context collector may append facts.
+            # Short follow-up text is never re-parsed as a new one-image request.
+            if not prompt.startswith(user_text):raise ValueError('preview_image_context_binding_mismatch')
+            appendix=prompt[len(user_text):]
+            if len(appendix)>16000:raise ValueError('preview_image_context_too_large')
+            plan=[{**item,'prompt':item['prompt']+appendix} for item in plan]
+        else:
+            plan = image_plan(user_text, prompt, aspect_ratio, size, outputs,provider_sizes=provider_sizes)
         preview = os.environ.get('CUSTOMER_PREVIEW_MODE') == 'true'
         if reference_role not in {'subject','style','background','composition','brand','reference','front','back'}:
             raise ValueError('参考图用途无效。')
@@ -285,7 +301,7 @@ class PlatformMCPService:
                         if len(attachments)>1:
                             item_prompt += '\n图片数组顺序与用途：'+json.dumps([{'index':i+1,'role':record.get('role','subject')} for i,record in enumerate(attachments)],ensure_ascii=False)+'。用途通过本提示说明，不代表供应商有独立角色控制参数。'
                         if reference_role == 'subject':
-                            item_prompt += '以原图人物为主体，保留五官、发型、服饰、姿势和辨识度；不要重新创造相似人物；只改变用户明确要求的区域。保持人物完整，避免不必要的裁切。'
+                            item_prompt += '以原图主体为基础，保留用户未要求改变的五官、发型、服饰、版式和辨识度；人物姿态等以本轮明确修改要求为准。不要重新创造无关主体；只改变用户明确要求的区域。保持人物完整，避免不必要的裁切。'
                         item_prompt += '模型不能保证局部编辑绝对不变，忠实执行用户保持不变的约束。'
                 if logo_required:
                     item_prompt += "\n企业Logo由平台在右上角叠加原始资产；请在该处留白，不要绘制、猜测或重设计任何Logo。"

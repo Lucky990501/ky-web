@@ -4,6 +4,15 @@ from app.preview_budget import PreviewBudgetExceeded
 from app.preview_task_admission import PreviewTaskCapacity
 
 MESSAGES={
+ 'preview_image_count_ambiguous':'需求中给出了不同的总张数，请确认最终一共需要几张。',
+ 'preview_image_count_limit':'每次最多生成5张图片，请将超过5张的需求分批提交。',
+ 'preview_image_size_ambiguous':'需求中有互相矛盾的尺寸或比例，请保留最终要求。',
+ 'preview_image_context_missing':'请先在需要续作的图片项目中打开上一轮结果，再发送修改或补图要求。',
+ 'preview_image_context_busy':'当前项目仍在生成中，请等待本轮完成，避免重复生成和扣费。',
+ 'preview_image_context_long':'当前项目累计要求过长，请简要确认要保留的核心要求；没有提交新请求。',
+ 'preview_image_context_changed':'当前项目已有更新，请重新发送本轮要求；没有提交新请求。',
+ 'preview_image_outcome_unknown':'所选图片上次请求结果尚未确认，不能直接补发；请保留诊断ID核实，没有再次调用。',
+ 'preview_image_nothing_missing':'所选图片已生成或当前没有缺失项。如需不同效果，请明确提出再来一个新版本。',
  'PREVIEW_INSUFFICIENT_CREDIT':'当前体验企业的演示积分不足，未创建图片任务；请联系Owner补充演示积分。模型费用额度与积分独立。',
  'IMAGE_REFERENCE_INVALID':'参考图片不存在、已失效或已用于其他任务，请重新选择有权限的参考图片。',
  'IMAGE_EDIT_BASE_MISSING':'编辑基图不存在或无权访问，请在当前项目重新选择基图。',
