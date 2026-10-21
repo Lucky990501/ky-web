@@ -57,6 +57,7 @@
           figure=document.createElement('figure');figure.dataset.assetId=asset.id;
           const image=document.createElement('img'),caption=document.createElement('figcaption');
           image.alt=asset.label;image.loading=index<2?'eager':'lazy';image.decoding='async';image.width=asset.width;image.height=asset.height;
+          image.dataset.previewImageOriginal=window.workbenchPreviewUrl(asset.url);
           caption.textContent=asset.label;
           image.onerror=()=>{caption.textContent=asset.label+' · 图片暂不可用；未触发重新生图。';};
           if(window.WorkbenchPreviewImages)window.WorkbenchPreviewImages.bind(image,window.workbenchPreviewUrl('/api/v1/preview/image-display/illustrations/'+asset.id));

@@ -34,7 +34,7 @@
       if(version!==epoch)throw Error('IMAGE_SESSION_CHANGED');
       const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'error',signal:controller.signal});
       const type=(response.headers.get('content-type')||'').split(';')[0].trim();
-      if(!response.ok||!['image/png','image/jpeg','image/webp'].includes(type)||Number(response.headers.get('content-length'))>10*1024*1024){await response.body?.cancel();throw Error('IMAGE_INVALID');}
+      if(!response.ok||!['image/png','image/jpeg','image/webp'].includes(type)||Number(response.headers.get('content-length'))>10*1024*1024){await response.body?.cancel();const error=Error('IMAGE_INVALID');error.status=response.status;throw error;}
       const reader=response.body.getReader(),parts=[];let size=0;
       while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>10*1024*1024){await reader.cancel();throw Error('IMAGE_TOO_LARGE');}parts.push(value);}
       return decodeSlot(async()=>{
@@ -55,16 +55,51 @@
     }).finally(()=>{clearTimeout(timer);controllers.delete(controller);if(version===epoch)pending.delete(key);});
     pending.set(key,work);return work;
   }
-  const observed=new WeakSet(),bound=new Set();
+  const observed=new WeakSet(),bound=new Set(),fallbackBound=new WeakSet();
+  function state(node,value){
+    node.dataset.previewImageState=value;
+    const wrap=node.closest('.media-thumb')||node.parentElement;if(!wrap)return;
+    const loaded=value==='loaded',failed=value==='failed',loading=wrap.querySelector('.media-loading');
+    wrap.classList.toggle('media-failed',failed);wrap.classList.toggle('media-loaded',loaded);
+    wrap.setAttribute('aria-busy',String(!loaded&&!failed));node.hidden=failed;
+    if(loading)loading.hidden=loaded||failed;
+    if(!failed){wrap.querySelector('.media-error')?.remove();wrap.removeAttribute('aria-live');}
+    else{
+      if(!wrap.querySelector('.media-error')){const message=document.createElement('span');message.className='media-error';message.innerHTML='<b>图片加载失败</b><small>点击重新加载；原图下载入口保留</small>';wrap.append(message);}
+      wrap.setAttribute('aria-live','polite');
+    }
+  }
+  function original(node,source){
+    const candidate=safe(node.dataset.previewImageOriginal||node.closest('a[data-generation-link]')?.href||'');
+    if(candidate&&/\/preview\/api\/v1\/(?:storage\/generated\/|preview\/illustrations\/assets\/)/.test(candidate))return candidate;
+    return node.dataset.previewOriginalFallback==='true'&&safe(source)?safe(source):'';
+  }
+  function fallback(node,error){
+    const target=original(node,node.dataset.previewImageSource);
+    if(node.dataset.previewFallbackUsed==='true'||!target||[401,403].includes(error?.status))return false;
+    node.dataset.previewFallbackUsed='true';state(node,'loading-original');node.src=target;return true;
+  }
+  function bindGenerationFallback(node){
+    if(fallbackBound.has(node))return;fallbackBound.add(node);
+    node.addEventListener('load',()=>{if(node.naturalWidth)state(node,'loaded');});
+    node.addEventListener('error',()=>{
+      // No-src and delayed/decoding images have not failed a real load.
+      if(!node.getAttribute('src')||['waiting','decoding'].includes(node.dataset.previewImageState))return;
+      if(!fallback(node))state(node,'failed');
+    });
+    const wrap=node.closest('.media-thumb');
+    const retry=event=>{if(node.dataset.previewImageState!=='failed')return;event.preventDefault();event.stopImmediatePropagation();node.removeAttribute('data-preview-fallback-used');void load(node);};
+    wrap?.addEventListener('click',retry,{capture:true});
+    wrap?.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' ')retry(event);},{capture:true});
+    if(node.getAttribute('src')&&node.complete&&node.naturalWidth)state(node,'loaded');
+    else if(!node.getAttribute('src'))state(node,'waiting');
+  }
   async function load(node){
     const source=node.dataset.previewImageSource;let version=epoch;
-    try{if(!identity)await verifyIdentity();version=epoch;const owner=epoch,result=await raster(source);if(node.isConnected&&owner===epoch&&node.dataset.previewImageSource===source){if(node.src!==result.data)node.src=result.data;node.style.aspectRatio=result.width+'/'+result.height;}}
-    catch{if(node.isConnected&&version===epoch){
-      // The existing full-image viewer can display originals larger than the
-      // memory-cache decoder limit. Fall back ONLY to its unchanged, private,
-      // authenticated source, never to an external/arbitrary model URL.
-      if(node.dataset.previewOriginalFallback==='true'&&safe(source))node.src=source;
-      else node.dispatchEvent(new Event('error'));
+    state(node,'decoding');
+    try{if(!identity)await verifyIdentity();version=epoch;state(node,'decoding');const owner=epoch,result=await raster(source);if(node.isConnected&&owner===epoch&&node.dataset.previewImageSource===source){state(node,'loading');if(node.src!==result.data)node.src=result.data;else if(node.complete&&node.naturalWidth)state(node,'loaded');node.style.aspectRatio=result.width+'/'+result.height;}}
+    catch(error){if(node.isConnected&&version===epoch){
+      if(!fallback(node,error))state(node,'failed');
     }}
   }
   const lazy=new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting){lazy.unobserve(entry.target);void load(entry.target);}},{rootMargin:'400px'});
@@ -72,13 +107,14 @@
     if(!safe(source))return;
     if(node.dataset.previewImageSource===source&&observed.has(node))return;
     node.dataset.previewImageSource=source;observed.add(node);bound.add(node);node.decoding='async';
+    bindGenerationFallback(node);
     if(node.closest('#generation-viewer'))node.dataset.previewOriginalFallback='true';
     if(node.loading==='lazy')lazy.observe(node);else void load(node);
   }
   function enhance(){for(const node of document.querySelectorAll('img[data-preview-image-source]'))if(!observed.has(node))bind(node,node.dataset.previewImageSource);for(const node of bound)if(!node.isConnected){lazy.unobserve(node);bound.delete(node);}}
-  listeners.add(()=>{for(const node of bound)node.removeAttribute('src');});
+  listeners.add(()=>{for(const node of bound){node.removeAttribute('src');node.removeAttribute('data-preview-fallback-used');state(node,'waiting');}});
   new MutationObserver(enhance).observe(document.documentElement,{childList:true,subtree:true});
   addEventListener('pagehide',clear);
   addEventListener('pageshow',event=>{if(event.persisted)location.reload();});
-  window.WorkbenchPreviewImages=Object.freeze({raster,verifyIdentity,setIdentity,clear,bind,stats:()=>({entries:cache.size,bytes,epoch,pending:pending.size,hits,misses,lastClear}),onClear(fn){listeners.add(fn);return()=>listeners.delete(fn);}});
+  window.WorkbenchPreviewImages=Object.freeze({raster,verifyIdentity,setIdentity,clear,bind,bindGenerationFallback,stats:()=>({entries:cache.size,bytes,epoch,pending:pending.size,hits,misses,lastClear}),onClear(fn){listeners.add(fn);return()=>listeners.delete(fn);}});
 })();
