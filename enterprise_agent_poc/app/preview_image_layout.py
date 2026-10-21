@@ -61,9 +61,17 @@ def overlay_preview_logo(content,logo,mode,anchor=None):
         canvas=source.convert('RGBA');mark=mark.convert('RGBA')
         x,y,w,h,padding=logo_geometry(canvas.width,canvas.height,mode,anchor)
         mark.thumbnail((w,h),Image.Resampling.LANCZOS)
-        # An explicit brand component, inside the area reserved in the prompt.
-        panel=Image.new('RGBA',(mark.width+padding*2,mark.height+padding*2),(255,255,255,245))
+        # The Provider can ignore the blank-brand instruction and paint its own
+        # text. Own the WHOLE pre-reserved header, not just the logo bounding
+        # box; otherwise those hallucinated strokes bleed out beside the mark.
+        if mode in {'brochure_front','brochure_back'}:
+            panel_width=canvas.width/3
+            left=round(2*panel_width) if mode=='brochure_front' else 0
+            band=(left+max(1,padding),max(1,padding),round(left+panel_width)-max(1,padding),max(1,round(canvas.height*.16)))
+            canvas.paste((255,255,255,255),band)
+        else:band=None
+        panel=Image.new('RGBA',(mark.width+padding*2,mark.height+padding*2),(255,255,255,255))
         panel.alpha_composite(mark,(padding,padding));canvas.alpha_composite(panel,(x,y))
         out=io.BytesIO();canvas.save(out,'PNG')
-        return out.getvalue(),{'policy':'preview-brand-zone-v1','layout_mode':mode,'x':x,'y':y,
-            'width':panel.width,'height':panel.height,'logo_width':mark.width,'logo_height':mark.height}
+        return out.getvalue(),{'policy':'preview-brand-zone-v2','layout_mode':mode,'x':x,'y':y,
+            'width':panel.width,'height':panel.height,'logo_width':mark.width,'logo_height':mark.height,'owned_header':band}

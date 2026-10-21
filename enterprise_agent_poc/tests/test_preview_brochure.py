@@ -102,6 +102,22 @@ def test_brochure_exception_does_not_change_standard_poster_sizes_or_production_
     assert make_plan('改成一张竖版海报',base='原来是教育三折页')[0][0]['layout_mode']=='poster'
 
 
+@pytest.mark.parametrize('mode',['brochure_front','brochure_back'])
+def test_provider_painted_brand_is_removed_only_in_reserved_header(mode):
+    source=Image.new('RGB',(1536,1024),'lightgray');draw=ImageDraw.Draw(source)
+    left=1024 if mode=='brochure_front' else 0
+    draw.rectangle((left+10,10,left+500,160),fill='blue')
+    body=io.BytesIO();source.save(body,'PNG')
+    logo=Image.new('RGBA',(240,80),(0,0,0,0));ImageDraw.Draw(logo).rectangle((4,4,235,75),fill='red')
+    raw=io.BytesIO();logo.save(raw,'PNG')
+    content,where=overlay_preview_logo(body.getvalue(),raw.getvalue(),mode)
+    with Image.open(io.BytesIO(content)) as result:
+        assert result.getpixel((left+450,80))[:3]==(255,255,255)
+        assert result.getpixel((left+450,200))[:3]==(211,211,211)
+        assert result.getpixel((700,700))[:3]==(211,211,211)
+    assert where['owned_header'] and where['policy']=='preview-brand-zone-v2'
+
+
 def test_canonical_brochure_two_real_mcp_fixture_posts_and_original_logo(image_fixture,monkeypatch):
     executor,actors,calls=image_fixture;actor=actors[0]
     monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true');monkeypatch.setenv('ENTERPRISE_POC_DATA_DIR',str(executor.budget.path.parent))
