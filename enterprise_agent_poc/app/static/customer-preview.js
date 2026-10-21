@@ -26,7 +26,10 @@
   let imageCapability=null,imageConsent=null,editGeneration=null,confirming=false,confirmedSubmit=false;
   window.workbenchPreviewReferenceLimit=()=>imageCapability?.max_reference_images||1;
   window.fetch = (input, options) => {
-    const target=input instanceof Request?new Request(url(input.url),input):url(input);
+    let target=input instanceof Request?new Request(url(input.url),input):url(input);
+    const requested=new URL(input instanceof Request?input.url:String(target),location.href);
+    const previewLogout=requested.origin===location.origin&&requested.pathname==='/preview/api/v1/auth/logout';
+    if(previewLogout)target='/preview/api/v1/preview-auth/logout';
     if(options?.method==='POST'&&new URL(input instanceof Request?input.url:String(target),location.href).pathname==='/preview/api/v1/agents/image-agent/runs'&&imageConsent){
       const body=JSON.parse(options.body||'{}');
       if(body.message===imageConsent.prompt){
@@ -39,6 +42,10 @@
       imageConsent=null;
     }
     const pending=fetchOriginal(target,options);
+    pending.then(response=>{
+      if(previewLogout&&response.ok){location.replace('/preview/login');return;}
+      if(response.status===401)response.clone().json().then(value=>{if(value.error_code==='PREVIEW_LOGIN_REQUIRED')location.replace('/preview/login');}).catch(()=>{});
+    }).catch(()=>{});
     if(options?.method==='POST'&&String(target).includes('/agents/image-agent/runs'))pending.then(response=>{if(response.ok)editGeneration=null;}).catch(()=>{});
     if((!options?.method||options.method==='GET')&&/\/api\/v1\/tasks\/[^/?]+(?:\?.*)?$/.test(String(target))){
       pending.then(response=>response.ok?response.clone().json():null).then(task=>{if(task?.agent_id==='image-agent'&&['completed','failed','cancelled'].includes(task.status))refreshPreviewImageCapability();}).catch(()=>{});

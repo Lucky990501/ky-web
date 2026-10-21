@@ -299,6 +299,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     identity=json.loads(identity_path.read_text()) if identity_path.is_file() else {'source':'LOCAL_CANDIDATE','base_source':'8eb2fa7061de17fe355d64c03fa5451b547dae85'}
     submission_lock = asyncio.Lock()
     main.product_store.initialize()
+    from app.preview_customer_auth import PreviewCustomerAuth
+    customer_auth=PreviewCustomerAuth(main,root,local_http)
     main.skill_registry.initialize()
     main.agent_catalog_control.initialize()
     main.skill_registry.bind_agent("preview-wechat-agent", "wechat-official-account-writing", "1.0.1", None, allow_new_binding=True)
@@ -471,6 +473,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 return await JSONResponse({"user_message": "Preview路径不匹配"}, 404)(scope, receive, send)
             scope = dict(scope, path=path[len(BASE):], raw_path=scope.get("raw_path", b"")[len(BASE):])
             path = scope["path"]
+            if path=='/login' or path.startswith('/api/v1/preview-auth/'):
+                return await customer_auth.route(scope,receive,send)
             if image_submission_blocked(path, scope["method"], image_executor.authorized()):
                 return await JSONResponse({"error_code": "IMAGE_APPROVAL_EXTERNAL_BLOCKED", "user_message": IMAGE_BLOCK_MESSAGE}, 503)(scope, receive, send)
             if path in {"/api/health", "/api/v1/preview-status"}:
@@ -502,16 +506,22 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             except Exception: pass
             token = cookie[COOKIE].value if COOKIE in cookie else ""
             try:
-                principal = main.sessions.verify(token)
+                principal = main.current_user(token)
                 if not principal.tenant_id.startswith("preview-"): raise PermissionError()
-                if not main.product_store.user_by_id(principal.user_id, principal.tenant_id): raise PermissionError()
             except Exception:
+                if customer_auth.enabled():
+                    result=(JSONResponse({'error_code':'PREVIEW_LOGIN_REQUIRED','user_message':'请登录固定企业账号。','login_url':BASE+'/login'},401)
+                            if path.startswith('/api/') else Response(status_code=303,headers={'location':BASE+'/login'}))
+                    return await result(scope,receive,send)
                 try: token = new_session()
                 except PermissionError as exc: return await JSONResponse({"user_message": str(exc)}, 429)(scope, receive, send)
             headers.append((b"cookie", ("workbench_session=" + token).encode()))
             scope["headers"] = headers
             async def with_cookie(message):
                 if message["type"] == "http.response.start":
+                    # Shared handlers must never overwrite/delete Production's cookie.
+                    message['headers']=[(k,v) for k,v in message.get('headers',[])
+                                        if not (k.lower()==b'set-cookie' and v.lower().startswith(b'workbench_session='))]
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)

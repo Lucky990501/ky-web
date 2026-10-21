@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>客户企业空间登录</title><link rel="stylesheet" href="/preview/static/preview-login.css"><script defer src="/preview/static/preview-login.js"></script></head>
+<body><main><h1>客户企业空间</h1><p id="intro">使用专属账号登录，继续查看自己的项目与历史。</p>
+<form id="login-form"><label for="account">账号</label><input id="account" name="username" autocomplete="username" type="email" required maxlength="254">
+<label for="password">密码</label><div class="password-row"><input id="password" name="password" autocomplete="current-password" type="password" required maxlength="128"><button type="button" id="show-password" aria-controls="password" aria-pressed="false">显示</button></div>
+<button class="primary" type="submit">登录企业空间</button></form>
+<form id="setup-form" hidden><p>首次登录，请设置你自己的密码。初始密码随后失效。</p><label for="new-password">新密码（至少12个字符）</label><input id="new-password" autocomplete="new-password" type="password" minlength="12" maxlength="128" required>
+<label for="repeat-password">再次输入新密码</label><input id="repeat-password" autocomplete="new-password" type="password" minlength="12" maxlength="128" required><button class="primary" type="submit">保存并进入</button></form>
+<p id="feedback" role="status" aria-live="polite"></p><button type="button" id="logout">退出当前体验会话</button>
+<p class="help">账号由Owner安全交付。会话过期后重新登录即可，不会创建新的企业空间。</p></main></body></html>
