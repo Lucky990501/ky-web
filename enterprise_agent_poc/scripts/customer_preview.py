@@ -531,6 +531,20 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + browser_token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
+            if path.startswith('/api/v1/storage/') and scope['method']=='GET':
+                from app.preview_image_layout import original_brochure_key
+                from app.storage import storage_provider,StorageObjectNotFound,StorageUnavailable
+                principal=main.current_user(token)
+                key=path[len('/api/v1/storage/'):]
+                if main.product_store.readable_generation(principal.tenant_id,principal.user_id,key):
+                    original=original_brochure_key(main,principal,key)
+                    if original!=key:
+                        try:
+                            content=storage_provider(main.settings).get(original)
+                            from app.platform_mcp.service import _validated_image_metadata
+                            _,_,mime=_validated_image_metadata(content)
+                            return await Response(content,media_type=mime,headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})(scope,receive,with_cookie)
+                        except (StorageObjectNotFound,StorageUnavailable):pass
             if path.startswith('/api/v1/preview/image-display/'):
                 match=re.fullmatch(r'/api/v1/preview/image-display/(illustrations|generations)/([a-z0-9:_-]{1,100})',path)
                 if not match or scope['method']!='GET':return await Response(status_code=404)(scope,receive,with_cookie)

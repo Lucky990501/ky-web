@@ -24,7 +24,9 @@ class PreviewImageDisplay:
                 row=c.execute('select storage_key from generations where id=? and tenant_id=? and user_id=? and deleted_at is null',
                               (identifier,actor.tenant_id,actor.user_id)).fetchone()
             if not row or not self.main.product_store.readable_generation(actor.tenant_id,actor.user_id,row['storage_key']):raise LookupError()
-            content=self.illustrations.storage.get(row['storage_key'])
+            from app.preview_image_layout import original_brochure_key
+            key=original_brochure_key(self.main,actor,row['storage_key'])
+            content=self.illustrations.storage.get(key)
         else:raise LookupError()
         # Authorization and original integrity are checked BEFORE derived-cache lookup.
         digest=hashlib.sha256(content).hexdigest()

@@ -103,7 +103,7 @@ def test_brochure_exception_does_not_change_standard_poster_sizes_or_production_
 
 
 @pytest.mark.parametrize('mode',['brochure_front','brochure_back'])
-def test_provider_painted_brand_is_removed_only_in_reserved_header(mode):
+def test_provider_painted_brand_and_content_are_preserved_byte_for_byte(mode):
     source=Image.new('RGB',(1536,1024),'lightgray');draw=ImageDraw.Draw(source)
     left=1024 if mode=='brochure_front' else 0
     draw.rectangle((left+10,10,left+500,160),fill='blue')
@@ -111,11 +111,40 @@ def test_provider_painted_brand_is_removed_only_in_reserved_header(mode):
     logo=Image.new('RGBA',(240,80),(0,0,0,0));ImageDraw.Draw(logo).rectangle((4,4,235,75),fill='red')
     raw=io.BytesIO();logo.save(raw,'PNG')
     content,where=overlay_preview_logo(body.getvalue(),raw.getvalue(),mode)
+    assert content==body.getvalue()
+    assert not where['applied'] and where['reason']=='existing_logo_or_content_preserved'
+
+
+def test_transparent_logo_never_adds_background_plate():
+    source=Image.new('RGB',(1536,1024),(40,90,120));body=io.BytesIO();source.save(body,'PNG')
+    logo=Image.new('RGBA',(240,80),(0,0,0,0));ImageDraw.Draw(logo).rectangle((80,20,160,60),fill=(220,30,50,180))
+    raw=io.BytesIO();logo.save(raw,'PNG')
+    content,where=overlay_preview_logo(body.getvalue(),raw.getvalue(),'brochure_front')
+    assert where['applied']
     with Image.open(io.BytesIO(content)) as result:
-        assert result.getpixel((left+450,80))[:3]==(255,255,255)
-        assert result.getpixel((left+450,200))[:3]==(211,211,211)
-        assert result.getpixel((700,700))[:3]==(211,211,211)
-    assert where['owned_header'] and where['policy']=='preview-brand-zone-v2'
+        assert result.getpixel((where['x'],where['y']))[:3]==(40,90,120)
+        assert result.getpixel((1400,50))[:3]==(40,90,120)
+        assert result.size==source.size
+
+
+def test_legacy_white_plate_resolves_only_exact_owned_brochure_artifact(image_fixture):
+    from app.preview_image_layout import original_brochure_key
+    executor,actors,calls=image_fixture;actor=actors[0]
+    task=run_batch(executor,actor,'教育三折页正反面分别输出')
+    key=task['generations'][0]['storage_key'];original=f'generated/{actor.tenant_id}/fixture-original.png'
+    trace=executor.main.store.run_trace(task['run_id'],actor.tenant_id)['payload']
+    artifact=trace['mcp_calls'][0]['artifacts'][0]
+    artifact.update(storage_key=key,original_storage_key=original,layout_mode='brochure_front',brand_placement={'policy':'preview-brand-zone-v2'})
+    executor.main.store.finish_run_trace(task['run_id'],'runtime_completed',trace)
+    assert original_brochure_key(executor.main,actor,key)==original
+    for other in actors[1:]:assert original_brochure_key(executor.main,other,key)==key
+    for bad in ['generated/preview-other/file.png','../private.png','/private.png','generated/'+actor.tenant_id+'/../file.png']:
+        artifact['original_storage_key']=bad;executor.main.store.finish_run_trace(task['run_id'],'runtime_completed',trace)
+        assert original_brochure_key(executor.main,actor,key)==key
+    artifact.update(original_storage_key=original,brand_placement={'policy':'preview-transparent-logo-v3'})
+    executor.main.store.finish_run_trace(task['run_id'],'runtime_completed',trace)
+    assert original_brochure_key(executor.main,actor,key)==key
+    assert calls==[]
 
 
 def test_canonical_brochure_two_real_mcp_fixture_posts_and_original_logo(image_fixture,monkeypatch):

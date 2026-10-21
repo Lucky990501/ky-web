@@ -1,7 +1,9 @@
 """Small Preview-only brochure semantics and original-Logo brand zones."""
 import io
+import json
 import re
-from PIL import Image
+from pathlib import PurePosixPath
+from PIL import Image,ImageStat
 from app.brand_logo import inspect_transparent_png
 
 BROCHURE_SIZE='1536x1024'  # Existing verified gateway enum, NOT a new size.
@@ -33,7 +35,7 @@ def layout_prompt(mode):
         +'建立明确的阅读顺序与字号层级，标题少而有力，正文精简、充足留白，不把所有材料均匀硬塞三栏。'
         '未知的讲师、价格、联系方式和成果不编造，可标注待确认。教育场景采用自然写实人物与真实环境，不用夸张卡通。'
         +('右侧封面板左上方' if outer else '左侧内页面板左上方')
-        +'是品牌组件安全区：该面板顶部16%高度内保持干净浅色留白，不放适合人群、课程信息、人物或标题；Logo由服务端叠加原始资产，不要重绘Logo。'
+        +'若已有Logo，请保留一处且勿重复；若尚无Logo，可为透明品牌素材留出自然的小块空白，不以大面积白色面板覆盖标题或正文。不要重绘Logo。'
         '三折页为设计概念图片，并非带出血/折页公差的印刷PDF。')
 
 
@@ -61,17 +63,43 @@ def overlay_preview_logo(content,logo,mode,anchor=None):
         canvas=source.convert('RGBA');mark=mark.convert('RGBA')
         x,y,w,h,padding=logo_geometry(canvas.width,canvas.height,mode,anchor)
         mark.thumbnail((w,h),Image.Resampling.LANCZOS)
-        # The Provider can ignore the blank-brand instruction and paint its own
-        # text. Own the WHOLE pre-reserved header, not just the logo bounding
-        # box; otherwise those hallucinated strokes bleed out beside the mark.
+        # A local, conservative occupancy check, NOT a universal logo/OCR
+        # detector. Any logo, text, photo or uncertain content in the header
+        # prevents automatic overlay. Never erase pixels to make space.
         if mode in {'brochure_front','brochure_back'}:
-            panel_width=canvas.width/3
-            left=round(2*panel_width) if mode=='brochure_front' else 0
-            band=(left+max(1,padding),max(1,padding),round(left+panel_width)-max(1,padding),max(1,round(canvas.height*.16)))
-            canvas.paste((255,255,255,255),band)
-        else:band=None
-        panel=Image.new('RGBA',(mark.width+padding*2,mark.height+padding*2),(255,255,255,255))
-        panel.alpha_composite(mark,(padding,padding));canvas.alpha_composite(panel,(x,y))
+            header=canvas.crop((0,0,canvas.width,max(1,round(canvas.height*.16)))).convert('RGB')
+            header.thumbnail((720,120),Image.Resampling.LANCZOS)
+            if max(ImageStat.Stat(header).stddev)>7:
+                return content,{'policy':'preview-transparent-logo-v3','layout_mode':mode,'applied':False,
+                    'reason':'existing_logo_or_content_preserved','detection':'conservative_header_occupancy_not_semantic_ocr'}
+        # Alpha-composite ONLY the original transparent PNG, no plate, mask,
+        # white rectangle or background fill. All other pixels stay untouched.
+        canvas.alpha_composite(mark,(x+padding,y+padding))
         out=io.BytesIO();canvas.save(out,'PNG')
-        return out.getvalue(),{'policy':'preview-brand-zone-v2','layout_mode':mode,'x':x,'y':y,
-            'width':panel.width,'height':panel.height,'logo_width':mark.width,'logo_height':mark.height,'owned_header':band}
+        return out.getvalue(),{'policy':'preview-transparent-logo-v3','layout_mode':mode,'applied':True,'x':x+padding,'y':y+padding,
+            'width':mark.width,'height':mark.height,'logo_width':mark.width,'logo_height':mark.height}
+
+
+def original_brochure_key(main,actor,key):
+    """Read-only repair for our v1/v2 overlays; never rewrite history/files.
+
+    Resolve only this user's exact Generation/Task artifact to its preserved
+    Provider original. No arbitrary storage keys or cross-user trace lookup.
+    """
+    if not actor.tenant_id.startswith('preview-'):return key
+    with main.store.connection() as c:
+        row=c.execute("select t.run_id from generations g join tasks t on t.id=g.task_id and t.tenant_id=g.tenant_id and t.user_id=g.user_id where g.storage_key=? and g.tenant_id=? and g.user_id=? and g.deleted_at is null and t.agent_id='image-agent' limit 1",
+            (key,actor.tenant_id,actor.user_id)).fetchone()
+        if not row or not row['run_id']:return key
+        trace=c.execute('select payload from run_traces where run_id=? and tenant_id=?',(row['run_id'],actor.tenant_id)).fetchone()
+    if not trace:return key
+    try:
+        for call in json.loads(trace['payload']).get('mcp_calls',[]):
+            if call.get('tool')!='image_generation':continue
+            for item in call.get('artifacts',[]):
+                placement=item.get('brand_placement') or {}
+                if item.get('storage_key')!=key or item.get('layout_mode') not in {'brochure_front','brochure_back'} or placement.get('policy') not in {'preview-brand-zone-v1','preview-brand-zone-v2'}:continue
+                original=item.get('original_storage_key','');parts=PurePosixPath(original).parts
+                if len(parts)==3 and parts[:2]==('generated',actor.tenant_id) and all(p not in {'','.','..'} for p in parts) and '\\' not in original:return original
+    except (ValueError,TypeError,AttributeError):pass
+    return key

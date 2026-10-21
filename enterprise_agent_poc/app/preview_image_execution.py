@@ -191,7 +191,9 @@ class PreviewImageExecution:
             # no arbitrary URL/path, original Generation never overwritten.
             from app.storage import storage_provider
             from app.chat_image_uploads import validate_chat_image
-            source = storage_provider(self.main.settings).get(source_record['storage_key'])
+            from app.preview_image_layout import original_brochure_key
+            source_key=original_brochure_key(self.main,principal,source_record['storage_key'])
+            source = storage_provider(self.main.settings).get(source_key)
             ext, mime, width, height = validate_chat_image(source, source_record['mime_type'])
             key = f'chat-uploads/{principal.tenant_id}/{uuid4().hex}{ext}'
             storage_provider(self.main.settings).put(key, source, mime)

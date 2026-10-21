@@ -314,7 +314,7 @@ class PlatformMCPService:
                         from app.preview_image_layout import logo_geometry
                         width,height=map(int,item['size'].split('x'))
                         x,y,w,h,pad=logo_geometry(width,height,item.get('layout_mode'),item.get('logo_anchor'))
-                        item_prompt+=f'\nLogo由平台叠加原始资产，品牌组件安全区约为画布({x},{y})起、宽{w+pad*2}高{h+pad*2}像素；在该区域及周围保留自然浅色留白，不放标题、适合人群或活动信息，不重绘或重复保留参考图中的旧Logo。'
+                        item_prompt+=f'\n若图中已有Logo，保留一处，不要重复。若尚无Logo，可在({x},{y})附近为原始透明PNG留出宽{w+pad*2}高{h+pad*2}像素的自然空白；不画白色遮罩，不移动或覆盖标题正文，不重绘品牌Logo。'
                     else:item_prompt += "\n企业Logo由平台在右上角叠加原始资产；请在该处留白，不要绘制、猜测或重设计任何Logo。"
                 response = None
                 try:
@@ -418,7 +418,7 @@ class PlatformMCPService:
                         "requested_quality":quality, "reference_roles":[record.get('role',reference_role) for record in attachments],
                         "index": item["index"], "purpose": item["purpose"], "requested_aspect_ratio": item["aspect_ratio"],
                         "dimension_match": dimension_match, "warnings": [] if dimension_match else ["PROVIDER_DIMENSION_MISMATCH"],
-                        "original_storage_key": provider_key, "brand_logo_applied": logo_bytes is not None,
+                        "original_storage_key": provider_key, "brand_logo_applied": logo_bytes is not None and (brand_placement is None or brand_placement.get('applied',True)),
                         **({'layout_mode':item.get('layout_mode'),'brand_placement':brand_placement} if canonical_submission else {}),
                         "reference_role": reference_role if attachment else None,
                     })
