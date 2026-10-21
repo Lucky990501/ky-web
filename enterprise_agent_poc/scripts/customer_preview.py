@@ -25,7 +25,19 @@ if os.environ.get("PREVIEW_EXTRA_SITE_PACKAGES"):
     sys.path.append(os.environ["PREVIEW_EXTRA_SITE_PACKAGES"])
 BASE = "/preview"
 COOKIE = "workbench_preview_session"
+MAX_PREVIEW_TENANTS = 50  # Bounded delivery headroom; no deletion or paid entitlement.
 IMAGE_BLOCK_MESSAGE = "图片生成暂不可用：自动审批服务处理中。请先体验其他功能。"
+
+
+def admit_preview_tenant(connection, tenant, credential):
+    """Serialize anonymous admissions without changing existing identities."""
+    if not tenant.startswith('preview-'):
+        raise PermissionError('仅允许独立Preview体验身份。')
+    connection.execute('BEGIN IMMEDIATE')
+    count = connection.execute("SELECT count(*) FROM tenants WHERE id LIKE 'preview-%'").fetchone()[0]
+    if count >= MAX_PREVIEW_TENANTS:
+        raise PermissionError('临时体验访客数量已到上限，请联系Owner。')
+    connection.execute('INSERT INTO tenants VALUES(?,?,?)', (tenant, 'AI体验企业', credential))
 
 
 def image_submission_blocked(path, method, authorized=False):
@@ -294,9 +306,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     def new_session():
         tenant = "preview-" + uuid4().hex
         with main.store.connection() as conn:
-            if conn.execute("SELECT count(*) FROM tenants").fetchone()[0] >= 30:
-                raise PermissionError("临时体验访客数量已到上限，请联系Owner。")
-            conn.execute("INSERT INTO tenants VALUES(?,?,?)", (tenant, "AI体验企业", secrets.token_urlsafe(32)))
+            admit_preview_tenant(conn, tenant, secrets.token_urlsafe(32))
             conn.execute("INSERT INTO enterprise_configs VALUES(?,?)", (tenant, json.dumps({"brand_name": "AI体验企业", "brand_logo": None, "description": "独立体验资料，请在企业设置中填写测试信息。"}, ensure_ascii=False)))
             for agent in CATALOG:
                 conn.execute("INSERT INTO tenant_agent_instances(tenant_id,agent_id,status) VALUES(?,?,'enabled')", (tenant, agent))
