@@ -135,14 +135,18 @@ def test_legacy_white_plate_resolves_only_exact_owned_brochure_artifact(image_fi
     trace=executor.main.store.run_trace(task['run_id'],actor.tenant_id)['payload']
     artifact=trace['mcp_calls'][0]['artifacts'][0]
     artifact.update(storage_key=key,original_storage_key=original,layout_mode='brochure_front',brand_placement={'policy':'preview-brand-zone-v2'})
-    executor.main.store.finish_run_trace(task['run_id'],'runtime_completed',trace)
+    def save_fixture_trace():
+        import json
+        # Fixture-only seeding; completed production traces are immutable.
+        with executor.main.store.connection() as c:c.execute('update run_traces set payload=? where run_id=?',(json.dumps(trace),task['run_id']))
+    save_fixture_trace()
     assert original_brochure_key(executor.main,actor,key)==original
     for other in actors[1:]:assert original_brochure_key(executor.main,other,key)==key
     for bad in ['generated/preview-other/file.png','../private.png','/private.png','generated/'+actor.tenant_id+'/../file.png']:
-        artifact['original_storage_key']=bad;executor.main.store.finish_run_trace(task['run_id'],'runtime_completed',trace)
+        artifact['original_storage_key']=bad;save_fixture_trace()
         assert original_brochure_key(executor.main,actor,key)==key
     artifact.update(original_storage_key=original,brand_placement={'policy':'preview-transparent-logo-v3'})
-    executor.main.store.finish_run_trace(task['run_id'],'runtime_completed',trace)
+    save_fixture_trace()
     assert original_brochure_key(executor.main,actor,key)==key
     assert calls==[]
 
