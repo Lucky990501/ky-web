@@ -60,20 +60,81 @@
     clean(template.content);
     return template.innerHTML;
   }
-  function previewDocument(html, previewImages, loading=false) {
+  function previewDocument(html, previewImages, loading=false, deferred=false) {
     const safe = sanitizeArticle(html);
     const parsed = document.createElement('template'); parsed.innerHTML = safe;
-    if (previewImages) for (const node of parsed.content.querySelectorAll('img')) {
+    if(deferred)for(const [index,node] of [...parsed.content.querySelectorAll('img')].entries()){
+      node.dataset.previewSource=node.getAttribute('src');node.removeAttribute('src');node.loading=index<2?'eager':'lazy';node.decoding='async';node.style.aspectRatio='4/3';
+    }
+    if (previewImages&&!deferred) for (const node of parsed.content.querySelectorAll('img')) {
       const raster = previewImages.get(node.getAttribute('src'));
       if (typeof raster === 'string' && raster.length <= 14 * 1024 * 1024 && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(raster)) node.setAttribute('src', raster);
       else node.replaceWith(document.createTextNode(loading?'[图片正在安全加载…]':'[图片暂不可用，请在公众号后台手动上传]'));
     }
     const images = [...new Set([...parsed.content.querySelectorAll('img')].map(node => node.getAttribute('src')))];
-    const imagePolicy = images.length ? previewImages ? 'data:' : images.join(' ') : "'none'";
+    const imagePolicy = deferred?'data:':images.length ? previewImages ? 'data:' : images.join(' ') : "'none'";
     const documentHtml=`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src ${imagePolicy}; base-uri 'none'; form-action 'none'"><style>html{overflow-wrap:anywhere}body{box-sizing:border-box;max-width:680px;margin:0 auto;padding:24px 20px;color:#3E3E3E;font:16px/1.6 system-ui,sans-serif}*{box-sizing:border-box;max-width:100%}img{height:auto}table{display:block;overflow:auto;border-collapse:collapse}pre{white-space:pre-wrap}a{color:inherit}</style></head><body>${parsed.innerHTML}</body></html>`;
     return window.WORKBENCH_PREVIEW_BASE?documentHtml.replace('</style>','body{font:17px/1.95 system-ui,sans-serif;color:#222;background:#fff}@media(max-width:480px){body{padding:20px 16px}h1,h2{font-size:28px!important}p{font-size:16px!important}}</style>'):documentHtml;
   }
+  async function mountCachedPreview(frame,result,isCurrent){
+    frame.setAttribute('sandbox','allow-same-origin');
+    const html=sanitizeArticle(result.html),current=()=>frame.isConnected&&isCurrent();
+    const revision=(frame._displayRevision||0)+1;frame._displayRevision=revision;
+    if(!frame._displayReady){
+      frame._displayReady=new Promise(resolve=>{frame.addEventListener('load',resolve,{once:true});});
+      frame.srcdoc=previewDocument(html,null,false,true);frame._displayHtml=html;
+    }
+    await frame._displayReady;if(!current()||revision!==frame._displayRevision)return;
+    const doc=frame.contentDocument;
+    if(frame._displayHtml!==html){
+      const next=document.createElement('template');next.innerHTML=html;
+      for(const node of next.content.querySelectorAll('img')){node.dataset.previewSource=node.getAttribute('src');node.removeAttribute('src');node.style.aspectRatio='4/3';node.loading='lazy';node.decoding='async';}
+      const oldImages=new Map([...doc.images].map(n=>[n.dataset.previewSource,n]));
+      const patch=(parent,desired)=>{
+        for(let index=0;index<desired.length;index++){
+          const want=desired[index];let old=parent.childNodes[index];
+          if(want.nodeType===Node.ELEMENT_NODE&&want.localName==='img'){
+            const reused=oldImages.get(want.dataset.previewSource);
+            if(reused){if(old!==reused)parent.insertBefore(reused,old||null);continue;}
+          }
+          if(!old){parent.append(want.cloneNode(true));continue;}
+          if(old.nodeType!==want.nodeType||old.nodeName!==want.nodeName){old.replaceWith(want.cloneNode(true));continue;}
+          if(want.nodeType===Node.TEXT_NODE){if(old.textContent!==want.textContent)old.textContent=want.textContent;continue;}
+          for(const attr of [...old.attributes])if(!want.hasAttribute(attr.name))old.removeAttribute(attr.name);
+          for(const attr of [...want.attributes])if(old.getAttribute(attr.name)!==attr.value)old.setAttribute(attr.name,attr.value);
+          patch(old,[...want.childNodes]);
+        }
+        while(parent.childNodes.length>desired.length)parent.lastChild.remove();
+      };
+      patch(doc.body,[...next.content.childNodes]);frame._displayHtml=html;
+    }
+    frame.dataset.articleReady='false';
+    await window.WorkbenchPreviewImages.verifyIdentity();if(!current()||revision!==frame._displayRevision)return;
+    if(!frame._displayCleanup){
+      const unsubscribe=window.WorkbenchPreviewImages.onClear(()=>{if(frame.isConnected){doc.body.replaceChildren();frame.dataset.articleReady='false';}});
+      const observer=new MutationObserver(()=>{if(!frame.isConnected){observer.disconnect();unsubscribe();}});observer.observe(document.documentElement,{childList:true,subtree:true});frame._displayCleanup=true;
+    }
+    const sources=[...new Set([...doc.images].map(n=>n.dataset.previewSource))].filter(Boolean);
+    // Full-resolution rasters remain in the rendered DOM for BOTH native
+    // selection-copy and the copy button. Decode/encode once per private LRU
+    // entry, not once per frame/open/poll; never copy low-resolution thumbnails.
+    await Promise.all(sources.slice(0,12).map(async source=>{
+      try{
+        const image=await window.WorkbenchPreviewImages.raster(source);
+        if(!current()||revision!==frame._displayRevision)return;
+        for(const node of doc.images)if(node.dataset.previewSource===source){
+          if(node.getAttribute('src')!==image.data)node.src=image.data;
+          node.style.aspectRatio=image.width+'/'+image.height;node.width=image.width;node.height=image.height;
+        }
+      }catch{/* Keep the truthful unavailable placeholder; no automatic paid retry. */}
+    }));
+    if(current()&&revision===frame._displayRevision){
+      await Promise.all([...doc.images].filter(n=>n.getAttribute('src')).map(n=>n.decode().catch(()=>{})));
+      if(current()&&revision===frame._displayRevision)frame.dataset.articleReady='true';
+    }
+  }
   async function mountSafePreview(frame, result, isCurrent) {
+    if(window.WORKBENCH_PREVIEW_BASE&&window.WorkbenchPreviewImages)return mountCachedPreview(frame,result,isCurrent);
     // Preview-only DOM access for native selection copying. This grants NO
     // scripts/forms/navigation: model HTML is still sanitized, CSP default
     // deny is unchanged, and allow-scripts is deliberately never granted.
@@ -233,7 +294,10 @@
       const style = [inlineDefaults[node.localName], ...kept].filter(Boolean).join(';');
       if (style) node.setAttribute('style', style);
     }
-    const wrapper = document.createElement('section'); wrapper.setAttribute('style', window.WORKBENCH_PREVIEW_BASE&&window.previewWechatSectionStyle||inlineDefaults.section); wrapper.append(safe.content);
+    // Keep export assembly in the template's INERT owner document. Adopting
+    // its images into even a detached live-document element starts hidden
+    // original-image GETs, bypassing the display cache on every open/export.
+    const wrapper = (window.WORKBENCH_PREVIEW_BASE?safe.content.ownerDocument:document).createElement('section'); wrapper.setAttribute('style', window.WORKBENCH_PREVIEW_BASE&&window.previewWechatSectionStyle||inlineDefaults.section); wrapper.append(safe.content);
     const text = plainArticle(wrapper);
     if (!text) throw new Error('ARTICLE_INVALID');
     const field = value => redactPaths(String(value || '').replace(/[\u0000-\u001f]/g, ' ').trim());
@@ -298,7 +362,7 @@
       if (body) {
         // Reuse the exact existing sandbox/CSP preview, now inside the reply.
         // Never insert raw model HTML into the host permission context.
-        const frame = document.createElement('iframe'); frame.className = 'wechat-inline-article';
+        const frame = window.WORKBENCH_PREVIEW_BASE&&body.querySelector('.wechat-inline-article')||document.createElement('iframe'); frame.className = 'wechat-inline-article';
         frame.title = '公众号文章正文'; frame.setAttribute('sandbox', ''); frame.setAttribute('referrerpolicy', 'no-referrer');
         frame.style.height = `${Math.min(640, Math.max(160, 48 + result.text.split('\n').length * 28 + Math.ceil(result.text.length / 32) * 12))}px`;
         if(window.WORKBENCH_PREVIEW_BASE){
@@ -306,7 +370,7 @@
           const columns=Math.max(12,Math.floor(((body.clientWidth||375)-48)/17));
           frame.style.height=Math.min(24000,Math.max(320,100+Math.ceil(result.text.length/columns)*34+parsed.content.querySelectorAll('p').length*24+parsed.content.querySelectorAll('h2').length*120+parsed.content.querySelectorAll('img').length*480))+'px';
         }
-        body.replaceChildren(frame); body.classList.remove('chat-message-content-markdown'); body.classList.add('wechat-inline-message-content');
+        if(frame.parentNode!==body)body.replaceChildren(frame); body.classList.remove('chat-message-content-markdown'); body.classList.add('wechat-inline-message-content');
         mountSafePreview(frame, result, current).catch(() => { if (current()) frame.srcdoc = previewDocument('<p>文章预览暂不可用，请重试。</p>'); });
         // The manual controls already provide safe rich/source/plain copying.
         // Keep regeneration, but remove the old raw model-source copy action.
@@ -321,7 +385,8 @@
     if(window.WORKBENCH_PREVIEW_BASE){
       const cover=slot.querySelector('[data-manual-cover]'),src=safeArticleImage(metadata.coverAsset?.url||'');
       if(src){
-        const image=document.createElement('img');image.src=src;image.alt='文章发布封面';image.loading='lazy';
+        const image=document.createElement('img');image.alt='文章发布封面';image.loading='lazy';
+        if(window.WorkbenchPreviewImages&&/^[a-f0-9]{32}$/.test(metadata.coverAsset.id||''))window.WorkbenchPreviewImages.bind(image,window.workbenchPreviewUrl('/api/v1/preview/image-display/illustrations/'+metadata.coverAsset.id));else image.src=src;
         const link=document.createElement('a');link.href=src;link.download='公众号封面'+(metadata.coverAsset.extension||'.png');link.textContent='下载封面';link.className='button secondary';
         cover.replaceChildren(image,link);
       }else cover.textContent='独立封面准备中；正文阅读和导出不受影响。';

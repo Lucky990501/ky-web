@@ -43,8 +43,9 @@
     }
     const pending=fetchOriginal(target,options);
     pending.then(response=>{
-      if(previewLogout&&response.ok){location.replace('/preview/login');return;}
-      if(response.status===401)response.clone().json().then(value=>{if(value.error_code==='PREVIEW_LOGIN_REQUIRED')location.replace('/preview/login');}).catch(()=>{});
+      if(previewLogout&&response.ok){window.WorkbenchPreviewImages?.setIdentity(null);location.replace('/preview/login');return;}
+      if(requested.pathname==='/preview/api/v1/me'&&response.ok)response.clone().json().then(value=>window.WorkbenchPreviewImages?.setIdentity(value)).catch(()=>{});
+      if(response.status===401){window.WorkbenchPreviewImages?.setIdentity(null);response.clone().json().then(value=>{if(value.error_code==='PREVIEW_LOGIN_REQUIRED')location.replace('/preview/login');}).catch(()=>{});}
     }).catch(()=>{});
     if(options?.method==='POST'&&String(target).includes('/agents/image-agent/runs'))pending.then(response=>{if(response.ok)editGeneration=null;}).catch(()=>{});
     if((!options?.method||options.method==='GET')&&/\/api\/v1\/tasks\/[^/?]+(?:\?.*)?$/.test(String(target))){

@@ -214,6 +214,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
         except (ValueError,OSError):
             # A bad optional ENV must never take down the six existing tools.
             illustration_service=PreviewIllustrationService(main,root,IllustrationConfig())
+    from app.preview_image_display import PreviewImageDisplay
+    image_display=PreviewImageDisplay(main,illustration_service,root)
     from app.preview_article_references import PreviewArticleReferences, AGENT as ARTICLE_AGENT
     article_references = PreviewArticleReferences(main, budget)
     article_submission = ContextVar('preview_article_submission',default=None)
@@ -490,7 +492,7 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             denied = ("/api/v1/platform", "/api/admin", "/api/v1/auth", "/api/v1/members", "/api/v1/profile", "/mcp", "/docs", "/openapi")
             if path.startswith(denied):
                 return await JSONResponse({"user_message": "体验版不开放平台管理或账号接口"}, 403)(scope, receive, send)
-            if path.startswith("/api/") and not path.startswith(("/api/v1/me", "/api/v1/workspace", "/api/v1/agents", "/api/v1/tasks", "/api/v1/conversations", "/api/v1/generations", "/api/v1/enterprise-config", "/api/v1/knowledge", "/api/v1/assets", "/api/v1/storage", "/api/v1/chat-images", "/api/v1/documents", "/api/v1/preview/article-references", "/api/v1/preview/illustrations")):
+            if path.startswith("/api/") and not path.startswith(("/api/v1/me", "/api/v1/workspace", "/api/v1/agents", "/api/v1/tasks", "/api/v1/conversations", "/api/v1/generations", "/api/v1/enterprise-config", "/api/v1/knowledge", "/api/v1/assets", "/api/v1/storage", "/api/v1/chat-images", "/api/v1/documents", "/api/v1/preview/article-references", "/api/v1/preview/illustrations", "/api/v1/preview/image-display")):
                 return await JSONResponse({"user_message": "体验版未开放此接口"}, 403)(scope, receive, send)
             if path.startswith("/api/v1/agents/") and path.endswith("/runs") and scope["method"] == "POST" and path != '/api/v1/agents/image-agent/runs':
                 if not keys.get("DEEPSEEK_API_KEY") or not prices.get("text_pricing_verified"):
@@ -529,6 +531,16 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                     message.setdefault("headers", []).append((b"set-cookie", (COOKIE + "=" + browser_token + "; Path=/preview/; HttpOnly; SameSite=Lax; Max-Age=259200" + ("" if local_http else "; Secure")).encode()))
                     message["headers"].append((b"cache-control", b"no-store"))
                 await send(message)
+            if path.startswith('/api/v1/preview/image-display/'):
+                match=re.fullmatch(r'/api/v1/preview/image-display/(illustrations|generations)/([a-f0-9-]{32,36})',path)
+                if not match or scope['method']!='GET':return await Response(status_code=404)(scope,receive,with_cookie)
+                try:
+                    actor=main.current_user(token)
+                    async with image_display.slots:
+                        content=await asyncio.to_thread(image_display.render,actor,match[1],match[2])
+                    return await Response(content,media_type='image/webp',headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})(scope,receive,with_cookie)
+                except (LookupError,PermissionError):return await Response(status_code=404)(scope,receive,with_cookie)
+                except Exception:return await JSONResponse({'error_code':'PREVIEW_THUMBNAIL_UNAVAILABLE','user_message':'缩略图暂不可用，原图和下载仍可使用。'},503)(scope,receive,with_cookie)
             if path.startswith('/api/v1/preview/illustrations'):
                 from app.preview_illustration_routes import illustration_request
                 actor=main.current_user(token)
@@ -621,6 +633,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 preview_script = hashlib.sha256((main.STATIC_DIR / "customer-preview.js").read_bytes()).hexdigest()[:16]
                 preview_style = hashlib.sha256((main.STATIC_DIR / "customer-preview.css").read_bytes()).hexdigest()[:16]
                 html = html.replace("<head>", f'<head><script src="/preview/static/customer-preview.js?v={preview_script}"></script><link rel="stylesheet" href="/preview/static/customer-preview.css?v={preview_style}">')
+                display_script=hashlib.sha256((main.STATIC_DIR/'preview-image-display.js').read_bytes()).hexdigest()[:16]
+                html=html.replace('</head>',f'<script src="/preview/static/preview-image-display.js?v={display_script}"></script></head>')
                 reading=hashlib.sha256((main.STATIC_DIR/'preview-wechat-style.js').read_bytes()).hexdigest()[:16]
                 html=html.replace('</head>',f'<script src="/preview/static/preview-wechat-style.js?v={reading}"></script></head>')
                 illustration_script=hashlib.sha256((main.STATIC_DIR/'preview-illustrations.js').read_bytes()).hexdigest()[:16]

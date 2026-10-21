@@ -14,7 +14,8 @@
     const feedback=document.createElement('p');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');feedback.setAttribute('aria-atomic','true');
     const actions=document.createElement('div'),assets=document.createElement('div');assets.className='preview-illustration-gallery';
     slot.append(title,feedback,actions,assets);article.append(slot);
-    let plan=null,timer=null,polls=0,emptyPolls=0;
+    let plan=null,timer=null,polls=0,emptyPolls=0,renderSignature='';
+    const assetNodes=new Map();
     const current=()=>slot.isConnected&&main.isConnected&&article.closest('#main')===main;
     const observer=new MutationObserver(()=>{if(!current()){clearTimeout(timer);observer.disconnect();}});observer.observe(document.documentElement,{childList:true,subtree:true});
     function link(label,url,filename) {
@@ -45,14 +46,24 @@
     }
     function render() {
       if(!current())return;
-      actions.replaceChildren();assets.replaceChildren();
-      for(const asset of plan?.assets||[]) {
-        if(asset.role==='cover')continue;
-        const figure=document.createElement('figure'),image=document.createElement('img'),caption=document.createElement('figcaption');
-        image.src=window.workbenchPreviewUrl(asset.url);image.alt=asset.label;image.loading='lazy';image.width=asset.width;image.height=asset.height;
-        caption.textContent=asset.label;
-        image.onerror=()=>{caption.textContent=asset.label+' · 图片暂不可用；未触发重新生图。';};
-        figure.append(image,caption,link('下载配图',asset.url,asset.filename));assets.append(figure);
+      const signature=JSON.stringify(plan);
+      if(signature===renderSignature){if(plan&&['queued','generating'].includes(plan.status))again();return;}
+      renderSignature=signature;actions.replaceChildren();
+      const visible=(plan?.assets||[]).filter(asset=>asset.role!=='cover'),ids=new Set(visible.map(asset=>asset.id));
+      for(const [id,node] of assetNodes)if(!ids.has(id)){node.remove();assetNodes.delete(id);}
+      for(const [index,asset] of visible.entries()) {
+        let figure=assetNodes.get(asset.id);
+        if(!figure){
+          figure=document.createElement('figure');figure.dataset.assetId=asset.id;
+          const image=document.createElement('img'),caption=document.createElement('figcaption');
+          image.alt=asset.label;image.loading=index<2?'eager':'lazy';image.decoding='async';image.width=asset.width;image.height=asset.height;
+          caption.textContent=asset.label;
+          image.onerror=()=>{caption.textContent=asset.label+' · 图片暂不可用；未触发重新生图。';};
+          if(window.WorkbenchPreviewImages)window.WorkbenchPreviewImages.bind(image,window.workbenchPreviewUrl('/api/v1/preview/image-display/illustrations/'+asset.id));
+          else image.src=window.workbenchPreviewUrl(asset.url);
+          figure.append(image,caption,link('下载配图',asset.url,asset.filename));assetNodes.set(asset.id,figure);
+        }
+        if(assets.children[index]!==figure)assets.insertBefore(figure,assets.children[index]||null);
       }
       updateArticle();
       const running=plan&&['queued','generating'].includes(plan.status);slot.setAttribute('aria-busy',running?'true':'false');
