@@ -4,6 +4,7 @@ from app.preview_budget import PreviewBudgetExceeded
 from app.preview_task_admission import PreviewTaskCapacity
 
 MESSAGES={
+ 'preview_image_side_ambiguous':'请确认要补正面还是反面，我会保留当前项目已有图片，不从头重做。',
  'preview_image_count_ambiguous':'需求中给出了不同的总张数，请确认最终一共需要几张。',
  'preview_image_count_limit':'每次最多生成5张图片，请将超过5张的需求分批提交。',
  'preview_image_size_ambiguous':'需求中有互相矛盾的尺寸或比例，请保留最终要求。',

@@ -7,6 +7,7 @@ const old=cp.execFileSync('git',['show','a0a1fe1c36cad25bc58ec2f1287defde4a828c4
 const oldDisplay=cp.execFileSync('git',['show','a0a1fe1c36cad25bc58ec2f1287defde4a828c4c:enterprise_agent_poc/app/static/preview-image-display.js'],{encoding:'utf8'});
 const fallback=s=>s.split('\n').find(l=>l.startsWith('const bindImageFallbacks = '));
 const composer=current.slice(current.indexOf('function resizePreviewComposer('),current.indexOf('const refreshIcons = '));
+const viewer=current.split('\n').find(line=>line.startsWith('function openGenerationViewer('));
 const counts=new Map(),key='task:12345678-1234-1234-1234-123456789abc:generation';let scenario='ok';
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 const server=http.createServer(async(req,res)=>{
@@ -20,6 +21,7 @@ const server=http.createServer(async(req,res)=>{
   }
   if(thumb&&scenario==='404'){res.writeHead(503,{'content-type':'application/json'});return res.end('{}');}
   if(thumb&&scenario==='delay')await wait(600);
+  if(!thumb&&scenario==='viewer')await wait(800);
   res.writeHead(200,{'content-type':'image/png','content-length':png.length,'cache-control':'private, no-store'});return res.end(png);
  }
  if(p.endsWith('/display.js')||p.endsWith('/before-display.js')){res.writeHead(200,{'content-type':'application/javascript'});return res.end(p.endsWith('/before-display.js')?oldDisplay:fs.readFileSync(path.join(root,'preview-image-display.js')));}
@@ -27,6 +29,8 @@ const server=http.createServer(async(req,res)=>{
  const before=p.endsWith('/before');res.writeHead(200,{'content-type':'text/html'});
  res.end(`<!doctype html><html data-customer-preview="true"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FIXTURE 图片加载及输入框</title><link rel="stylesheet" href="/workbench.css"><style>body{margin:0}header{height:70px;padding:12px}#main{height:calc(100dvh - 70px)}.creation-layout{height:100%}.creation-main{display:flex;flex-direction:column}.chat-body{flex:1}.composer{width:100%}.fixture-card{max-width:360px}.fixture-card img{width:256px;height:144px;max-width:100%}</style><script>window.WORKBENCH_PREVIEW_BASE='/preview';window.icon=()=>'';</script><script src="${before?'/before-display.js':'/display.js'}"></script><body><header>隔离浏览器Fixture · 无模型调用 / 非Owner公网验收</header><main id="main" data-agent-id="image-agent"><div class="creation-layout chatgpt-conversation-layout"><aside></aside><section class="creation-main"><div id="chat-body" class="chat-body"><div id="cards"></div></div><form id="composer" class="composer"><textarea id="prompt" aria-label="输入提示词"></textarea><div><span>输入自然语言需求</span><p class="composer-run-feedback" id="composer-run-feedback" role="status"></p><button class="button primary" id="composer-submit" type="submit" aria-label="发送"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 20V4m-6 6 6-6 6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></div></form></section></div></main><script>
  ${before?fallback(old):composer+fallback(current)};
+ const app=document.body;const escapeHtml=value=>String(value);const bindModalDialog=node=>{node.querySelector('.dialog-close').onclick=()=>node.remove();};const refreshIcons=()=>bindImageFallbacks();
+ ${viewer}
  window.addFixtureImage=()=>{const cards=document.querySelector('#cards');cards.insertAdjacentHTML('beforeend','<div class="fixture-card"><a class="media-thumb" data-generation-link href="/preview/api/v1/storage/generated/preview-fixture-a/fixture.png"><span class="media-loading">加载中</span><img loading="lazy" data-generation-image data-preview-image-source="/preview/api/v1/preview/image-display/generations/${key}" alt="Fixture历史图片"></a></div>');bindImageFallbacks();};
  window.addFixtureImage();${before?'':'bindPreviewComposerResize();'}
  document.querySelector('#composer').onsubmit=e=>{e.preventDefault();document.querySelector('#prompt').value='';${before?'':'resizePreviewComposer(document.querySelector("#prompt"));'}};
@@ -65,6 +69,26 @@ const server=http.createServer(async(req,res)=>{
    assert.deepEqual(errors,[]);report.cases.push({scenario,result:'PASS',original_requests:original});await page.close();
   }
   scenario='ok';
+  scenario='viewer';counts.clear();page=await browser.newPage({viewport:{width:1200,height:900}});await page.goto(base+'/after');
+  await page.waitForFunction(()=>document.querySelector('#cards img')?.dataset.previewImageState==='loaded');
+  const open=()=>page.evaluate(()=>openGenerationViewer(document.querySelector('[data-generation-link]').href,'Fixture大图',document.querySelector('[data-generation-link]')));
+  await open();await page.waitForFunction(()=>document.querySelector('#generation-viewer [data-viewer-seed]')?.naturalWidth>0);
+  assert.equal(await page.locator('#generation-viewer img[data-preview-image-source]').isHidden(),true);
+  assert.equal(await page.locator('[data-viewer-loading]').isVisible(),true);
+  await page.waitForFunction(()=>document.querySelector('#generation-viewer img[data-preview-image-source]')?.dataset.previewImageState==='loaded');
+  assert.equal(await page.locator('[data-viewer-loading]').isHidden(),true);
+  const downloads=[...counts].filter(([p])=>p.includes('/storage/')).reduce((n,[,v])=>n+v,0);
+  await page.locator('#generation-viewer .dialog-close').click();await open();
+  await page.waitForFunction(()=>document.querySelector('#generation-viewer img[data-preview-image-source]')?.dataset.previewImageState==='loaded');
+  assert.equal([...counts].filter(([p])=>p.includes('/storage/')).reduce((n,[,v])=>n+v,0),downloads);
+  await page.screenshot({path:path.join(out,'viewer-full-loaded-fixture.png'),fullPage:true});
+  report.cases.push({scenario:'viewer-first-open-seed-and-cache',result:'PASS'});await page.close();
+  page=await browser.newPage({viewport:{width:1200,height:900}});await page.goto(base+'/after');
+  await page.evaluate(()=>openGenerationViewer('/preview/api/v1/storage/generated/preview-fixture-a/fixture.png','Fixture冷启动',null));
+  assert.equal(await page.locator('#generation-viewer img[data-preview-image-source]').isHidden(),true);
+  assert.equal(await page.locator('[data-viewer-loading]').isVisible(),true);
+  await page.waitForFunction(()=>document.querySelector('#generation-viewer img[data-preview-image-source]')?.dataset.previewImageState==='loaded');
+  report.cases.push({scenario:'viewer-cold-no-broken-placeholder',result:'PASS'});await page.close();scenario='ok';
   for(const viewport of [{width:1200,height:900},{width:390,height:844},{width:844,height:390}]){
    page=await browser.newPage({viewport});await page.goto(base+'/after');const input=page.locator('#prompt');
    const height=()=>input.evaluate(n=>n.getBoundingClientRect().height);

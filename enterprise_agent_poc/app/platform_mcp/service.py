@@ -240,10 +240,16 @@ class PlatformMCPService:
             raise ImageRequestError("reference_batch_contract_required", "参考图编辑当前每任务支持一张结果；多面编辑请先拆分任务，未发送额外付费请求。")
         config = self._store.enterprise_config(principal.tenant_id)
         omit_logo = bool(re.search(r"(?:不要|无需|不需要|不放|不加).{0,5}(?:logo|标志|标识)", user_text, re.I))
+        brand_intent=user_text
+        if canonical_submission:
+            brand_intent+='\n'+canonical_submission.get('creative_brief','')
+            if not re.search(r'logo|标志|标识',user_text,re.I):
+                omit_logo=bool(re.search(r'(?:不要|无需|不需要|不放|不加).{0,5}(?:logo|标志|标识)',brand_intent,re.I))
         logo_required = not omit_logo and (include_brand_logo or bool(re.search(r"(?:企业|品牌|公司).{0,8}(?:logo|标志|标识)|(?:保留|使用|放上|加上|添加).{0,8}logo", user_text, re.I))
             or bool(config.get("brand_logo") and re.search(r"企业|品牌|招生|宣传|海报|三折页", user_text)))
         if preview and not omit_logo and re.search(r'logo', user_text, re.I):
             logo_required = True
+        if canonical_submission and not omit_logo and config.get('brand_logo') and re.search(r'企业|品牌|海报|三折页',brand_intent):logo_required=True
         preview_brand_context = ''
         if preview:
             preview_brand_context = json.dumps({k:config[k] for k in (
@@ -304,7 +310,12 @@ class PlatformMCPService:
                             item_prompt += '以原图主体为基础，保留用户未要求改变的五官、发型、服饰、版式和辨识度；人物姿态等以本轮明确修改要求为准。不要重新创造无关主体；只改变用户明确要求的区域。保持人物完整，避免不必要的裁切。'
                         item_prompt += '模型不能保证局部编辑绝对不变，忠实执行用户保持不变的约束。'
                 if logo_required:
-                    item_prompt += "\n企业Logo由平台在右上角叠加原始资产；请在该处留白，不要绘制、猜测或重设计任何Logo。"
+                    if canonical_submission and (item.get('layout_mode') in {'brochure_front','brochure_back'} or item.get('logo_optimized') or item.get('logo_anchor')):
+                        from app.preview_image_layout import logo_geometry
+                        width,height=map(int,item['size'].split('x'))
+                        x,y,w,h,pad=logo_geometry(width,height,item.get('layout_mode'),item.get('logo_anchor'))
+                        item_prompt+=f'\nLogo由平台叠加原始资产，品牌组件安全区约为画布({x},{y})起、宽{w+pad*2}高{h+pad*2}像素；在该区域及周围保留自然浅色留白，不放标题、适合人群或活动信息，不重绘或重复保留参考图中的旧Logo。'
+                    else:item_prompt += "\n企业Logo由平台在右上角叠加原始资产；请在该处留白，不要绘制、猜测或重设计任何Logo。"
                 response = None
                 try:
                     async with image_transport_guard("edits" if attachment else "generations"):
@@ -382,8 +393,12 @@ class PlatformMCPService:
                     except Exception as exc:
                         raise RuntimeError("图片已生成但平台持久化失败。") from exc
                     storage_key = provider_key
+                    brand_placement=None
                     if logo_bytes is not None:
-                        image = overlay_brand_logo(image, logo_bytes)
+                        if canonical_submission and (item.get('layout_mode') in {'brochure_front','brochure_back'} or item.get('logo_optimized') or item.get('logo_anchor')):
+                            from app.preview_image_layout import overlay_preview_logo
+                            image,brand_placement=overlay_preview_logo(image,logo_bytes,item.get('layout_mode'),item.get('logo_anchor'))
+                        else:image = overlay_brand_logo(image, logo_bytes)
                         actual_format, extension, mime_type = _validated_image_metadata(image)
                         storage_key = f"generated/{principal.tenant_id}/{uuid4().hex}{extension}"
                         try:
@@ -404,6 +419,7 @@ class PlatformMCPService:
                         "index": item["index"], "purpose": item["purpose"], "requested_aspect_ratio": item["aspect_ratio"],
                         "dimension_match": dimension_match, "warnings": [] if dimension_match else ["PROVIDER_DIMENSION_MISMATCH"],
                         "original_storage_key": provider_key, "brand_logo_applied": logo_bytes is not None,
+                        **({'layout_mode':item.get('layout_mode'),'brand_placement':brand_placement} if canonical_submission else {}),
                         "reference_role": reference_role if attachment else None,
                     })
                     self._store.log_event(None, "image.request", {

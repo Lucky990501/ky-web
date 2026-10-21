@@ -63,6 +63,7 @@ class PreviewImageExecution:
 
     def capability(self):
         from app.preview_image_intent import AUTO_SIZES
+        from app.preview_image_layout import BROCHURE_SIZE
         quota = self.budget.summary()['image']
         enabled = self.authorized() and quota['requests'] < quota['max_requests']
         return {'enabled': enabled, 'execution_mode': MODE,
@@ -71,6 +72,7 @@ class PreviewImageExecution:
                 'max_outputs': 5, 'max_reference_images': reference_limit() if self.main.settings.image_model_id==MODEL else 1,
                 'multi_reference_status':'BLOCKED_CURRENT_WIRE_HTTP_400' if reference_limit()==1 else 'OWNER_CONFIRMED_MULTIPART_NOT_PROVIDER_VERIFIED',
                 'sizes':list(AUTO_SIZES.values()), 'qualities':['high'], 'parameter_spec':SPEC_ID,
+                'layout_sizes':{'brochure':BROCHURE_SIZE},
                 'native_high_resolution': 'OWNER_SPECIFIED_NOT_PROVIDER_VERIFIED',
                 'user_message': ('独立体验图片生成：每任务1～5张，参考图编辑及版本保留；不自动重试。'
                                  if enabled else '图片生成暂不可用：未取得独立执行授权或体验额度已用完。')}
@@ -182,7 +184,7 @@ class PreviewImageExecution:
         if not self.main.product_store.agent_enabled(principal.tenant_id, 'image-agent'):
             raise PermissionError('图片智能体尚未为当前企业启用。')
         self.credit_preflight(principal)
-        parent_role='style' if prepared['action']=='series' and not re.search(r'人物|主体|同一个人|那个人',prompt) else 'subject'
+        parent_role='style' if prepared['action'] in {'series','side_completion','clarify'} and not re.search(r'人物|主体|同一个人|那个人',prompt) else 'subject'
         clone_sources=[{**parent,'role':parent_role}] if parent else prepared['clone_references'] if not attachments else []
         for source_record in clone_sources:
             # An owner-checked immutable copy through the existing upload store;
@@ -334,7 +336,7 @@ class PreviewImageExecution:
                 with Image.open(io.BytesIO(content)) as picture:
                     artifact['width'], artifact['height'] = picture.size
             response = f'已生成{len(artifacts)}张图片，请使用下方图片卡片查看大图或下载。'
-            action_label={'edit':'修改版本（原版保留）','series':'同项目系列续作','recovery':'补齐缺失图片（已有结果保留）'}.get(submission.get('action'))
+            action_label={'edit':'修改版本（原版保留）','clarify':'按本轮纠正重新规划（旧版保留）','side_completion':'同项目新增另一面（原面保留）','series':'同项目系列续作','recovery':'补齐缺失图片（已有结果保留）'}.get(submission.get('action'))
             if action_label:response=action_label+'。\n'+response
             if submission.get('note'):response+='\n'+submission['note']
             if result.get('failures'):

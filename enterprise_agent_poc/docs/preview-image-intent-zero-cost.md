@@ -14,6 +14,9 @@ authorization, credit, historical Task, image file or budget change.
   or portrait 2160x3840, with quality high. Explicit ratios/dimensions win over
   scene defaults. Unsupported exact dimensions map to the nearest standard
   with a note; no resizing of saved originals occurs.
+  Brochure layouts are an explicit Preview exception: the already verified
+  1536x1024 (3:2) enum is the nearest existing landscape option to A4. This is
+  not an exact A4, print-ready or DPI guarantee. User-explicit geometry wins.
 - Counts are 1–5. Reference counts and slot ordinals are distinct from totals.
   An unspecified group defaults to three; an unspecified trifold defaults to
   two landscape spreads, three panels each, not print-ready PDF/artwork.
@@ -25,6 +28,13 @@ authorization, credit, historical Task, image file or budget change.
   failed HTTP or explicit non-dispatch evidence. Successful slots and unknown
   outcomes are not replayed. Existing request and fee records are untouched.
 - History responses distinguish new edits, series additions and recovery.
+- Corrective wording overrides conflicting old count/layout instructions while
+  keeping the current conversation's verified creative brief. A missing,
+  previously unplanned reverse side is a new linked output, not a retry of the
+  successful front. Known failed planned sides retain the bounded recovery guard.
+- Brochure front/back carry dedicated three-panel layout modes and separate
+  brand zones. Only the original transparent tenant Logo is composited there;
+  source image dimensions and historical assets remain unchanged.
 
 ## Verification limits
 
@@ -38,3 +48,5 @@ dialog, conversation/ordered references/digest delivered to submission.
 All are explicitly **Fixture** results. No paid image generation, live customer
 Task creation or public-browser business acceptance is claimed. Actual Provider
 visual fidelity and uncommon ambiguous language still require customer review.
+Any separately authorized paid acceptance is recorded in its own deployment
+evidence, not relabeled as a zero-cost test.

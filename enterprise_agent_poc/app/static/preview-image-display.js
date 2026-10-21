@@ -60,6 +60,7 @@
     node.dataset.previewImageState=value;
     const wrap=node.closest('.media-thumb')||node.parentElement;if(!wrap)return;
     const loaded=value==='loaded',failed=value==='failed',loading=wrap.querySelector('.media-loading');
+    const viewer=node.closest('#generation-viewer .viewer-canvas');
     wrap.classList.toggle('media-failed',failed);wrap.classList.toggle('media-loaded',loaded);
     wrap.setAttribute('aria-busy',String(!loaded&&!failed));node.hidden=failed;
     if(loading)loading.hidden=loaded||failed;
@@ -67,6 +68,14 @@
     else{
       if(!wrap.querySelector('.media-error')){const message=document.createElement('span');message.className='media-error';message.innerHTML='<b>图片加载失败</b><small>点击重新加载；原图下载入口保留</small>';wrap.append(message);}
       wrap.setAttribute('aria-live','polite');
+    }
+    if(viewer){
+      // The full image stays hidden until a real load, not just src assignment.
+      // A separately validated thumbnail may remain visible while decoding.
+      node.hidden=!loaded;viewer.dataset.previewViewerState=value;
+      const seed=viewer.querySelector('[data-viewer-seed]'),status=viewer.querySelector('[data-viewer-loading]');
+      if(seed)seed.hidden=loaded||failed;
+      if(status){status.hidden=loaded;status.textContent=failed?'大图暂时无法加载，请使用下载入口或稍后重新打开。':'正在加载高清原图…';}
     }
   }
   function original(node,source){
@@ -112,9 +121,10 @@
     if(node.loading==='lazy')lazy.observe(node);else void load(node);
   }
   function enhance(){for(const node of document.querySelectorAll('img[data-preview-image-source]'))if(!observed.has(node))bind(node,node.dataset.previewImageSource);for(const node of bound)if(!node.isConnected){lazy.unobserve(node);bound.delete(node);}}
-  listeners.add(()=>{for(const node of bound){node.removeAttribute('src');node.removeAttribute('data-preview-fallback-used');state(node,'waiting');}});
+  listeners.add(()=>{document.querySelectorAll('#generation-viewer [data-viewer-seed]').forEach(node=>node.remove());for(const node of bound){node.removeAttribute('src');node.removeAttribute('data-preview-fallback-used');state(node,'waiting');}});
   new MutationObserver(enhance).observe(document.documentElement,{childList:true,subtree:true});
   addEventListener('pagehide',clear);
   addEventListener('pageshow',event=>{if(event.persisted)location.reload();});
-  window.WorkbenchPreviewImages=Object.freeze({raster,verifyIdentity,setIdentity,clear,bind,bindGenerationFallback,stats:()=>({entries:cache.size,bytes,epoch,pending:pending.size,hits,misses,lastClear}),onClear(fn){listeners.add(fn);return()=>listeners.delete(fn);}});
+  function peek(source){const url=safe(source),value=identity&&url&&cache.get(identity+':'+url);return value&&Date.now()-value.time<TTL?value:null;}
+  window.WorkbenchPreviewImages=Object.freeze({raster,verifyIdentity,setIdentity,clear,bind,bindGenerationFallback,peek,stats:()=>({entries:cache.size,bytes,epoch,pending:pending.size,hits,misses,lastClear}),onClear(fn){listeners.add(fn);return()=>listeners.delete(fn);}});
 })();
