@@ -10,6 +10,7 @@ PREVIEW_CREDIT_TARGET = 100000
 EXISTING_TENANTS_OPERATION = "owner_preview_existing_credit_target_100000_v1"
 EXPERIENCE_REFRESH_OPERATION = "owner_preview_credit_refresh_100000_20261020_v1"
 NEW_VISITOR_OPERATION = "preview_new_visitor_credit_target_100000_v1"
+CUSTOMER_CANONICAL_OPERATION = "preview_canonical_customer_credit_target_100000_20261021_v1"
 
 
 def top_up_preview_credits(store, *, operation, tenant_id=None):
@@ -18,8 +19,10 @@ def top_up_preview_credits(store, *, operation, tenant_id=None):
             or path is None or path.name != "preview.sqlite"
             or path.parent.name != "customer-ai-preview-data"):
         raise PermissionError("Independent Preview SQLite required")
-    if operation not in (EXISTING_TENANTS_OPERATION, NEW_VISITOR_OPERATION, EXPERIENCE_REFRESH_OPERATION):
+    if operation not in (EXISTING_TENANTS_OPERATION, NEW_VISITOR_OPERATION, EXPERIENCE_REFRESH_OPERATION, CUSTOMER_CANONICAL_OPERATION):
         raise PermissionError("Unknown Preview credit authorization")
+    if operation == CUSTOMER_CANONICAL_OPERATION and tenant_id is None:
+        raise PermissionError("Explicit customer Tenant required")
     if (tenant_id is not None and not tenant_id.startswith("preview-")) or (
             operation == NEW_VISITOR_OPERATION and tenant_id is None):
         raise PermissionError("Preview tenant required")

@@ -22,6 +22,12 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS preview_customer_accounts(
  operation_id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL UNIQUE,user_id TEXT NOT NULL UNIQUE,
  account TEXT NOT NULL UNIQUE,initial_password_pending INTEGER NOT NULL DEFAULT 1,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)'''
+BINDING_SCHEMA='''CREATE TABLE IF NOT EXISTS preview_customer_bindings(
+ operation_id TEXT PRIMARY KEY,account TEXT NOT NULL UNIQUE,
+ tenant_id TEXT NOT NULL,user_id TEXT NOT NULL UNIQUE,
+ source_tenant_id TEXT NOT NULL,source_user_id TEXT NOT NULL,
+ initial_password_pending INTEGER NOT NULL,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)'''
 
 
 class PreviewCustomerAuth:
@@ -29,7 +35,7 @@ class PreviewCustomerAuth:
         self.main=main;self.path=Path(root)/'preview.sqlite';self.secure=not local_http
         self.attempts=defaultdict(deque)
         self.dummy_hash=hash_password(secrets.token_urlsafe(24))
-        with self.db() as c:c.execute(SCHEMA)
+        with self.db() as c:c.execute(SCHEMA);c.execute(BINDING_SCHEMA)
 
     @contextmanager
     def db(self):
@@ -43,8 +49,17 @@ class PreviewCustomerAuth:
 
     def customer(self,user_id):
         with self.db() as c:
+            bound=c.execute('select * from preview_customer_bindings where user_id=?',(user_id,)).fetchone()
+            if bound:return {**dict(bound),'binding':True}
             row=c.execute('select * from preview_customer_accounts where user_id=?',(user_id,)).fetchone()
         return dict(row) if row else None
+
+    def login_user(self,account):
+        with self.db() as c:bound=c.execute('select tenant_id,user_id from preview_customer_bindings where account=?',(account,)).fetchone()
+        if bound:
+            user=self.main.product_store.user_by_id(bound['user_id'],bound['tenant_id'])
+            return self.main.product_store.user_by_email(user['email']) if user else None
+        return self.main.product_store.user_by_email(account)
 
     def issue(self,user,setup=False):
         return self.main.sessions.issue(UserPrincipal(user['id'],user['tenant_id'],user['role'],
@@ -90,10 +105,10 @@ class PreviewCustomerAuth:
             while attempts and attempts[0]<=now-60:attempts.popleft()
             if len(attempts)>=6:return await response('尝试次数过多，请一分钟后再试。',429)(scope,receive,send)
             attempts.append(now)
-            user=self.main.product_store.user_by_email(account)
+            user=self.login_user(account)
             record=self.customer(user['id']) if user else None
             verified=verify_password(password,user['password_hash'] if user and record else self.dummy_hash)
-            if not verified or not record or record['tenant_id']!=user['tenant_id'] or user['account_status']!='enabled':
+            if not verified or not record or record['account']!=account or record['tenant_id']!=user['tenant_id'] or user['account_status']!='enabled':
                 return await response('账号或密码不正确。',401)(scope,receive,send)
             attempts.clear();setup=bool(record['initial_password_pending'])
             result=JSONResponse({'password_change_required':setup,'next':'/preview/'},headers={'Cache-Control':'no-store'})
@@ -109,14 +124,15 @@ class PreviewCustomerAuth:
                     or user['account_status']!='enabled' or principal.auth_version!='setup:'+self.main.sessions.credential_version(user['password_hash'])):raise PermissionError()
                 if verify_password(payload['new_password'],user['password_hash']):return await response('请设置不同于初始密码的新密码。')(scope,receive,send)
                 new_hash=hash_password(payload['new_password'])
+                table='preview_customer_bindings' if record.get('binding') else 'preview_customer_accounts'
                 with self.db() as c:
                     c.execute('BEGIN IMMEDIATE')
-                    current=c.execute('select initial_password_pending from preview_customer_accounts where user_id=?',(user['id'],)).fetchone()
+                    current=c.execute('select initial_password_pending from '+table+' where user_id=?',(user['id'],)).fetchone()
                     if not current or not current[0]:raise PermissionError()
                     changed=c.execute('update users set password_hash=? where id=? and tenant_id=? and password_hash=?',
                                       (new_hash,user['id'],user['tenant_id'],user['password_hash'])).rowcount
                     if changed!=1:raise PermissionError()
-                    c.execute('update preview_customer_accounts set initial_password_pending=0 where user_id=?',(user['id'],))
+                    c.execute('update '+table+' set initial_password_pending=0 where user_id=?',(user['id'],))
                 user['password_hash']=new_hash
                 return await self.cookie(JSONResponse({'next':'/preview/'},headers={'Cache-Control':'no-store'}),self.issue(user))(scope,receive,send)
             except Exception:
@@ -158,3 +174,52 @@ def provision(root,*,operation_id,account,password_hash):
     store=SimpleNamespace(database_path=path,is_postgres=False,connection=connection)
     credits=top_up_preview_credits(store,operation=NEW_VISITOR_OPERATION,tenant_id=tenant)[0]
     return {'tenant_id':tenant,'user_id':user,'account':account,'created':created,'credits':credits}
+
+
+def bind_existing_customer(root,*,operation_id,source_operation_id,target_tenant_id,owner_user_id):
+    """Operator-only alias binding. Never move User/Task foreign keys or history."""
+    root=Path(root).resolve();path=root/'preview.sqlite'
+    if root.name!='customer-ai-preview-data' or not path.is_file() or not target_tenant_id.startswith('preview-'):
+        raise PermissionError('Independent Preview Tenant required')
+    if not all(re.fullmatch(r'[a-zA-Z0-9_-]{1,100}',v) for v in [operation_id,source_operation_id,owner_user_id]):
+        raise ValueError('Invalid binding contract')
+    @contextmanager
+    def connection():
+        c=sqlite3.connect(path,timeout=10);c.row_factory=sqlite3.Row
+        try:yield c;c.commit()
+        except Exception:c.rollback();raise
+        finally:c.close()
+    with connection() as c:
+        c.execute('BEGIN IMMEDIATE');c.execute(BINDING_SCHEMA)
+        owner=c.execute("select id from users where id=? and tenant_id=? and role='enterprise_admin' and account_status='enabled'",(owner_user_id,target_tenant_id)).fetchone()
+        if not owner:raise PermissionError('Verified Owner identity required')
+        source=c.execute('select * from preview_customer_accounts where operation_id=?',(source_operation_id,)).fetchone()
+        if not source or source['tenant_id']==target_tenant_id or source['user_id']==owner_user_id:raise PermissionError('Independent source customer required')
+        prior=c.execute('select * from preview_customer_bindings where operation_id=?',(operation_id,)).fetchone()
+        if prior:
+            if (prior['source_user_id']!=source['user_id'] or prior['tenant_id']!=target_tenant_id or prior['account']!=source['account']):raise PermissionError('Binding identity mismatch')
+            target=c.execute('select id,tenant_id,account_status,role from users where id=?',(prior['user_id'],)).fetchone()
+            if not target or target['tenant_id']!=target_tenant_id or target['role']!='member' or target['account_status']!='enabled':raise PermissionError('Bound customer identity mismatch')
+            user_id=target['id'];created=False
+        else:
+            source_user=c.execute('select * from users where id=? and tenant_id=?',(source['user_id'],source['tenant_id'])).fetchone()
+            if not source_user or source_user['account_status']!='enabled' or source_user['email']!=source['account']:raise PermissionError('Source customer mismatch')
+            if c.execute('select 1 from preview_customer_bindings where account=?',(source['account'],)).fetchone():raise PermissionError('Account already bound by another operation')
+            user_id=str(uuid4());internal_account='customer-member-'+uuid4().hex+'@preview.luckio.cn'
+            c.execute("insert into users(id,tenant_id,email,password_hash,display_name,role) values(?,?,?,?,?,'member')",
+                      (user_id,target_tenant_id,internal_account,source_user['password_hash'],'客户体验用户'))
+            c.execute('insert into preview_customer_bindings(operation_id,account,tenant_id,user_id,source_tenant_id,source_user_id,initial_password_pending) values(?,?,?,?,?,?,?)',
+                      (operation_id,source['account'],target_tenant_id,user_id,source['tenant_id'],source['user_id'],source['initial_password_pending']))
+            # Revoke only the old separately provisioned identity's sessions. Its data,
+            # password hash, Tenant and all ownership foreign keys remain intact.
+            c.execute("update users set account_status='disabled' where id=? and tenant_id=?",(source['user_id'],source['tenant_id']))
+            created=True
+        enabled={r[0] for r in c.execute("select agent_id from tenant_agent_instances where tenant_id=? and status='enabled'",(target_tenant_id,))}
+        if not {'copywriting-agent','campaign-agent','preview-wechat-agent','image-agent'}.issubset(enabled):raise PermissionError('Existing delivered agents required')
+    from types import SimpleNamespace
+    from app.preview_credit_target import CUSTOMER_CANONICAL_OPERATION
+    credits=top_up_preview_credits(SimpleNamespace(database_path=path,is_postgres=False,connection=connection),
+                                  operation=CUSTOMER_CANONICAL_OPERATION,tenant_id=target_tenant_id)[0]
+    return {'tenant_id':target_tenant_id,'user_id':user_id,'account':source['account'],'role':'member',
+            'source_tenant_id':source['tenant_id'],'source_user_id':source['user_id'],
+            'created':created,'credits':credits,'password_changed':False}
