@@ -28,8 +28,30 @@ test('generic direct refresh routes request dynamic metadata and do not render C
   assert.ok(!h.document.main.innerHTML.includes('活动策划'));
 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
-test('workspace advertises public Productized slug without changing Legacy references',async()=>{
+test('B1 customer portal exposes copywriting and truthful deferred states without management',async()=>{
   const h=harness('/workspace');const pending=h.run("render('workspace')");
+  h.respond('/api/v1/workspace',{agents:[{id:'copywriting-agent',enabled:true},{id:'image-agent',enabled:true}],credit_balance:100,recent_conversations:[]});await pending;
+  assert.ok(h.document.main.innerHTML.includes('data-agent="copywriting-agent"'));
+  assert.ok(!h.document.main.innerHTML.includes('data-agent="image-agent"'));
+  assert.ok(h.document.main.innerHTML.includes('本批尚未迁入'));
+  for(const role of ['member','enterprise_admin']){
+    const ids=JSON.parse(h.run(`JSON.stringify(navigationForUser({role:'${role}',is_platform_admin:true}).map(x=>x[0]))`));
+    assert.deepEqual(ids,['workspace','copywriting','history','profile']);
+  }
+  assert.equal(h.run("agentNavigationPath('copywriting','conversation-1',null)"),'/workspace/copywriting?conversation=conversation-1');
+});
+test('B1 management navigation distinguishes platform and enterprise administration',()=>{
+  const h=harness('/manage');
+  const ids=user=>JSON.parse(h.run(`JSON.stringify(navigationForUser(${JSON.stringify(user)}).map(x=>x[0]))`));
+  assert.deepEqual(ids({role:'member',is_platform_admin:true}),['management','platform-agents','platform-skills','profile']);
+  const enterprise=ids({role:'enterprise_admin',is_platform_admin:false});
+  assert.ok(enterprise.includes('managed-agents')&&enterprise.includes('members'));
+  assert.ok(!enterprise.includes('platform-skills')&&!enterprise.includes('image')&&!enterprise.includes('copywriting'));
+  h.run("me={role:'member',is_platform_admin:false}");
+  assert.equal(h.run("allowedPage('management')"),'workspace');
+});
+test('workspace advertises public Productized slug without changing Legacy references',async()=>{
+  const h=harness('/legacy/workspace');const pending=h.run("render('workspace')");
   h.respond('/api/v1/workspace',{agents:[
     {id:'image-agent',slug:'image-generation',name:'Legacy',enabled:true,credit_cost:20},
     {id:'internal-uuid',slug:'social-content-agent',conversation_path:'/agents/social-content-agent',definition_source:'productized',name:'Social',enabled:true,credit_cost:3}
@@ -186,7 +208,7 @@ test('existing agent conversation restoration and platform authorization remain 
 });
 
 test('member, enterprise admin, and platform admin share one filtered navigation source',()=>{
-  const h=harness('/workspace');
+  const h=harness('/legacy/workspace');
   const ids=user=>JSON.parse(h.run(`JSON.stringify(navigationForUser(${JSON.stringify(user)}).map(item=>item[0]))`));
   assert.deepEqual(ids({role:'member',is_platform_admin:false}),['workspace','image','history','generations','profile']);
   assert.deepEqual(ids({role:'enterprise_admin',is_platform_admin:false}),['workspace','image','history','generations','knowledge','assets','recent-tasks','members','enterprise','profile']);
@@ -281,7 +303,7 @@ test('history rows keep titles and descriptions to ten characters',()=>{
 });
 
 test('P1 recent task navigation remains enterprise-admin only',()=>{
-  const h=harness('/workspace');
+  const h=harness('/legacy/workspace');
   const enterprise=JSON.parse(h.run("JSON.stringify(navigationForUser({role:'enterprise_admin',is_platform_admin:false}).map(item=>item[0]))"));
   assert.ok(enterprise.includes('recent-tasks'));
   h.run("me={role:'member',is_platform_admin:false}");
@@ -290,7 +312,7 @@ test('P1 recent task navigation remains enterprise-admin only',()=>{
 });
 
 test('Polish batch keeps the customer workspace focused and renders asset tags as chips',async()=>{
-  const h=harness('/workspace');
+  const h=harness('/legacy/workspace');
   const pending=h.run("render('workspace')");
   h.respond('/api/v1/workspace',{brand_name:'测试企业',credit_balance:100,agents:[
     {id:'image-agent',name:'图片生成智能体',description:'制作企业视觉内容',category:'视觉创作',enabled:true,credit_cost:20,icon:'image'},
@@ -310,7 +332,7 @@ test('Polish batch keeps the customer workspace focused and renders asset tags a
 });
 
 test('Workspace banner aligns agent cards, limits recent lists, and exposes profile navigation',async()=>{
-  const h=harness('/workspace');
+  const h=harness('/legacy/workspace');
   const pending=h.run("render('workspace')");
   h.respond('/api/v1/workspace',{brand_name:'测试企业',credit_balance:100,agents:[
     {id:'image-agent',name:'图片生成智能体',description:'制作企业视觉内容',enabled:true,credit_cost:20,icon:'image'},
@@ -539,7 +561,7 @@ test('G6-G9 greeting uses one responsive style scale and mobile-safe text wrappi
 });
 
 test('R3 R4 R5 R8 renamed and new Registry agents retain stable routes',async()=>{
-  const h=harness('/workspace');const pending=h.run("render('workspace')");
+  const h=harness('/legacy/workspace');const pending=h.run("render('workspace')");
   h.respond('/api/v1/workspace',{agents:[
     {id:'campaign-agent',slug:'campaign-planning',name:'活动策划智能体',description:'活动方案',icon:'calendar-days',category:'general',enabled:true,credit_cost:8},
     {id:'copywriting-agent',slug:'copywriting',name:'文案创作智能体',description:'传播文案',icon:'type',category:'general',enabled:true,credit_cost:3},

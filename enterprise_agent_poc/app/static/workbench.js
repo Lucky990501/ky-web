@@ -2,6 +2,7 @@ const app = document.querySelector('#app');
 let me, activeConversationId = null, activeTaskId = null, activeAgentId = 'image-agent', mobileDrawerController = () => {};
 const agentConversationSelections = new Map(), pendingConversationSubmissions = new Map();
 const acceptedTaskReferences = new Map();
+const composerDrafts = new Map();
 let orphanHistoryPointer = null;
 let sessionViewVersion = 0, enterpriseBrand = null;
 const principalSnapshot = () => ({userId:me?.user_id,tenantId:me?.tenant_id,role:me?.role,platformAdmin:Boolean(me?.is_platform_admin),version:sessionViewVersion});
@@ -60,6 +61,7 @@ function applyEnterpriseBrand(data,kind='workspace',owner=null,{refreshLogo=fals
 function resetSessionViews(){
   detachConversationView(document.querySelector('#main'));sessionViewVersion++;
   agentConversationSelections.clear();acceptedTaskReferences.clear();pendingConversationSubmissions.clear();pageCache.clear();enterpriseBrand=null;
+  composerDrafts.clear();
   orphanHistoryPointer=null;
 }
 const storageUrl = item => item?.content_url || item?.image_url || `/api/v1/storage/${String(item?.storage_key||'').split('/').map(encodeURIComponent).join('/')}`;
@@ -82,14 +84,17 @@ const memberNavs = [['workspace','layout-dashboard','工作台'],['image','wand-
 const enterpriseAdminNavs = [['knowledge','book-open','知识库'],['assets','image','素材库'],['recent-tasks','list-checks','最近任务'],['members','users','成员管理'],['enterprise','settings','企业设置']];
 const platformAdminNavs = [['platform-skills','package-check','Skill 管理'],['platform-agents','bot','Agent 管理']];
 const profileNav = ['profile','user-round','个人中心'];
-const navigationForUser = user => [...memberNavs,...(user?.role==='enterprise_admin'?enterpriseAdminNavs:[]),...(user?.is_platform_admin?platformAdminNavs:[]),profileNav];
+const portalMode=()=>location.pathname.startsWith('/manage')?'management':location.pathname.startsWith('/workspace')?'customer':'legacy';
+const managementRoutes={management:'/manage','managed-agents':'/manage/agents','platform-agents':'/manage/agents','platform-skills':'/manage/skills',enterprise:'/manage/enterprise',members:'/manage/members',knowledge:'/manage/knowledge',assets:'/manage/assets','recent-tasks':'/manage/usage',profile:'/manage/profile'};
+const customerRoutes={workspace:'/workspace',copywriting:'/workspace/copywriting',history:'/workspace/history',profile:'/workspace/profile'};
+const navigationForUser = user => portalMode()==='customer'?[['workspace','layout-dashboard','AI Workspace'],['copywriting','type','文案创作'],['history','history','本人项目'],profileNav]:portalMode()==='management'?[['management','layout-dashboard','管理概览'],[user?.is_platform_admin?'platform-agents':'managed-agents','bot','智能体管理'],...(user?.is_platform_admin?[['platform-skills','package-check','Skill 管理']]:[]),...(user?.role==='enterprise_admin'?enterpriseAdminNavs.map(item=>item[0]==='recent-tasks'?['recent-tasks','chart-no-axes-combined','用量与运行诊断']:item):[]),profileNav]:[...memberNavs,...(user?.role==='enterprise_admin'?enterpriseAdminNavs:[]),...(user?.is_platform_admin?platformAdminNavs:[]),profileNav];
 const pageRoutes = Object.freeze({workspace:'/workspace',image:'/agents/image',copywriting:'/agents/copywriting',campaign:'/agents/campaign',history:'/conversations',generations:'/generations',knowledge:'/knowledge',assets:'/assets','recent-tasks':'/recent-tasks',members:'/members',enterprise:'/enterprise-config',profile:'/profile','platform-skills':'/platform/skills','platform-agents':'/platform/agents'});
-const pageFromPath = path => Object.entries(pageRoutes).find(([,route])=>route===path)?.[0]||( /^\/agents\/[a-zA-Z0-9-]+$/.test(path) ? `agent:${path.slice(8)}` : null);
+const pageFromPath = path => path==='/legacy/workspace'?'workspace':path==='/manage/agents'?(me?.is_platform_admin?'platform-agents':'managed-agents'):[...Object.entries(customerRoutes),...Object.entries(managementRoutes),...Object.entries(pageRoutes)].find(([,route])=>route===path)?.[0]||( /^\/agents\/[a-zA-Z0-9-]+$/.test(path) ? `agent:${path.slice(8)}` : null);
 const navigationState = page => ({page,activeAgentId,activeConversationId,activeTaskId,...(page==='history'?{orphanHistory:readOrphanHistoryPointer()}: {})});
-const allowedPage = page => ['platform-skills','platform-agents'].includes(page)&&!me?.is_platform_admin?'workspace':['knowledge','assets','recent-tasks','members','enterprise','billing'].includes(page)&&me?.role!=='enterprise_admin'?'workspace':page;
+const allowedPage = page => ['management','managed-agents'].includes(page)&&!me?.is_platform_admin&&me?.role!=='enterprise_admin'?'workspace':['platform-skills','platform-agents'].includes(page)&&!me?.is_platform_admin?'workspace':['knowledge','assets','recent-tasks','members','enterprise','billing'].includes(page)&&me?.role!=='enterprise_admin'?'workspace':page;
 const agentRouteForPage=page=>({image:'image-agent',copywriting:'copywriting-agent',campaign:'campaign-agent'})[page]||(page?.startsWith('agent:')?page.slice(6):null);
 function agentNavigationPath(page,conversationId,taskId=activeTaskId){
-  const path=pageRoutes[page]||(page.startsWith('agent:')?`/agents/${encodeURIComponent(page.slice(6))}`:location.pathname);
+  const path=(location.pathname==='/legacy/workspace'&&page==='workspace'?'/legacy/workspace':portalMode()==='management'?managementRoutes[page]:portalMode()==='customer'?customerRoutes[page]:null)||pageRoutes[page]||(page.startsWith('agent:')?`/agents/${encodeURIComponent(page.slice(6))}`:location.pathname);
   if(!agentRouteForPage(page))return path;
   const query=[];if(conversationId)query.push(`conversation=${encodeURIComponent(conversationId)}`);if(taskId)query.push(`task=${encodeURIComponent(taskId)}`);
   return query.length?`${path}?${query.join('&')}`:path;
@@ -152,6 +157,7 @@ function conversationViewIsCurrent(main,state){
   return !state?.detached&&principalIsCurrent(state?.owner)&&main?.isConnected!==false&&(!state?.main||document.querySelector('#main')===state.main);
 }
 function detachConversationView(main){
+  main?._composerCleanup?.();
   const state=main?._submittingState||main?.querySelector?.('#task-status')?._streamState;
   if(!state)return;
   state.detached=true;clearStreamingVisualWork(state,{discard:true});stopThinkingClock(state);closeStreamingSource(state);
@@ -172,6 +178,8 @@ app.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="brand
   document.querySelectorAll('[data-page]').forEach(x => x.onclick = () => {if(x.closest('.mobile-drawer'))setDrawer(false);navigate(x.dataset.page);});
   document.querySelector('#top-help').onclick = showHelpDialog;
   bindAccountMenu();
+  document.querySelectorAll('.brand-lockup b').forEach(node=>node.textContent=portalMode()==='management'?'Agent Workbench':'AI Workspace');
+  if(me.is_platform_admin||me.role==='enterprise_admin')document.querySelector('.top-actions')?.insertAdjacentHTML?.('afterbegin',`<a class="button secondary" href="${portalMode()==='management'?'/workspace':'/manage'}">${portalMode()==='management'?'进入 AI Workspace':'进入管理端'}</a>`);
   syncAvatarViews(); render(initialPage); refreshIcons();
 }
 
@@ -191,7 +199,8 @@ async function render(page) {
   document.querySelectorAll('[data-page]').forEach(x => x.classList.toggle('active',x.dataset.page === (page.startsWith('agent:')?'image':page)));
   main.innerHTML = pageLoading();
   try {
-    if (page === 'workspace') return await workspaceV2(main);
+    if (page === 'workspace') return await (location.pathname==='/legacy/workspace'?workspaceV2(main):customerWorkspace(main));
+    if (page === 'management'||page === 'managed-agents') return await managementWorkspace(main,page);
     if (page === 'image') return await agentWorkspaceV2(main,'image-agent');
     if (page === 'copywriting') return await agentWorkspaceV2(main,'copywriting-agent');
     if (page === 'campaign') return await agentWorkspaceV2(main,'campaign-agent');
@@ -208,6 +217,25 @@ async function render(page) {
     if (page === 'platform-skills' && me.is_platform_admin) return await platformSkills(main);
     if (page === 'platform-agents' && me.is_platform_admin) return await platformAgents(main);
   } catch (error) { main.innerHTML = `<section class="page-load-error" role="alert"><b>${icon('circle-alert',24)}页面加载失败</b><p>${escapeHtml(error.message || '请稍后重试。')}</p><button class="button primary" data-retry-page="${escapeHtml(page)}">${icon('refresh-cw')}重新加载</button></section>`; main.querySelector('[data-retry-page]').onclick = () => render(page); refreshIcons(); }
+}
+
+async function customerWorkspace(main){
+  const data=await api('/api/v1/workspace',{cache:'no-store'});
+  if(main.isConnected===false||!principalIsCurrent(main._owner))return;
+  applyEnterpriseBrand(data,'workspace',main._owner);sideCredit(data.credit_balance);
+  const agents=data.agents||[],copy=agents.find(a=>a.id==='copywriting-agent');
+  const states=[['image-agent','图片生成'],['campaign-agent','活动策划'],['wechat-official-account-writing','公众号编写']].map(([id,label])=>{const item=agents.find(a=>a.id===id||a.slug===id);return `<article class="panel"><h3>${label}</h3><p>${item?.enabled?'现有正式入口已启用':'当前企业未启用'}</p><small>本批尚未迁入 AI Workspace</small></article>`;}).join('');
+  main.innerHTML=`${header('AI Workspace','用自然语言创作，持续修改并保存自己的完整文案。','sparkles')}<section class="welcome-banner"><div><b data-company-name>${escapeHtml(companyDisplayName())}</b><h2>文案创作</h2><p>从新想法开始，或继续修改上一版。事实与完整成稿保存在同一项目中。</p>${copy?.enabled?button('开始创作','arrow-right','primary','data-agent="copywriting-agent"'):'<p>文案创作尚未为当前企业启用，请联系管理员。</p>'}</div></section><section class="panel recent-history"><div class="section-title"><h2>本人最近项目</h2><a href="/workspace/history" data-go="history">查看全部</a></div>${(data.recent_conversations||[]).slice(0,5).map(x=>conversationRowHtml(x,'data-agent-conversation')).join('')||'<p>还没有项目。</p>'}</section><h2>其他能力状态</h2><div class="agent-grid">${states}</div>`;
+  main.querySelectorAll('[data-agent]').forEach(node=>node.onclick=()=>navigate(agentPage(node.dataset.agent)));
+  main.querySelectorAll('[data-agent-conversation]').forEach(node=>node.onclick=()=>selectAgentConversation(node.dataset.agentId,node.dataset.agentConversation));bindNavigation();refreshIcons();
+}
+
+async function managementWorkspace(main,page){
+  const data=await api('/api/v1/workspace',{cache:'no-store'});
+  if(main.isConnected===false||!principalIsCurrent(main._owner))return;
+  const links=navigationForUser(me).filter(([id])=>!['management','profile'].includes(id));
+  main.innerHTML=`${header('Agent Workbench','管理企业 AI 能力、成员权限与运行状态。日常创作请进入 AI Workspace。','settings')}<div class="agent-grid">${page==='managed-agents'?(data.agents||[]).map(a=>`<article class="panel"><h3>${escapeHtml(a.name)}</h3><p>${a.enabled?'当前企业已启用':'当前企业未启用'}</p><small>模板、Skill 发布与受控 Runtime Test 由平台管理员管理。</small></article>`).join(''):links.map(([id,i,label])=>`<article class="panel"><h3>${escapeHtml(label)}</h3>${button('打开',i,'secondary',`data-go="${id}"`)}</article>`).join('')}</div>${me.is_platform_admin?'<p class="muted">受控 Runtime Test 位于智能体版本详情，与普通用户文案会话分开。</p>':''}`;
+  bindNavigation();refreshIcons();
 }
 
 async function workspaceV2(main) {
@@ -552,6 +580,16 @@ function activityWordExportFeedback(main){
   return feedback;
 }
 function bindConversationActions(main){
+  if(main.dataset.agentId==='copywriting-agent'){
+    main.querySelectorAll('[data-assistant-message-id]').forEach(article=>{
+      const actions=article.querySelector('.message-actions')||article.querySelector('[data-stream-actions]');
+      const match=/^task:([a-f0-9-]{36}):assistant$/.exec(article.dataset.assistantMessageId||'');
+      if(!actions||!match||actions.querySelector('[data-edit-draft]'))return;
+      actions.querySelector('[data-regenerate]')?.remove();
+      actions.insertAdjacentHTML('beforeend',`${button('继续修改','pencil','secondary','data-edit-draft')}<a class="button secondary" href="/api/v1/tasks/${match[1]}/text" download>导出 TXT</a>`);
+      actions.querySelector('[data-edit-draft]').onclick=()=>{const input=main.querySelector('#prompt');if(input){input.placeholder='描述想调整的内容，例如：只改第二段，其余保持不变。';input.focus();}};
+    });
+  }
   main.querySelectorAll('[data-example-prompt]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.examplePrompt;input.focus();});
   main.querySelectorAll('[data-copy-response]').forEach(node=>node.onclick=async()=>{const original=node.innerHTML;try{await navigator.clipboard.writeText(node.dataset.copyResponse);node.textContent='已复制';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}catch{node.textContent='复制失败';setTimeout(()=>{if(node.isConnected)node.innerHTML=original;refreshIcons();},1600);}});
   main.querySelectorAll('[data-regenerate]').forEach(node=>node.onclick=()=>{const input=main.querySelector('#prompt');if(!input)return;input.value=node.dataset.regenerate;input.focus();});
@@ -875,9 +913,22 @@ async function agentWorkspaceV2(main, agentId) {
   const recoveredDetail=detail||(selectedTask?{tasks:[selectedTask]}:null);
   bindConversationRail(main,agentId); main.querySelector('#composer').onsubmit=event=>submitAgentTaskV2(event,agentId,main); bindConversationActions(main); hydrateHistoryActivityPlans(main,history,agentId); restoreActiveConversationTask(main,agentId,recoveredDetail); restorePendingSubmission(main,agentId); restoreConversationTerminalStatus(main,recoveredDetail); refreshIcons();
   if(agent.placeholder)main.querySelector('#prompt').placeholder=agent.placeholder;
+  if(agentId==='copywriting-agent')bindBusinessComposer(main);
   if(!canRun)main.querySelector('#new-chat').disabled=true;
   if((!canRun||taskOnly)&&!activeConversationTask(recoveredDetail)){main.querySelector('#composer').innerHTML=`<p role="status">${!canRun?'智能体已停用，历史项目只读；不能创建任务或继续执行。':'任务结果可查询；当前历史关联不可访问，不能在该项目续发。请新建项目，或待历史关联恢复后重新打开。'}</p>`;main.querySelector('#composer').onsubmit=event=>event.preventDefault();}
   bindNavigation();
+}
+function bindBusinessComposer(main){
+  const input=main.querySelector('#prompt');if(!input)return;
+  const scope=principalCacheScope(),key=()=>`${scope}:${main._conversationContext?.conversationId||'new'}:copywriting`;
+  let previousKey=key();
+  input.setAttribute('aria-label','创作需求或修改要求');
+  input.value=composerDrafts.get(key())||input.value;
+  const resize=()=>{if(!input.isConnected)return;const cap=Math.min(window.innerWidth<=768?160:200,window.innerHeight*.3);input.style.height='auto';input.style.height=`${Math.min(cap,Math.max(42,input.scrollHeight))}px`;input.style.overflowY=input.scrollHeight>cap?'auto':'hidden';};
+  const update=()=>{const currentKey=key();if(currentKey!==previousKey)composerDrafts.delete(previousKey);previousKey=currentKey;if(input.value)composerDrafts.set(currentKey,input.value);else composerDrafts.delete(currentKey);while(composerDrafts.size>30)composerDrafts.delete(composerDrafts.keys().next().value);resize();};
+  input.addEventListener('input',update);window.addEventListener('resize',resize);
+  main._composerCleanup=()=>{update();window.removeEventListener('resize',resize);};
+  resize();
 }
 async function submitAgentTaskV2(event,agentId,main){
   event.preventDefault();const input=document.querySelector('#prompt'),text=input.value.trim(),attachment=agentId==='image-agent'?main._chatImage:null;if(!text||document.querySelector('#task-status')||attachment&&attachment.status!=='idle'&&attachment.status!=='ready')return;
@@ -893,9 +944,11 @@ async function submitAgentTaskV2(event,agentId,main){
   if(main._conversationContext?.taskOnly||main._conversationContext?.canRun===false)return;
   const submittedAt=Date.now();if(attachment?.record){attachment.locked=true;attachment.render();}
   input.value='';const body=document.querySelector('#chat-body'),follow=shouldAutoFollowStream();
+  input.dispatchEvent(new Event('input'));
   body.insertAdjacentHTML('beforeend',`<article class="chat-message chat-message-user"><b>你</b><div class="chat-message-content chat-message-content-user">${userMessageAttachmentHtml(attachment?.record?[attachment.record]:[])}${escapeHtml(text)}</div></article>${streamingMessageHtml('正在思考')}`);
   const node=main.querySelector('#task-status'),state=createStreamingState();state.main=main;state.owner=main._conversationContext?.owner||principalSnapshot();main._submittingState=state;state.conversationStartedAt=submittedAt;state.follow=follow;state.sourcePrompt=text;beginConversationRun(state,{agentId,phase:ConversationRunPhase.SUBMITTING});node._streamState=state;updateComposerRunState(main,state);watchStreamingFollow(state);startThinkingClock(node,state);refreshIcons();scrollStreamToBottom(follow,state,true);
   const payload={message:text};if(activeConversationId)payload.conversation_id=activeConversationId;if(attachment?.record)payload.attachments=[{type:'image',id:attachment.record.id}];
+  if(agentId==='copywriting-agent')payload.client_request_id=crypto.randomUUID();
   const key=agentSelectionKey(agentId),pending={owner:state.owner,promise:null};
   pending.promise=api(`/api/v1/agents/${agentId}/runs`,{method:'POST',body:JSON.stringify(payload)}).then(task=>{
     if(!principalIsCurrent(state.owner))throw Error('登录会话已变化，请从历史记录查询任务。');
@@ -918,8 +971,20 @@ function finishStreamTask(node,state,done,agentId,main,retryText){
   state.run=state.run||createConversationRunState();state.run.conversationId=done.conversation_id||state.run.conversationId;applyStreamingEvent(state,'complete',done);transitionConversationRun(state.run,ConversationRunPhase.COMPLETED);updateComposerRunState(main,state);rememberAcceptedTask(main,agentId,{id:state.run.taskId,conversation_id:state.run.conversationId,status:done.status});
   confirmRecoveredConversation(main,state);
   pageCache.delete('/api/v1/conversations');pageCache.delete('/api/v1/generations');pageCache.delete('/api/v1/workspace');
+  if(agentId==='copywriting-agent')refreshCopywritingHistory(main);
   state.onVisualDrained=()=>{if(state.completed||state.run?.terminal==='cancelled'||state.visualPending)return;state.onVisualDrained=null;completeStreamingMessage(node,state,retryText,main);settleConversationRun(main,state,'completed');};
   if(state.visualPending){if(!state.renderPending)scheduleStreamingRender(node,state);}else state.onVisualDrained();
+}
+async function refreshCopywritingHistory(main){
+  const owner=main._owner,revision=(main._copyHistoryRevision||0)+1;main._copyHistoryRevision=revision;
+  try{
+    const items=await api('/api/v1/conversations',{cache:'no-store'});
+    if(main.isConnected===false||document.querySelector('#main')!==main||!principalIsCurrent(owner)||main._copyHistoryRevision!==revision)return;
+    const rail=main.querySelector('.conversation-rail');if(!rail)return;
+    const own=items.filter(item=>item.agent_id==='copywriting-agent');main._orphanKnownConversations=own;
+    rail.innerHTML=agentConversationRailHtml(own,main._conversationContext?.conversationId);
+    bindConversationRail(main,'copywriting-agent');refreshIcons();
+  }catch{/* Saved result stays available; history can be reopened normally. */}
 }
 function streamTask(taskId,agentId,main,retryText,node,state){
   if(!conversationViewIsCurrent(main,state))return;

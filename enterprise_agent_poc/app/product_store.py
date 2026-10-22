@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -436,16 +437,29 @@ class ProductStore:
             row = conn.execute("SELECT status FROM tenant_agent_instances WHERE tenant_id=? AND agent_id=?", (tenant_id, agent_id)).fetchone()
         return bool(row and row["status"] == "enabled")
 
-    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
+    def create_task(self, tenant_id: str, user_id: str, agent_id: str, text: str, conversation_id: str | None, *, attachment_ids: list[str] | None = None, client_request_id: str | None = None, _test_revision=None, _test_id=None, _test_fingerprint=None, _release_operation_id=None) -> dict:
         if _release_operation_id and not _test_revision:
             raise PermissionError("Release ownership is only valid for controlled Runtime Test")
         attachment_ids = attachment_ids or []
+        if client_request_id and agent_id != "copywriting-agent":
+            raise ValueError("该入口暂不支持此提交标识。")
+        task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps([tenant_id, user_id, client_request_id]))) if client_request_id else str(uuid.uuid4())
+        fingerprint = hashlib.sha256(json.dumps([agent_id, text, conversation_id], ensure_ascii=False).encode()).hexdigest()
         if len(attachment_ids) > 1 or (attachment_ids and agent_id != "image-agent"):
             raise ValueError("当前仅图片生成智能体支持一张参考图。")
         with self._store.connection() as conn:
             context = None
-            if attachment_ids and not self._store.is_postgres:
+            if (attachment_ids or agent_id == "copywriting-agent") and not self._store.is_postgres:
                 conn.execute("BEGIN IMMEDIATE")
+            if client_request_id:
+                if self._store.is_postgres:
+                    conn.execute("SELECT pg_advisory_xact_lock(?)", (int(uuid.UUID(task_id)) % (2**63 - 1),))
+                prior = conn.execute("SELECT * FROM tasks WHERE id=? AND tenant_id=? AND user_id=?", (task_id, tenant_id, user_id)).fetchone()
+                if prior:
+                    receipt = conn.execute("SELECT payload FROM execution_events WHERE event_type=?", ("b1.submission." + task_id,)).fetchone()
+                    if not receipt or json.loads(receipt["payload"])["fingerprint"] != fingerprint:
+                        raise ValueError("同一提交标识不能用于不同内容。")
+                    return dict(prior)
             if agent_id not in CATALOG:
                 if not self.execution_resolver:
                     raise LookupError("Execution resolver unavailable")
@@ -465,13 +479,18 @@ class ProductStore:
             if not credit or credit["balance"] < agent.credit_cost:
                 raise ValueError("insufficient_credit")
             if conversation_id:
+                if agent_id == "copywriting-agent" and self._store.is_postgres:
+                    conn.execute("SELECT id FROM conversations WHERE id=? AND tenant_id=? FOR UPDATE", (conversation_id, tenant_id)).fetchone()
                 owner = conn.execute("SELECT o.user_id,c.agent_id FROM conversation_owners o JOIN conversations c ON c.id=o.conversation_id WHERE o.conversation_id=? AND o.deleted_at IS NULL AND c.tenant_id=?", (conversation_id, tenant_id)).fetchone()
                 if not owner or owner["user_id"] != user_id:
                     raise LookupError("会话不存在或不属于当前用户。")
                 if owner["agent_id"] != agent_id:
                     raise ValueError("不能跨智能体复用会话。")
-            task_id = str(uuid.uuid4())
+                if agent_id == "copywriting-agent" and conn.execute("SELECT id FROM tasks WHERE conversation_id=? AND tenant_id=? AND user_id=? AND status IN ('queued','running')", (conversation_id, tenant_id, user_id)).fetchone():
+                    raise ValueError("当前会话仍在生成，请等待完成或取消后再修改。")
             conn.execute("INSERT INTO tasks(id,tenant_id,user_id,agent_id,conversation_id,input_text,status,stage) VALUES (?,?,?,?,?,?,'queued','queued')", (task_id, tenant_id, user_id, agent_id, conversation_id, text))
+            if client_request_id:
+                conn.execute("INSERT INTO execution_events(conversation_id,event_type,payload) VALUES (?,?,?)", (conversation_id, "b1.submission." + task_id, json.dumps({"fingerprint": fingerprint})))
             if attachment_ids:
                 claimed = conn.execute(
                     "UPDATE chat_image_attachments SET task_id=? WHERE id=? AND tenant_id=? AND user_id=? AND task_id IS NULL",
@@ -769,10 +788,10 @@ class ProductStore:
                 stage = "assistant_message"
                 conn.execute(
                     "INSERT OR IGNORE INTO messages(id,conversation_id,role,content,created_at) VALUES (?,?,'assistant',?,?)",
-                    (assistant_message_id, conversation_id, response[:12000], datetime.now(timezone.utc).isoformat()),
+                    (assistant_message_id, conversation_id, response if task["agent_id"] == "copywriting-agent" else response[:12000], datetime.now(timezone.utc).isoformat()),
                 )
                 assistant = conn.execute("SELECT conversation_id,role,content FROM messages WHERE id=?", (assistant_message_id,)).fetchone()
-                if not assistant or assistant["conversation_id"] != conversation_id or assistant["role"] != "assistant" or assistant["content"] != response[:12000]:
+                if not assistant or assistant["conversation_id"] != conversation_id or assistant["role"] != "assistant" or assistant["content"] != (response if task["agent_id"] == "copywriting-agent" else response[:12000]):
                     raise ValueError("Existing final message conflicts with runtime result.")
 
                 stage = "artifact_association"
@@ -886,6 +905,12 @@ class ProductStore:
                 ).fetchall()
             ]
             messages = conn.execute("SELECT id,role,content,created_at FROM messages WHERE conversation_id=? ORDER BY created_at,id", (conversation_id,)).fetchall()
+            full_copywriting_results = dict((row["id"], row["final_response"]) for row in conn.execute(
+                "SELECT t.id,r.final_response FROM tasks t JOIN task_results r ON r.task_id=t.id "
+                "WHERE t.conversation_id=? AND t.tenant_id=? AND t.user_id=? "
+                "AND t.agent_id='copywriting-agent' AND t.status='completed'",
+                (conversation_id, tenant_id, user_id),
+            ).fetchall())
             if not messages:
                 # Conversations created before message persistence still have a
                 # task input/result audit trail. Expose it as read-only history
@@ -969,6 +994,8 @@ class ProductStore:
                 task_id = message_id.removeprefix("legacy-assistant-")
             if task_id:
                 message["task_id"] = task_id
+                if message["role"] == "assistant" and task_id in full_copywriting_results:
+                    message["content"] = full_copywriting_results[task_id]
                 if message["role"] == "user" and task_id in attachments_by_task:
                     message["attachments"] = [attachments_by_task[task_id]]
                 if message["role"] == "assistant" and task_id in generation_by_task:
@@ -1466,6 +1493,8 @@ class ProductStore:
 
     def recoverable_tasks(self) -> list[dict]:
         with self._store.connection() as conn:
-            conn.execute("UPDATE tasks SET status='queued',stage='queued',user_message='服务已恢复，任务重新排队' WHERE status IN ('queued','running')")
-            rows=conn.execute("SELECT * FROM tasks WHERE status='queued' ORDER BY created_at").fetchall()
+            conn.execute("UPDATE tasks SET status='queued',stage='queued',user_message='服务已恢复，任务重新排队' WHERE status IN ('queued','running') AND NOT (agent_id='copywriting-agent' AND status='running')")
+            # Preserve copywriting's durable claim / unknown outcome on local
+            # restarts as well. TaskService may recover proven persistence only.
+            rows=conn.execute("SELECT * FROM tasks WHERE status='queued' OR (agent_id='copywriting-agent' AND status='running') ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]

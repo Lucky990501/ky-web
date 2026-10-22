@@ -42,6 +42,13 @@ class TaskService:
         if self._store.cancellation_requested(task_id, tenant_id):
             self._store.finalize_task_cancellation(task_id, tenant_id)
             return
+        if current["agent_id"] == "copywriting-agent" and not current.get("run_id"):
+            # One claimant across local processes and Redis redeliveries. A
+            # crash after claim is not permission to replay an unknown request.
+            with self._store._store.connection() as conn:
+                claimed = conn.execute("UPDATE tasks SET status='running',stage='loading_context' WHERE id=? AND tenant_id=? AND status='queued' AND run_id IS NULL", (task_id, tenant_id))
+                if claimed.rowcount != 1:
+                    return
         if current.get("run_id"):
             prior_trace = self._agents._store.run_trace(current["run_id"], tenant_id)
             if self._persistence_recoverable(prior_trace):
@@ -65,7 +72,7 @@ class TaskService:
             # A duplicate delivery/read-recovery must not start another model
             # turn while the recorded Run is still executing. Only the proven
             # persistence-only path above may recover its already-created result.
-            if current.get("status") == "running":
+            if current.get("status") == "running" or current["agent_id"] == "copywriting-agent":
                 return
 
         # A failed runtime must not be replayed by a duplicate queue delivery.
@@ -88,6 +95,8 @@ class TaskService:
 
             agent = self._store.task_definition(task)
             execution_options = {}
+            if task["agent_id"] == "copywriting-agent":
+                execution_options["business_user_id"] = task["user_id"]
             if self._store.execution_resolver and task["agent_id"] not in CATALOG:
                 with self._store._store.connection() as conn:
                     context = self._store.execution_resolver.task_context(conn, task)
@@ -157,6 +166,8 @@ class TaskService:
                     message = "运行已结束，但没有收到可保存的最终正文。"
                 elif code == "runtime_terminal_error":
                     message = "运行未正常完成，部分输出不会作为成功结果保存。"
+                elif code == "copywriting_context_limit":
+                    message = "完整文案上下文超过安全容量，请在新项目中提供需要修改的成稿；本次尚未调用模型。"
                 else:
                     message = "任务运行失败，请稍后重试。"
             else:

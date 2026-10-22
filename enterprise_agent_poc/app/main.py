@@ -80,6 +80,7 @@ class AgentTaskRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4_000)
     conversation_id: str | None = None
     attachments: list[ChatImageAttachmentRequest] = Field(default_factory=list, max_length=1)
+    client_request_id: str | None = Field(default=None, min_length=16, max_length=64, pattern=r"^[A-Za-z0-9-]+$")
 class RenameRequest(BaseModel): title: str = Field(min_length=1,max_length=80)
 class EnterpriseConfigRequest(BaseModel): payload: dict
 class KnowledgeTextRequest(BaseModel): name: str = Field(min_length=1,max_length=180); content: str = Field(min_length=1,max_length=100_000)
@@ -187,6 +188,7 @@ _CUSTOMER_ERROR_MESSAGES = {
     "FORBIDDEN": "你没有权限访问此功能。",
     "AGENT_UNAVAILABLE": "当前智能体暂不可用。",
     "TASK_FAILED": "任务处理失败，请重试。",
+    "COPYWRITING_CONTEXT_LIMIT": "完整文案上下文超过安全容量，请在新项目中提供需要修改的成稿；本次尚未调用模型。",
     "TASK_TIMEOUT": "任务处理时间较长，请稍后重试。",
     "KNOWLEDGE_PROCESSING_FAILED": "资料处理失败，请重新上传。",
     "INVALID_INPUT": "输入内容不符合要求，请检查后重试。",
@@ -248,7 +250,9 @@ def _public_task(task: dict, *, include_diagnostic: bool = False) -> dict:
         value["status"] = "cancelling"
     internal_code = str(value.get("error_code") or "")
     if value.get("status") == "failed":
-        if "timeout" in internal_code:
+        if internal_code == "copywriting_context_limit":
+            code = "COPYWRITING_CONTEXT_LIMIT"
+        elif "timeout" in internal_code:
             code = "TASK_TIMEOUT"
         elif internal_code in {"runtime_start_error", "worker_interrupted", "image_provider_error", "mcp_error"}:
             code = "SERVICE_TEMPORARILY_UNAVAILABLE"
@@ -394,6 +398,10 @@ async def production_health() -> dict:
 @app.get("/", include_in_schema=False)
 @app.get("/login", include_in_schema=False)
 @app.get("/workspace", include_in_schema=False)
+@app.get("/legacy/workspace", include_in_schema=False)
+@app.get("/workspace/copywriting", include_in_schema=False)
+@app.get("/workspace/history", include_in_schema=False)
+@app.get("/workspace/profile", include_in_schema=False)
 @app.get("/agents/image", include_in_schema=False)
 @app.get("/agents/copywriting", include_in_schema=False)
 @app.get("/agents/campaign", include_in_schema=False)
@@ -410,6 +418,42 @@ async def production_health() -> dict:
 @app.get("/platform/agents", include_in_schema=False)
 async def product_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": HTML_REVALIDATION_CACHE_CONTROL})
+
+
+@app.get("/manage", include_in_schema=False)
+@app.get("/manage/{section}", include_in_schema=False)
+async def management_page(section: str = "home", workbench_session: str | None = Cookie(default=None)) -> FileResponse:
+    if section not in {"home", "agents", "skills", "enterprise", "members", "knowledge", "assets", "usage", "profile"}:
+        raise HTTPException(404, "管理入口不存在。")
+    # Serve login shell to new browsers; every read/write API still authenticates.
+    if workbench_session:
+        try:
+            principal = current_user(workbench_session)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": HTML_REVALIDATION_CACHE_CONTROL})
+        platform_admin = skill_registry.is_platform_admin(principal.user_id)
+        if principal.role != "enterprise_admin" and not platform_admin:
+            raise HTTPException(403, "你没有管理端访问权限。")
+        if section == "skills" and not platform_admin:
+            raise HTTPException(403, "此功能需要平台管理员权限。")
+        if section in {"enterprise", "members", "knowledge", "assets", "usage"} and principal.role != "enterprise_admin":
+            raise HTTPException(403, "此功能需要当前企业管理员权限。")
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": HTML_REVALIDATION_CACHE_CONTROL})
+
+
+@app.get("/api/v1/tasks/{task_id}/text")
+async def copywriting_text_export(task_id: str, workbench_session: str | None = Cookie(default=None)) -> Response:
+    principal = current_user(workbench_session)
+    task = product_store.task(task_id, principal.tenant_id, principal.user_id)
+    if not task or task["agent_id"] != "copywriting-agent":
+        raise HTTPException(404, "文案不存在或无权访问。")
+    if task["status"] != "completed" or not task.get("final_response"):
+        raise HTTPException(409, "文案尚未完整保存。")
+    return Response(task["final_response"], media_type="text/plain; charset=utf-8", headers={
+        "Cache-Control": "no-store", "Content-Disposition": 'attachment; filename="copywriting.txt"',
+        "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/api/v1/auth/login")
@@ -649,7 +693,8 @@ async def create_agent_task(agent_id: str, payload: AgentTaskRequest, request: R
         raise HTTPException(404, "该智能体尚未为当前企业启用。")
     try:
         task = product_store.create_task(principal.tenant_id, principal.user_id, agent_id, payload.message, payload.conversation_id,
-                                         attachment_ids=[item.id for item in payload.attachments])
+                                         attachment_ids=[item.id for item in payload.attachments],
+                                         **({"client_request_id": payload.client_request_id} if payload.client_request_id else {}))
     except ValueError as exc:
         if str(exc) == "insufficient_credit":
             raise HTTPException(402, "积分不足，无法提交任务。") from exc

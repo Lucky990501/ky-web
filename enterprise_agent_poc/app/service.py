@@ -75,6 +75,7 @@ class AgentService:
         on_run_started: Callable[[str, str], None] | None = None,
         task_id: str | None = None,
         reference_image_attached: bool = False,
+        business_user_id: str | None = None,
     ) -> RunResult:
         if execution_context is None:
             profile = self.profile_for(tenant_id, agent_id)
@@ -85,6 +86,11 @@ class AgentService:
                 raise PermissionError("Execution context identity mismatch")
             profile = context_profile(execution_context)
             agent = definition(execution_context)
+        business_copywriting = agent_id == "copywriting-agent" and execution_context is None and business_user_id is not None
+        instructions = agent.instructions
+        if business_copywriting:
+            from app.copywriting_context import INSTRUCTIONS
+            instructions = INSTRUCTIONS
         grounding_enabled = bool(profile.grounding_policy and profile.grounding_policy.get("enabled") is True)
         if reference_image_attached and (agent_id != "image-agent" or not task_id):
             raise ValueError("参考图片必须绑定图片任务。")
@@ -150,6 +156,10 @@ class AgentService:
         }
         if execution_context:
             baseline.update(execution_context_id=execution_context["id"], profile_hash_version="v2", configuration_fingerprint=execution_context["configuration_fingerprint"])
+        if business_copywriting:
+            from app.copywriting_context import PROMPT_VERSION, PROMPT_SHA256
+            baseline.update(business_prompt_version=PROMPT_VERSION, business_prompt_sha256=PROMPT_SHA256,
+                            context_contract="owned-full-draft-v1")
         # A startup may fail before Codex returns a thread.  Persist a minimal
         # trace first so the task keeps an auditable run_id without inventing a
         # thread id or storing provider exceptions/secrets.
@@ -161,14 +171,24 @@ class AgentService:
             if cancellation_requested and cancellation_requested():
                 raise GenerationCancelled()
             if is_resume:
-                recovery_context = self._recovery_context(conversation_id, tenant_id, message)
-                session = await self._runtime.resume_session(
-                    profile,
-                    existing["runtime_thread_id"],
-                    developer_instructions=agent.instructions,
-                    recovery_context=recovery_context,
-                    **({"task_id": task_id} if reference_image_attached else {}),
-                )
+                if business_copywriting:
+                    from app.copywriting_context import owned_edit_context, CopywritingContextLimit
+                    try:
+                        context = owned_edit_context(self._store, tenant_id, business_user_id, conversation_id, message)
+                    except CopywritingContextLimit as exc:
+                        raise AgentRunError(str(exc), run_id=run_id, conversation_id=conversation_id,
+                                            error_code="copywriting_context_limit", failure_stage="context") from exc
+                    # Normal thread_resume does not apply new developer context.
+                    # Rebind only this business turn using the supported start API,
+                    # retaining the formal Conversation, ownership and full history.
+                    session = await self._runtime.create_session(profile, instructions + context)
+                else:
+                    recovery_context = self._recovery_context(conversation_id, tenant_id, message)
+                    session = await self._runtime.resume_session(
+                        profile, existing["runtime_thread_id"],
+                        developer_instructions=instructions, recovery_context=recovery_context,
+                        **({"task_id": task_id} if reference_image_attached else {}),
+                    )
                 if session.thread_id != existing["runtime_thread_id"]:
                     if not self._store.replace_conversation_thread(
                         conversation_id, tenant_id, existing["runtime_thread_id"], session.thread_id
@@ -176,7 +196,7 @@ class AgentService:
                         raise RuntimeError("会话 Thread 绑定并发更新失败。")
             else:
                 session = await self._runtime.create_session(
-                    profile, agent.instructions,
+                    profile, instructions,
                     **({"task_id": task_id} if reference_image_attached else {}),
                 )
                 if execution_context:

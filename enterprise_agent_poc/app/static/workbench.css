@@ -188,3 +188,5 @@ body.dialog-open{overflow:hidden}.global-search-disabled{opacity:.72;cursor:not-
 .wechat-preview-dialog footer{padding-top:12px}
 .wechat-preview-dialog footer .button{min-height:44px}
 @media(max-width:600px){.wechat-preview-dialog{padding:16px}.wechat-article-buttons .button{flex:1 1 calc(50% - 10px)}.wechat-preview-dialog footer .button{width:100%}}
+:where([data-agent-id="copywriting-agent"]) .composer textarea {box-sizing:border-box;min-height:42px;max-height:min(200px,30vh);resize:none;overflow-y:hidden;}
+@media(max-width:768px){:where([data-agent-id="copywriting-agent"]) .composer textarea{max-height:min(160px,30vh);}}
