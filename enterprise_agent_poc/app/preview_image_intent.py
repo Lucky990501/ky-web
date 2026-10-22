@@ -10,9 +10,10 @@ import unicodedata
 
 from app.image_request_contract import ImageRequestError
 from app.preview_image_layout import BROCHURE_SIZE,BROCHURE_RATIO,brochure,explicit_geometry,side,layout_prompt,logo_anchor
+from app.preview_image_art_direction import instructions as art_direction
 
 AUTO_SIZES = {'1:1': '2048x2048', '16:9': '3840x2160', '9:16': '2160x3840'}
-VERSION = 'preview-image-intent-v1'
+VERSION = 'preview-image-intent-v2-art-direction'
 NUM = r'(?:\d+|[一二两三四五六七八九十])'
 
 
@@ -119,6 +120,7 @@ def make_plan(text, *, inherited=None, base='', default=None):
         anchor=logo_anchor(text)
         optimize_logo=bool(re.search(r'logo.{0,12}(?:位置|不对|不协调|太大|改|调)|(?:调整|修改|调).{0,8}logo',text,re.I))
         if optimize_logo:prompt+='\n清理参考图中旧Logo位置的不协调痕迹，保留主题与有效内容；在新的品牌安全区留白，原Logo仍由平台叠加，不要自行重绘。'
+        prompt+='\n\n'+art_direction()
         plan.append(dict(index=index, purpose=purpose, prompt=prompt, size=slot_size, aspect_ratio=slot_ratio, prompt_version=VERSION,
                          layout_mode=mode,logo_anchor=anchor,logo_optimized=optimize_logo))
     if folded:
