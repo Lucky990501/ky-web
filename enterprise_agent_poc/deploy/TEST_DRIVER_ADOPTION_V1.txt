@@ -1,0 +1,88 @@
+Reusable Test driver material-adoption hook V1
+
+Scope: thin FINALIZATION action for the existing external Test material installer.
+Not a new signer, installer service or qualification driver. Frozen9e635 Tooling
+and B1 remain unmodified. No automatic Linux adoption or Native claim.
+
+Actual maintenance boundary identified from retained execution sources:
+.894-test-maintenance-v3-execution/install_exact_materials.py
+.894-test-maintenance-v3-execution/v6_exact_handoff_and_scope.py
+Those are historical operation-specific external Root installers, not a reusable
+installed daemon. Their historical approvals MUST NOT be replayed. Their OS/Git
+verification, protected staging, exclusive writes, readback and Root decision
+record are the existing installation method reused here. No77e/e70 entry is used.
+The applicable executor role is06_CODEX_AUTHORIZED_LUCKY_SUDO under an actual
+new exact installation authorization, not the product Worker or arbitrary sudo.
+No current human/operator approval record for this new adapter is asserted.
+
+Precise extension point:
+After the authorized external installer verifies its own Python/stdlib and this
+adapter's exact Git blob/hash, stages a new Root-only version with its existing
+EXCL mechanism, and holds its existing lock, call:
+    test_delivery_adoption.finalize(request_path, decision_path)
+Use a fresh isolated Python process (-I -B) with no scripts modules preloaded.
+Do not run the historical installers against their old scopes. Do not replace
+old files or select this hook as a PRIMARY service ExecStart.
+
+The hook does NOT stage files itself: existing installer owns transfer/staging.
+It verifies complete staged enterprise_agent_poc Git subtree, including every
+file, against Tooling Commit/Tree/Parent before importing the existing package
+verifier. It requires Root-owned canonical paths, rejects symlinks/ACLs/extra
+bytecode/hardlinks, pins the complete runtime, checks actual runtime versions,
+observes current PRIMARY, verifies both artifacts using the frozen driver's
+existing artifact() function, and writes exactly one immutable adoption receipt.
+No key, DB connection, service operation, PRIMARY selection or grant is created.
+
+Request contract (real values required, no fabricated installation sample):
+action=adopt_reusable_test_driver_v1; environment=test; host; operation_id UUID;
+permissions exactly isolated_qualify=true, primary_switch/production/preview=false,
+paid_calls=0; profile=PRIVATE_STAGE2_TMPFS_V2;
+limits exactly704MiB scratch,768MiB aggregate,256MiB host reserve,20% floor,
+1280MiB MemoryHigh,1536MiB MemoryMax,swap0.
+tooling and primary: source/tree/parent; files: complete relative-file SHA256 map;
+repository: trusted existing Git checkout; tooling_root: new protected staged
+enterprise_agent_poc subtree; primary_pointer fixedTest /current;
+receipt_directory: existing approved protected Test-only destination;
+operator: actual name/uid/gid (nonRoot);
+runtime: root, complete files map, python/python_version, postgres, redis,
+pgvector_control. All runtime role paths must lie within runtime root.
+artifacts: candidate/predecessor eachsource/tree/archive/manifest and exact
+archive_sha256/manifest_sha256. Predecessor must equal observedPRIMARY.
+No business Source constant or fixed77e predecessor occurs in the hook.
+
+Existing external Root decision kind retained:
+ACTUAL_OWNER_AUTHORIZED_06_ROOT_DECISION_RECORD.
+New decision must bind technical_action above; canonical request_sha256; adapter
+SHA256; exact installer_python and SHA256; actual_root_uid0; real operator and
+owner_references; host; real issued_at/expires_at(max4hours); revoked=false;
+uses1; production_authority=false; provider_budget0.
+Canonical request digest uses sorted compact UTF8 JSON, ensure_ascii=false.
+The real external installer must verify the Owner's raw approved request bytes
+and authorization provenance BEFORE recording this canonical binding. Root file
+ownership alone is NOT evidence of Owner approval. The hook never writes a decision.
+It is not permissible to create a decision merely to make this test pass.
+
+Receipt:
+<operation_id>.adoption.json under approved receipt_directory; O_EXCL/NOFOLLOW,
+fsync/file+directory/readback, immutable0444. Failure keeps partial evidence;
+no automatic retry/overwrite. status=MATERIALS_VERIFIED; native_pass=false;
+execution_authorized=false. This receipt deliberately is NOT the driver's
+native_adoption_receipt and cannot substitute for the Linux profile PASS receipt.
+
+Next real boundary:
+1 Existing qualified installer executor receives an exact new installation
+  decision covering the adapter bytes, staged9e635 bytes, runtime source/pins,
+  actual paths and identity. No record is signed or installed in this change.
+2 Stage/readback using existing method; call hook under existing lock. Preserve
+  failed/staged materials, old contracts and current894; no service restarts.
+3 Separately authorized PRIVATE_STAGE2_TMPFS_V2 Linux profile tests must actually
+  prove mount/socket/proc isolation, runtime relocation, ENOSPC, cgroup teardown,
+  zero egress and resources. Do not fabricate a PASS profile receipt from step2.
+4 Only then can the existing isolated_qualify execution grant bind actualB1,
+  actual894 artifacts and driver policy, and runB1. No primary rollback claim.
+
+Remaining boundary is exact installation/adoption authorization held by the
+existing external Root material-install executor. No Owner manual SSH is needed.
+This patch supplies its reviewable finalize interface, not another issuer.
+Offline synthetic decisions are tests only. Different candidate Sources reuse
+the same hook with new exact artifacts/request; no source-specific code changes.
