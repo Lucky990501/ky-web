@@ -10,7 +10,7 @@ def test_owner_supplied_entities_and_address_boundaries():
     for term in ['融侨外滩壹号写字楼B座','易明教育赋能中心（定制化伴学）','长明会','心力、认知、表达、关系','提分成为成长的自然结果','不得自动用作赋能中心校区','不得擅自扩写成保证提分','新的创作会话','等待用户确认']:
         assert term in text
 
-@pytest.mark.parametrize('message',['写一段招生文案','写易明教育的公众号','写长明会文章','介绍总部','做个活动方案'])
+@pytest.mark.parametrize('message',['写一段招生文案','写易明教育的公众号','写长明会文章','介绍总部','介绍活动'])
 def test_first_request_always_asks_even_when_a_name_is_present(message):
     selected,question=brand.decision([],message)
     assert not selected and question.startswith(brand.PREFIX)
@@ -56,3 +56,16 @@ def test_preview_only_install_does_not_mutate_shared_catalog(monkeypatch):
     with pytest.raises(RuntimeError):brand.install()
     monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true');brand.install()
     assert CATALOG==before
+
+def test_campaign_keeps_brand_facts_without_confirmation_or_false_confirmed_claim(monkeypatch):
+    monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true')
+    task={'agent_id':'campaign-agent','tenant_id':brand.TENANT,'input_text':'做一个元旦活动方案'}
+    # No history lookup or question gate: existing task ownership remains in the business service.
+    assert brand.for_task(None,task)==((),None)
+    body={'instructions':'existing campaign contract','input':[],'tools':[{'name':'fixture'}]}
+    result=brand.provider_request(body,task,None)
+    assert brand.policy() in result['instructions'] and result['tools']==body['tools']
+    assert '活动策划不执行上述主题确认流程' in result['instructions']
+    assert '本会话已由用户确认的创作主题：' not in result['instructions']
+    assert brand.provider_request(result,task,None)==result
+    assert not brand.is_question({**task,'final_response':brand.QUESTION})

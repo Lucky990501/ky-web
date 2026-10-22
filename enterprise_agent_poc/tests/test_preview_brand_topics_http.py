@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-def test_three_agents_ask_before_runtime_and_images_then_resume_same_conversation(tmp_path):
+def test_copy_wechat_ask_campaign_runs_directly_and_edits_resume_same_conversation(tmp_path):
     probe=r'''
 import asyncio,json,sqlite3,sys
 from pathlib import Path
@@ -42,7 +42,7 @@ async def run():
    assert task['status']=='completed',task
    return main.product_store.task(tid,me['tenant_id'],me['user_id'])
   results=[]
-  for agent in ['copywriting-agent','campaign-agent','preview-wechat-agent']:
+  for agent in ['copywriting-agent','preview-wechat-agent']:
    task=await submit(agent,'按易明教育写一份完整内容，原素材要保留')
    assert brand.PREFIX in task['final_response']
    trace=main.store.run_trace(task['run_id'],me['tenant_id'])['payload']
@@ -54,6 +54,9 @@ async def run():
   assert len(generated)==1 and second['conversation_id']==results[0]['conversation_id']
   third=await submit('copywriting-agent','第二段改短一点',second['conversation_id'])
   assert len(generated)==2 and third['conversation_id']==second['conversation_id']
+  campaign=await submit('campaign-agent','元旦当天线下门店，面向高中生家长的八周年活动方案')
+  assert len(generated)==3 and campaign['final_response']=='FIXTURE_ONLY confirmed content'
+  assert brand.PREFIX not in campaign['final_response'] and brand.policy() in seen[-1]
   with sqlite3.connect(root/'preview-budget.sqlite') as c:assert c.execute('select count(*) from requests').fetchone()[0]==0
  print('BRAND_TOPIC_HTTP_FIXTURE_PASS provider_calls=0')
 asyncio.run(run())

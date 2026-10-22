@@ -3,6 +3,7 @@ import os,re
 from pathlib import Path
 
 AGENTS=frozenset({'copywriting-agent','preview-wechat-agent','campaign-agent'})
+CONFIRM_AGENTS=frozenset({'copywriting-agent','preview-wechat-agent'})
 TENANT='preview-74397425ff1141bb881db1d97451735d'
 PATH=Path(__file__).resolve().parents[1]/'preview_prompts/yiming-brand-topics.md'
 NAMES=('易明长青总部','易明教育赋能中心（定制化伴学）','长明会')
@@ -62,7 +63,7 @@ def decision(messages,current):
     return (),QUESTION+suffix
 
 def for_task(main,task):
-    if task['agent_id'] not in AGENTS:return (),None
+    if task['agent_id'] not in CONFIRM_AGENTS:return (),None
     if not task['tenant_id'].startswith('preview-'):raise PermissionError('Preview topic scope invalid')
     messages=[]
     if task.get('conversation_id'):
@@ -80,6 +81,7 @@ def provider_request(body,task,main):
     if question:raise PermissionError('Brand topic confirmation required before Provider dispatch')
     text=body.get('instructions') or ''
     if policy() not in text:text+='\n\n'+policy()
+    if task['agent_id'] not in CONFIRM_AGENTS:return {**body,'instructions':text}
     marker='本会话已由用户确认的创作主题：'
     text='\n'.join(line for line in text.splitlines() if not line.startswith(marker))
     text+='\n'+marker+'、'.join(NAMES[x-1] for x in selected)+'。沿用当前会话原需求完成本轮交付，不再重复询问。'
@@ -92,7 +94,7 @@ def install_runtime(main,task_context):
     main.runtime._preview_brand_original_stream=original
     async def stream(session,message):
         tid=task_context.get();task=main.product_store.task_for_worker(tid) if tid else None
-        if task and task['agent_id'] in AGENTS and task['tenant_id']==TENANT:
+        if task and task['agent_id'] in CONFIRM_AGENTS and task['tenant_id']==TENANT:
             _,question=for_task(main,task)
             if question:
                 yield RuntimeStreamEvent.visible_delta(question)
@@ -104,4 +106,4 @@ def install_runtime(main,task_context):
     main.runtime.stream_turn=stream
 
 def is_question(task):
-    return task.get('tenant_id')==TENANT and task.get('agent_id') in AGENTS and PREFIX in str(task.get('final_response') or '')
+    return task.get('tenant_id')==TENANT and task.get('agent_id') in CONFIRM_AGENTS and PREFIX in str(task.get('final_response') or '')
