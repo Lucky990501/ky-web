@@ -28,7 +28,7 @@ def choice(text):
     if text in {'全部','都要','三个都要','综合品牌','综合介绍','综合'}:return (1,2,3)
     if re.fullmatch(r'(?:选|选择|第)?[123一二三](?:个|项)?(?:\s*[、,/+和及]\s*[123一二三])*[。！!]?\s*',text):
         return tuple(sorted({int(x.translate(str.maketrans('一二三','123'))) for x in re.findall('[123一二三]',text)}))
-    if re.search(r'不是|不选|不要|别写',text):return ()
+    if re.search(r'(?:不是|不选|不要|别写).{0,6}(?:[123一二三]|易明|总部|长明会|伴学)',text):return ()
     selected=[]
     for i,pattern in enumerate(('易明长青|总部','易明教育(?:赋能中心)?|定制化伴学','长明会'),1):
         if re.search(pattern,text):selected.append(i)

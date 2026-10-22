@@ -46,7 +46,7 @@ async def run():
    task=await submit(agent,'按易明教育写一份完整内容，原素材要保留')
    assert brand.PREFIX in task['final_response']
    trace=main.store.run_trace(task['run_id'],me['tenant_id'])['payload']
-   assert trace['structured_result_status']=='needs_brand_topic' and trace['structured_model_calls']==0
+   assert trace['structured_result_status']=='needs_brand_topic' and trace['total_model_calls_for_structured_result']==0
    results.append(task)
   assert generated==[] and all(brand.policy() in s for s in seen)
   with sqlite3.connect(root/'illustrations.sqlite') as c:assert c.execute('select count(*) from illustration_plans').fetchone()[0]==0
