@@ -1,0 +1,186 @@
+Reusable Test delivery candidate V2 — DRIVER CONNECTED / NOT INSTALLED / NOT NATIVE ACCEPTED
+
+This is a Tooling candidate, not a change to B1 business code or Production.
+Do not present package/contract tests as a running preproduction pipeline.
+
+1. Reuse analysis
+
+Unmodified components reused directly:
+- scripts/build_release.py: selected Git archive, deterministic gzip, static
+  cache-identity substitution and original release Manifest writer.
+- scripts/release_manifest.py: existing Production-format Manifest contract.
+- Git object identity, existing Test host/resource slice and systemd sandboxing.
+
+Inspected but NOT invoked against a different environment:
+- release_verify.py service_state()/health(): currently names Production units,
+  port18090 and environment=production. Replacing strings at runtime is unsafe.
+- deploy/release_switch.sh and schema015 successor tooling: existing activation,
+  backup and recovery contracts must remain in force. They do not automatically
+  accept a newly issued Test plan, so this candidate does not wrap them with a
+  fabricated success receipt or manually move the PRIMARY pointer.
+- release_test_environment.py: the new thin driver calls its existing private
+  PG/Redis lifecycle and marked-root cleanup. Its paid start_app() is NOT called.
+  A separate fixture adapter replaces only the Runtime model Provider, not the
+  TaskService, queue, database, auth or MCP transport. No fake key is presented
+  as a real Provider authentication result.
+
+2. What is implemented
+
+scripts/test_delivery_pipeline.py:
+- package: exact committed Source/Tree -> unchanged builder -> original
+  Manifest -> independent full Git-byte/file-mode/package readback.
+- verify: deny extra/duplicate/link/traversal members, mismatched Source/Tree,
+  Archive/Manifest/hash, or unrecognized static transformation.
+- plan: candidate identity, Git parents and actual observed runtime predecessor
+  are separate fields. No77e/e70/894/B1 constant in the reusable implementation.
+  Real execution re-observes PRIMARY; an input snapshot is NOT a live proof.
+- execute: fail-closed isolated qualification consumer. Requires installed
+  Root-owned policy, exact request-bound single-use grant, complete Tooling pins,
+  runtime/driver pins, qualified Linux profile receipt and protected paths.
+  It does not issue grants or install itself. The only adopted action currently
+  supported is isolated_qualify, NOT PRIMARY activation or Production release.
+- Exact Operation gets an exclusive attempted record; unknown/failed attempts
+  are retained, never overwritten or automatically retried.
+- A trusted nonblocking qualification lock serializes these bounded isolated
+  runs; it does not take over or alter the existing PRIMARY release lock.
+- Approved driver runs non-Root, private network, protected host paths,
+  restricted cgroup, bounded tmpfs and bounded stdout. No inherited credentials.
+  Revocation/expiry and host disk floor are checked during the run.
+- Complete qualification results must name real PG/Redis/Worker/MCP, source,
+  operation, all required tests, actual disk metrics and zero external calls.
+  Missing tests, SQLite results, paid calls or isolation changes reject PASS.
+
+scripts/test_delivery_verified_entry.py:
+- Root bootstrap using isolated Python. Pins the whole adopted Tooling tree
+  BEFORE importing the delivery code. Rejects additional files, bytecode, links,
+  writable/ACL-unreviewed ancestors and interpreter mismatch.
+- Direct Root import/execution of the ordinary delivery module refuses before
+  importing project modules. Non-Root local package/plan commands remain usable.
+
+3. Commands (local preparation only)
+
+From an independent Tooling checkout's enterprise_agent_poc directory:
+  python -B scripts/test_delivery_pipeline.py package --repo <git-repo-root> \
+    --source <exact-40-hex-source> --tree <exact-tree> --output <new-directory>
+  python -B scripts/test_delivery_pipeline.py verify --repo <git-repo-root> \
+    --source <source> --tree <tree> --archive <original-archive> --manifest <original-manifest>
+  python -B scripts/test_delivery_pipeline.py plan --repo <git-repo-root> \
+    --source <source> --tree <tree> --archive <archive> --manifest <manifest> \
+    --observation <read-only-test-observation.json> --output <new-plan.json> \
+    --predecessor-archive <exact-old-archive> --predecessor-manifest <exact-old-manifest>
+
+These output unsigned proposals, not approvals. Output directories/files must
+be new; failed partial artifacts remain. Builder process Git EOL is fixed toLF
+without changing repository/global config, so Windows text=auto cannot silently
+alter archive bytes. Windows artifacts are still labelled Windows, NOT Linux
+build or Native proof. Production promotion must reuse the exact archive and
+Manifest already qualified on Linux, not rebuild different bytes after testing.
+
+4. Bounded runner / driver adoption interface
+
+The policy supplies actual approved paths and identities, not caller argv:
+environment=test; hostname; primary_pointer; release_root; source_repository;
+operations_root; tooling_root and complete tooling_files; runtime_root;
+python/python_sha256; qualification_driver/driver_sha256;
+driver_protocol=QUALIFICATION_DRIVER_PROTOCOL_V1; operator_uid/operator_gid;
+protected_service_units; slice=enterprise-agent-test.slice;
+native_adoption_receipt and its SHA256.
+
+The independently granted per-run record binds action=isolated_qualify,
+canonical request/policy SHA256, exact operation_id, real not_before/expires_at
+(maximum4hours), uses=1, revoked=false, and actual issuer_record. This interface
+is NOT an issuer and does not certify an Owner chat message as a machine grant.
+No concrete policy, approval, UID, approval timestamps or Linux receipt has
+been created by this candidate.
+
+The driver consumes /input/request.json, candidate archive/manifest and the
+independently verified exact predecessor archive/manifest. It uses the bounded
+/private/tmp tmpfs for ALL PG/WAL/temp/Redis/fixtures/cache/
+logs, extract only the verified artifact, start real processes from that
+artifact, and emit one bounded sanitized JSON result. No key or real customer
+record is mounted. OperatorUID must differ from all protected service UIDs to
+avoid same-UID /proc environment access. A separate test account requires the
+existing explicit installation/adoption permission; it is not auto-created.
+
+Disk: 704MiB tmpfs scratch + <=63MiB COMBINED read-only inputs + <=1MiB receipt <=768MiB;
+additional256MiB host reserve. No clearing cache, 20% threshold change or cloud
+purchase. tmpfs is memory-charged and swap is disabled for the isolated job.
+This is a proposed enforceable layout, NOT a measured startup/peak result.
+Native adoption must prove mount ordering, runtime relocation/imports, host
+socket/proc isolation, ENOSPC behavior, cgroup cleanup, zero egress and evidence
+retention. A mock sandbox argv test does not prove these Linux facts.
+
+5. Required qualification result
+
+operation_id, source, tree; backend=postgresql-redis-worker-mcp;
+provider_calls/production_changes/preview_changes/primary_changes all0;
+disk_peak_bytes <=768MiB; min_root_free_fraction >0.2; checks map with PASS for:
+pg, redis, worker, mcp, authentication, portals, task, sse_history, five_turns,
+full_text, idempotency, cancel, unknown_recovery, tenant_user_isolation,
+old_reader_compatibility.
+
+Only a trusted adopted driver can produce accepted Native results.
+scripts/test_delivery_native.py now orchestrates the actual isolated lifecycle:
+exact artifacts -> existing PG/Redis startup -> formal migrations and synthetic
+accounts -> candidate MCP/API/Worker -> HTTP/queue/PG checks -> kill/restart only
+its own Worker -> pg_dump -> pg_restore into a NEW private database -> exact
+predecessor readback with default_transaction_read_only=on -> existing cleanup.
+It emits PASS only after every step succeeds. It is an executable CANDIDATE,
+not a measured Native result. The Linux adoption receipt must bind the updated
+PRIVATE_STAGE2_TMPFS_V2 profile and new driver bytes; V1 receipts do not qualify.
+
+scripts/test_delivery_fixture.py is a test-process adapter. The real Worker.run
+and main TaskService/AgentService remain in use; only agents._runtime is replaced
+with a deterministic Provider. That Provider performs real authenticated HTTP
+MCP calls, using the candidate's RuntimeTokenIssuer and FastMCP. No Codex model
+subprocess or external paid API is launched. Existing Stage2 bootstrap's
+explicit synthetic placeholders prevent workspace .env discovery, not pretend
+Provider authorization. No Production credential is mounted.
+
+scripts/test_delivery_checks.py asserts five turns, >12k first response, full
+history/export, context continuity, real Redis enqueue and redelivery, real
+credit ledger single debit, role/user/tenant boundaries, cancellation, and an
+in-flight fixture call interrupted by killing the job's Worker. Its restart
+must drain processing without another Provider entry or false completion.
+MCP tests use real transport: allowed scope, missing scope, tampered token,
+and separate tenant data. Local unit tests replace that transport and are
+explicitly NOT counted as Native MCP tests.
+
+6. Recovery and PRIMARY status
+
+The plan compares exact migration file identities, but explicitly leaves
+primary_recovery_ready=false. No schema equality can establish compatibility
+of newly written Task/Run/Conversation data by itself. Qualification must read
+new fixture data with the predecessor, and the existing backup/recovery entry
+must have an applicable approved binding before any PRIMARY cutover.
+
+No PRIMARY switch or PRIMARY DB restore is implemented by this candidate. Primary
+activation remains a separate not-yet-closed adapter to existing Release tools,
+not a shell shortcut. A failure in the isolated job stops only that exact unit,
+keeps input/attempt/failure receipts, and does not touch894 or restore a database.
+The new driver restores only its own synthetic dump into a new private DB,
+compares all public table row fingerprints and exercises the predecessor's real
+ProductStore read path without initialize or migration. This is isolated backup
+and old-reader compatibility, NOT PRIMARY service rollback or Production safety.
+Migration bytes must match; a different migration set stops without inventing a
+new migration contract. Existing Production recovery tooling remains unchanged.
+
+Tmpfs scratch is ephemeral; full failed PG state is NOT retained after teardown.
+Only bounded sanitized results/stage labels and immutable inputs survive. If a concrete
+test requires full failed-cluster retention, it needs a reviewed bounded store
+instead of silently exceeding the current budget.
+
+7. Review boundary / next step
+
+Local package, dynamic-source and negative authority tests can be reviewed now.
+Do not sign installation/execution approval based on those tests alone.
+Before host execution, pin the reusable zero-paid qualification driver and
+qualify the Linux profile above, then adopt this exact Tooling via the existing
+trusted Root installation channel. That one-time adoption is infrastructure
+approval; subsequent candidate versions supply only identities and per-run
+scope, with no Source-specific signer code change.
+
+After real candidate qualification, connect the applicable existing Test
+backup/activation/recovery contract and qualify its exact predecessor. This
+candidate is therefore DRIVER_IMPLEMENTED_PENDING_PROTECTED_ADOPTION, not full
+reusable PRIMARY deployment PASS, not B1 integration PASS, not Production permission.
