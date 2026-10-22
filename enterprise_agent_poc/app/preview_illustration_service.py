@@ -162,6 +162,8 @@ class PreviewIllustrationService:
         if task['agent_id'] not in {'campaign-agent','preview-wechat-agent'}:raise IllustrationError('ILLUSTRATION_AGENT_INVALID','仅活动策划及公众号文章可使用此配图服务。')
         if require_enabled and not self.main.product_store.agent_enabled(actor.tenant_id,task['agent_id']):raise PermissionError()
         if task['status']!='completed':raise IllustrationError('ILLUSTRATION_SOURCE_PENDING','请先等待完整正文生成并保存。')
+        from app.preview_brand_topics import is_question
+        if is_question(task):raise IllustrationError('ILLUSTRATION_SOURCE_PENDING','请先确认创作主题并完成正文，主题询问不会生成配图。')
         return task
 
     def plan(self,actor,task_id):

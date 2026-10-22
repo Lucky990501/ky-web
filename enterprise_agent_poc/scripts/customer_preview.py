@@ -153,6 +153,8 @@ def add_preview_agent():
     )
     from app.preview_wechat_article import install as install_wechat
     install_wechat()
+    from app.preview_brand_topics import install as install_brand_topics
+    install_brand_topics()
 
 
 def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, pricing=None, local_http=False, image_authorization=None,
@@ -177,6 +179,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     text_guard=PreviewTextGuard(budget,Path(root).parent/'illustration-budget-authorization.json')
     text_gate=PreviewTaskTextGate(main.store,text_guard,f'http://127.0.0.1:{api_port}/_preview_model')
     text_task_context=ContextVar('preview_text_task_context',default=None)
+    from app.preview_brand_topics import install_runtime as install_brand_topic_runtime
+    install_brand_topic_runtime(main,text_task_context)
     if main.manager._test_gate is not None:
         raise RuntimeError('Preview task gate cannot replace a formal Test/Stage2 gate')
     main.manager._test_gate=text_gate
@@ -193,8 +197,13 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             raise PreviewBudgetExceeded('缺少准确Preview任务上下文。','PREVIEW_CONTROLLED_ACCEPTANCE_DENIED')
         return {**options,'task_id':current}
     async def task_create_session(*args,**options):
+        from app.preview_brand_topics import session_instructions
+        if len(args)>1:args=(args[0],session_instructions(main,text_task_context,args[1]),*args[2:])
         return await original_create_session(*args,**task_options(options))
     async def task_resume_session(*args,**options):
+        from app.preview_brand_topics import session_instructions
+        if options.get('developer_instructions'):
+            options={**options,'developer_instructions':session_instructions(main,text_task_context,options['developer_instructions'])}
         return await original_resume_session(*args,**task_options(options))
     main.runtime.create_session,main.runtime.resume_session=task_create_session,task_resume_session
     from app.preview_image_execution import PreviewImageExecution
@@ -244,6 +253,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 # paid illustrations. History GET/reload never does this.
                 actor=SimpleNamespace(tenant_id=task['tenant_id'],user_id=task['user_id'])
                 completed=main.product_store.task(task['id'],actor.tenant_id,actor.user_id)
+                from app.preview_brand_topics import is_question
+                if completed and is_question(completed):return result
                 if task.get('status') not in {'completed','failed','cancelled'} and completed and completed['status']=='completed':
                     try:illustration_service.auto_after_text(actor,task['id'])
                     except Exception:
@@ -359,6 +370,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
                 reference = article_references.for_task(dict(running_task))
                 if reference:
                     body['instructions'] += article_references.instructions(reference)
+            from app.preview_brand_topics import provider_request as brand_topic_request
+            body=brand_topic_request(body,running_task,main)
             scoped_control=text_guard.check(running_task)
             if scoped_control:
                 # This one approved acceptance excludes paid knowledge/image

@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from app.wechat_article_format import render_wechat_article as _base_render
 
 BODY_POLICY='''Preview公众号交付要求（优先于旧Skill中三个标题候选等交付包装要求）：
-直接输出一篇完整文章，只保留一个正式文章标题、导语、章节标题、正文和结尾。
+如本会话要求品牌主题确认，先完成确认；确认后直接输出一篇完整文章，只保留一个正式文章标题、导语、章节标题、正文和结尾。
 不要三个标题候选、写作思路、结构说明、创作过程、无关前言、营销分析或结尾AI说明。
 使用一个Markdown一级标题与自然的二级章节，正文段落清晰。不要输出第二份HTML或CSS；平台会安全排版。
 自然选择正文中真正重要的观点、结论或提醒，用Markdown **重点内容** 标记；每个主要章节通常1至2处，可强调核心整句，不要求每段都有，不扩大强调范围，不改写业务事实。
