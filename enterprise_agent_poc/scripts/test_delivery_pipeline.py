@@ -258,10 +258,16 @@ def observe(policy):
     require(sys.platform == 'linux' and socket.gethostname() == policy['hostname'], 'LIVE_HOST_MISMATCH')
     pointer = Path(policy['primary_pointer'])
     target = pointer.resolve(strict=True)
-    release_root = trusted(policy['release_root'], directory=True)
+    release_root = Path(policy['release_root'])
+    require(str(release_root) == '/opt/enterprise-agent-workbench-test/releases', 'TEST_RELEASE_ROOT')
     require(target.is_relative_to(release_root) and target != release_root, 'PRIMARY_PATH_OUTSIDE_TEST')
-    ident = identity(target, git(target, 'rev-parse', 'HEAD').decode().strip())
-    return {**ident, 'path': str(target)}
+    # Historical PRIMARY is evidence, not Root-executable Tooling. Never run
+    # Root Git against its user-owned Gitfile/config. Reuse sealed observation.
+    from scripts.test_delivery_adoption import observe_primary
+    observed = observe_primary(policy['primary_observation'])
+    require(observed['path'] == str(target), 'PRIMARY_OBSERVATION_PATH')
+    return {'source': observed['source'], 'tree': observed['tree'],
+            'git_parents': observed['parent'].split(), 'path': observed['path']}
 
 
 def storage_gate(free, total):

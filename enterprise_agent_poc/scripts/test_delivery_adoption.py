@@ -57,13 +57,17 @@ def trust(path):
 def read(path):
     p = trust(path)
     need(p.is_file() and p.stat().st_size <= 1024**2, 'RECORD_SIZE')
+    return decode_record(p.read_bytes())
+
+
+def decode_record(raw):
     def unique(pairs):
         out = {}
         for key, value in pairs:
             need(key not in out, 'DUPLICATE_FIELD')
             out[key] = value
         return out
-    return json.loads(p.read_bytes(), object_pairs_hook=unique)
+    return json.loads(raw, object_pairs_hook=unique)
 
 
 def validate_authority(request, decision, now):
@@ -133,6 +137,102 @@ def tree_pins(root):
     return out
 
 
+def readonly_node(path, owner, mode):
+    """Historical data only: never import it or run Git/config/hooks from it."""
+    p = Path(path)
+    need(p.is_absolute() and p.resolve(strict=True) == p, 'PRIMARY_CANONICAL_PATH')
+    s = p.lstat()
+    need((s.st_uid, s.st_gid) == tuple(owner) and stat.S_IMODE(s.st_mode) == mode
+         and not s.st_mode & 0o022 and not stat.S_ISLNK(s.st_mode), 'PRIMARY_READONLY_METADATA')
+    need(p.is_dir() or (stat.S_ISREG(s.st_mode) and s.st_nlink == 1), 'PRIMARY_NODE_TYPE')
+    return p
+
+
+def running_cwd(unit):
+    need(re.fullmatch(r'enterprise-agent-test-(api|mcp|worker)\.service', unit), 'PRIMARY_UNIT_SCOPE')
+    def pid():
+        value = subprocess.check_output(['/usr/bin/systemctl', 'show', unit,
+            '--property=MainPID', '--value'], timeout=10).decode().strip()
+        need(value.isdigit() and int(value) > 0, 'PRIMARY_NOT_RUNNING')
+        return value
+    before = pid()
+    cwd = os.readlink('/proc/'+before+'/cwd')
+    need(pid() == before, 'PRIMARY_PROCESS_CHANGED')
+    return cwd
+
+
+def historical_record(path):
+    """Root-authored evidence may be group-readable, never group-writable."""
+    p = Path(path)
+    need(p.is_absolute() and p.resolve(strict=True) == p, 'HISTORICAL_RECORD_PATH')
+    for node in (p, *p.parents):
+        s = node.lstat()
+        need(s.st_uid == 0 and not s.st_mode & 0o022 and not node.is_symlink(),
+             'HISTORICAL_RECORD_OWNER')
+        need(not any(k.startswith('system.posix_acl') for k in os.listxattr(node)),
+             'HISTORICAL_RECORD_ACL')
+    s = p.stat()
+    need(p.is_file() and s.st_nlink == 1 and not s.st_mode & 0o222
+         and s.st_size <= 1024**2, 'HISTORICAL_IMMUTABLE_RECORD')
+    return p
+
+
+def observe_primary(spec):
+    """Cross-check existing Root-sealed Prepare inventory; no live Git execution.
+
+    spec is part of the externally approved request/policy, NOT caller-observed
+    expected values. A user-owned Release alone can never supply authority.
+    """
+    binding_path = historical_record(spec['binding_path']); prepare_path = historical_record(spec['prepare_path'])
+    need(sha(binding_path) == spec['binding_sha256'] and sha(prepare_path) == spec['prepare_sha256'],
+         'PRIMARY_INDEPENDENT_EVIDENCE_HASH')
+    binding, prepared = decode_record(binding_path.read_bytes()), decode_record(prepare_path.read_bytes())
+    need(binding['prepare_sha256'] == sha(prepare_path), 'PRIMARY_PREPARE_BINDING')
+    ident = {'source': prepared['source'], 'tree': prepared['tree'], 'parent': prepared['git_parent']}
+    need(all(binding[k] == ident[k] for k in ('source', 'tree'))
+         and ident == spec['identity'], 'PRIMARY_SEALED_IDENTITY')
+    pointer = Path(spec['pointer']); target = Path(spec['release'])
+    need(str(pointer) == '/opt/enterprise-agent-workbench-test/current'
+         and target.parent == pointer.parent/'releases', 'PRIMARY_PATH_SCOPE')
+    need(pointer.is_symlink() and pointer.resolve(strict=True) == target, 'PRIMARY_POINTER')
+    # Existing ancestor ACLs are observations, not permission to execute code.
+    # Pin their exact metadata/ACL bytes in the approved read-only observation.
+    for name, expected in spec['ancestors'].items():
+        p = Path(name); s = p.lstat()
+        actual = {'uid': s.st_uid, 'gid': s.st_gid, 'mode': stat.S_IMODE(s.st_mode),
+            'acl': {k: hashlib.sha256(os.getxattr(p, k)).hexdigest()
+                    for k in os.listxattr(p) if k.startswith('system.posix_acl')}}
+        need(not p.is_symlink() and actual == expected, 'PRIMARY_ANCESTOR_IDENTITY')
+    required = {str(p) for p in target.parents}
+    need(required <= set(spec['ancestors']), 'PRIMARY_ANCESTOR_SET')
+    owner = spec['owner']
+    root = readonly_node(target, owner, 0o555)
+    gitfile = readonly_node(root/'.git', owner, 0o444)
+    gitdir = readonly_node(Path(spec['gitdir']), owner, 0o555)
+    need(gitdir.parent == pointer.parent/'shared/source-identities', 'PRIMARY_GITDIR_SCOPE')
+    need({str(p) for p in gitdir.parents} <= set(spec['ancestors']), 'PRIMARY_GITDIR_ANCESTORS')
+    need(gitfile.read_text().strip() == 'gitdir: '+str(gitdir), 'PRIMARY_GITDIR_LINK')
+    head = readonly_node(gitdir/'HEAD', owner, 0o444)
+    need(head.read_text().strip() == ident['source'], 'PRIMARY_GIT_HEAD')
+    files = prepared['files']
+    need(files and '.git' in files, 'PRIMARY_INSTALLED_INVENTORY')
+    for name, expected in files.items():
+        relative = Path(name)
+        need(not relative.is_absolute() and '..' not in relative.parts and '\\' not in name,
+             'PRIMARY_INVENTORY_PATH')
+        path = root/relative
+        need(path.resolve(strict=True) == path and path.is_file() and not path.is_symlink(),
+             'PRIMARY_INVENTORY_TYPE')
+        need(sha(path) == expected, 'PRIMARY_INSTALLED_BYTES')
+    need(set(spec['units']) == {'enterprise-agent-test-'+r+'.service' for r in ('api', 'mcp', 'worker')},
+         'PRIMARY_SERVICE_SET')
+    for unit in spec['units']:
+        need(running_cwd(unit) == str(root/'enterprise_agent_poc'), 'PRIMARY_PROCESS_CWD')
+    need(pointer.resolve(strict=True) == root and sha(prepare_path) == spec['prepare_sha256']
+         and sha(binding_path) == spec['binding_sha256'], 'PRIMARY_CHANGED_DURING_OBSERVATION')
+    return {**ident, 'path': str(root)}
+
+
 def finalize(request_path, decision_path):
     """Called under existing installer lock; no self-signing or privilege elevation."""
     need(sys.platform == 'linux' and os.geteuid() == os.getegid() == 0
@@ -171,10 +271,10 @@ def finalize(request_path, decision_path):
             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent'}).decode().strip()
         need(re.search(r'(?<![\d.])'+re.escape(expected_version)+r'(?![\d.])', output), 'RUNTIME_VERSION')
     need(re.search(r"default_version\s*=\s*'0\.8\.6'", Path(runtime['pgvector_control']).read_text()), 'PGVECTOR_VERSION')
-    pointer = Path(request['primary_pointer'])
-    trust(pointer.parent); primary_root = trust(pointer.resolve(strict=True))
-    primary = identity(primary_root, git(primary_root, 'rev-parse', 'HEAD').decode().strip())
+    first_primary = observe_primary(request['primary_observation'])
+    primary = {k: first_primary[k] for k in ('source', 'tree', 'parent')}
     need(primary == request['primary'], 'PRIMARY_MISMATCH')
+    need(identity(repo, primary['source']) == primary, 'PRIMARY_INDEPENDENT_GIT_IDENTITY')
     import pwd
     account = pwd.getpwnam(request['operator']['name'])
     operator = {'name': account.pw_name, 'uid': account.pw_uid, 'gid': account.pw_gid}
@@ -196,8 +296,7 @@ def finalize(request_path, decision_path):
         runtime=runtime, artifacts=artifacts, operator=operator,
         free=v.f_bavail*v.f_frsize, total=v.f_blocks*v.f_frsize)
     receipt = validate(request, decision, observed, int(time.time()))
-    need(pointer.resolve(strict=True) == primary_root
-         and identity(primary_root, git(primary_root, 'rev-parse', 'HEAD').decode().strip()) == primary,
+    need(observe_primary(request['primary_observation']) == first_primary,
          'PRIMARY_CHANGED_DURING_ADOPTION')
     receipt.update(decision_sha256=sha(decision_path), adapter_sha256=sha(__file__),
                    actual_uid=os.geteuid(), recorded_at=int(time.time()))

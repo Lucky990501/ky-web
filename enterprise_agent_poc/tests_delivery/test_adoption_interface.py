@@ -120,5 +120,10 @@ def test_unprivileged_finalize_never_reads_or_writes(monkeypatch):
 
 def test_no_installer_or_service_or_issuer_commands():
     source = Path(a.__file__).read_text(encoding='utf-8')
-    for forbidden in ('systemctl', 'sudo ', 'shutil', 'os.chown', 'os.symlink', 'def issue('):
+    for forbidden in ('sudo ', 'shutil', 'os.chown', 'os.symlink', 'def issue('):
+        assert forbidden not in source
+    # One read-only MainPID query is now required; service mutation stays forbidden.
+    assert source.count("'/usr/bin/systemctl'") == 1
+    assert "['/usr/bin/systemctl', 'show', unit," in source
+    for forbidden in ("'restart'", "'start'", "'stop'", "'daemon-reload'"):
         assert forbidden not in source
