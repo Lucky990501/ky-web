@@ -7,6 +7,7 @@ import subprocess
 import tarfile
 import io
 import hashlib
+import os
 
 import pytest
 
@@ -51,7 +52,10 @@ def test_exact_accepted_but_never_native_or_execution_grant():
 
 def test_real_frozen_git_tree_and_complete_file_hashes_contract():
     r, d, o = fixture()
-    repo = Path(__file__).resolve().parents[2]
+    # Cross-OS independent DEV may mount a Windows worktree whose .git points
+    # to Windows syntax. Read the SAME frozen Git object from the main repo;
+    # no expected identity or byte assertion changes.
+    repo = Path(os.environ.get('TEST_DELIVERY_GIT_REPO', Path(__file__).resolve().parents[2]))
     source = r['tooling']['source']
     rows = subprocess.check_output(['git', '-C', str(repo), 'show', '-s',
                                    '--format=%H%n%T%n%P', source]).decode().splitlines()

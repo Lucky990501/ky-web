@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from uuid import uuid4
@@ -215,7 +216,12 @@ def main():
     try:
         role_main(args.role, args.project, args.config, args.expected, args.phase)
     except Exception as exc:
-        print(json.dumps({'status': 'FAILED', 'exception_class': type(exc).__name__}), flush=True)
+        # Fixed assertion labels only; never project DSNs, exception payloads or
+        # credential values into operator receipts.
+        code = str(exc) if isinstance(exc, RuntimeError) and re.fullmatch('[A-Z0-9_:-]{1,100}', str(exc)) else 'REDACTED'
+        if isinstance(exc, KeyError) and exc.args and re.fullmatch('[a-z_]{1,60}', str(exc.args[0])):
+            code = 'MISSING_FIELD:' + str(exc.args[0]).upper()
+        print(json.dumps({'status': 'FAILED', 'exception_class': type(exc).__name__, 'failure_code': code}), flush=True)
         raise SystemExit(2) from None
 
 

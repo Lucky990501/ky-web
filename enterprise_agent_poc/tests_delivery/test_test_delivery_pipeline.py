@@ -8,6 +8,8 @@ import sys
 import tarfile
 import time
 import uuid
+import os
+import io
 
 import pytest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -27,7 +29,21 @@ def bundle_git_repo(tmp_path):
     for key,value in [('user.name','Fixture'),('user.email','fixture@example.invalid'),('core.autocrlf','false')]:
         subprocess.run(['git','-C',str(repo),'config',key,value],check=True)
     project=repo/'enterprise_agent_poc'
-    shutil.copytree(Path(p.PROJECT)/'skill_packages',project/'skill_packages')
+    # Skill locks bind Git bytes. A mounted Windows checkout may contain CRLF;
+    # fixture creation must not turn that checkout conversion into a new Skill.
+    source_repo = Path(os.environ.get('TEST_DELIVERY_GIT_REPO', Path(__file__).resolve().parents[2]))
+    raw = subprocess.check_output(['git', '-C', str(source_repo), 'archive',
+        '9e6350684dea1d54cdfd17e5daaa1574bce75579', 'enterprise_agent_poc/skill_packages/'])
+    with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
+        for member in archive:
+            assert not member.name.startswith('/') and '..' not in Path(member.name).parts
+            assert member.isdir() or member.isfile()
+            dest = repo/member.name
+            if member.isdir():
+                dest.mkdir(parents=True, exist_ok=True)
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(archive.extractfile(member).read())
     static=project/'app/static';static.mkdir(parents=True)
     (project/'app/main.py').write_text('# fixture\n')
     (static/'workbench.js').write_bytes(b'console.log("fixture");\n')
@@ -183,6 +199,7 @@ def test_sandbox_default_denial_and_no_root_candidate(scope):
 def test_native_result_cannot_be_mock_or_incomplete(scope,field,value):
     r,_,_=scope;r['candidate']={'source':'a'*40,'tree':'b'*40}
     result={'operation_id':r['operation_id'],'source':'a'*40,'tree':'b'*40,
+        'validation_level':'PROTECTED_ISOLATED_QUALIFICATION', 'test_native':'PENDING_EXTERNAL_ACCEPTANCE',
         'backend':'postgresql-redis-worker-mcp','provider_calls':0,'production_changes':0,
         'preview_changes':0,'primary_changes':0,'checks':{x:'PASS' for x in p.CHECKS},
         'disk_peak_bytes':0,'min_root_free_fraction':.3}

@@ -137,6 +137,53 @@ def tree_pins(root):
     return out
 
 
+def runtime_inventory(roots, *, protected=False):
+    """Read-only reusable dependency graph; never install/chmod or import it.
+
+    A user-owned inventory is preparation, NOT executable trust. Existing Root
+    installer may accept a one-time immutable closure, then call with protected
+    True and bind its digest. Symlinks are explicit graph edges, not ignored:
+    every resolved target must be in the enumerated roots and pinned too.
+    Caller must still prove dependency/relocation closure with actual imports,
+    loader dependencies and startup; inventory alone does not assert closure.
+    """
+    paths = [Path(r) for r in roots]
+    need(paths and len(paths) == len(set(paths)), 'RUNTIME_ROOT_SET')
+    need(not protected or (sys.platform == 'linux' and hasattr(os, 'listxattr')),
+         'PROTECTED_RUNTIME_LINUX_ONLY')
+    for p in paths:
+        need(p.is_absolute() and p.resolve(strict=True) == p, 'RUNTIME_CANONICAL_ROOT')
+        if protected:
+            trust(p)
+    entries = {}
+    for root in paths:
+        for p in (root, *(sorted(root.rglob('*')) if root.is_dir() else ())):
+            s = p.lstat()
+            need(stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode) or stat.S_ISLNK(s.st_mode), 'RUNTIME_SPECIAL_FILE')
+            value = {'uid': s.st_uid, 'gid': s.st_gid, 'mode': stat.S_IMODE(s.st_mode),
+                     'acl_inspected': hasattr(os, 'listxattr'),
+                     'acl': {k: hashlib.sha256(os.getxattr(p, k, follow_symlinks=False)).hexdigest()
+                             for k in (os.listxattr(p, follow_symlinks=False) if hasattr(os, 'listxattr') else ())
+                             if k.startswith('system.posix_acl')}}
+            if p.is_symlink():
+                target = p.resolve(strict=True)
+                need(any(target == r or (r.is_dir() and target.is_relative_to(r)) for r in paths),
+                     'RUNTIME_LINK_OUTSIDE_CLOSURE')
+                value.update(link=os.readlink(p), target=str(target))
+                if protected:
+                    trust(p.parent); trust(target)
+                    need(s.st_uid == s.st_gid == 0, 'RUNTIME_LINK_OWNER')
+            else:
+                if protected:
+                    trust(p)
+                if p.is_file():
+                    value['sha256'] = sha(p)
+            entries[str(p)] = value
+    return {'contract': 'TEST_RUNTIME_INVENTORY_V1', 'roots': list(map(str, paths)),
+            'entries': entries, 'protected_paths_verified': protected,
+            'dependency_closure_proven': False}
+
+
 def readonly_node(path, owner, mode):
     """Historical data only: never import it or run Git/config/hooks from it."""
     p = Path(path)
@@ -246,10 +293,15 @@ def finalize(request_path, decision_path):
     need(str(Path(sys.executable).resolve()) == decision['installer_python']
          and sha(trust(decision['installer_python'])) == decision['installer_python_sha256'],
          'INSTALLER_PYTHON_PIN')
-    base = Path('/opt/enterprise-agent-workbench-test')
+    # New executable materials may use an independent protected root, avoiding
+    # historical Test ACLs. This does not relax trust() or alter PRIMARY paths.
+    base = Path(request.get('installation_root', '/opt/enterprise-agent-workbench-test'))
+    need(base in (Path('/opt/enterprise-agent-workbench-test'),
+                  Path('/opt/enterprise-agent-test-delivery')), 'INSTALLATION_ROOT_SCOPE')
+    trust(base)
     for key in ('tooling_root', 'repository', 'receipt_directory'):
         need(trust(request[key]).is_relative_to(base) and Path(request[key]) != base, 'TEST_PATH_SCOPE')
-    need(request['primary_pointer'] == str(base/'current'), 'TEST_POINTER_ONLY')
+    need(request['primary_pointer'] == '/opt/enterprise-agent-workbench-test/current', 'TEST_POINTER_ONLY')
     root = trust(request['tooling_root']); repo = trust(request['repository'])
     pins = tree_pins(root)
     need(pins == request['files'], 'TOOLING_FILE_PINS')

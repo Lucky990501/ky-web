@@ -39,8 +39,19 @@ async def mcp_permissions(settings):
     # Tampered token must never return a successful tool response.
     bad = token('tenant-a', ('enterprise_config:read',))
     bad = bad[:-1] + ('A' if bad[-1] != 'A' else 'B')
-    rejected = await mcp_call(settings.platform_mcp_url, bad, 'enterprise_config_get')
-    need(rejected.isError, 'MCP_INVALID_TOKEN_ACCEPTED')
+    try:
+        rejected = await mcp_call(settings.platform_mcp_url, bad, 'enterprise_config_get')
+        need(rejected.isError, 'MCP_INVALID_TOKEN_ACCEPTED')
+    except Exception as exc:
+        # Real HTTP authentication may reject transport initialization, rather
+        # than return a tool-level isError. Only an exact 401 is denial evidence;
+        # timeout, connection failure and unrelated exception groups still fail.
+        import httpx
+        def denied(error):
+            if isinstance(error, BaseExceptionGroup):
+                return bool(error.exceptions) and all(denied(e) for e in error.exceptions)
+            return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 401
+        need(denied(exc), 'MCP_INVALID_TOKEN_NOT_PROVEN')
 
 
 def run_phase(phase, config, settings):
@@ -53,7 +64,9 @@ def run_phase(phase, config, settings):
     need(store.is_postgres and queue.ping(), 'REAL_PG_REDIS_REQUIRED')
     owner = product.user_by_email(EMAILS[0]); evidence_path = root / 'expected-results.json'
     def terminal(tid):
-        task = product.task_for_worker(tid)
+        # Worker projection is execution input, not the persisted result join.
+        # Verify the same authorized read path used by Task API/history.
+        task = product.task(tid, 'tenant-a', owner['id'])
         return task if task and task['status'] in ('completed', 'failed', 'cancelled') else None
     def drained():
         return queue._client.llen(queue.pending) == queue._client.llen(queue.processing) == 0
@@ -135,7 +148,7 @@ def run_phase(phase, config, settings):
         elif phase == 'unknown-check':
             wait_for(drained, 'RESTART_QUEUE_NOT_RECOVERED')
             time.sleep(.3)
-            task = product.task_for_worker((root / 'unknown-id').read_text())
+            task = product.task((root / 'unknown-id').read_text(), 'tenant-a', owner['id'])
             need(len(read_calls(root)) == 6 and task['status'] == 'running' and not task['final_response'],
                  'UNKNOWN_REQUEST_REPLAYED_OR_FALSE_COMPLETED')
         else:

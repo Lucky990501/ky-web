@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import socket
 import subprocess
 import sys
@@ -100,16 +101,32 @@ def sandbox_preflight(parent):
 
 
 class Job:
-    def __init__(self, request, root_parent):
+    def __init__(self, request, root_parent, *, dev_runtime=None):
         self.request = request; self.root_parent = root_parent
         self.lifecycle = load_lifecycle(); self.s = self.lifecycle.IsolatedServices()
+        self.dev_runtime = dev_runtime
+        if dev_runtime:
+            # DEV uses existing binaries; it neither installs nor adopts them.
+            # Keep the existing lifecycle's exact PG stop/marker contract.
+            self.lifecycle.RUNTIME_CACHE = Path(dev_runtime['pg']).parent
         self.stage = 'PRECHECK'; self.evidence = []; self.project = None
         self.peak = 0; self.free_min = 1.; self.initial_used = 0
         self.process_identities = []
 
     def space(self):
         scratch = os.statvfs(self.root_parent)
-        used = (scratch.f_blocks - scratch.f_bfree) * scratch.f_frsize
+        if getattr(self, 'dev_runtime', None):
+            # DEV has no bounded tmpfs. Do not count the host's unrelated disk
+            # usage as this job's usage, or claim cgroup/tmpfs enforcement.
+            used = 0
+            if self.s.root:
+                for path in self.s._safe_root().rglob('*'):
+                    try:
+                        used += path.lstat().st_blocks * 512
+                    except FileNotFoundError:  # PG atomic temporary-file rename
+                        pass
+        else:
+            used = (scratch.f_blocks - scratch.f_bfree) * scratch.f_frsize
         self.peak = max(self.peak, used + self.input_size)
         host = os.statvfs('/')
         fraction = host.f_bavail / host.f_blocks
@@ -129,6 +146,18 @@ class Job:
                     self.space()
                     need(time.monotonic() < deadline and log.stat().st_size <= 4 * 1024**2, 'COMMAND_BOUND')
                     time.sleep(.1)
+                if proc.returncode != 0:
+                    # Fixture assertions are fixed labels, not arbitrary child
+                    # logs. Keep failure evidence without emitting secrets.
+                    for line in log.read_bytes()[-4096:].decode(errors='replace').splitlines():
+                        try:
+                            value = json.loads(line)
+                            code = value.get('failure_code', '')
+                            if re.fullmatch('[A-Z0-9_:-]{1,100}', code):
+                                self.evidence.append({'stage': self.stage, 'failure_code': code,
+                                                      'exception_class': value.get('exception_class', 'UNKNOWN')})
+                        except (ValueError, AttributeError, TypeError):
+                            pass
                 need(proc.returncode == 0, 'CHILD_FAILED:' + self.stage)
             finally:
                 if proc.poll() is None:
@@ -194,9 +223,11 @@ class Job:
         self.s.root = Path(tempfile.mkdtemp(prefix=self.lifecycle.ROOT_PREFIX, dir=self.root_parent))
         self.s.root.chmod(0o700)
         (self.s.root / 'stage2-isolated.marker').write_text(self.lifecycle.MARKER)
-        self.s.redis_server = Path('/runtime/redis-7.0.15/bin/redis-server')
-        self.s.redis_cli = Path('/runtime/redis-7.0.15/bin/redis-cli')
-        self.pg = Path('/runtime/postgresql-16.6/bin')
+        redis = Path(self.dev_runtime['redis']) if self.dev_runtime else Path('/runtime/redis-7.0.15')
+        pg = Path(self.dev_runtime['pg']) if self.dev_runtime else Path('/runtime/postgresql-16.6')
+        self.s.redis_server = redis / 'bin/redis-server'
+        self.s.redis_cli = redis / 'bin/redis-cli'
+        self.pg = pg / 'bin'
         for binary in (self.s.redis_server, self.s.redis_cli, *(self.pg / n for n in
                        ('initdb', 'pg_ctl', 'createdb', 'pg_dump', 'pg_restore'))):
             need(binary.is_file() and os.access(binary, os.X_OK), 'TRUSTED_RUNTIME_INPUT_MISSING')
@@ -213,8 +244,12 @@ class Job:
         result = {}
         with psycopg.connect(host=str(self.s.root / 'pg/socket'), port=54330, user='stage1_fixture',
                              dbname=database, options='-c default_transaction_read_only=on') as conn:
-            need(conn.execute('SHOW server_version').fetchone()[0].split()[0] == '16.6', 'PG_VERSION')
-            need(conn.execute("SELECT extversion FROM pg_extension WHERE extname='vector'").fetchone() == ('0.8.6',), 'VECTOR_VERSION')
+            version = conn.execute('SHOW server_version').fetchone()[0].split()[0]
+            vector = conn.execute("SELECT extversion FROM pg_extension WHERE extname='vector'").fetchone()
+            need(version == '16.6', 'PG_VERSION')
+            need(vector == ('0.8.6',), 'VECTOR_VERSION')
+            self.runtime_versions = {'postgresql': version, 'pgvector': vector[0],
+                                     'python': sys.version.split()[0], 'redis': '7.0.15'}
             tables = conn.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").fetchall()
             for (table,) in tables:
                 h = hashlib.sha256(); count = 0
@@ -285,26 +320,69 @@ class Job:
                 'stages': self.evidence, 'recovery': recovery,
                 'process_identities': self.process_identities,
                 'knowledge': self.health_value.get('knowledge', 'NOT_REPORTED'),
+                'runtime_versions': getattr(self, 'runtime_versions', {}),
                 'knowledge_semantic_acceptance': 'NOT_IN_SCOPE_LOCAL_HASH',
                 'primary_activation': 'NOT_EXECUTED', 'native_systemd_per_service_parity': 'NOT_PROVEN'}
+
+
+def dev_preflight(args):
+    """Explicit non-Root development only; NEVER a protected Native receipt.
+
+    No technical approval is fabricated. The user's DEV authorization permits
+    only new local synthetic resources. Candidate/predecessor archives are
+    rechecked against Git before any candidate code or database is started.
+    """
+    need(sys.platform == 'linux' and os.geteuid() != 0, 'DEV_NONROOT_ONLY')
+    need(args.root == Path('/private/tmp') and args.root.resolve() == args.root,
+         'DEV_PRIVATE_PARENT')
+    need(args.repo and args.pg_root and args.redis_root, 'DEV_RUNTIME_AND_REPO_REQUIRED')
+    need(not any(k in os.environ for k in ('DATABASE_URL', 'REDIS_URL', 'PYTHONPATH',
+         'ENTERPRISE_POC_DATABASE_URL', 'DEEPSEEK_API_KEY', 'OPENAI_API_KEY')),
+         'DEV_CLEAN_ENVIRONMENT_REQUIRED')
+    from test_delivery_pipeline import read, artifact, identity
+    request = read(args.request)
+    for ident, archive, manifest, bound in (
+        (request['candidate'], args.archive, args.manifest, request['artifact']),
+        (request['observed_predecessor'], args.predecessor_archive,
+         args.predecessor_manifest, request['predecessor_artifact'])):
+        need(identity(args.repo, ident['source']) == ident, 'DEV_GIT_IDENTITY')
+        need(artifact(args.repo, ident['source'], archive, manifest) == bound, 'DEV_GIT_ARTIFACT')
+    for path in (args.pg_root, args.redis_root):
+        need(path.is_absolute() and path.resolve(strict=True) == path, 'DEV_RUNTIME_PATH')
+    free = os.statvfs(args.root)
+    need(free.f_bavail * free.f_frsize > 2 * 1024**3 and free.f_bavail / free.f_blocks > .2,
+         'DEV_CAPACITY')
+    return request
 
 
 def main():
     parser = argparse.ArgumentParser()
     for name in ('request', 'archive', 'manifest', 'predecessor-archive', 'predecessor-manifest', 'root'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--dev', action='store_true', help='Authorized independent DEV only; not TEST_NATIVE')
+    for name in ('repo', 'pg-root', 'redis-root'):
+        parser.add_argument('--' + name, type=Path)
     args = parser.parse_args(); job = None; result = None
     try:
-        sandbox_preflight(args.root)
-        request = json.loads(args.request.read_text())
+        if args.dev:
+            request = dev_preflight(args)
+        else:
+            need(not any((args.repo, args.pg_root, args.redis_root)), 'NATIVE_RUNTIME_FIXED')
+            sandbox_preflight(args.root)
+            request = json.loads(args.request.read_text())
         need(request['action'] == 'isolated_qualify' and request['environment'] == 'test'
              and request['calls'] == {'text': 0, 'image': 0, 'wechat': 0}
              and request['checks'] == list(CHECKS), 'EXACT_ZERO_COST_SCOPE')
-        job = Job(request, args.root)
+        job = Job(request, args.root, dev_runtime={'pg': str(args.pg_root),
+                  'redis': str(args.redis_root)} if args.dev else None)
         result = job.run(args.archive, args.manifest, args.predecessor_archive, args.predecessor_manifest)
+        result.update(validation_level='DEV_INTEGRATION_PASS' if args.dev else 'PROTECTED_ISOLATED_QUALIFICATION',
+                      test_native='NOT_EXECUTED' if args.dev else 'PENDING_EXTERNAL_ACCEPTANCE')
     except Exception as exc:
         result = {'status': 'FAILED', 'failed_stage': job.stage if job else 'PRECHECK',
-                  'exception_class': type(exc).__name__, 'stages': job.evidence if job else []}
+                  'exception_class': type(exc).__name__, 'stages': job.evidence if job else [],
+                  'failure_code': str(exc) if isinstance(exc, RuntimeError) and
+                      re.fullmatch('[A-Z0-9_:-]{1,100}', str(exc)) else 'REDACTED'}
     finally:
         if job and job.s.root:
             try:

@@ -1,0 +1,185 @@
+STANDARD_TEST_DELIVERY_V1 — CANDIDATE / NOT INSTALLED
+2026-10-23; exact Tooling identity is this document's Git commit/tree.
+
+RESULT LEVELS
+DEV_INTEGRATION_PASS: actual private PG/Redis/API/Worker/MCP, deterministic
+zero-cost model double, HTTP auth/SSE/history, real queue and transactions.
+TEST_NATIVE_PASS: NOT EXECUTED. No Test installation, grant or cutover occurred.
+PRODUCTION: unchanged. Test PASS never authorizes Production release.
+
+This is a bounded extension to test_delivery_pipeline/adoption/native, not a
+new issuer or deployment framework. Business app, Runtime, migrations, Skills,
+Production release_switch.sh/release_verify/recovery and frozen seals unchanged.
+
+1. What the code now provides
+
+Existing package/verify/plan use the original build_release/release_manifest
+and exact Git bytes, Source, Tree, parents, archive SHA and Manifest SHA.
+delivery-plan adds STANDARD_TEST_DELIVERY_V1 with a fixed sequence:
+preflight -> backup -> install -> activate -> health -> qualify -> export.
+Neither a plan nor an installed-identity observation authorizes an action.
+
+dispatch_delivery is a sequencing HOOK for the existing protected Test executor,
+not a new CLI installer. run_step is a fixed reviewed executor callback, NOT a
+command in request JSON. delivery_scope consumes current exact request/policy/
+operation/actor/host-bound records from the existing authorized executor. It
+does not authenticate an Owner string as an approval or issue records itself.
+The caller must independently verify the actual issuer and protected storage.
+
+delivery_journal uses exclusive operation directories, append-only chained
+claim/intent/result receipts, file+directory fsync and readback. A surviving
+intent or uncertain fsync means UNKNOWN, never NO_WRITE. Duplicate operation
+claim rejects; disconnect recovery queries this original operation, not replay.
+No auto-rollback or automatic retry is added. Existing Recovery decides whether
+and how recovery is permitted under a fresh applicable recovery authorization.
+
+IMPORTANT: no installed Test executor currently maps these seven callbacks.
+The existing protected execute CLI STILL only permits isolated_qualify. It is
+not silently enlarged to PRIMARY activation. This candidate alone cannot deploy
+Test. The existing executor maintainer must adopt this hook/mapping once under
+real technical authority, not run a newly created shell shortcut.
+
+2. Once-only authority and executable trust adoption — pending06
+
+Existing channel: 06_CODEX_AUTHORIZED_LUCKY_SUDO / existing external protected
+material workflow, previously install_exact_materials.py and
+v6_exact_handoff_and_scope.py. OS sudo capability is not a current technical
+scope. Expired e87 record must not be reused. No new signer is supplied here.
+
+Requested reusable actions: prepare / activate / recover / status, test only.
+Each operation binds exact Source/Tree/parents, archive+Manifest, predecessor,
+Tooling pins, runtime profile, actor, host, operation UUID, expiry/revocation,
+zero paid calls. Source is INPUT, never compiled into executor source.
+New candidates change identities and a legitimately approved operation record;
+they do not require a new Source-specific issuer or entry implementation.
+This requires one real policy/technical adoption; none was manufactured here.
+
+Global release lock: existing executor MUST hold its real shared Test release
+flock across revalidation, all callbacks and journal commits, and use the SAME
+inode as its existing activation/recovery. operation mkdir is duplicate safety,
+NOT a substitute for that global lock. Current host lock mapping/concurrency
+is NOT VERIFIED by component tests and is an explicit installation gate.
+
+3. Runtime and ACL
+
+runtime_inventory is read-only. It records files, uid/gid/mode, ACL hashes and
+explicit symlink edges; every target must be inside the listed closure. An
+inventory of user-owned files is not Root executable trust. protected=True
+requires strict Root paths/ACL checks. Additional/changed files change digest.
+dependency_closure_proven remains FALSE: actual loader/import/relocation probes
+must prove closure; hashes or an estimated192MiB size cannot establish that.
+
+Reuse installed dependency versions. Existing authorized material installer may
+stage a one-time immutable, content-pinned subset in independent
+/opt/enterprise-agent-test-delivery; test_delivery_adoption.finalize now accepts
+this exact root as well as the old Test root. Its strict trust checks remain.
+The PRIMARY pointer remains /opt/enterprise-agent-workbench-test/current.
+Do not chown/chmod current894, its ACL ancestors or shared active runtime.
+Do not copy a complete runtime for every application commit. After one-time
+adoption, reuse the SAME qualified closure/profile across compatible Sources.
+Current remote192MiB subset/closure/relocation is still NOT VERIFIED/INSTALLED.
+
+4. Actual894 predecessor versus archive provenance
+
+06's B1_FINAL_OPERATION_ADMISSION_CLOSEOUT_V1.txt records that original894
+Archive+Manifest were not found in its bounded search. No search of customer
+backups/Secrets was attempted here. This is NOT proof that no original exists.
+
+delivery-plan supports ORIGINAL_RELEASE_ARTIFACT versus
+INSTALLED_IDENTITY_OBSERVATION. The latter accepts an exact proposed observed
+identity/evidence hash but sets activation_ready/recovery_ready=false and
+does not invent archive provenance. observe_primary still requires independent
+Root-sealed Prepare/binding, exact installed byte inventory, pointer, metadata,
+Git identity and three running CWDs. It never executes user-owned Git as Root.
+
+A new894 Git build was made for DEV OLD-READER testing only. It is labelled
+RECONSTRUCTED, not the original installed artifact/Manifest or release history.
+It proves the frozen894 reader can read the NEW synthetic backup; it does not
+prove actual Test pointer rollback, service restart or all customer data safety.
+
+If original pair remains unavailable, existing authority must explicitly accept
+the sealed installed identity and separately protected recovery copy/backup as
+a new versioned INSTALLED_IDENTITY acceptance. It must validate that recovery
+bytes match the installed inventory/Git and restoration is tested. No producer
+for this real acceptance is issued by this candidate. Never substitute d906.
+
+5. Existing release executor callback mapping required before activation
+
+preflight: real host/authority/runtime pins, fresh installed identity, Schema
+ledger checksums, resource floor, candidate package integrity, applicable scope.
+backup: existing Test backup, immutable output/hash, restore into a DISTINCT
+private DB, verify data and exact old-reader. Back up protected object/config
+state through existing backup mechanism; do not emit Secrets to reports.
+install: existing protected material installer, new immutable release directory;
+no candidate imports as Root before first-byte/pin validation.
+activate: existing atomic Test pointer/unit binding under the global lock;
+Test units only; no Production release_switch string substitutions.
+health: actual API/MCP/Worker CWD+Source, DB/Redis identities and readiness.
+qualify: actual authorized business/permission/SSE/history checks with zero-cost
+Provider double for B1; not a SQLite or mocked queue result.
+export: exact already-tested archive/Manifest, raw results and failure history
+for02. Do not rebuild different bytes on Production or imply deployment consent.
+
+Each callback returns status=PASS, operation_id, request_sha256 and its actual
+protected evidence references; dispatcher rejects wrong binding. Synthetic
+callback tests prove sequencing/denial ONLY, not real deploy or service parity.
+If any step is interrupted, keep original journal; independently reconcile
+actual pointer/data/process state through the existing recovery entry. Never
+delete Task/Run/Admission. Do not fall back merely because migrations match.
+No applicable backup/compatibility/recovery authorization => STOP, not restore.
+
+6. Commands and actual independent DEV integration
+
+From enterprise_agent_poc, existing commands remain:
+  python -B scripts/test_delivery_pipeline.py package --repo <repo> \
+    --source <exactSource> --tree <exactTree> --output <newOutput>
+  python -B scripts/test_delivery_pipeline.py verify --repo <repo> \
+    --source <exactSource> --tree <exactTree> --archive <archive> --manifest <manifest>
+  python -B scripts/test_delivery_pipeline.py delivery-plan --repo <repo> \
+    --source <source> --tree <tree> --archive <archive> --manifest <manifest> \
+    --observation <readonlyObservation> --predecessor-proof <explicitProof> --output <newPlan>
+
+Explicit authorized DEV entry (nonRoot Linux, independent resources only):
+  env -i PATH=/usr/bin:/bin HOME=<privateDevHome> LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+    <existingPython> -B scripts/test_delivery_native.py --dev --repo <repo> \
+    --request <devRequest> --archive <archive> --manifest <manifest> \
+    --predecessor-archive <labelledRebuilt894Archive> --predecessor-manifest <rebuiltManifest> \
+    --root /private/tmp --pg-root <existingPG16.6Root> --redis-root <existingRedisRoot>
+Do not use these --dev flags to simulate protected Test adoption. Root rejects.
+Native entry retains fixed runtime/private-network/tmpfs/Root-policy gates.
+Native result consumer explicitly rejects DEV_INTEGRATION_PASS receipts.
+
+Measured DEV: Python3.11.16, PG16.6, pgvector0.8.6, Redis7.0.15. Five completed
+copywriting turns, first >12k chars,10 persisted messages,5 result rows,5 debits,
+authenticated real MCP HTTP, cross-user/tenant denial, real Redis redelivery,
+cancel before execution, kill/restartWorker without another Provider invocation.
+In-flight interruption remains persisted running/unconfirmed; no false completed
+result, no automatic model retry or second debit. This is safe non-replay,
+not a claim of automatic completion of an unknown external operation.
+Private pg_dump/pg_restore to distinct DB, all44 public-table fingerprints
+equal, read-only frozen894 Store/history reader success. No historical DB used.
+Scratch sampled allocation peak ~74MB, root free ~91.66%; DEV has no Test cgroup
+or bounded tmpfs enforcement. Native systemd per-service parity NOT PROVEN.
+knowledge=degraded is retained; no semanticRAG or real model quality claim.
+
+7. Exact remaining gates /06 handoff
+
+Do NOT repeat ordinary business QA or build a B1-specific executor.
+One-time existing executor adoption/mapping, actual authority and global lock;
+qualified immutable dependency closure and independent install path; predecessor
+archive search/explicit installed-identity acceptance and real recovery proof;
+actual Test slice, private mounts/proc/network, memory/disk limits; real
+Test API/MCP/Worker service startup and rollback/forward-recovery rehearsal.
+Only after these real gates pass can TEST_NATIVE_PASS/DEPLOYMENT_READY be stated.
+
+No Push authorized; local commit only. No SSH to PRIMARY/Production/Preview in
+this implementation run. No Root installation, grants, paid calls, Source
+switch, service restart or customer-data mutation. Old code/evidence preserved.
+
+Final focused Linux regression:135PASS,0FAIL/ERROR/SKIP. This count is not a sum
+of repeated runs. Earlier failed Windows dependency/temp-path runs and first
+Linux fixture-EOL failure remain in external evidence, not reclassified asPASS.
+DEV real integration raw result: .standard-test-delivery-evidence-v1/dev-final.log
+from repository parent of this Tooling worktree. Final JUnit: offline-final3.xml.
+source-reuse-final/source-independence.json records two exact Sources and the
+unchanged executor SHA256 across both offline build/deployment-plan checks.

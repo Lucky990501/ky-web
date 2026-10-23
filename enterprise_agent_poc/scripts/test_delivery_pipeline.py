@@ -87,6 +87,12 @@ def exclusive(path, value):
         f.write(raw)
         f.flush()
         os.fsync(f.fileno())
+    if sys.platform == 'linux':
+        parent_fd = os.open(Path(path).parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
 
 
 def git(repo, *args):
@@ -220,6 +226,139 @@ def plan(repo, source, tree, archive, manifest, observation, predecessor_archive
     return result
 
 
+def delivery_plan(repo, source, tree, archive, manifest, observation, predecessor):
+    """Versioned handoff to the EXISTING Test installer/recovery maintainer.
+
+    Identity observation is not archive provenance or recovery authority. This
+    unsigned plan never makes a current pointer writable or creates a grant.
+    The stable actions are reusable; only per-operation identities change.
+    """
+    result = plan(repo, source, tree, archive, manifest, observation)
+    mode = predecessor.get('proof_kind')
+    require(mode in ('ORIGINAL_RELEASE_ARTIFACT', 'INSTALLED_IDENTITY_OBSERVATION'),
+            'PREDECESSOR_PROOF_KIND')
+    require(predecessor['identity'] == result['observed_predecessor'], 'PREDECESSOR_IDENTITY')
+    require(predecessor.get('evidence_sha256') and re.fullmatch('[a-f0-9]{64}', predecessor['evidence_sha256']),
+            'PREDECESSOR_EVIDENCE_HASH')
+    if mode == 'ORIGINAL_RELEASE_ARTIFACT':
+        require(predecessor.get('archive') and predecessor.get('manifest'), 'ORIGINAL_PAIR_REQUIRED')
+        result['predecessor_artifact'] = artifact(repo, predecessor['identity']['source'],
+                                                predecessor['archive'], predecessor['manifest'])
+    else:
+        require(not any(k in predecessor for k in ('archive', 'manifest')), 'OBSERVATION_NOT_ORIGINAL_ARCHIVE')
+    result.update(contract='STANDARD_TEST_DELIVERY_V1', action='test_delivery',
+                  predecessor_proof=predecessor,
+                  steps=['preflight', 'backup', 'install', 'activate', 'health', 'qualify', 'export'],
+                  execution_scope={'environment': 'test', 'actions': ['prepare', 'activate', 'recover', 'status'],
+                      'binding': ['operation_id', 'request_sha256', 'policy_sha256', 'host', 'actor',
+                                  'candidate', 'artifact', 'observed_predecessor', 'runtime_profile_sha256'],
+                      'issuer': 'EXISTING_AUTHORIZED_TEST_EXECUTOR_ONLY', 'paid_calls': 0,
+                      'production': False, 'preview': False},
+                  activation_ready=False, recovery_ready=False,
+                  predecessor_original_artifact_available=mode == 'ORIGINAL_RELEASE_ARTIFACT')
+    result['rollback'].update(reason='Read-only observed identity is NOT an original archive or executable rollback proof; '
+        'restore-tested backup, exact installed predecessor acceptance and data compatibility require separate verification')
+    return result
+
+
+def delivery_journal(operations_root, request):
+    """Existing executor's exclusive operation claim and append-only receipts.
+
+    The executor owns the global release lock across dispatch, including callback
+    effects; this operation claim additionally prevents duplicate SSH requests.
+    Any mkdir/fsync/readback uncertainty remains visible and is never replayed.
+    """
+    root = trusted(operations_root, directory=True)
+    opid = request['operation_id']
+    require(str(uuid.UUID(opid)) == opid, 'OPERATION_MISMATCH')
+    operation = root / opid
+    prior = None
+    def append(stage, payload):
+        nonlocal prior
+        require(re.fullmatch(r'(claim|intent:[a-z]+|result:[a-z]+)', stage), 'JOURNAL_STAGE')
+        if stage == 'claim':
+            operation.mkdir(mode=0o700)  # existing/PENDING/UNKNOWN => reject, not replay
+        record = {'operation_id': opid, 'request_sha256': digest(request),
+                  'stage': stage, 'prior_sha256': prior, 'payload': payload}
+        dest = operation / (stage.replace(':', '-') + '.json')
+        exclusive(dest, record)
+        require(read(dest) == record, 'JOURNAL_COMMIT_UNKNOWN')
+        prior = digest(record)
+    return append
+
+
+def delivery_scope(request, policy, grant, now):
+    """Consume, never issue, a current record from the existing Test authority.
+
+    Existing protected executor must authenticate the issuer record and actor,
+    read these inputs from trusted storage and hold its release lock throughout
+    dispatch. This check is also called between every effect/receipt, not once
+    before SSH/TTY waiting. No Source is compiled into the consumer.
+    """
+    require(request['contract'] == 'STANDARD_TEST_DELIVERY_V1' and request['action'] == 'test_delivery'
+            and policy['contract'] == 'STANDARD_TEST_DELIVERY_POLICY_V1'
+            and request['environment'] == policy['environment'] == 'test', 'TEST_DELIVERY_CONTRACT')
+    require(policy['hostname'] == request['observation']['hostname'] == grant['hostname'], 'HOST_BINDING_MISMATCH')
+    require(grant['action'] == 'test_delivery' and grant['operation_id'] == request['operation_id']
+            and grant['request_sha256'] == digest(request) and grant['policy_sha256'] == digest(policy),
+            'DELIVERY_GRANT_BINDING')
+    require(grant['actor'] == policy['operator'] and type(policy['operator']['uid']) is int
+            and type(policy['operator']['gid']) is int
+            and policy['operator']['uid'] > 0 and policy['operator']['gid'] > 0,
+            'DELIVERY_ACTOR_IDENTITY')
+    require(grant['tooling'] == policy['tooling']
+            and all(re.fullmatch('[a-f0-9]{40}', policy['tooling'][key]) for key in ('source', 'tree'))
+            and grant['runtime_profile_sha256'] == policy['runtime_profile_sha256']
+            and re.fullmatch('[a-f0-9]{64}', policy['runtime_profile_sha256'])
+            and re.fullmatch('[a-f0-9]{64}', policy['tooling_files_sha256']), 'DELIVERY_EXECUTABLE_BINDING')
+    require(grant['issuer_record_sha256'] == policy['accepted_issuer_record_sha256']
+            and re.fullmatch('[a-f0-9]{64}', grant['issuer_record_sha256']), 'EXISTING_ISSUER_REQUIRED')
+    require(grant['actions'] == policy['actions'] == ['prepare', 'activate', 'recover', 'status']
+            and grant['production_authority'] is False and grant['preview_authority'] is False
+            and request['calls'] == {'text': 0, 'image': 0, 'wechat': 0}, 'DELIVERY_SCOPE_EXPANSION')
+    require(type(grant['not_before']) is int and type(grant['expires_at']) is int
+            and grant['not_before'] <= now < grant['expires_at']
+            and 0 < grant['expires_at'] - grant['not_before'] <= 14400
+            and grant['revoked'] is False and type(grant['uses']) is int and grant['uses'] == 1,
+            'DELIVERY_GRANT_EXPIRED_OR_REVOKED')
+
+
+def dispatch_delivery(request, run_step, journal, revalidate):
+    """Thin sequencing hook for the existing protected Test release executor.
+
+    NOT a standalone Root entry. Caller must hold its existing global release
+    lock, authenticate/pin this hook BEFORE import, and supply its fixed reviewed
+    release/backup/recovery adapter. Neither callback can come from request JSON.
+    journal must durably append/read back under that lock; it cannot overwrite.
+    No automatic re-execution of an interrupted install/switch/backup is allowed.
+    Existing Recovery owns data compatibility and requires its own authorization.
+    """
+    require(request['contract'] == 'STANDARD_TEST_DELIVERY_V1' and
+            request['environment'] == 'test' and request['calls'] == {'text': 0, 'image': 0, 'wechat': 0},
+            'STANDARD_TEST_SCOPE')
+    require(request['steps'] == ['preflight', 'backup', 'install', 'activate', 'health', 'qualify', 'export'],
+            'FIXED_DELIVERY_STEPS')
+    # No resume-by-replay. status/recovery are existing-executor operations on
+    # this original ID, not a new deployment after SSH disconnect.
+    revalidate(request)
+    journal('claim', {'request_sha256': digest(request), 'operation_id': request['operation_id']})
+    receipts = {}
+    for step in request['steps']:
+        revalidate(request)
+        journal('intent:' + step, {'request_sha256': digest(request)})
+        # Failure from callback or fsync/readback deliberately leaves intent
+        # pending. Never label that as NO_WRITE or initiate a blind rollback.
+        result = run_step(step, request, dict(receipts))
+        require(isinstance(result, dict) and result.get('status') == 'PASS'
+                and result.get('operation_id') == request['operation_id']
+                and result.get('request_sha256') == digest(request), 'STEP_RECEIPT_BINDING:' + step)
+        revalidate(request)
+        journal('result:' + step, result)
+        receipts[step] = result
+    return {'status': 'TEST_DELIVERY_COMPLETED_PENDING_PRODUCTION_REVIEW',
+            'operation_id': request['operation_id'], 'receipts': receipts, 'production_authorized': False}
+
+
 def trusted(path, directory=False):
     p = Path(path)
     require(p.is_absolute() and p.resolve(strict=True) == p, 'TRUST_PATH_NOT_CANONICAL')
@@ -275,6 +414,8 @@ def storage_gate(free, total):
 
 
 def qualification_result(result, request):
+    require(result.get('validation_level') == 'PROTECTED_ISOLATED_QUALIFICATION'
+            and result.get('test_native') == 'PENDING_EXTERNAL_ACCEPTANCE', 'DEV_IS_NOT_NATIVE')
     require(result['operation_id'] == request['operation_id']
             and result['source'] == request['candidate']['source']
             and result['tree'] == request['candidate']['tree'], 'RESULT_IDENTITY_MISMATCH')
@@ -482,15 +623,17 @@ def execute(request_path, policy_path, grant_path, archive_path, manifest_path, 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='mode', required=True)
-    for mode in ('package', 'plan', 'verify'):
+    for mode in ('package', 'plan', 'verify', 'delivery-plan'):
         p = sub.add_parser(mode); p.add_argument('--repo', type=Path, required=True)
         p.add_argument('--source', required=True); p.add_argument('--tree', required=True)
         if mode == 'package': p.add_argument('--output', type=Path, required=True)
         else:
             p.add_argument('--archive', type=Path, required=True); p.add_argument('--manifest', type=Path, required=True)
-        if mode == 'plan':
+        if mode in ('plan', 'delivery-plan'):
             p.add_argument('--observation', type=Path, required=True); p.add_argument('--output', type=Path, required=True)
             p.add_argument('--predecessor-archive', type=Path); p.add_argument('--predecessor-manifest', type=Path)
+        if mode == 'delivery-plan':
+            p.add_argument('--predecessor-proof', type=Path, required=True)
     p = sub.add_parser('execute')
     for key in ('request', 'policy', 'grant', 'archive', 'manifest', 'predecessor-archive', 'predecessor-manifest'):
         p.add_argument('--' + key, type=Path, required=True)
@@ -500,6 +643,11 @@ def main():
     elif args.mode == 'verify':
         require(identity(args.repo, args.source)['tree'] == args.tree, 'TREE_MISMATCH')
         result = artifact(args.repo, args.source, args.archive, args.manifest)
+    elif args.mode == 'delivery-plan':
+        result = delivery_plan(args.repo, args.source, args.tree, args.archive, args.manifest,
+                               read(args.observation), read(args.predecessor_proof))
+        exclusive(args.output, result)
+        result = {'status': 'UNSIGNED_DELIVERY_PLAN_NOT_AUTHORITY', 'request_sha256': digest(result)}
     else:
         result = plan(args.repo, args.source, args.tree, args.archive, args.manifest, read(args.observation), args.predecessor_archive, args.predecessor_manifest)
         exclusive(args.output, result)
