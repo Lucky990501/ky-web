@@ -29,6 +29,8 @@ def test_planning_case_and_short_followup_retain_formal_contract(monkeypatch):
     monkeypatch.setenv('CUSTOMER_PREVIEW_MODE','true')
     first='写一个元旦节的策划案。活动内容：品牌宣传；时间：1月1日；地点：线下门店；对象：家长和学生。'
     assert is_full_activity_plan('campaign-agent',first)
+    natural='写一个元旦节的策划案，面向家长和学生，元旦节当天，线下门店，品牌宣传活动。'
+    assert is_full_activity_plan('campaign-agent',natural) and assess_activity(natural)['ready']
     messages=[{'role':'user','content':first},{'role':'assistant','content':'FIXTURE 补充说明。'}]
     current='请直接生成完整方案。'
     context=with_user_context(current,messages)
