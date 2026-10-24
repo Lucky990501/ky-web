@@ -452,6 +452,9 @@ class PreviewIllustrationService:
                 except IllustrationError as error:
                     result.update(can_generate=False,blocker_code=error.code,user_message=str(error))
         elif row['status']=='planned':result['can_generate']=False
+        if row['status']=='skipped' and row['error_code']=='ILLUSTRATION_TASK_LIMIT' and payload['kind']=='activity':
+            per_task,_=self.plan_limits(payload['kind'])
+            result['user_message']=f'本方案需要{len(payload["items"])}张配图，超过单方案{per_task}张上限；请将活动整合为约6个主环节，复杂活动最多10个，正文及纯文导出仍可使用。'
         if row['document_json']:result['document']=json.loads(row['document_json'])
         if assets and payload['kind']=='wechat':
             result['html']=ArticleTree(payload['html']).html([{**a,'url':'/preview'+a['url']} for a in public_assets])

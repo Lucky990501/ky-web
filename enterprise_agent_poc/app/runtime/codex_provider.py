@@ -520,9 +520,12 @@ class CodexRuntimeProvider(RuntimeProvider):
             return
 
         first_prompt = (brief["source"] if brief else message) + "\n\n" + STRUCTURED_INSTRUCTION
-        if os.environ.get('CUSTOMER_PREVIEW_MODE')=='true' and profile.tenant_id.startswith('preview-'):
-            from app.preview_activity_pending import PREVIEW_PLANNING_INSTRUCTION
+        preview_planning=os.environ.get('CUSTOMER_PREVIEW_MODE')=='true' and profile.tenant_id.startswith('preview-')
+        output_plan_schema=PLAN_SCHEMA
+        if preview_planning:
+            from app.preview_activity_pending import PREVIEW_PLANNING_INSTRUCTION,planning_schema
             first_prompt += PREVIEW_PLANNING_INSTRUCTION
+            output_plan_schema=planning_schema()
         prompt = first_prompt
         original = None
         original_violations = []
@@ -555,7 +558,7 @@ class CodexRuntimeProvider(RuntimeProvider):
             record("INITIAL" if attempt == 1 else "CORRECTION", attempt)
             try:
                 async for event in self._stream_provider_turn(
-                    session, profile, prompt, output_schema=PLAN_SCHEMA if use_schema else None,
+                    session, profile, prompt, output_schema=output_plan_schema if use_schema else None,
                     visible_deltas=False,
                 ):
                     if event.kind == "completed":
@@ -593,13 +596,14 @@ class CodexRuntimeProvider(RuntimeProvider):
                 yield RuntimeStreamEvent.activity("semantic_validating", "started")
                 violations = semantic_guard(candidate, grounding)
                 yield RuntimeStreamEvent.activity("semantic_validating", "completed")
-            valid = candidate is not None and correction_merge_valid and not violations
+            count_valid=not preview_planning or candidate is None or len(candidate.activity_items)<=10
+            valid = candidate is not None and correction_merge_valid and not violations and count_valid
             record("SEMANTIC_VALIDATION" if attempt == 1 else "REVALIDATION", attempt,
                    format_valid=candidate is not None, semantic_valid=valid,
                    correction_result=("PASS" if valid else "FAIL") if attempt == 2 else None,
                    issues=violations)
             pending_annotation=False
-            if (not valid and candidate is not None and attempt==1
+            if (not valid and count_valid and candidate is not None and attempt==1
                     and os.environ.get('CUSTOMER_PREVIEW_MODE')=='true'
                     and profile.tenant_id.startswith('preview-')):
                 from app.preview_activity_pending import annotate_pending_resources
@@ -631,7 +635,8 @@ class CodexRuntimeProvider(RuntimeProvider):
                 prompt = correction_prompt(candidate, violations)
 
         fallback = SAFE_FALLBACK
-        status = ("semantic_guard_failed_after_retry" if violations else
+        status = ("activity_item_limit_failed" if not count_valid else
+                  "semantic_guard_failed_after_retry" if violations else
                   "targeted_correction_failed_after_retry" if not correction_merge_valid else
                   "format_validation_failed_after_retry")
         record("FINAL", max_attempts, format_valid=candidate is not None,

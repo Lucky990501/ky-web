@@ -9,7 +9,8 @@ def activity_schema_request(body, agent_id):
         return False
     from app.activity_plan_runtime import PLAN_SCHEMA
     fmt = (body.get('text') or {}).get('format') or {}
-    return fmt.get('type') == 'json_schema' and fmt.get('schema') == PLAN_SCHEMA
+    from app.preview_activity_pending import planning_schema
+    return fmt.get('type') == 'json_schema' and fmt.get('schema') in (PLAN_SCHEMA,planning_schema())
 
 
 def apply_policy(body, agent_id, *, controlled=False):

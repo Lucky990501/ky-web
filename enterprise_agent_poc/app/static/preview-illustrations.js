@@ -93,7 +93,7 @@
         }
         if(plan.unresolved_missing)feedback.textContent+=` ${plan.unresolved_missing}张请求结果未确认或需恢复原资产，未重新生图。`;
       } else if(plan?.status==='skipped') {
-        feedback.textContent=/AUTHORIZ|BUDGET/.test(plan.error_code||'')?unavailable:'正文已完成，当前配图未执行：'+(plan.error_code==='ILLUSTRATION_NO_REQUIREMENTS'?'没有有效配图需求。':'配图条件未满足，纯文版仍可使用。');
+        feedback.textContent=/AUTHORIZ|BUDGET/.test(plan.error_code||'')?unavailable:'正文已完成，当前配图未执行：'+(plan.error_code==='ILLUSTRATION_NO_REQUIREMENTS'?'没有有效配图需求。':plan.error_code==='ILLUSTRATION_TASK_LIMIT'&&plan.kind==='activity'?plan.user_message:'配图条件未满足，纯文版仍可使用。');
       } else feedback.textContent='正文已完成，历史配图未执行；保留原正文和纯文字导出，不因刷新自动收费。';
     }
     async function load() {

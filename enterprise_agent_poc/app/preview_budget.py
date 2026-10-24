@@ -114,6 +114,7 @@ PREVIEW_ERRORS = {
     "PREVIEW_CONTROLLED_ACCEPTANCE_DENIED": "本轮受控验收授权缺失、失效或已关闭，未发起额外模型请求。",
     "MODEL_OUTPUT_INCOMPLETE": "模型输出达到本轮长度上限，文章尚未完整保存；不会自动收费重试。",
     "ACTIVITY_PLAN_VALIDATION_FAILED": "活动方案未通过结构或事实校验，未保存为正式方案；请保留诊断ID，不会自动收费重试。",
+    "ACTIVITY_PLAN_ITEM_LIMIT": "活动方案超过10个主环节，未自动删减内容或收费重试；请将相关步骤整合为约6个主环节后生成。",
 }
 
 
@@ -134,6 +135,8 @@ def bounded_embedding_batches(texts, model):
 
 
 def preview_task_failure(task, trace, denied):
+    if task.get('agent_id')=='campaign-agent' and trace.get('structured_result_status')=='activity_item_limit_failed':
+        return 'ACTIVITY_PLAN_ITEM_LIMIT'
     if any(x.get('event')=='preview_start_timeout' for x in trace.get('lifecycle_events',[]) if isinstance(x,dict)):
         return 'PREVIEW_RUNTIME_START_TIMEOUT'
     if task.get('agent_id')=='campaign-agent' and 'failed' in str(trace.get('structured_result_status','')):
