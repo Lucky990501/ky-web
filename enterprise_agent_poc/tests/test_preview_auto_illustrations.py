@@ -52,9 +52,11 @@ def test_unavailable_images_do_not_fail_text_or_reserve(setup,blocked):
 def test_bounded_parallelism_partial_images_visible_and_independent_failure(setup,monkeypatch):
     service,actors,old,budget=setup;authorize(service,actors);actor=actors[0]
     task=activity(service,actor,7);calls=[];running=0;peak=0
+    release_remaining=asyncio.Event()
     async def generate(prompt,record_http,**kwargs):
         nonlocal running,peak
         index=len(calls);calls.append(index);running+=1;peak=max(peak,running)
+        if index>=2:await release_remaining.wait()
         await asyncio.sleep(.03)
         if index==1:
             running-=1;record_http(503,'FIXTURE');raise IllustrationError('ILLUSTRATION_PROVIDER_REJECTED','FIXTURE')
@@ -62,8 +64,11 @@ def test_bounded_parallelism_partial_images_visible_and_independent_failure(setu
     monkeypatch.setattr(service.provider,'generate',generate)
     async def run():
         result=service.auto_after_text(actor,task['id'])
-        while len(calls)<3:await asyncio.sleep(.005)
+        async def partial_saved():
+            while len(calls)<3 or not service.get(actor,result['id'])['assets']:await asyncio.sleep(.005)
+        await asyncio.wait_for(partial_saved(),timeout=5)
         partial=service.get(actor,result['id']);assert len(partial['assets'])==1 and partial['status']=='generating'
+        release_remaining.set()
         await asyncio.gather(*list(service.jobs))
         done=service.get(actor,result['id']);assert done['status']=='failed' and len(done['assets'])==6
         assert service.main.product_store.task(task['id'],actor.tenant_id,actor.user_id)['status']=='completed'
