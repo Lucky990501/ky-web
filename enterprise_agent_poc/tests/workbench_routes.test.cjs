@@ -30,22 +30,22 @@ test('generic direct refresh routes request dynamic metadata and do not render C
 const flush = () => new Promise(resolve => setImmediate(resolve));
 test('B1 customer portal exposes copywriting and truthful deferred states without management',async()=>{
   const h=harness('/workspace');const pending=h.run("render('workspace')");
-  h.respond('/api/v1/workspace',{agents:[{id:'copywriting-agent',enabled:true},{id:'image-agent',enabled:true}],credit_balance:100,recent_conversations:[]});await pending;
+  h.respond('/api/v1/workspace',{agents:[{id:'copywriting-agent',enabled:true},{id:'image-agent',enabled:true}],customer_capabilities:[{id:'copywriting-agent',state:'ready',runnable:true},{id:'image-agent',state:'not_migrated',reason:'尚未开放'}],credit_balance:100,recent_conversations:[]});await pending;
   assert.ok(h.document.main.innerHTML.includes('data-agent="copywriting-agent"'));
   assert.ok(!h.document.main.innerHTML.includes('data-agent="image-agent"'));
-  assert.ok(h.document.main.innerHTML.includes('本批尚未迁入'));
+  assert.ok(h.document.main.innerHTML.includes('尚未开放'));
   for(const role of ['member','enterprise_admin']){
     const ids=JSON.parse(h.run(`JSON.stringify(navigationForUser({role:'${role}',is_platform_admin:true}).map(x=>x[0]))`));
-    assert.deepEqual(ids,['workspace','copywriting','history','profile']);
+    assert.deepEqual(ids,role==='enterprise_admin'?['workspace','copywriting','history','settings-home','profile']:['workspace','copywriting','history','profile']);
   }
   assert.equal(h.run("agentNavigationPath('copywriting','conversation-1',null)"),'/workspace/copywriting?conversation=conversation-1');
 });
 test('B1 management navigation distinguishes platform and enterprise administration',()=>{
   const h=harness('/manage');
   const ids=user=>JSON.parse(h.run(`JSON.stringify(navigationForUser(${JSON.stringify(user)}).map(x=>x[0]))`));
-  assert.deepEqual(ids({role:'member',is_platform_admin:true}),['management','platform-agents','platform-skills','profile']);
+  assert.deepEqual(ids({role:'member',is_platform_admin:true}),['management','platform-agents','platform-skills','platform-tenants','platform-diagnostics','profile']);
   const enterprise=ids({role:'enterprise_admin',is_platform_admin:false});
-  assert.ok(enterprise.includes('managed-agents')&&enterprise.includes('members'));
+  assert.deepEqual(enterprise,[]);
   assert.ok(!enterprise.includes('platform-skills')&&!enterprise.includes('image')&&!enterprise.includes('copywriting'));
   h.run("me={role:'member',is_platform_admin:false}");
   assert.equal(h.run("allowedPage('management')"),'workspace');
@@ -139,7 +139,8 @@ function harness(pathname = '/platform/skills', state = null) {
     }
   }
   function consistent(page,heading){
-    assert.equal(location.pathname,page === 'profile'?'/profile':page==='platform-agents'?'/platform/agents':'/platform/skills');
+    const managing=location.pathname.startsWith('/manage');
+    assert.equal(location.pathname,managing?(page==='profile'?'/manage/profile':page==='platform-agents'?'/manage/agents':'/manage/skills'):(page === 'profile'?'/profile':page==='platform-agents'?'/platform/agents':'/platform/skills'));
     assert.equal(document.main.dataset.page,page);
     assert.ok(document.main.innerHTML.includes(`<h1>${heading}</h1>`));
     assert.deepEqual(navs.filter(x=>x.classList.active).map(x=>x.dataset.page),[page]);

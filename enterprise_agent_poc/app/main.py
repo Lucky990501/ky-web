@@ -323,7 +323,7 @@ def require_admin(workbench_session: str | None) -> UserPrincipal:
 def require_platform_admin(workbench_session: str | None) -> UserPrincipal:
     principal = current_user(workbench_session)
     if not skill_registry.is_platform_admin(principal.user_id):
-        raise HTTPException(403, "仅平台管理员可操作 Skill Registry。")
+        raise HTTPException(403, "仅平台管理员可操作。")
     return principal
 
 
@@ -414,14 +414,14 @@ async def production_health() -> dict:
 @app.get("/assets", include_in_schema=False)
 @app.get("/members", include_in_schema=False)
 @app.get("/profile", include_in_schema=False)
-@app.get("/platform/skills", include_in_schema=False)
-@app.get("/platform/agents", include_in_schema=False)
 async def product_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": HTML_REVALIDATION_CACHE_CONTROL})
 
 
 @app.get("/manage", include_in_schema=False)
 @app.get("/manage/{section}", include_in_schema=False)
+@app.get("/platform/skills", include_in_schema=False)
+@app.get("/platform/agents", include_in_schema=False)
 async def management_page(section: str = "home", workbench_session: str | None = Cookie(default=None)) -> FileResponse:
     if section not in {"home", "agents", "skills", "enterprise", "members", "knowledge", "assets", "usage", "profile"}:
         raise HTTPException(404, "管理入口不存在。")
@@ -434,13 +434,44 @@ async def management_page(section: str = "home", workbench_session: str | None =
                 raise
             return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": HTML_REVALIDATION_CACHE_CONTROL})
         platform_admin = skill_registry.is_platform_admin(principal.user_id)
-        if principal.role != "enterprise_admin" and not platform_admin:
+        if not platform_admin:
             raise HTTPException(403, "你没有管理端访问权限。")
-        if section == "skills" and not platform_admin:
-            raise HTTPException(403, "此功能需要平台管理员权限。")
-        if section in {"enterprise", "members", "knowledge", "assets", "usage"} and principal.role != "enterprise_admin":
-            raise HTTPException(403, "此功能需要当前企业管理员权限。")
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": HTML_REVALIDATION_CACHE_CONTROL})
+
+
+@app.get('/workspace/settings',include_in_schema=False)
+@app.get('/workspace/settings/{section}',include_in_schema=False)
+async def workspace_settings_page(section:str='home',workbench_session:str|None=Cookie(default=None)):
+    if section not in {'home','brand','members','knowledge','assets','usage','agents'}:raise HTTPException(404,'设置页不存在。')
+    if workbench_session:
+        try:require_admin(workbench_session)
+        except HTTPException as exc:
+            if exc.status_code!=401:raise
+    return FileResponse(STATIC_DIR/'index.html',headers={'Cache-Control':HTML_REVALIDATION_CACHE_CONTROL})
+
+
+def customer_capabilities(tenant_id):
+    from app.customer_workspace import capabilities
+    # API and Worker may have different credential environments. Do not infer
+    # Worker health from API-process keys, or issue a paid probe for a UI card.
+    configured=bool(settings.model_id and settings.model_provider_id and settings.model_wire_api=='responses'
+                    and (settings.task_queue!='redis' or settings.redis_url))
+    return capabilities(product_store.agents(tenant_id),runtime_configured=configured)
+
+
+@app.get('/api/v1/workspace/settings')
+async def workspace_settings(workbench_session:str|None=Cookie(default=None)):
+    principal=require_admin(workbench_session)
+    return {'tenant_id':principal.tenant_id,'usage':product_store.workspace_usage(principal.tenant_id),
+            'agents':customer_capabilities(principal.tenant_id)}
+
+
+@app.get('/api/v1/platform/tenants')
+async def platform_tenants(workbench_session:str|None=Cookie(default=None)):
+    require_platform_admin(workbench_session)
+    with store.connection() as conn:
+        rows=conn.execute('SELECT t.id,t.name,(SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) AS members FROM tenants t ORDER BY t.id').fetchall()
+    return [dict(row) for row in rows]
 
 
 @app.get("/api/v1/tasks/{task_id}/text")
@@ -610,7 +641,7 @@ async def my_avatar(workbench_session: str | None = Cookie(default=None)):
 @app.get("/api/v1/workspace")
 async def workspace(workbench_session: str | None = Cookie(default=None)) -> dict:
     principal = current_user(workbench_session)
-    return product_store.workspace(principal.tenant_id, principal.user_id)
+    return {**product_store.workspace(principal.tenant_id, principal.user_id),'customer_capabilities':customer_capabilities(principal.tenant_id)}
 
 
 @app.get("/api/v1/agents")
@@ -903,6 +934,13 @@ async def get_enterprise_config(workbench_session: str | None = Cookie(default=N
 @app.put("/api/v1/enterprise-config")
 async def put_enterprise_config(payload: EnterpriseConfigRequest,workbench_session: str | None = Cookie(default=None)) -> dict:
     principal=require_admin(workbench_session)
+    # Enterprise content settings are not a platform/runtime configuration API.
+    allowed={'brand_name','company_intro','primary_color','secondary_color','slogan','brand_tags',
+             'brand_style','target_users','required_rules','forbidden_claims','custom_rules'}
+    if {'brand_logo','brand_logo_metadata','brand_mark_logo'} & payload.payload.keys():
+        raise HTTPException(422,'BRAND_LOGO_UPLOAD_REQUIRED')
+    if set(payload.payload)-allowed:
+        raise HTTPException(422,'仅支持企业资料与品牌内容规则；Logo请使用专用上传入口。')
     try:
         return public_brand_logo(product_store.update_enterprise_config(principal.tenant_id,payload.payload))
     except ValueError as exc:
@@ -1189,15 +1227,17 @@ async def runtime_baseline() -> dict:
 
 @app.get("/api/admin/runtime/diagnostics")
 async def runtime_diagnostics(workbench_session: str | None = Cookie(default=None)) -> dict:
-    require_admin(workbench_session)
+    require_platform_admin(workbench_session)
     last=store.latest_run_trace()
+    if last and last['status']=='failed':
+        last={**last,'payload':{'error':'最近运行失败；具体内容仅可由有任务访问权限的身份查看。'}}
     latest_success=None
     if last and last["status"] == "completed": latest_success={"run_id":last["run_id"],"completed_at":last["completed_at"]}
     return {"runtime_version":"openai-codex==0.147.0","provider":settings.model_provider_id,"model":settings.model_id,"base_url":settings.model_base_url,"wire_api":settings.model_wire_api,"api_key_present":bool(os.environ.get(settings.codex_api_key_env)),"api_key_fingerprint":_key_fingerprint(),"runtime_config":safe_runtime_config_snapshot(),"codex_process_profiles":len(manager._instances),"platform_mcp_url":settings.platform_mcp_url,"platform_mcp_configured":bool(settings.platform_mcp_url),"deepseek_auth_status":"not_probed","deepseek_responses_status":"not_probed","last_successful_turn":latest_success,"last_error":(last["payload"].get("error") if last and last["status"] == "failed" else None)}
 
 @app.post("/api/admin/runtime/test")
 async def runtime_test(payload: RuntimeTestRequest, workbench_session: str | None = Cookie(default=None)) -> dict:
-    principal=require_admin(workbench_session)
+    principal=require_platform_admin(workbench_session)
     prompt="只回复 OK" if payload.mode == "ok" else "调用 enterprise_config_get 并只返回企业名称"
     try:
         result=await agents.run(principal.tenant_id,"image-agent",prompt)

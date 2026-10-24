@@ -32,8 +32,12 @@ const prompts=['写一篇高考冲刺招生文案。','把它改成短视频拍�
       if(p==='/api/v1/auth/login'){logged=true;return json(me());}
       if(p.startsWith('/api/')&&!logged)return json({error_code:'AUTH_REQUIRED'},401);
       if(p==='/api/v1/me')return json(me());
-      if(p==='/api/v1/workspace')return json({brand_name:'隔离 Fixture 企业',credit_balance:100,agents:[agent,{id:'image-agent',enabled:true}],recent_conversations:tasks.length?[conversation()]:[]});
+      if(p==='/api/v1/workspace')return json({brand_name:'隔离 Fixture 企业',credit_balance:100,agents:[agent,{id:'image-agent',enabled:true}],customer_capabilities:[{...agent,runnable:true,state:'ready'},{id:'image-agent',state:'not_migrated',reason:'尚未开放'}],recent_conversations:tasks.length?[conversation()]:[]});
+      if(p==='/api/v1/workspace/settings')return json({tenant_id:me().tenant_id,usage:{credit_balance:100,credits_spent:15,tasks:[{agent_id:agent.id,status:'completed',count:5}]},agents:[{...agent,state:'ready',reason:'已开通'}, {id:'image-agent',name:'图片生成',state:'not_migrated',reason:'尚未迁移'}]});
+      if(p==='/api/v1/platform/tenants')return json([{id:'synthetic-a',name:'Fixture企业A',members:3},{id:'synthetic-b',name:'Fixture企业B',members:2}]);
       if(p==='/api/v1/enterprise-config')return json({brand_name:'隔离 Fixture 企业'});
+      if(p==='/api/v1/members')return json([{id:'synthetic-member',display_name:'合成员工',email:'member@example.invalid',role:'member',status:'enabled',created_at:'2026-10-24T00:00:00Z'}]);
+      if(p==='/api/v1/knowledge/files')return json([{id:'synthetic-file',name:'合成企业资料.md',status:'ready',mime_type:'text/markdown',size_bytes:128}]);
       if(p==='/api/v1/agents/copywriting-agent')return json(agent);
       if(p==='/api/v1/conversations')return json(tasks.length?[conversation()]:[]);
       if(p==='/api/v1/conversations/b1-fixture-conversation')return json(conversation());
@@ -64,6 +68,7 @@ const prompts=['写一篇高考冲刺招生文案。','把它改成短视频拍�
     await page.locator('#login button[type=submit]').click();
     await page.getByRole('heading',{name:'AI Workspace',exact:true}).waitFor();
     assert.equal(await page.locator('.sidebar [data-page=members]').count(),0);
+    assert.equal(await page.locator('.sidebar [data-page=settings-home]').count(),0);
     await page.locator('[data-agent="copywriting-agent"]').click();
     await page.locator('#prompt').waitFor().catch(async error=>{console.error({url:page.url(),errors,body:await page.locator('#main').innerText()});throw error;});
     for(let i=0;i<prompts.length;i++){
@@ -88,13 +93,35 @@ const prompts=['写一篇高考冲刺招生文案。','把它改成短视频拍�
     const mobile=await page.locator('#prompt').boundingBox();assert.ok(mobile.height<=160&&mobile.height>100);
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
     if(out)await page.screenshot({path:path.join(out,'b1-copywriting-mobile-FIXTURE.png'),fullPage:true});
-    role='enterprise_admin';await page.setViewportSize({width:1440,height:1000});await page.goto('http://127.0.0.1:18766/manage');
-    await page.getByRole('heading',{name:'Agent Workbench',exact:true}).waitFor();
-    assert.equal(await page.locator('.sidebar [data-page=copywriting]').count(),0);
+    role='enterprise_admin';await page.setViewportSize({width:1440,height:1000});await page.goto('http://127.0.0.1:18766/workspace/settings');
+    await page.getByRole('heading',{name:'企业设置',exact:true}).waitFor();
+    assert.equal(await page.locator('.sidebar [data-page=copywriting]').count(),1);
     assert.equal(await page.locator('.sidebar [data-page=platform-skills]').count(),0);
-    assert.equal(await page.locator('.sidebar [data-page=members]').count(),1);
+    assert.equal(await page.locator('.workspace-settings-nav [data-go=members]').count(),1);
+    if(out)await page.screenshot({path:path.join(out,'b1-enterprise-settings-desktop-FIXTURE.png'),fullPage:true});
+    await page.setViewportSize({width:375,height:812});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+    if(out)await page.screenshot({path:path.join(out,'b1-enterprise-settings-mobile-FIXTURE.png'),fullPage:true});
+    for(const [section,heading] of [['members','成员管理'],['knowledge','企业知识库'],['enterprise','企业设置'],['assets','企业素材库']]){
+      await page.locator(`.workspace-settings-nav [data-go=${section}]`).click();
+      await page.getByRole('heading',{name:heading,exact:true}).waitFor().catch(async error=>{console.error({fixture:true,section,url:page.url(),errors,body:await page.locator('#main').innerText()});throw error;});
+      assert.equal(await page.locator('.workspace-settings-nav').count(),1);
+      if(out)await page.screenshot({path:path.join(out,`b1-settings-${section}-mobile-FIXTURE.png`),fullPage:true});
+      const overflow=await page.evaluate(()=>[...document.querySelectorAll('#main *')].filter(n=>n.getBoundingClientRect().right>innerWidth+1).slice(0,8).map(n=>({tag:n.tagName,className:n.className,width:n.getBoundingClientRect().width,right:n.getBoundingClientRect().right})));
+      assert.deepEqual(overflow,[],section+' mobile overflow');
+    }
+    await page.setViewportSize({width:1440,height:1000});role='member';platform=true;
+    await page.goto('http://127.0.0.1:18766/manage');await page.getByRole('heading',{name:'Agent Workbench',exact:true}).waitFor();
+    assert.equal(await page.locator('.sidebar [data-page=copywriting]').count(),0);
+    assert.equal(await page.locator('.sidebar [data-page=platform-tenants]').count(),1);
+    await page.locator('.sidebar [data-page=platform-tenants]').click();await page.getByRole('heading',{name:'企业与开通',exact:true}).waitFor();
     if(out)await page.screenshot({path:path.join(out,'b1-management-FIXTURE.png'),fullPage:true});
+    logged=false;await page.goto('http://127.0.0.1:18766/workspace');
+    await page.locator('#login input[name=account]').waitFor();
+    assert.equal(await page.locator('.workspace-settings-nav').count(),0);
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({fixture:true,provider_calls:0,turns:requests.length,copy:true,export:true,draft_restore:true,desktop_height:desktop.height,mobile_height:mobile.height,roles:true,errors},null,2));
+    const result={fixture:true,provider_calls:0,turns:requests.length,copy:true,export:true,draft_restore:true,desktop_height:desktop.height,mobile_height:mobile.height,roles:true,expired_login:true,settings_sections:['members','knowledge','brand','assets'],mobile_overflow:false,errors};
+    if(out)fs.writeFileSync(path.join(out,'browser-fixture-results.json'),JSON.stringify(result,null,2)+'\n');
+    console.log(JSON.stringify(result,null,2));
   }finally{await browser.close();if(downloadServer)await new Promise(resolve=>downloadServer.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

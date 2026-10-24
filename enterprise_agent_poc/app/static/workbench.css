@@ -190,3 +190,6 @@ body.dialog-open{overflow:hidden}.global-search-disabled{opacity:.72;cursor:not-
 @media(max-width:600px){.wechat-preview-dialog{padding:16px}.wechat-article-buttons .button{flex:1 1 calc(50% - 10px)}.wechat-preview-dialog footer .button{width:100%}}
 :where([data-agent-id="copywriting-agent"]) .composer textarea {box-sizing:border-box;min-height:42px;max-height:min(200px,30vh);resize:none;overflow-y:hidden;}
 @media(max-width:768px){:where([data-agent-id="copywriting-agent"]) .composer textarea{max-height:min(160px,30vh);}}
+.workspace-settings-nav{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}.workspace-settings-nav [aria-current=page]{color:var(--primary,#2563eb);border-color:currentColor}.workspace-settings-nav .button{min-height:40px}.workspace-settings-nav+section{min-width:0}
+.workspace-settings-nav+section .asset-gallery>.empty-state{grid-column:1/-1}
+@media(max-width:640px){.workspace-settings-nav+section .filter-row{flex-wrap:wrap}.workspace-settings-nav+section .filter-row label{min-width:0;flex:1 1 220px}.workspace-settings-nav+section .filter-row select{max-width:100%}}

@@ -116,18 +116,19 @@ def test_routes_roles_and_login(history_env, monkeypatch, tmp_path):
     with env.store.connection() as conn:
         conn.executescript(registry._sqlite_schema())
     monkeypatch.setattr(main, "skill_registry", registry)
-    for path in ("/workspace", "/workspace/copywriting", "/workspace/history", "/workspace/profile", "/legacy/workspace", "/agents/copywriting", "/platform/agents"):
+    for path in ("/workspace", "/workspace/copywriting", "/workspace/history", "/workspace/profile", "/legacy/workspace", "/agents/copywriting"):
         assert env.client.get(path).status_code == 200
     assert env.client.get("/manage").status_code == 403
+    assert env.client.get("/platform/agents").status_code == 403
     login(env.client, "admin@history.test")
     for path in ("/manage", "/manage/agents", "/manage/members", "/manage/usage"):
-        assert env.client.get(path).status_code == 200
+        assert env.client.get(path).status_code == 403
     assert env.client.get("/manage/skills").status_code == 403
     assert env.client.get("/api/v1/platform/skills").status_code == 403
     registry.grant_platform_admin(env.owner["id"])
     login(env.client, "owner@history.test")
     assert env.client.get("/manage/skills").status_code == 200
-    assert env.client.get("/manage/members").status_code == 403
+    assert env.client.get("/manage/members").status_code == 200
     env.client.cookies.clear()
     assert env.client.get("/manage").status_code == 200  # Login shell only.
     assert env.client.get("/api/v1/workspace").status_code == 401

@@ -84,14 +84,16 @@ const memberNavs = [['workspace','layout-dashboard','工作台'],['image','wand-
 const enterpriseAdminNavs = [['knowledge','book-open','知识库'],['assets','image','素材库'],['recent-tasks','list-checks','最近任务'],['members','users','成员管理'],['enterprise','settings','企业设置']];
 const platformAdminNavs = [['platform-skills','package-check','Skill 管理'],['platform-agents','bot','Agent 管理']];
 const profileNav = ['profile','user-round','个人中心'];
-const portalMode=()=>location.pathname.startsWith('/manage')?'management':location.pathname.startsWith('/workspace')?'customer':'legacy';
+const portalMode=()=>location.pathname.startsWith('/manage')||location.pathname.startsWith('/platform/')?'management':location.pathname.startsWith('/workspace')||['/enterprise-config','/members','/knowledge','/assets','/recent-tasks'].includes(location.pathname)?'customer':'legacy';
 const managementRoutes={management:'/manage','managed-agents':'/manage/agents','platform-agents':'/manage/agents','platform-skills':'/manage/skills',enterprise:'/manage/enterprise',members:'/manage/members',knowledge:'/manage/knowledge',assets:'/manage/assets','recent-tasks':'/manage/usage',profile:'/manage/profile'};
-const customerRoutes={workspace:'/workspace',copywriting:'/workspace/copywriting',history:'/workspace/history',profile:'/workspace/profile'};
-const navigationForUser = user => portalMode()==='customer'?[['workspace','layout-dashboard','AI Workspace'],['copywriting','type','文案创作'],['history','history','本人项目'],profileNav]:portalMode()==='management'?[['management','layout-dashboard','管理概览'],[user?.is_platform_admin?'platform-agents':'managed-agents','bot','智能体管理'],...(user?.is_platform_admin?[['platform-skills','package-check','Skill 管理']]:[]),...(user?.role==='enterprise_admin'?enterpriseAdminNavs.map(item=>item[0]==='recent-tasks'?['recent-tasks','chart-no-axes-combined','用量与运行诊断']:item):[]),profileNav]:[...memberNavs,...(user?.role==='enterprise_admin'?enterpriseAdminNavs:[]),...(user?.is_platform_admin?platformAdminNavs:[]),profileNav];
+const customerRoutes={workspace:'/workspace',copywriting:'/workspace/copywriting',history:'/workspace/history',profile:'/workspace/profile','settings-home':'/workspace/settings',enterprise:'/workspace/settings/brand',members:'/workspace/settings/members',knowledge:'/workspace/settings/knowledge',assets:'/workspace/settings/assets','workspace-usage':'/workspace/settings/usage','workspace-agents':'/workspace/settings/agents'};
+const workspaceSettingsPages=new Set(['settings-home','enterprise','members','knowledge','assets','workspace-usage','workspace-agents']);
+const navigationForUser = user => portalMode()==='customer'?[['workspace','layout-dashboard','AI Workspace'],['copywriting','type','文案创作'],['history','history','本人项目'],...(user?.role==='enterprise_admin'?[['settings-home','settings','企业设置']]:[]),profileNav]:portalMode()==='management'?(user?.is_platform_admin?[['management','layout-dashboard','管理概览'],['platform-agents','bot','智能体管理'],['platform-skills','package-check','Skill 管理'],['platform-tenants','building-2','企业与开通'],['platform-diagnostics','activity','运行诊断'],profileNav]:[]):[...memberNavs,...(user?.role==='enterprise_admin'?enterpriseAdminNavs:[]),...(user?.is_platform_admin?platformAdminNavs:[]),profileNav];
+managementRoutes['platform-tenants']='/manage/enterprise';managementRoutes['platform-diagnostics']='/manage/usage';
 const pageRoutes = Object.freeze({workspace:'/workspace',image:'/agents/image',copywriting:'/agents/copywriting',campaign:'/agents/campaign',history:'/conversations',generations:'/generations',knowledge:'/knowledge',assets:'/assets','recent-tasks':'/recent-tasks',members:'/members',enterprise:'/enterprise-config',profile:'/profile','platform-skills':'/platform/skills','platform-agents':'/platform/agents'});
-const pageFromPath = path => path==='/legacy/workspace'?'workspace':path==='/manage/agents'?(me?.is_platform_admin?'platform-agents':'managed-agents'):[...Object.entries(customerRoutes),...Object.entries(managementRoutes),...Object.entries(pageRoutes)].find(([,route])=>route===path)?.[0]||( /^\/agents\/[a-zA-Z0-9-]+$/.test(path) ? `agent:${path.slice(8)}` : null);
+const pageFromPath = path => path==='/legacy/workspace'?'workspace':path==='/manage/agents'?'platform-agents':['/manage/enterprise','/manage/members'].includes(path)?'platform-tenants':path==='/manage/usage'?'platform-diagnostics':[...Object.entries(customerRoutes),...Object.entries(managementRoutes),...Object.entries(pageRoutes)].find(([,route])=>route===path)?.[0]||( /^\/agents\/[a-zA-Z0-9-]+$/.test(path) ? `agent:${path.slice(8)}` : null);
 const navigationState = page => ({page,activeAgentId,activeConversationId,activeTaskId,...(page==='history'?{orphanHistory:readOrphanHistoryPointer()}: {})});
-const allowedPage = page => ['management','managed-agents'].includes(page)&&!me?.is_platform_admin&&me?.role!=='enterprise_admin'?'workspace':['platform-skills','platform-agents'].includes(page)&&!me?.is_platform_admin?'workspace':['knowledge','assets','recent-tasks','members','enterprise','billing'].includes(page)&&me?.role!=='enterprise_admin'?'workspace':page;
+const allowedPage = page => ['management','managed-agents','platform-tenants','platform-diagnostics','platform-skills','platform-agents'].includes(page)&&!me?.is_platform_admin?'workspace':(workspaceSettingsPages.has(page)||['recent-tasks','billing'].includes(page))&&me?.role!=='enterprise_admin'?'workspace':page;
 const agentRouteForPage=page=>({image:'image-agent',copywriting:'copywriting-agent',campaign:'campaign-agent'})[page]||(page?.startsWith('agent:')?page.slice(6):null);
 function agentNavigationPath(page,conversationId,taskId=activeTaskId){
   const path=(location.pathname==='/legacy/workspace'&&page==='workspace'?'/legacy/workspace':portalMode()==='management'?managementRoutes[page]:portalMode()==='customer'?customerRoutes[page]:null)||pageRoutes[page]||(page.startsWith('agent:')?`/agents/${encodeURIComponent(page.slice(6))}`:location.pathname);
@@ -179,7 +181,7 @@ app.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="brand
   document.querySelector('#top-help').onclick = showHelpDialog;
   bindAccountMenu();
   document.querySelectorAll('.brand-lockup b').forEach(node=>node.textContent=portalMode()==='management'?'Agent Workbench':'AI Workspace');
-  if(me.is_platform_admin||me.role==='enterprise_admin')document.querySelector('.top-actions')?.insertAdjacentHTML?.('afterbegin',`<a class="button secondary" href="${portalMode()==='management'?'/workspace':'/manage'}">${portalMode()==='management'?'进入 AI Workspace':'进入管理端'}</a>`);
+  if(me.is_platform_admin)document.querySelector('.top-actions')?.insertAdjacentHTML?.('afterbegin',`<a class="button secondary" href="${portalMode()==='management'?'/workspace':'/manage'}">${portalMode()==='management'?'进入 AI Workspace':'进入管理端'}</a>`);
   syncAvatarViews(); render(initialPage); refreshIcons();
 }
 
@@ -200,6 +202,9 @@ async function render(page) {
   main.innerHTML = pageLoading();
   try {
     if (page === 'workspace') return await (location.pathname==='/legacy/workspace'?workspaceV2(main):customerWorkspace(main));
+    if (workspaceSettingsPages.has(page)&&portalMode()==='customer') return await workspaceSettings(main,page);
+    if (page === 'platform-tenants') return await platformTenants(main);
+    if (page === 'platform-diagnostics') return await platformDiagnostics(main);
     if (page === 'management'||page === 'managed-agents') return await managementWorkspace(main,page);
     if (page === 'image') return await agentWorkspaceV2(main,'image-agent');
     if (page === 'copywriting') return await agentWorkspaceV2(main,'copywriting-agent');
@@ -223,9 +228,9 @@ async function customerWorkspace(main){
   const data=await api('/api/v1/workspace',{cache:'no-store'});
   if(main.isConnected===false||!principalIsCurrent(main._owner))return;
   applyEnterpriseBrand(data,'workspace',main._owner);sideCredit(data.credit_balance);
-  const agents=data.agents||[],copy=agents.find(a=>a.id==='copywriting-agent');
-  const states=[['image-agent','图片生成'],['campaign-agent','活动策划'],['wechat-official-account-writing','公众号编写']].map(([id,label])=>{const item=agents.find(a=>a.id===id||a.slug===id);return `<article class="panel"><h3>${label}</h3><p>${item?.enabled?'现有正式入口已启用':'当前企业未启用'}</p><small>本批尚未迁入 AI Workspace</small></article>`;}).join('');
-  main.innerHTML=`${header('AI Workspace','用自然语言创作，持续修改并保存自己的完整文案。','sparkles')}<section class="welcome-banner"><div><b data-company-name>${escapeHtml(companyDisplayName())}</b><h2>文案创作</h2><p>从新想法开始，或继续修改上一版。事实与完整成稿保存在同一项目中。</p>${copy?.enabled?button('开始创作','arrow-right','primary','data-agent="copywriting-agent"'):'<p>文案创作尚未为当前企业启用，请联系管理员。</p>'}</div></section><section class="panel recent-history"><div class="section-title"><h2>本人最近项目</h2><a href="/workspace/history" data-go="history">查看全部</a></div>${(data.recent_conversations||[]).slice(0,5).map(x=>conversationRowHtml(x,'data-agent-conversation')).join('')||'<p>还没有项目。</p>'}</section><h2>其他能力状态</h2><div class="agent-grid">${states}</div>`;
+  const agents=data.customer_capabilities||[],copy=agents.find(a=>a.id==='copywriting-agent');
+  const states=[['image-agent','图片生成'],['campaign-agent','活动策划'],['wechat-agent','公众号编写']].map(([id,label])=>{const item=agents.find(a=>a.id===id||a.name===label);return `<article class="panel"><h3>${label}</h3><p>${escapeHtml(capabilityLabel(item))}</p><small>${escapeHtml(item?.reason||'能力状态尚未确认')}</small></article>`;}).join('');
+  main.innerHTML=`${header('AI Workspace','用自然语言创作，持续修改并保存自己的完整文案。','sparkles')}<section class="welcome-banner"><div><b data-company-name>${escapeHtml(companyDisplayName())}</b><h2>文案创作</h2><p>从新想法开始，或继续修改上一版。事实与完整成稿保存在同一项目中。</p>${copy?.runnable?button('开始创作','arrow-right','primary','data-agent="copywriting-agent"'):`<p>${escapeHtml(copy?.reason||'文案运行状态尚未确认，请联系企业负责人。')}</p>`}</div></section><section class="panel recent-history"><div class="section-title"><h2>本人最近项目</h2><a href="/workspace/history" data-go="history">查看全部</a></div>${(data.recent_conversations||[]).slice(0,5).map(x=>conversationRowHtml(x,'data-agent-conversation')).join('')||'<p>还没有项目。</p>'}</section><h2>其他能力状态</h2><div class="agent-grid">${states}</div>`;
   main.querySelectorAll('[data-agent]').forEach(node=>node.onclick=()=>navigate(agentPage(node.dataset.agent)));
   main.querySelectorAll('[data-agent-conversation]').forEach(node=>node.onclick=()=>selectAgentConversation(node.dataset.agentId,node.dataset.agentConversation));bindNavigation();refreshIcons();
 }
@@ -236,6 +241,38 @@ async function managementWorkspace(main,page){
   const links=navigationForUser(me).filter(([id])=>!['management','profile'].includes(id));
   main.innerHTML=`${header('Agent Workbench','管理企业 AI 能力、成员权限与运行状态。日常创作请进入 AI Workspace。','settings')}<div class="agent-grid">${page==='managed-agents'?(data.agents||[]).map(a=>`<article class="panel"><h3>${escapeHtml(a.name)}</h3><p>${a.enabled?'当前企业已启用':'当前企业未启用'}</p><small>模板、Skill 发布与受控 Runtime Test 由平台管理员管理。</small></article>`).join(''):links.map(([id,i,label])=>`<article class="panel"><h3>${escapeHtml(label)}</h3>${button('打开',i,'secondary',`data-go="${id}"`)}</article>`).join('')}</div>${me.is_platform_admin?'<p class="muted">受控 Runtime Test 位于智能体版本详情，与普通用户文案会话分开。</p>':''}`;
   bindNavigation();refreshIcons();
+}
+
+const capabilityLabel=item=>({ready:'已开通，可使用',unavailable:'已开通，当前不可用',not_enabled:'当前企业未开通',not_migrated:'尚未开放'})[item?.state]||'状态待确认';
+async function workspaceSettings(main,page){
+  if(me.role!=='enterprise_admin')throw Error('仅本企业负责人可管理企业设置。');
+  const owner=main._owner,view=document.createElement('section');view.dataset.page=page;view._owner=owner;main.replaceChildren(view);
+  const sections=[['settings-home','企业概览'],['enterprise','企业与品牌'],['members','成员'],['knowledge','知识库'],['assets','公共资料'],['workspace-usage','用量与余额'],['workspace-agents','已开通能力']];
+  const renderers={enterprise,members,knowledge:knowledgeV3,assets};
+  if(renderers[page])await renderers[page](view);
+  else{
+    const data=await api('/api/v1/workspace/settings',{cache:'no-store'});
+    if(!principalIsCurrent(owner)||!view.isConnected)return;
+    const usage=data.usage,total=(usage.tasks||[]).reduce((n,x)=>n+x.count,0);
+    view.innerHTML=`${header(page==='workspace-agents'?'已开通能力':page==='workspace-usage'?'用量与余额':'企业设置','仅管理当前企业；个人项目仍按用户身份隔离。','settings')}<div class="stat-row"><article><b>${escapeHtml(usage.credit_balance)}</b><span>企业剩余积分</span></article><article><b>${escapeHtml(usage.credits_spent)}</b><span>累计已扣积分</span></article><article><b>${total}</b><span>已记录任务数</span></article></div><section class="panel"><h2>企业能力</h2><div class="agent-grid">${(data.agents||[]).map(a=>`<article><h3>${escapeHtml(a.name)}</h3><p>${escapeHtml(capabilityLabel(a))}</p><small>${escapeHtml(a.reason)}</small></article>`).join('')}</div></section><section class="panel"><h2>真实用量记录</h2>${(usage.tasks||[]).map(x=>`<p>${escapeHtml(x.agent_id)} · ${escapeHtml(statusText(x.status))} · ${x.count} 次</p>`).join('')||'<p>暂无任务记录。</p>'}<p>余额单位为企业积分；供应商账户余额未接入。个人额度划拨暂未提供。</p></section>`;
+  }
+  if(!principalIsCurrent(owner)||!view.isConnected)return;
+  main.insertAdjacentHTML('afterbegin',`<nav class="workspace-settings-nav" aria-label="企业设置">${sections.map(([id,label])=>`<a class="button secondary" href="${customerRoutes[id]}" data-go="${id}" ${id===page?'aria-current="page"':''}>${label}</a>`).join('')}</nav>`);
+  bindNavigation();refreshIcons();
+}
+
+async function platformTenants(main){
+  const owner=main._owner,tenants=await api('/api/v1/platform/tenants',{cache:'no-store'});
+  if(!principalIsCurrent(owner)||!main.isConnected)return;
+  main.innerHTML=`${header('企业与开通','平台企业清单与智能体开通入口；不读取成员私人项目。','building-2')}<div class="agent-grid">${tenants.map(t=>`<article class="panel"><h2>${escapeHtml(t.name)}</h2><p>${t.members} 位成员</p><small>${escapeHtml(t.id)}</small></article>`).join('')||'<p>暂无企业。</p>'}</div><section class="panel"><p>智能体的企业配置、启停及受控测试沿用智能体管理。企业资料、成员和知识库由各企业负责人在 AI Workspace 管理。</p>${button('智能体管理','bot','primary','data-go="platform-agents"')}</section>`;
+  bindNavigation();refreshIcons();
+}
+
+async function platformDiagnostics(main){
+  const owner=main._owner,value=await api('/api/admin/runtime/diagnostics',{cache:'no-store'});
+  if(!principalIsCurrent(owner)||!main.isConnected)return;
+  main.innerHTML=`${header('运行诊断','仅平台管理员可见的运行状态。','activity')}<section class="panel"><p>Runtime：${escapeHtml(value.runtime_version)}</p><p>模型：${escapeHtml(value.model)}</p><p>运行凭据：${value.api_key_present?'已配置':'未配置'}</p><p>当前进程配置：${Number(value.codex_process_profiles)||0}</p><p>受控 Runtime Test 位于智能体版本详情。</p></section>`;
+  refreshIcons();
 }
 
 async function workspaceV2(main) {

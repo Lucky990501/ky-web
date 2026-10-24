@@ -1,0 +1,20 @@
+{
+  "fixture": true,
+  "provider_calls": 0,
+  "turns": 5,
+  "copy": true,
+  "export": true,
+  "draft_restore": true,
+  "desktop_height": 200,
+  "mobile_height": 160,
+  "roles": true,
+  "expired_login": true,
+  "settings_sections": [
+    "members",
+    "knowledge",
+    "brand",
+    "assets"
+  ],
+  "mobile_overflow": false,
+  "errors": []
+}

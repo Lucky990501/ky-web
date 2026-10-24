@@ -11,11 +11,17 @@ snapshot=$(mktemp -d /tmp/v6-b1-fixture.XXXXXXXX)
 if ! "${git_cmd[@]}" diff --quiet HEAD -- enterprise_agent_poc; then
   "${git_cmd[@]}" diff --binary HEAD -- enterprise_agent_poc | (cd "$snapshot" && git apply --unsafe-paths -)
 fi
-for relative in enterprise_agent_poc/app/copywriting_context.py enterprise_agent_poc/tests/test_dual_portal_b1.py; do
+for relative in enterprise_agent_poc/app/customer_workspace.py enterprise_agent_poc/tests/test_customer_roles_p0.py; do
   cp "$repo/$relative" "$snapshot/$relative"
   chmod 644 "$snapshot/$relative"
 done
 printf 'FIXTURE_SNAPSHOT=%s\nBASE_SOURCE=%s\n' "$snapshot" "$("${git_cmd[@]}" rev-parse HEAD)"
 "${git_cmd[@]}" diff --binary HEAD -- enterprise_agent_poc | sha256sum
 cd "$snapshot/enterprise_agent_poc"
-"$python_bin" -m pytest tests/test_dual_portal_b1.py tests/test_product_auth.py tests/test_task_history_ownership.py tests/test_workbench_routes.py -q --tb=short 2>&1 | tee "$snapshot/fixture-results.txt"
+selected=(tests/test_customer_roles_p0.py tests/test_dual_portal_b1.py tests/test_product_auth.py tests/test_task_history_ownership.py tests/test_workbench_routes.py tests/test_brand_logo_upload.py::test_l1_valid_transparent_png_upload_preview_and_config tests/test_brand_logo_upload.py::test_l7_tenant_isolation_and_no_arbitrary_config_reference)
+if (($#)); then selected=("$@"); fi
+"$python_bin" -m pytest "${selected[@]}" -q --tb=short --junitxml="$snapshot/fixture-junit.xml" 2>&1 | tee "$snapshot/fixture-results.txt"
+if [[ -n "${B1_FIXTURE_EVIDENCE_DIR:-}" ]]; then
+  mkdir -p "$B1_FIXTURE_EVIDENCE_DIR"
+  cp "$snapshot/fixture-results.txt" "$snapshot/fixture-junit.xml" "$B1_FIXTURE_EVIDENCE_DIR/"
+fi

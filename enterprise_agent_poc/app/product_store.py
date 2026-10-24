@@ -396,6 +396,16 @@ class ProductStore:
         config = self._store.enterprise_config(tenant_id)
         return {"tenant_name": tenant["name"], "brand_name": config.get("brand_name"), "logo": config.get("logo"), "credit_balance": credit["balance"] if credit else 0, "agents": self.agents(tenant_id), "recent_conversations": self.conversations(tenant_id, user_id, 5), "recent_generations": self.generations(tenant_id, user_id, 5)}
 
+    def workspace_usage(self, tenant_id: str) -> dict:
+        """Real tenant aggregates only; no private draft, provider balance or allocation fiction."""
+        with self._store.connection() as conn:
+            account=conn.execute('SELECT balance FROM credit_accounts WHERE tenant_id=?',(tenant_id,)).fetchone()
+            debits=conn.execute('SELECT COUNT(*) n,COALESCE(SUM(-amount),0) spent FROM credit_transactions WHERE tenant_id=? AND amount<0',(tenant_id,)).fetchone()
+            tasks=conn.execute('SELECT agent_id,status,COUNT(*) count FROM tasks WHERE tenant_id=? GROUP BY agent_id,status',(tenant_id,)).fetchall()
+        return {'credit_balance':account['balance'] if account else 0,'credits_spent':debits['spent'],
+                'debit_transactions':debits['n'],'tasks':[dict(row) for row in tasks],
+                'unit':'credits','personal_allocation_supported':False,'provider_balance_verified':False}
+
     def agents(self, tenant_id: str) -> list[dict]:
         with self._store.connection() as conn:
             # Stage 1 catalog drafts / configured instances are not runnable.
