@@ -38,7 +38,7 @@ def assess_activity(message: str) -> dict | None:
                 return None
         except (ValueError, KeyError, TypeError):
             return None
-    from app.activity_plan_runtime import _SIMPLE,_PLAN_DISCUSSION
+    from app.activity_plan_runtime import _SIMPLE,_PLAN_DISCUSSION,is_full_activity_plan
     if _SIMPLE.search(current) or _PLAN_DISCUSSION.search(current):
         return None
     if re.search(r"(?:标题|几个主题|一句|短文案|邀约文案|是什么|什么意思)", current) and not re.search(r"完整|正式|执行方案", current):
@@ -48,7 +48,7 @@ def assess_activity(message: str) -> dict | None:
     if not previous and re.search(r"活动.{0,8}(?:已经|已).{0,8}(?:策划好|完成)|(?:请|帮我)(?:点评|分析)", current):
         return None
     text = "\n".join([*previous, current])
-    intent = bool(previous or re.search(r"(?:策划|筹备|组织|准备|做|制作|生成|出|设计|制定|写).{0,20}(?:活动|方案|策划案)|活动.{0,12}(?:完整方案|正式方案|执行方案)", current))
+    intent = bool(previous or is_full_activity_plan('campaign-agent',current) or re.search(r"(?:策划|筹备|组织|准备|做|制作|生成|出|设计|制定).{0,20}(?:活动|方案)|活动.{0,12}(?:完整方案|正式方案|执行方案)", current))
     if not intent or not re.search(r"活动|亲子|开学季|客户答谢|策划案", text):
         return None
     # Match facts expressed in ordinary prose as well as labels. Unknown
