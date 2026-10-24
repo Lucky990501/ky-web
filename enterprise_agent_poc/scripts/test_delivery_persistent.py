@@ -336,6 +336,15 @@ def verify_installation(policy):
         if file.is_file(): actual[str(file)] = p.sha(file)
     p.require(actual == policy['tooling_files'] and str(root/'scripts/test_delivery_persistent.py') in actual
               and str(root/'scripts/test_delivery_verified_entry.py') in actual, 'INSTALL_COMPLETE_PIN_SET')
+    # Independently compare the installed set to Git, not merely to another
+    # policy-provided list of hashes that might describe a different Source.
+    import hashlib
+    prefix = 'enterprise_agent_poc/'
+    names = p.git(policy['repository'], 'ls-tree', '-r', '--name-only',
+                  policy['tooling']['source'], '--', prefix).decode().splitlines()
+    expected = {str(root/name.removeprefix(prefix)):hashlib.sha256(p.git(policy['repository'],
+        'show', policy['tooling']['source']+':'+name)).hexdigest() for name in names}
+    p.require(actual == expected, 'INSTALL_GIT_BLOB_SET')
     from scripts import test_delivery_adoption as adoption
     runtime = adoption.runtime_inventory(policy['runtime_roots'], protected=True)
     closure = p.read(p.trusted(policy['runtime_closure_receipt']))
