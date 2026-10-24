@@ -1,0 +1,139 @@
+V6-01-NEW-TEST-EXECUTOR-CALLBACKS-P0 — CODE CANDIDATE ONLY / NOT INSTALLED
+
+MAINTENANCE
+01 owns this executor-source successor, under the current explicit assignment.
+06 owns independent authority authentication, protected installation and actual
+service execution. No03 business-source changes. No new issuer/service/DB.
+Base0d05d3c47f11da4f65c6792205a1e4a5dad5c36f
+Treeeecfc1fd54f04a955b6caad3bb1e19092ded2dfd
+Parentf22540a94202bb21e4921fbe0c0d08701ceda1d0.
+
+READONLY BASIS
+06 V6_06_33FC_ACTIVATION_RECOVERY_ENTRY_P0_RESULT_V1.txt
+SHA256cf49d5f9416871c101986330fb419388b95b24eb32d7298b60d656b9153c2de7.
+Hostinstance-mif0a40l /120.48.70.73; Ubuntu24.04; user eaw-test.
+Only enterprise-agent-standard-test-api/mcp/worker.service may be controlled.
+PG/Redis units remain untouched. Production/Preview/old894 never addressed.
+Original namespace project /private/tmp/ky-web-stage2-readiness.standard-b1-v1/candidate/enterprise_agent_poc
+BindPaths /var/lib/enterprise-agent-standard-test/private:/private/tmp:rbind.
+Existing config remains /private/tmp/ky-web-stage2-readiness.standard-b1-v1/redis-e2e.manifest.json.
+No guessed environment paths or customer data imports.
+
+IMPLEMENTATION / ENTRY
+test_delivery_persistent.py supplies fixed activation, audit and801 recovery
+callbacks. Existing test_delivery_verified_entry.py gains execute-persistent.
+Existing execute and execute-isolated gates retain their meanings; isolated
+approval cannot activate persistent services. The existing release_lock and
+delivery_journal are reused. Root bootstrap pins the entire Tooling tree before
+imports, rejects bytecode/links/untrusted paths and pins /usr/bin/python3.12;
+application Python is separate. No candidate application code is run as Root.
+
+AFTER independent installation/activation authorization, the command contract is:
+/usr/bin/python3.12 -I -S -B <tooling>/scripts/test_delivery_verified_entry.py \
+  execute-persistent --policy <protected-policy> --request <protected-request> \
+  --grant <protected-grant>
+This line is NOT authorization to run it now. There is no direct Root shortcut.
+
+Policy context NEW_TEST_PERSISTENT_CALLBACKS_V1, standard delivery policy V1;
+hostname exact; units exact; service_user=eaw-test; operation store fixed at
+/opt/enterprise-agent-test-delivery/operations; repository fixed alongside it.
+Tooling installed at /opt/enterprise-agent-test-delivery/tooling/enterprise_agent_poc.
+Source/Tree/Parent, archive/manifest request identity rechecked against protected
+Git and original build/manifest logic. Source is not inferred from cwd names.
+Each live payload is read through its actual process mount namespace and
+compared to its bound archive. Service fragment/drop-in list must be pinned.
+
+The actual existing06 independent decision must have kind
+ACTUAL_OWNER_AUTHORIZED_06_ROOT_DECISION_RECORD and technical_action
+execute_new_test_persistent_v1, request hash, policy-scope hash (all policy fields
+except accepted_issuer_record_sha256), operator, host, independent Owner refs,
+issued_at/expires_at<=4h, uses1, revoked=false, provider_budget0,
+primary_switch_authority=true for THIS NEW TEST ONLY, Production/Preview=false.
+Grant additionally binds mode activate/recover, request/policy hashes, operation,
+actor, Tooling/runtime profile and the actual issuer-record file/hash.
+Policies/grants/decisions are not created by this candidate or offline fixtures.
+Current expiry, revocation marker, lock inode and policy immutability rechecked
+before effects and after effects/before success audit. Failure => retainedUNKNOWN.
+
+INSTALLATION CONTRACT — existing authorized material installer only
+1 Independently approve this exact Tooling Source/tree and complete blob pins,
+  including bootstrap, new module and all imported modules/package initializers.
+  No old0d05 material receipt/code pin can certify these changed bytes.
+2 Existing Root installer stages immutable bytes, protects all ancestors and
+  enumerates complete tooling_files. No extra __init__.py/pyc/symlinks accepted.
+  Role/executable dependencies need the existing runtime_inventory protected
+  graph plus actual dynamic_loader/python_imports/pgvector_load/redis_start/
+  relocation closure receipt, bound to policy runtime_profile_sha256. Paths/
+  symlinks cannot be accepted merely because a version string matches.
+3 Create Root-owned operations/releases directories and the three fixed unit
+  drop-in directories under /etc/systemd/system. Pin ALL current unit fragments
+  and loaded drop-ins in service_files. Preserve original units and all security
+  properties; generated override changes only WorkingDirectory,
+  BindReadOnlyPaths and ExecStart. No nginx/environment/DB mutation.
+4 Establish the existing global lock inode at
+  /run/lock/enterprise-agent-test-successor-v1.lock, exact original mode/owner
+  checked by release_lock. No replacement lock or caller-maintained FD.
+5 Install/retain original801 recovery archive and manifest, not regenerated:
+  /opt/enterprise-agent-test-delivery/artifacts/b1.tar.gz
+  SHA2569619fbc84512af93de9735527ccb44be12b00bd135d4da3a5675347b13a7601e
+  b1.manifest.json SHA25627dcafea650b528ffae020c8a4f8f4f6f00946460be43fb6458fe50de66ab5df.
+6 Call verify_installation(policy) from the independently pinned existing
+  installer AFTER first-byte validation. Repeated verification is read-only,
+  returns INSTALL_BYTES_VERIFIED_NOT_EXECUTION_AUTHORITY; it does not grant a
+  release or restart services. Repeat installation of identical bytes may be
+  accepted only by that existing installer; changed/partial bytes fail, not overwrite.
+7 Fresh check Source/tree, complete pins, controller/runtime closure, lock,
+  authorization denial, original801 artifacts, loaded unit identities and live
+  health. Never use activation or deliberate failure as installation-only test.
+
+ACTIVATION / RECOVERY
+New activation requires direct801 predecessor, accurate current CWD per role,
+actual prior Git identity/archive/payload match and exact target Git identity.
+No migration difference accepted. A separately protected data compatibility
+receipt is mandatory: request_sha256, target identity, statusPASS,
+backup_restore_verified=true and current_data_compatible=true. Its original
+file SHA256 is pinned in policy.06 must obtain these from actual backup/restore
+and current data qualification, not manufacture a PASS record. Schema equality
+alone never establishes rollback safety. No DB restore is performed here.
+
+Candidate archive is verified and staged once into the exact source-named
+Root-protected releases directory. Existing staging must have matching installed
+receipt and EVERY expected file/hash with no extras. Partial staging is retained
+and rejected. Root files become read-only and are mounted read-only into each
+existing private namespace at ROOT/releases/<source>/enterprise_agent_poc.
+Fixed order: stop worker/api/mcp; atomically replace only the three managed
+90-standard-test-release.conf files; daemon-reload; start mcp/api/worker.
+Multi-unit change is NOT one systemd transaction: durable intent/result for each
+action identifies interruption direction. Never delete staged data to fakePASS.
+
+Recovery is a SEPARATE authorized operation with mode recover and target EXACT
+801fd27a92f32ecc87e9aec1a8c253a8942d1e92 /treec2daa36435c384b4d4836b8e2b3ed65fe3e05f09.
+Archive and Manifest hashes above are enforced in code, not prefix matching.
+Request failed_operation_id must identify the original preserved activate
+request/failure hashes and its exact candidate as current predecessor. Inactive
+services are allowed only in recovery; running roles still require exact CWD,
+user, loaded-unit pins and original bytes. Mixed801/candidate requires an exact
+per-role snapshot and proper original801 recovery archive. Arbitrary third
+versions cannot be recovered through this adapter. Existing proof/authority
+missing, expired or revoked => STOP; no blind fallback or automatic continuation.
+Post-switch/recovery checks actual CWD, PID uid/argv, exact managed override,
+API environment=test/status=ok and MCP transport. knowledge=degraded is not hidden.
+Callback completion is not full Agent/Provider/Native business qualification.
+
+AUDIT / INTERRUPTION
+Original delivery_journal exclusive operation claim serializes duplicate IDs;
+existing global flock prevents concurrent operations. Intent is durable BEFORE
+each effect; result records actor, authority hash, source/target, Tooling,
+operation UUID, timestamp, action/result. No DSN, env, argv or credential dump.
+Audit failure before an effect prevents it. Failure after an effect leaves
+UNKNOWN plus preserved request/failure, never 'nothing written'. Failed service,
+audit or health does not silently auto-recover, re-claim or replay the operation.
+Separate recovery must remain authorized for the real recovery window; expiry
+can leave a partially switched Test requiring new recovery authorization. This
+is an explicit operational risk, not a reason to extend or ignore expiry.
+
+BOUNDARY
+This task performs offline Fixture/Mock validation only. No SSH, Root install,
+live activation/recovery or paid calls.33fc business source remains unchanged.
+06 installation review may proceed ONLY for the NEW exact Tooling identity;
+actual installation/activation and compatibility proof remain separate gates.

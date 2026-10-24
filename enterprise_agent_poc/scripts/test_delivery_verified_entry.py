@@ -29,6 +29,10 @@ def trust(path):
 
 
 def controller_binary(policy, mode):
+    if mode == 'execute-persistent':
+        require(policy['context'] == 'NEW_TEST_PERSISTENT_CALLBACKS_V1'
+                and policy['controller_python'] == '/usr/bin/python3.12', 'NEW_TEST_SYSTEM_CONTROLLER')
+        return policy['controller_python'], policy['controller_python_sha256']
     if mode == 'execute-isolated':
         require(policy['controller_python'] == '/usr/bin/python3.10', 'SYSTEM_CONTROLLER_PYTHON_REQUIRED')
         return policy['controller_python'], policy['controller_python_sha256']
@@ -61,13 +65,14 @@ def main():
     require(actual == p['tooling_files'], 'COMPLETE_TOOLING_PIN_SET')
     require(str(Path(__file__).resolve()) in actual, 'BOOTSTRAP_NOT_ADOPTED')
     python, pin = controller_binary(p, sys.argv[1])
-    if sys.argv[1] == 'execute-isolated':
+    if sys.argv[1] in ('execute-isolated', 'execute-persistent'):
         require(sys.flags.no_site, 'CONTROLLER_NO_SITE_REQUIRED')
     require(hashlib.sha256(trust(python).read_bytes()).hexdigest() == pin, 'PYTHON_PIN')
     require(Path(sys.executable).resolve() == Path(python).resolve(), 'PYTHON_IDENTITY')
-    require(sys.argv[1] in ('execute', 'execute-isolated'), 'EXECUTE_ONLY')
-    entry = root / ('scripts/test_delivery_context.py' if sys.argv[1] == 'execute-isolated'
-                    else 'scripts/test_delivery_pipeline.py')
+    require(sys.argv[1] in ('execute', 'execute-isolated', 'execute-persistent'), 'EXECUTE_ONLY')
+    entry = root / {'execute-isolated':'scripts/test_delivery_context.py',
+                    'execute-persistent':'scripts/test_delivery_persistent.py',
+                    'execute':'scripts/test_delivery_pipeline.py'}[sys.argv[1]]
     require(str(entry) in actual, 'ENTRY_PIN')
     # Every local import is now within the complete, Root-owned pinned tree.
     runpy.run_path(str(entry), run_name='__main__', init_globals={'_VERIFIED_TEST_ENTRY': True})
