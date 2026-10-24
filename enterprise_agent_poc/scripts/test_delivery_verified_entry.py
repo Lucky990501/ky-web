@@ -54,9 +54,10 @@ def main():
     require(str(Path(__file__).resolve()) in actual, 'BOOTSTRAP_NOT_ADOPTED')
     require(hashlib.sha256(trust(p['python']).read_bytes()).hexdigest() == p['python_sha256'], 'PYTHON_PIN')
     require(Path(sys.executable).resolve() == Path(p['python']).resolve(), 'PYTHON_IDENTITY')
-    entry = root / 'scripts/test_delivery_pipeline.py'
+    require(sys.argv[1] in ('execute', 'execute-isolated'), 'EXECUTE_ONLY')
+    entry = root / ('scripts/test_delivery_context.py' if sys.argv[1] == 'execute-isolated'
+                    else 'scripts/test_delivery_pipeline.py')
     require(str(entry) in actual, 'ENTRY_PIN')
-    require(sys.argv[1] == 'execute', 'EXECUTE_ONLY')
     # Every local import is now within the complete, Root-owned pinned tree.
     runpy.run_path(str(entry), run_name='__main__', init_globals={'_VERIFIED_TEST_ENTRY': True})
 

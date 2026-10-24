@@ -23,6 +23,14 @@ ACTION = 'adopt_reusable_test_driver_v1'
 PROFILE = 'PRIVATE_STAGE2_TMPFS_V2'
 
 
+def artifact_roles(request):
+    """Private candidate adoption observes PRIMARY, never installs/restores it."""
+    need(request.get('context') in (None, 'ISOLATED_CANDIDATE_CONTEXT_V1'), 'UNKNOWN_EXECUTOR_CONTEXT')
+    roles = ('candidate',) if request.get('context') == 'ISOLATED_CANDIDATE_CONTEXT_V1' else ('candidate', 'predecessor')
+    need(set(request['artifacts']) == set(roles), 'EXACT_ADOPTION_ARTIFACT_ROLES')
+    return roles
+
+
 def need(ok, code):
     if not ok:
         raise ValueError(code)
@@ -336,13 +344,16 @@ def finalize(request_path, decision_path):
     module = runpy.run_path(str(root/'scripts/test_delivery_pipeline.py'),
         init_globals={'_VERIFIED_TEST_ENTRY': True})
     artifacts = {}
-    for role in ('candidate', 'predecessor'):
+    isolated_context = request.get('context') == 'ISOLATED_CANDIDATE_CONTEXT_V1'
+    roles = artifact_roles(request)
+    for role in roles:
         a = request['artifacts'][role]
         trust(a['archive']); trust(a['manifest'])
         got = module['artifact'](repo, a['source'], a['archive'], a['manifest'])
         need(identity(repo, a['source'])['tree'] == a['tree'], 'ARTIFACT_TREE')
         artifacts[role] = dict(a, archive_sha256=got['archive_sha256'], manifest_sha256=got['manifest_sha256'])
-    need(artifacts['predecessor']['source'] == primary['source'], 'PREDECESSOR_IDENTITY')
+    if not isolated_context:
+        need(artifacts['predecessor']['source'] == primary['source'], 'PREDECESSOR_IDENTITY')
     v = os.statvfs(request['receipt_directory'])
     observed = dict(host=socket.gethostname(), primary=primary, tooling=tool, files=pins,
         runtime=runtime, artifacts=artifacts, operator=operator,
@@ -352,6 +363,8 @@ def finalize(request_path, decision_path):
          'PRIMARY_CHANGED_DURING_ADOPTION')
     receipt.update(decision_sha256=sha(decision_path), adapter_sha256=sha(__file__),
                    actual_uid=os.geteuid(), recorded_at=int(time.time()))
+    if isolated_context:
+        receipt['context'] = 'ISOLATED_CANDIDATE_CONTEXT_V1'
     # No caller-selected overwrite, activation, grant issuance or profile PASS.
     dest = trust(request['receipt_directory'])/(request['operation_id']+'.adoption.json')
     raw = (json.dumps(receipt, sort_keys=True)+'\n').encode()

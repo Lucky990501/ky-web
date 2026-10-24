@@ -219,7 +219,9 @@ class Job:
                 time.sleep(.2)
         raise RuntimeError('API_HEALTH_TIMEOUT')
 
-    def start(self):
+    def prepare_root(self):
+        """Allocate only this marked instance; no PG/Redis process is started."""
+        need(self.s.root is None, 'INSTANCE_ALREADY_PREPARED')
         self.s.root = Path(tempfile.mkdtemp(prefix=self.lifecycle.ROOT_PREFIX, dir=self.root_parent))
         self.s.root.chmod(0o700)
         (self.s.root / 'stage2-isolated.marker').write_text(self.lifecycle.MARKER)
@@ -232,11 +234,19 @@ class Job:
                        ('initdb', 'pg_ctl', 'createdb', 'pg_dump', 'pg_restore'))):
             need(binary.is_file() and os.access(binary, os.X_OK), 'TRUSTED_RUNTIME_INPUT_MISSING')
         self.s._prepare_evidence()
+
+    def start_databases(self):
+        need(self.s.root is not None and self.s.manifest is None and not self.s.pg_started,
+             'DATABASES_ALREADY_STARTED_OR_UNPREPARED')
         # Reuse lifecycle implementations, including private sockets and markers.
         self.s._start_pg(self.pg); self.s._start_redis(); self.s._manifest()
         self.s.config['environment'].update(ENTERPRISE_POC_MODEL_PROVIDER_ID='zero-cost-delivery-fixture',
                                           ENTERPRISE_POC_MODEL_ID='synthetic-no-model')
         self.s.manifest.write_text(json.dumps(self.s.config))
+
+    def start(self):
+        self.prepare_root()
+        self.start_databases()
 
     def database_fingerprint(self, database):
         import psycopg
@@ -261,7 +271,7 @@ class Job:
                 result[table] = {'rows': count, 'sha256': h.hexdigest()}
         return result
 
-    def backup_restore(self, predecessor):
+    def backup_restore(self, predecessor, *, reader_identity=None):
         """Restore only into a NEW private DB; never overwrite the candidate DB."""
         self.stage = 'ISOLATED_PG_BACKUP'
         before = self.database_fingerprint(self.s.database)
@@ -281,13 +291,19 @@ class Job:
         config['environment']['ENTERPRISE_POC_DATABASE_URL'] = dsn
         config['snapshot']['database_url'] = dsn
         path = self.s.root / 'restore-readonly.json'; path.write_text(json.dumps(config))
-        self.stage = 'EXACT_PREDECESSOR_READBACK'
+        self.stage = 'SAME_CANDIDATE_READBACK' if reader_identity else 'EXACT_PREDECESSOR_READBACK'
         self.command(self.role_args('readback', project=predecessor, config=path) +
                      ['--expected', str(self.s.root / 'expected-results.json')])
         need(self.database_fingerprint(restored) == before, 'OLD_READER_MUTATED_DATA')
-        return {'backup_sha256': sha(dump), 'table_fingerprints': before,
-                'restored_database_distinct': True, 'old_reader_source': self.request['observed_predecessor']['source'],
+        reader = reader_identity or self.request['observed_predecessor']
+        result = {'backup_sha256': sha(dump), 'table_fingerprints': before,
+                'restored_database_distinct': True,
+                'reader_source': reader['source'],
+                'reader_kind': 'SAME_CANDIDATE' if reader_identity else 'PREDECESSOR',
                 'primary_restore': 'NOT_EXECUTED', 'isolated_restore': 'PASS'}
+        if reader_identity is None:
+            result['old_reader_source'] = reader['source']
+        return result
 
     def run(self, archive, manifest, prior_archive, prior_manifest):
         self.input_size = sum(Path(x).stat().st_size for x in (archive, manifest, prior_archive, prior_manifest))

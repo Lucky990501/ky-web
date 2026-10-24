@@ -98,7 +98,11 @@ def exclusive(path, value):
 def git(repo, *args):
     # Never run candidate hooks or inherit Git environment overrides.
     env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
-    return subprocess.check_output(['git', '--no-optional-locks', '-c', 'core.hooksPath=',
+    if sys.platform == 'linux':
+        env = {'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LANG': 'C.UTF-8'}
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS='0')
+    return subprocess.check_output(['/usr/bin/git' if sys.platform == 'linux' else 'git',
+                                   '--no-optional-locks', '-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false',
                                    '-C', str(repo), *args], env=env, timeout=60)
 
 
@@ -428,7 +432,8 @@ def qualification_result(result, request):
     return result
 
 
-def sandbox_command(request, policy, op, archive, manifest, predecessor_archive=None, predecessor_manifest=None):
+def sandbox_command(request, policy, op, archive, manifest, predecessor_archive=None, predecessor_manifest=None,
+                    *, isolated_candidate=False):
     """Fixed non-Root sandbox; no caller-supplied command or shell interpolation.
 
     The reviewed driver receives a read-only request and production-format package.
@@ -441,10 +446,21 @@ def sandbox_command(request, policy, op, archive, manifest, predecessor_archive=
     python = PurePosixPath(policy['python']).relative_to(runtime)
     driver = PurePosixPath(policy['qualification_driver']).relative_to(tooling)
     op, archive, manifest = (PurePosixPath(x.as_posix()) for x in (op, archive, manifest))
-    require(predecessor_archive is not None and predecessor_manifest is not None, 'PREDECESSOR_ARTIFACT_REQUIRED')
-    predecessor_archive, predecessor_manifest = (PurePosixPath(x.as_posix()) for x in (predecessor_archive, predecessor_manifest))
+    prior_binds = ''; prior_args = []; paths = [runtime, tooling, archive, manifest, op]
+    if isolated_candidate:
+        require(request.get('target') == 'ISOLATED_CANDIDATE'
+                and policy['driver_protocol'] == 'ISOLATED_CANDIDATE_CONTEXT_V1', 'ISOLATED_CONTEXT_REQUIRED')
+        require(predecessor_archive is None and predecessor_manifest is None, 'NO_PRIMARY_RESTORE_INPUT')
+    else:
+        require(predecessor_archive is not None and predecessor_manifest is not None, 'PREDECESSOR_ARTIFACT_REQUIRED')
+        predecessor_archive, predecessor_manifest = (PurePosixPath(x.as_posix()) for x in (predecessor_archive, predecessor_manifest))
+        paths += [predecessor_archive, predecessor_manifest]
+        prior_binds = f' {predecessor_archive}:/input/predecessor.tar.gz {predecessor_manifest}:/input/predecessor.manifest.json'
+        prior_args = ['--predecessor-archive', '/input/predecessor.tar.gz',
+                      '--predecessor-manifest', '/input/predecessor.manifest.json']
     require(policy['slice'] == 'enterprise-agent-test.slice', 'TEST_SLICE_REQUIRED')
-    require(policy['driver_protocol'] == 'QUALIFICATION_DRIVER_PROTOCOL_V1', 'DRIVER_PROTOCOL_NOT_ADOPTED')
+    require(policy['driver_protocol'] == ('ISOLATED_CANDIDATE_CONTEXT_V1' if isolated_candidate
+            else 'QUALIFICATION_DRIVER_PROTOCOL_V1'), 'DRIVER_PROTOCOL_NOT_ADOPTED')
     # All /opt and /home data is hidden; only approved runtime/tooling/input are rebound.
     props = [
         'Slice=enterprise-agent-test.slice', 'CPUQuota=100%', 'MemoryHigh=1280M',
@@ -459,10 +475,10 @@ def sandbox_command(request, policy, op, archive, manifest, predecessor_archive=
         f'TemporaryFileSystem=/private/tmp:rw,nosuid,nodev,size={SCRATCH},mode=0700,uid={policy["operator_uid"]},gid={policy["operator_gid"]}',
         'InaccessiblePaths=-/opt -/home -/root -/run -/tmp -/etc -/var/lib -/var/log',
         'ReadWritePaths=/private/tmp',
-        f'BindReadOnlyPaths={runtime}:/runtime {tooling}:/tooling {archive}:/input/archive.tar.gz {manifest}:/input/manifest.json {op / "request.json"}:/input/request.json {predecessor_archive}:/input/predecessor.tar.gz {predecessor_manifest}:/input/predecessor.manifest.json /etc/passwd:/etc/passwd /etc/group:/etc/group',
+        f'BindReadOnlyPaths={runtime}:/runtime {tooling}:/tooling {archive}:/input/archive.tar.gz {manifest}:/input/manifest.json {op / "request.json"}:/input/request.json{prior_binds} /etc/passwd:/etc/passwd /etc/group:/etc/group',
     ]
     require(all(not any(c in str(p) for c in (' ', '\n', ':', '\\')) for p in
-                (runtime, tooling, archive, manifest, predecessor_archive, predecessor_manifest, op)), 'SANDBOX_PATH_ENCODING')
+                paths), 'SANDBOX_PATH_ENCODING')
     return ['/usr/bin/systemd-run', '--quiet', '--wait', '--pipe', '--collect',
             '--unit=test-delivery-' + request['operation_id'],
             '--uid=' + str(policy['operator_uid']), '--gid=' + str(policy['operator_gid']),
@@ -474,8 +490,7 @@ def sandbox_command(request, policy, op, archive, manifest, predecessor_archive=
             'ENTERPRISE_POC_WECHAT_NETWORK_ALLOWED=false',
             '/runtime/' + python.as_posix(), '-I', '-B', '/tooling/' + driver.as_posix(),
             '--request', '/input/request.json', '--archive', '/input/archive.tar.gz',
-            '--manifest', '/input/manifest.json', '--predecessor-archive', '/input/predecessor.tar.gz',
-            '--predecessor-manifest', '/input/predecessor.manifest.json', '--root', '/private/tmp']
+            '--manifest', '/input/manifest.json', *prior_args, '--root', '/private/tmp']
 
 
 def bounded_run(command, unit, root_floor, revalidate):
