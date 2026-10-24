@@ -24,10 +24,20 @@ python -B scripts/test_delivery_context.py plan-isolated
 
 Only the already-adopted `test_delivery_verified_entry.py` may invoke the new
 `execute-isolated --request --policy --grant --archive --manifest` mode as Root.
-Use the existing installer/technical execution channel, isolated Python `-I -B`,
+Use the existing installer/technical execution channel, isolated Python `-I -S -B`,
 and a controller inside `enterprise-agent-test.slice`. Ordinary CLI/SSH/sudo
 access does not constitute adoption or technical execution authority. No actual
 invocation/installation is approved by this implementation document.
+
+For this version the controller is the existing trusted OS
+`/usr/bin/python3.10 -I -S -B`, pinned by `controller_python_sha256`, with site
+initialization disabled. The policy's
+`python`/`python_sha256` refer separately to the application Runtime, executed
+only after systemd switches to the independent non-Root operator. Isolated
+material-adoption version probes also drop UID/GID and supplementary groups.
+The controller does not launch application Python as Root to inspect its version
+or reject an unqualified closure. No system Python or runtime is installed or
+changed by this code.
 
 The existing seven-stage `dispatch_delivery` remains unchanged. Its fixed
 callbacks are mapped by the new worker `test_delivery_isolated.py`:
@@ -41,6 +51,11 @@ callbacks are mapped by the new worker `test_delivery_isolated.py`:
 | health | Existing API/MCP/Worker health/CWD checks and private PG identity/version/ledger fingerprint |
 | qualify | Existing zero-cost five-turn/auth/tenant/SSE/history/idempotency/cancel/unknown-execution checks. Dump populated private data, restore into a distinct new private database and read it with the SAME candidate |
 | export | Exact original artifact identity, installed-byte readback, measured check results and redacted failures. No rebuild or Production authority |
+
+The protected export receipt includes the exact original archive/Manifest paths
+and their hashes. These inputs are retained by the existing material owner for
+handoff; private PG cleanup does not remove or rebuild them. No duplicate
+archive copy is charged to the1MiB Root-receipt budget.
 
 `old_reader_compatibility` is deliberately replaced by `same_source_restore`.
 No894 archive is required or fabricated.894 installed identity is independently

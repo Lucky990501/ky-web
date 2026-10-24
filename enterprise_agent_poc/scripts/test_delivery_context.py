@@ -285,6 +285,10 @@ def dispatch_context(request, callbacks, journal, revalidate, verify_lock):
 def protected_preflight(request, policy, archive, manifest):
     validate_request(request)
     p.require(socket.gethostname() == policy['hostname'], 'LIVE_HOST_MISMATCH')
+    p.require(policy['controller_python'] == '/usr/bin/python3.10'
+        and p.sha(p.trusted(policy['controller_python'])) == policy['controller_python_sha256']
+        and Path(sys.executable).resolve() == Path(policy['controller_python']).resolve(),
+        'SYSTEM_CONTROLLER_PYTHON_REQUIRED')
     roots = []
     for name in ('tooling_root', 'runtime_root', 'operations_root'):
         path = p.trusted(policy[name], directory=True)
@@ -354,6 +358,7 @@ def protected_preflight(request, policy, archive, manifest):
 def controller_preflight():
     p.require(sys.platform == 'linux' and os.geteuid() == 0, 'ADOPTED_ROOT_ENTRY_REQUIRED')
     p.require(sys.flags.isolated and sys.flags.dont_write_bytecode, 'ISOLATED_PYTHON_REQUIRED')
+    p.require(sys.flags.no_site, 'CONTROLLER_NO_SITE_REQUIRED')
     p.require('enterprise-agent-test.slice' in Path('/proc/self/cgroup').read_text(), 'TEST_CONTROLLER_SLICE_REQUIRED')
 
 
@@ -401,6 +406,7 @@ def execute(request_path, policy_path, grant_path, archive, manifest):
             p.require(p.observe(policy) == live, 'PRIMARY_CHANGED_DURING_CLEANUP')
             export = dict(status='ISOLATED_CANDIDATE_COMPLETED_PENDING_TEST_ACCEPTANCE', context=CONTEXT,
                 request_sha256=p.digest(request), candidate=request['candidate'], artifact=request['artifact'],
+                artifact_references={'archive': str(Path(archive)), 'manifest': str(Path(manifest))},
                 receipts=result['receipts'], primary_changes=0, production_changes=0, preview_changes=0,
                 provider_calls=0, cleanup='EXACT_UNIT_STOPPED', test_native='PENDING_EXTERNAL_ACCEPTANCE')
             p.exclusive(op/'export.json', export)

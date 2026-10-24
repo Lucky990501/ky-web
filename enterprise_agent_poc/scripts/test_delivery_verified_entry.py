@@ -28,6 +28,14 @@ def trust(path):
     return p
 
 
+def controller_binary(policy, mode):
+    if mode == 'execute-isolated':
+        require(policy['controller_python'] == '/usr/bin/python3.10', 'SYSTEM_CONTROLLER_PYTHON_REQUIRED')
+        return policy['controller_python'], policy['controller_python_sha256']
+    require(mode == 'execute', 'EXECUTE_ONLY')
+    return policy['python'], policy['python_sha256']
+
+
 def main():
     require(sys.platform == 'linux' and os.geteuid() == 0, 'LINUX_ROOT_REQUIRED')
     require(sys.flags.isolated and sys.flags.dont_write_bytecode, 'ISOLATED_PYTHON_REQUIRED')
@@ -52,8 +60,11 @@ def main():
             actual[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
     require(actual == p['tooling_files'], 'COMPLETE_TOOLING_PIN_SET')
     require(str(Path(__file__).resolve()) in actual, 'BOOTSTRAP_NOT_ADOPTED')
-    require(hashlib.sha256(trust(p['python']).read_bytes()).hexdigest() == p['python_sha256'], 'PYTHON_PIN')
-    require(Path(sys.executable).resolve() == Path(p['python']).resolve(), 'PYTHON_IDENTITY')
+    python, pin = controller_binary(p, sys.argv[1])
+    if sys.argv[1] == 'execute-isolated':
+        require(sys.flags.no_site, 'CONTROLLER_NO_SITE_REQUIRED')
+    require(hashlib.sha256(trust(python).read_bytes()).hexdigest() == pin, 'PYTHON_PIN')
+    require(Path(sys.executable).resolve() == Path(python).resolve(), 'PYTHON_IDENTITY')
     require(sys.argv[1] in ('execute', 'execute-isolated'), 'EXECUTE_ONLY')
     entry = root / ('scripts/test_delivery_context.py' if sys.argv[1] == 'execute-isolated'
                     else 'scripts/test_delivery_pipeline.py')

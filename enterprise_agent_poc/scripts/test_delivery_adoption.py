@@ -31,6 +31,17 @@ def artifact_roles(request):
     return roles
 
 
+def runtime_probe_identity(request):
+    """Only the new isolated branch demotes probes; historical behavior stays."""
+    if request.get('context') != 'ISOLATED_CANDIDATE_CONTEXT_V1':
+        return {}
+    import pwd
+    account = pwd.getpwnam(request['operator']['name'])
+    need(request['operator'] == {'name': account.pw_name, 'uid': account.pw_uid, 'gid': account.pw_gid}
+         and account.pw_uid > 0 and account.pw_gid > 0, 'NONROOT_RUNTIME_PROBE_REQUIRED')
+    return {'user': account.pw_uid, 'group': account.pw_gid, 'extra_groups': []}
+
+
 def need(ok, code):
     if not ok:
         raise ValueError(code)
@@ -297,6 +308,8 @@ def finalize(request_path, decision_path):
     need(decision['adapter_sha256'] == sha(trust(Path(__file__).resolve()))
          and decision['request_sha256'] == digest(request), 'FIRST_BYTE_AUTHORIZATION')
     validate_authority(request, decision, int(time.time()))
+    roles = artifact_roles(request)
+    isolated_context = request.get('context') == 'ISOLATED_CANDIDATE_CONTEXT_V1'
     need(socket.gethostname() == request['host'], 'HOST_MISMATCH')
     need(str(Path(sys.executable).resolve()) == decision['installer_python']
          and sha(trust(decision['installer_python'])) == decision['installer_python_sha256'],
@@ -325,10 +338,11 @@ def finalize(request_path, decision_path):
     for role in ('python', 'postgres', 'redis', 'pgvector_control'):
         path = trust(runtime[role])
         need(path.is_relative_to(runtime_root) and path.is_file(), 'RUNTIME_BOUNDARY')
+    probe_identity = runtime_probe_identity(request)
     for role, flag, expected_version in (('python', '--version', runtime['python_version']),
             ('postgres', '--version', '16.6'), ('redis', '--version', '7.0.15')):
         output = subprocess.check_output([runtime[role], flag], timeout=10,
-            env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent'}).decode().strip()
+            env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent'}, **probe_identity).decode().strip()
         need(re.search(r'(?<![\d.])'+re.escape(expected_version)+r'(?![\d.])', output), 'RUNTIME_VERSION')
     need(re.search(r"default_version\s*=\s*'0\.8\.6'", Path(runtime['pgvector_control']).read_text()), 'PGVECTOR_VERSION')
     first_primary = observe_primary(request['primary_observation'])
@@ -344,8 +358,6 @@ def finalize(request_path, decision_path):
     module = runpy.run_path(str(root/'scripts/test_delivery_pipeline.py'),
         init_globals={'_VERIFIED_TEST_ENTRY': True})
     artifacts = {}
-    isolated_context = request.get('context') == 'ISOLATED_CANDIDATE_CONTEXT_V1'
-    roles = artifact_roles(request)
     for role in roles:
         a = request['artifacts'][role]
         trust(a['archive']); trust(a['manifest'])

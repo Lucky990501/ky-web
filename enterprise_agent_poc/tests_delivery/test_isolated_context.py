@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import test_delivery_context as c
 from scripts import test_delivery_isolated as w
 from scripts import test_delivery_native as n
+from scripts import test_delivery_verified_entry as bootstrap
 
 p = c.p
 
@@ -75,6 +76,43 @@ def test_scope_expansion_rejects_before_any_callback(request_data,field,value):
 def test_request_receipt_budget_is_enforced_before_claim(request_data):
     request_data['unexpected_large_field']='x'*c.REQUEST_LIMIT
     with pytest.raises(ValueError,match='ISOLATED_REQUEST_SIZE'):c.validate_request(request_data)
+
+
+def test_controller_and_application_interpreters_are_separate():
+    policy=dict(controller_python='/usr/bin/python3.10',controller_python_sha256='a'*64,
+        python='/opt/protected/runtime/bin/python',python_sha256='b'*64)
+    assert bootstrap.controller_binary(policy,'execute-isolated')==('/usr/bin/python3.10','a'*64)
+    assert bootstrap.controller_binary(policy,'execute')==(policy['python'],'b'*64)
+    policy['controller_python']=policy['python']
+    with pytest.raises(ValueError,match='SYSTEM_CONTROLLER_PYTHON_REQUIRED'):
+        bootstrap.controller_binary(policy,'execute-isolated')
+
+
+@pytest.mark.parametrize('fault',[None,'root_uid','root_gid','wrong_uid','wrong_name'])
+def test_isolated_runtime_version_probes_drop_identity(monkeypatch,fault):
+    account=SimpleNamespace(pw_name='synthetic-operator',pw_uid=12345,pw_gid=12345)
+    requested=dict(name=account.pw_name,uid=account.pw_uid,gid=account.pw_gid)
+    if fault=='root_uid':account.pw_uid=0;requested['uid']=0
+    if fault=='root_gid':account.pw_gid=0;requested['gid']=0
+    if fault=='wrong_uid':requested['uid']=54321
+    if fault=='wrong_name':requested['name']='other'
+    monkeypatch.setitem(sys.modules,'pwd',SimpleNamespace(getpwnam=lambda _:account))
+    request=dict(context=c.CONTEXT,operator=requested)
+    if fault:
+        with pytest.raises(ValueError,match='NONROOT_RUNTIME_PROBE_REQUIRED'):
+            c.adoption.runtime_probe_identity(request)
+    else:
+        assert c.adoption.runtime_probe_identity(request)==dict(user=12345,group=12345,extra_groups=[])
+    assert c.adoption.runtime_probe_identity({})=={} # historical branch unchanged
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='existing Test OS controller Python')
+def test_real_system_controller_imports_without_application_runtime():
+    controller=Path('/usr/bin/python3.10')
+    assert controller.is_file()
+    result=subprocess.run([str(controller),'-I','-S','-B',str(Path(c.__file__)),'--help'],
+        capture_output=True,text=True,env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent'})
+    assert result.returncode==0 and 'execute-isolated' in result.stdout
 
 
 @pytest.mark.parametrize('target,field,value', [('decision','kind','HISTORICAL'),
@@ -250,6 +288,7 @@ def test_entry_replay_never_appends_failure_to_previous_operation(request_data,t
     monkeypatch.setattr(c,'SandboxBridge',UnitDouble)
     result=c.execute(*paths,tmp_path/'unused-archive',tmp_path/'unused-manifest')
     assert result['test_native']=='PENDING_EXTERNAL_ACCEPTANCE'
+    assert result['artifact_references']==dict(archive=str(tmp_path/'unused-archive'),manifest=str(tmp_path/'unused-manifest'))
     op=operations/request_data['operation_id']
     before={f.name:f.read_bytes() for f in op.iterdir()}
     assert len(calls)==7 and 'failure.json' not in before
