@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import os
 
 CONTEXT_PREFIX = "[ACTIVITY_USER_CONTEXT_V1]\n"
 QUESTION_PREFIX = "还需要确认："
@@ -14,6 +15,13 @@ def with_user_context(current: str, messages: list[dict]) -> str:
     if previous and previous[-1] == current:
         previous.pop()
     waiting = any(item["role"] == "assistant" and item["content"].startswith(QUESTION_PREFIX) for item in messages[-3:])
+    if not waiting and os.environ.get('CUSTOMER_PREVIEW_MODE')=='true':
+        from app.activity_plan_runtime import is_full_activity_plan,_SIMPLE,_PLAN_DISCUSSION
+        # Continue the latest visible planning request, never another project
+        # or a user's explicit small-copy/discussion request.
+        anchors=[i for i,text in enumerate(previous) if is_full_activity_plan('campaign-agent',text)]
+        if anchors and not is_full_activity_plan('campaign-agent',current) and not (_SIMPLE.search(current) or _PLAN_DISCUSSION.search(current)):
+            previous=previous[anchors[-1]:];waiting=True
     if not previous or not waiting:
         return current
     return CONTEXT_PREFIX + json.dumps({"current": current, "previous": previous}, ensure_ascii=False)
@@ -37,15 +45,15 @@ def assess_activity(message: str) -> dict | None:
     if not previous and re.search(r"活动.{0,8}(?:已经|已).{0,8}(?:策划好|完成)|(?:请|帮我)(?:点评|分析)", current):
         return None
     text = "\n".join([*previous, current])
-    intent = bool(previous or re.search(r"(?:策划|筹备|组织|准备|做|制作|生成|出|设计|制定).{0,20}(?:活动|方案)|活动.{0,12}(?:完整方案|正式方案|执行方案)", current))
-    if not intent or not re.search(r"活动|亲子|开学季|客户答谢", text):
+    intent = bool(previous or re.search(r"(?:策划|筹备|组织|准备|做|制作|生成|出|设计|制定|写).{0,20}(?:活动|方案|策划案)|活动.{0,12}(?:完整方案|正式方案|执行方案)", current))
+    if not intent or not re.search(r"活动|亲子|开学季|客户答谢|策划案", text):
         return None
     # Match facts expressed in ordinary prose as well as labels. Unknown
     # labelled lines never count as confirmed. No calendar facts are inferred.
     unknown = r"未定|待确认|待定|不知道|未提供|未确定|未确认|还没定|没定|没想好|暂无"
     facts = re.sub(r"(?:时间|日期|地点|场地|对象|内容)[：:]?[^\n。；，,]*(?:" + unknown + r")[^\n。；，,]*", "", text)
     known = {
-        "content": bool(re.search(r"亲子|助学|阅读|读书|公益|开学季|国庆|教师节|节日|答谢|感恩|招生|培训|主题[：:].+|内容[：:].+", facts)),
+        "content": bool(re.search(r"亲子|助学|阅读|读书|公益|开学季|国庆|教师节|元旦|节日|答谢|感恩|招生|培训|主题[：:].+|内容[：:].+", facts)),
         "time": bool(re.search(r"\d{1,4}[年/月日]|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[:：]\d{2}|明天|后天|本周末|周末|下周|周[一二三四五六日天]|日期[：:].+|时间[：:].+", facts)),
         "location": bool(re.search(r"(?:在|地点[：:]?|场地[：:]?)[^\n。；，,]{0,36}(?:广场|活动室|教室|大厅|校区|门店|公园|社区|会场|礼堂|中心|操场|图书馆|楼|门)|(?:地点|场地)[：:][^\n。；，,]{2,40}", facts)),
         "audience": bool(re.search(r"亲子|家长|孩子|学生|学员|客户|业主|居民|员工|参与对象[：:].+|活动对象[：:].+", facts)),

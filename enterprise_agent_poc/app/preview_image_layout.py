@@ -3,7 +3,7 @@ import io
 import json
 import re
 from pathlib import PurePosixPath
-from PIL import Image,ImageStat
+from PIL import Image,ImageStat,ImageChops,ImageFilter
 from app.brand_logo import inspect_transparent_png
 
 BROCHURE_SIZE='1536x1024'  # Existing verified gateway enum, NOT a new size.
@@ -52,7 +52,7 @@ def logo_geometry(width,height,mode,anchor=None):
         x=round(2*panel)+margin if mode=='brochure_front' else margin
         return x,margin,max(1,round(panel*.36)),max(1,round(height*.065)),margin//3
     maxw,maxh=max(1,round(width*.14)),max(1,round(height*.08))
-    return (width-maxw-margin if anchor in {'top_right','bottom_right'} else margin,
+    return (width-maxw-margin if anchor in {None,'top_right','bottom_right'} else margin,
             height-maxh-margin if anchor in {'bottom_left','bottom_right'} else margin,maxw,maxh,margin//3)
 
 
@@ -63,12 +63,22 @@ def overlay_preview_logo(content,logo,mode,anchor=None):
         canvas=source.convert('RGBA');mark=mark.convert('RGBA')
         x,y,w,h,padding=logo_geometry(canvas.width,canvas.height,mode,anchor)
         mark.thumbnail((w,h),Image.Resampling.LANCZOS)
-        # A local, conservative occupancy check, NOT a universal logo/OCR
-        # detector. Any logo, text, photo or uncertain content in the header
-        # prevents automatic overlay. Never erase pixels to make space.
-        header=canvas.crop((0,0,canvas.width,max(1,round(canvas.height*.16)))).convert('RGB')
-        header.thumbnail((720,120),Image.Resampling.LANCZOS)
-        if max(ImageStat.Stat(header).stddev)>7:
+        # Conservative occupancy protection, not semantic logo/OCR detection.
+        # Brochures keep their existing header rule; posters inspect only the
+        # reserved corner and ignore low-frequency background color changes.
+        if mode in {'brochure_front','brochure_back'}:
+            region=canvas.crop((0,0,canvas.width,max(1,round(canvas.height*.16)))).convert('RGB')
+            region.thumbnail((720,120),Image.Resampling.LANCZOS)
+            occupied=max(ImageStat.Stat(region).stddev)>7
+        else:
+            # Inspect only the reserved logo corner. Smooth sky/gradients are
+            # not evidence of an existing mark; preserve sharp local content.
+            region=canvas.crop((max(0,x-w//2),max(0,y-padding),min(canvas.width,x+w+padding*2),min(canvas.height,y+h+padding*2))).convert('RGB')
+            region.thumbnail((320,180),Image.Resampling.LANCZOS)
+            detail=ImageChops.difference(region,region.filter(ImageFilter.GaussianBlur(2)))
+            histogram=detail.convert('L').histogram()
+            occupied=(max(ImageStat.Stat(detail).mean)>2 or sum(histogram[12:])/max(1,sum(histogram))>.015)
+        if occupied:
             return content,{'policy':'preview-transparent-logo-v3','layout_mode':mode,'applied':False,
                 'reason':'existing_logo_or_content_preserved','detection':'conservative_header_occupancy_not_semantic_ocr'}
         # Alpha-composite ONLY the original transparent PNG, no plate, mask,
