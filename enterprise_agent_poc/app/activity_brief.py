@@ -38,6 +38,9 @@ def assess_activity(message: str) -> dict | None:
                 return None
         except (ValueError, KeyError, TypeError):
             return None
+    from app.activity_plan_runtime import _SIMPLE,_PLAN_DISCUSSION
+    if _SIMPLE.search(current) or _PLAN_DISCUSSION.search(current):
+        return None
     if re.search(r"(?:标题|几个主题|一句|短文案|邀约文案|是什么|什么意思)", current) and not re.search(r"完整|正式|执行方案", current):
         return None
     if not previous and re.search(r"^(?:(?:请问|请解释|请|帮我|麻烦)\s*)*(?:如何|怎么|怎样|为什么|是否|什么是|修改|改写|润色|调整|优化|补充|解释|点评|分析)|^(?:这个|这份|上述|刚才|已有|原有|既有|他们)", current):
