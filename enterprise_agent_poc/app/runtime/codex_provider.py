@@ -235,6 +235,12 @@ class CodexRuntimeManager:
                     token_expires_at=token_expires_at,
                 )
                 return codex
+            except asyncio.CancelledError:
+                # A cancelled startup may own a client not yet in the cache.
+                if 'codex' in locals():
+                    try:await asyncio.wait_for(codex.close(),timeout=2)
+                    except (Exception,asyncio.CancelledError):pass
+                raise
             except Exception as exc:
                 self._start_event(profile, "runtime_start_failed", stage=stage)
                 if 'codex' in locals():

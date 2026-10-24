@@ -199,12 +199,21 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
     async def task_create_session(*args,**options):
         from app.preview_brand_topics import session_instructions
         if len(args)>1:args=(args[0],session_instructions(main,text_task_context,args[1]),*args[2:])
-        return await original_create_session(*args,**task_options(options))
+        return await preview_start(original_create_session,args,task_options(options))
     async def task_resume_session(*args,**options):
         from app.preview_brand_topics import session_instructions
         if options.get('developer_instructions'):
             options={**options,'developer_instructions':session_instructions(main,text_task_context,options['developer_instructions'])}
-        return await original_resume_session(*args,**task_options(options))
+        return await preview_start(original_resume_session,args,task_options(options))
+    async def preview_start(operation,args,options):
+        from app.preview_runtime_start import guarded_start
+        task_id=options['task_id'];profile=args[0]
+        with main.store.connection() as c:
+            row=c.execute('select tenant_id from tasks where id=?',(task_id,)).fetchone()
+        if not row or row['tenant_id']!=profile.tenant_id:raise PermissionError('Preview任务身份不匹配')
+        return await guarded_start(operation(*args,**options),
+            lambda:main.product_store.cancellation_requested(task_id,profile.tenant_id),
+            lambda event:main.manager._start_event(profile,event))
     main.runtime.create_session,main.runtime.resume_session=task_create_session,task_resume_session
     from app.preview_image_execution import PreviewImageExecution
     authorization_path = ROOT.parent / 'preview-image-authorization.v2.json'
@@ -281,6 +290,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             if code=='MODEL_TOOL_UNAVAILABLE' and budget.task_output_incomplete(task['id']):
                 code='MODEL_OUTPUT_INCOMPLETE'
             result.update(error_code=code, user_message=PREVIEW_ERRORS.get(code, PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE']))
+            if code=='PREVIEW_RUNTIME_START_TIMEOUT':
+                result['user_message']='任务启动超时，已停止等待；本次不会自动重试，请保留诊断ID。'
             if code=='MODEL_OUTPUT_INCOMPLETE':
                 from app.preview_long_output import incomplete_message
                 result['user_message']=incomplete_message(task.get('agent_id'))

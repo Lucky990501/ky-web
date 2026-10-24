@@ -134,6 +134,8 @@ def bounded_embedding_batches(texts, model):
 
 
 def preview_task_failure(task, trace, denied):
+    if any(x.get('event')=='preview_start_timeout' for x in trace.get('lifecycle_events',[]) if isinstance(x,dict)):
+        return 'PREVIEW_RUNTIME_START_TIMEOUT'
     if task.get('agent_id')=='campaign-agent' and 'failed' in str(trace.get('structured_result_status','')):
         return 'ACTIVITY_PLAN_VALIDATION_FAILED'
     if denied:
