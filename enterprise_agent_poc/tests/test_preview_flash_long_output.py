@@ -50,13 +50,24 @@ def test_wechat_lengths_preserved_and_full_html_fixture(words):
     assert html.count('学')==words and '完整结尾。' in html and '导语。' in html
 
 
-def test_clarification_and_forced_tool_do_not_receive_long_final_policy():
+def test_preparation_receives_space_but_forced_tool_keeps_contract():
     b=body('campaign-agent');b.pop('text')
     out,_=bounded_text_output(b,PRICES,'campaign-agent')
-    assert out['max_output_tokens']==4096 and out['reasoning']['effort']=='high'
+    assert out['max_output_tokens']==16384 and out['reasoning']['effort']=='low'
+    assert apply_policy(b,'campaign-agent')[1]['phase']=='activity_preparation'
     b=body();b['tool_choice']={'type':'function','name':'mcp__platform__enterprise_config_get'}
     out,meta=apply_policy(b,'preview-wechat-agent')
     assert out==b and meta['phase']=='unchanged'
+
+
+def test_exact_task_terminal_classifies_generic_sdk_failure(tmp_path):
+    meter=PreviewBudget(tmp_path)
+    meter.observe({'event':'text_http_terminal','task_id':'fixture-other','status':'incomplete'})
+    assert not meter.task_output_incomplete('fixture-task')
+    meter.observe({'event':'text_http_terminal','task_id':'fixture-task','status':'incomplete'})
+    assert meter.task_output_incomplete('fixture-task')
+    meter.observe({'event':'text_http_terminal','task_id':'fixture-task','status':'completed'})
+    assert not meter.task_output_incomplete('fixture-task')
 
 
 @pytest.mark.parametrize('agent',['copywriting-agent','preview-wechat-agent','campaign-agent'])

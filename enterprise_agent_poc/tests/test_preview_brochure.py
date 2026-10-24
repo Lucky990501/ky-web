@@ -127,6 +127,17 @@ def test_transparent_logo_never_adds_background_plate():
         assert result.size==source.size
 
 
+def test_poster_existing_header_is_preserved_without_second_logo():
+    source=Image.new('RGB',(600,1000),'lightblue')
+    ImageDraw.Draw(source).rectangle((450,25,560,90),fill='blue')
+    body=io.BytesIO();source.save(body,'PNG')
+    logo=Image.new('RGBA',(240,80),(0,0,0,0))
+    ImageDraw.Draw(logo).rectangle((5,5,234,74),fill='red')
+    raw=io.BytesIO();logo.save(raw,'PNG')
+    content,where=overlay_preview_logo(body.getvalue(),raw.getvalue(),None)
+    assert content==body.getvalue() and not where['applied']
+
+
 def test_legacy_white_plate_resolves_only_exact_owned_brochure_artifact(image_fixture):
     from app.preview_image_layout import original_brochure_key
     executor,actors,calls=image_fixture;actor=actors[0]

@@ -15,7 +15,8 @@ def activity_schema_request(body, agent_id):
 def apply_policy(body, agent_id, *, controlled=False):
     """Raise low SDK defaults only for a supported final business-content phase.
 
-    Activity clarification/tool discovery keeps the old contract. WeChat can
+    Activity preparation can already contain a full draft before JSON conversion.
+    Ordinary auto/text preparation therefore needs the same output space. WeChat can
     answer directly without a tool, so an auto/text turn is a content phase.
     Explicit forced-tool turns and all independent controlled grants are exempt.
     """
@@ -24,6 +25,10 @@ def apply_policy(body, agent_id, *, controlled=False):
     if not controlled and body.get('model') == 'deepseek-flash':
         if activity_schema_request(body, agent_id):
             phase = 'activity_complete_json'
+        elif (agent_id == 'campaign-agent'
+              and body.get('tool_choice', 'auto') in ('auto', 'none', None)
+              and ((body.get('text') or {}).get('format') or {}).get('type', 'text') == 'text'):
+            phase = 'activity_preparation'
         elif (agent_id == 'preview-wechat-agent'
               and body.get('tool_choice', 'auto') in ('auto', 'none', None)
               and ((body.get('text') or {}).get('format') or {}).get('type', 'text') == 'text'):

@@ -308,6 +308,17 @@ class PreviewBudget:
                 return value
         return None
 
+    def task_output_incomplete(self, task_id):
+        # Exact Task binding; the latest terminal event is authoritative even
+        # when the SDK wraps an incomplete response as a generic runtime error.
+        with sqlite3.connect(self.path) as conn:
+            rows = conn.execute("SELECT payload FROM observations WHERE payload LIKE ? ORDER BY rowid DESC", ('%' + task_id + '%',)).fetchall()
+        for (payload,) in rows:
+            value = json.loads(payload)
+            if value.get('task_id') == task_id and value.get('event') == 'text_http_terminal':
+                return value.get('status') == 'incomplete'
+        return False
+
     def summary(self):
         with sqlite3.connect(self.path) as conn:
             rows = conn.execute("SELECT kind,ceiling FROM requests").fetchall()

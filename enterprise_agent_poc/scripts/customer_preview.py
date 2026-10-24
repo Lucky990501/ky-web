@@ -278,6 +278,8 @@ def create_preview(root, api_port=18920, mcp_port=18921, credentials=None, prici
             trace = json.loads(row['payload']) if row else {}
             denial=budget.task_denial(task)
             code = preview_task_failure(task, trace, denial)
+            if code=='MODEL_TOOL_UNAVAILABLE' and budget.task_output_incomplete(task['id']):
+                code='MODEL_OUTPUT_INCOMPLETE'
             result.update(error_code=code, user_message=PREVIEW_ERRORS.get(code, PREVIEW_ERRORS['MODEL_TOOL_UNAVAILABLE']))
             if code=='MODEL_OUTPUT_INCOMPLETE':
                 from app.preview_long_output import incomplete_message

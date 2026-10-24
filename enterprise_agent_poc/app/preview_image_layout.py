@@ -66,12 +66,11 @@ def overlay_preview_logo(content,logo,mode,anchor=None):
         # A local, conservative occupancy check, NOT a universal logo/OCR
         # detector. Any logo, text, photo or uncertain content in the header
         # prevents automatic overlay. Never erase pixels to make space.
-        if mode in {'brochure_front','brochure_back'}:
-            header=canvas.crop((0,0,canvas.width,max(1,round(canvas.height*.16)))).convert('RGB')
-            header.thumbnail((720,120),Image.Resampling.LANCZOS)
-            if max(ImageStat.Stat(header).stddev)>7:
-                return content,{'policy':'preview-transparent-logo-v3','layout_mode':mode,'applied':False,
-                    'reason':'existing_logo_or_content_preserved','detection':'conservative_header_occupancy_not_semantic_ocr'}
+        header=canvas.crop((0,0,canvas.width,max(1,round(canvas.height*.16)))).convert('RGB')
+        header.thumbnail((720,120),Image.Resampling.LANCZOS)
+        if max(ImageStat.Stat(header).stddev)>7:
+            return content,{'policy':'preview-transparent-logo-v3','layout_mode':mode,'applied':False,
+                'reason':'existing_logo_or_content_preserved','detection':'conservative_header_occupancy_not_semantic_ocr'}
         # Alpha-composite ONLY the original transparent PNG, no plate, mask,
         # white rectangle or background fill. All other pixels stay untouched.
         canvas.alpha_composite(mark,(x+padding,y+padding))

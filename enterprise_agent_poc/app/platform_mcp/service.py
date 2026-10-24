@@ -395,7 +395,7 @@ class PlatformMCPService:
                     storage_key = provider_key
                     brand_placement=None
                     if logo_bytes is not None:
-                        if canonical_submission and (item.get('layout_mode') in {'brochure_front','brochure_back'} or item.get('logo_optimized') or item.get('logo_anchor')):
+                        if canonical_submission:
                             from app.preview_image_layout import overlay_preview_logo
                             image,brand_placement=overlay_preview_logo(image,logo_bytes,item.get('layout_mode'),item.get('logo_anchor'))
                         else:image = overlay_brand_logo(image, logo_bytes)
