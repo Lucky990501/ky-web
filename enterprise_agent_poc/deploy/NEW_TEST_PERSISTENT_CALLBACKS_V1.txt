@@ -86,6 +86,136 @@ INSTALLATION CONTRACT — existing authorized material installer only
   authorization denial, original801 artifacts, loaded unit identities and live
   health. Never use activation or deliberate failure as installation-only test.
 
+BOUNDED SUCCESSOR: EXISTING_RUNTIME_APPLICATION_UPGRADE_V1
+This is an explicit alternative to step2's COMPLETE_RUNTIME_ADOPTION_V1, ONLY
+for instance-mif0a40l/eaw-test, unchanged existing Runtime,801->33fc and exact801
+recovery. It is NOT a new full Runtime qualification or an installation grant.
+Absent runtime_contract retains the OLD complete-runtime behavior. Unknown,
+mixed or downgraded records fail closed. Old79065 cannot consume this alternative:
+it requires runtime_closure_receipt, which this contract forbids. New complete
+Tooling Source/tree/blob pins, bootstrap identity and independent authorization
+are required; old pins, grants and installation receipts cannot approve new bytes.
+
+EXACT PAIR
+Executor baseline79065f64e9f60965f916d209a826a754f690bab2
+Tree db133561e053918e7d41a2e039122e849c4fbb56; successor direct Git parent79065.
+Application801fd27a92f32ecc87e9aec1a8c253a8942d1e92
+Tree c2daa36435c384b4d4836b8e2b3ed65fe3e05f09.
+Target33fc8d4d3482c0a854008a8d7a272b9e3b0537b8
+Tree fd54a444664e967845d77db8848607ca6e9bb6d8; direct parent801.
+No application bytes, migrations, Runtime, PG/Redis units or data are modified
+by this contract adaptation. Existing staging still protects application bytes.
+
+EVIDENCE -- ACTUAL OBSERVATIONS, NOT A FIVE-PASS JSON
+Policy selects runtime_contract=EXISTING_RUNTIME_APPLICATION_UPGRADE_V1,
+runtime_reuse_evidence=<existing protected observation record>, runtime_roots
+and runtime_profile_sha256=canonical digest of THAT record, not a sandbox profile
+or old full-qualification closure. runtime_closure_receipt must be absent.
+Existing grant and technical decision bind the complete policy/request as before.
+The observation has contract above and exact status
+OBSERVED_EXISTING_RUNTIME_NOT_FULL_QUALIFICATION; environment/test host,
+runtime_root=/opt/enterprise-agent-test-delivery/runtime, runtime_roots,
+executor_baseline/source+tree, successor tooling/source+tree+git_parents,
+predecessor/source+tree, target/source+tree+git_parents, operator, exact three units,
+issued_at/expires_at(max4h), runtime_mutation_authority=false,
+maintenance_exclusion=NO_CONCURRENT_RUNTIME_OR_UNIT_MAINTENANCE,
+runtime_inventory_sha256, mountinfo_sha256, dependency_files, executables,
+launcher_files and persistent_processes. No real record is issued by this code.
+
+Inventory is fresh read-only runtime_inventory(...,protected=True,
+timezone_hardlinks=<fixed PG timezone path>), type TEST_EXISTING_RUNTIME_INVENTORY_V1,
+still dependency_closure_proven=false. It cannot be relabeled as full qualification.
+The runtime_roots include the entire existing Runtime plus its actual external
+stdlib/dependency roots, canonical and
+nonoverlapping. All importable Python/extension/stdlib bytes and symlink targets
+must be inside these approved inventoried roots. A subset of imported modules,
+old package install receipt, G3 result or active process is not this evidence.
+The full current inventory digest must match the independent observation, not
+be replaced with a historical/differently scoped inventory. No relocation probe
+is needed for unchanged Runtime; the candidate's new read-only application mount,
+exact command/CWD and actual loading/health ARE checked by existing callbacks.
+
+dependency_files maps canonical paths to SHA256, including all live executable
+mappings for all FIVE units and both original repository and new protected
+Tooling test_delivery_fixture.py launchers. executables maps api/mcp/worker/
+postgresql/redis to exact Runtime-resident /proc/PID/exe paths. launcher_files
+contains exactly those two fixed launcher paths/pins. persistent_processes has
+postgresql/redis -> {pid,start_time,argv_sha256}; no command text is audited.
+Observation reads actual unit User/FragmentPath/DropInPaths, actual process UID,
+exe/maps, start time and persistent command hash; unpinned/deleted mappings,
+unexpected service/config/PID changes fail. PG/Redis must stay active and retain
+their exact processes. Only API/MCP/Worker may be inactive while recovering.
+PG/Redis systemctl access added here is SHOW ONLY, never stop/start/restart.
+Whole host mountinfo digest must remain equal; any unrelated mount change is a
+conservative STOP requiring a new independently authorized observation, not waiver.
+
+All Runtime inventory verification runs under the existing global lock before
+claim/effects and again after candidate startup/health. Expiry, mount, launcher,
+dependency and actual process checks run at each existing authority check before
+and after effects, including recovery. Concurrent privileged Runtime/unit material
+maintenance is excluded for the operation window by the actual authority; flock
+does not magically exclude unrelated Root writers. Unplanned maintenance => STOP.
+Incomplete candidate startup or new dependency => retained UNKNOWN, not success.
+
+TIMEZONE DATA EXCEPTION ONLY
+Do NOT split the368 paths. Runtime-only inspection may accept regular0644 Root0:0
+files ONLY below runtime/postgresql-16.6/share/timezone. All aliases must occur in
+the complete inventoried directory entries and group by actual(device,inode),
+same hash, member count==nlink. No outside aliases, directory aliases, unknown
+members or untrusted ACL/ancestors. Re-enumeration and second hash/stat checks
+reject changes; mount identity and maintenance exclusion are also required.
+Record/code trust() and the old complete-runtime contract retain nlink1.
+
+INSTALL ADMISSION -- STILL BLOCKED, NO ROOT SSH SUBSTITUTE
+01 maintains this executor successor;06 authenticates authority and performs
+later separately authorized installation/execution. Current evidence identifies
+NO qualified new-host installation action; G2 remains NOT_ISSUED. The historical
+old-host installers cannot be replayed. This candidate does not provide a generic
+Root installer, create approvals or claim that Root SSH is a qualified channel.
+Only after an existing controlled entry is actually designated/reviewed and given
+exact technical installation authority may it stage this complete Tooling tree,
+its independently approved protected policy/evidence, original801 artifacts,
+fixed operations/releases/drop-in directories and original global lock inode.
+No Runtime normalization/installation, PG/Redis replacement or service activation
+belongs to that installation action. Scope must bind source/tree/material pins,
+host/operator/paths/window and durable audit. Verify first bytes independently,
+then run verify_installation(policy) under the established lock. This function
+is a READ-ONLY FINALIZER, never the installer or permission to invoke Root SSH.
+Partial/unconfirmed installs remain preserved and BLOCKED; do not overwrite/replay.
+Identical installed bytes may be read-verified again; installation idempotency
+cannot be claimed without the actual designated entry. New installation, later
+activation and independent recovery remain distinct authorized operations.
+
+REUSED DATA PROOF / FINAL ACCEPTANCE
+Retain original113 P1 and independent131 tests; no claim they were rerun by06.
+06 G3 PASS_ISOLATED operation96e1e8c5-cbdf-46b5-8179-87cd776cab02,
+receipt SHA25685ed851e50060d22a3ddc3a3dca027bc2b7f4f2440cd0a9d15ac090a946636e2:
+33fc five turns retained; restored801 reads/writes sixth;44 tables/69 FKs checked.
+It is NOT current live data admission. Existing request-bound data compatibility
+receipt must bind then-current backup/restore point and both exact artifacts.
+Recover never restores an old database over legitimate new data. Expiry can
+leave services stopped: obtain a NEW valid exact recovery grant; do not bypass.
+Installation review, native service switch/recovery, public browser acceptance
+and actual current-data proof remain NOT_EXECUTED by this code candidate.
+
+OFFLINE CHANGE VALIDATION (2026-10-25)
+189 PASS/0 FAIL/0 ERROR/0 SKIP on existing fallback Ubuntu22.04 ordinary UID1000,
+targeted tests ONLY, not Full pytest/Stage2/Build or PRIMARY validation:
+63 new reuse tests +112 original callbacks +1 real temporary-file flock test
++11 original complete-runtime profile cases +2 original inventory/link cases.
+Real temporary hardlinks are used; owner/ACL/process/unit metadata are explicit
+Fixture doubles, never actual protected installation or Native service evidence.
+The actual execute() consumer is exercised with a synthetic host/authority/lock
+and callback effect; it is NOT a real signed Root operation or Native activation.
+New observer checks actual mapped device/inode as well as named file hashes.
+No loaded old inode may be accepted merely because the same path now hashes well.
+Final JUnit SHA256ca8ae114c8369cbf44f988a33dfe1c6b7a1ec82d06302453e5740b2ad73f5d9f.
+Retained local evidence: .minimal-application-release-evidence-v1/linux-final.xml.
+Earlier Windows131PASS/20FAIL (Linux-only primitives/sandbox hardlinks unavailable)
+and intermediate Linux fixture failures are retained, not relabeled as PASS or
+deleted. Final Linux tests corrected metadata/host Fixtures without weakening
+the production checks. Independent06 QA and actual environment remain pending.
+
 ACTIVATION / RECOVERY
 New activation requires direct801 predecessor, accurate current CWD per role,
 actual prior Git identity/archive/payload match and exact target Git identity.

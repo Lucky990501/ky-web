@@ -21,6 +21,7 @@ import uuid
 
 ACTION = 'adopt_reusable_test_driver_v1'
 PROFILE = 'PRIVATE_STAGE2_TMPFS_V2'
+TIMEZONE_DATA_ROOT = Path('/opt/enterprise-agent-test-delivery/runtime/postgresql-16.6/share/timezone')
 
 
 def artifact_roles(request):
@@ -156,7 +157,7 @@ def tree_pins(root):
     return out
 
 
-def runtime_inventory(roots, *, protected=False):
+def runtime_inventory(roots, *, protected=False, timezone_hardlinks=None):
     """Read-only reusable dependency graph; never install/chmod or import it.
 
     A user-owned inventory is preparation, NOT executable trust. Existing Root
@@ -167,6 +168,25 @@ def runtime_inventory(roots, *, protected=False):
     loader dependencies and startup; inventory alone does not assert closure.
     """
     paths = [Path(r) for r in roots]
+    timezone = Path(timezone_hardlinks) if timezone_hardlinks else None
+    if timezone:
+        need(protected and timezone == TIMEZONE_DATA_ROOT,
+             'EXACT_TIMEZONE_SCOPE')
+        trust(timezone)
+        need(any(timezone.is_relative_to(r) for r in paths), 'TIMEZONE_OUTSIDE_INVENTORY')
+    def runtime_trust(node):
+        # This exception is DATA ONLY. trust(), record reads and code pins keep
+        # their original single-link requirement. All aliases are checked below.
+        s = node.lstat()
+        if timezone and stat.S_ISREG(s.st_mode) and s.st_nlink > 1 and node.is_relative_to(timezone):
+            trust(node.parent)
+            need(node.resolve(strict=True) == node and s.st_uid == s.st_gid == 0
+                 and stat.S_IMODE(s.st_mode) == 0o644
+                 and s.st_dev == timezone.stat().st_dev
+                 and not any(x.startswith('system.posix_acl') for x in os.listxattr(node)),
+                 'TIMEZONE_DATA_TRUST')
+        else:
+            trust(node)
     need(paths and len(paths) == len(set(paths)), 'RUNTIME_ROOT_SET')
     need(not protected or (sys.platform == 'linux' and hasattr(os, 'listxattr')),
          'PROTECTED_RUNTIME_LINUX_ONLY')
@@ -190,15 +210,49 @@ def runtime_inventory(roots, *, protected=False):
                      'RUNTIME_LINK_OUTSIDE_CLOSURE')
                 value.update(link=os.readlink(p), target=str(target))
                 if protected:
-                    trust(p.parent); trust(target)
+                    trust(p.parent); runtime_trust(target)
                     need(s.st_uid == s.st_gid == 0, 'RUNTIME_LINK_OWNER')
             else:
                 if protected:
-                    trust(p)
+                    runtime_trust(p)
                 if p.is_file():
                     value['sha256'] = sha(p)
+            if timezone:
+                value.update(device=s.st_dev, inode=s.st_ino, links=s.st_nlink,
+                             mtime_ns=s.st_mtime_ns, ctime_ns=s.st_ctime_ns)
             entries[str(p)] = value
-    return {'contract': 'TEST_RUNTIME_INVENTORY_V1', 'roots': list(map(str, paths)),
+    if timezone:
+        groups = {}
+        directories = set()
+        for name, value in entries.items():
+            node = Path(name)
+            key = (value['device'], value['inode'])
+            if node.is_dir() and not node.is_symlink():
+                need(key not in directories, 'RUNTIME_DIRECTORY_ALIAS')
+                directories.add(key)
+            if 'sha256' in value and value['links'] > 1:
+                need(node.is_relative_to(timezone), 'HARDLINK_OUTSIDE_TIMEZONE')
+                groups.setdefault(key, []).append(name)
+        for names in groups.values():
+            values = [entries[n] for n in names]
+            need(all(v['links'] == len(names) and v['sha256'] == values[0]['sha256']
+                     for v in values), 'TIMEZONE_ALIAS_SET_NOT_CLOSED')
+        # Re-enumeration detects additions/removals, inode replacement and metadata
+        # drift during hashing. The approved maintenance exclusion must also hold;
+        # the release lock is NOT a filesystem-wide lock against other Root work.
+        observed = {str(node): node.lstat() for root in paths
+                    for node in (root, *(sorted(root.rglob('*')) if root.is_dir() else ())) }
+        need(set(observed) == set(entries), 'RUNTIME_INVENTORY_DRIFT')
+        for name, s in observed.items():
+            v = entries[name]
+            need((s.st_dev,s.st_ino,s.st_nlink,s.st_mtime_ns,s.st_ctime_ns,s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode)) ==
+                 (v['device'],v['inode'],v['links'],v['mtime_ns'],v['ctime_ns'],v['uid'],v['gid'],v['mode']),
+                 'RUNTIME_INVENTORY_DRIFT')
+            if 'sha256' in v:
+                runtime_trust(Path(name))
+                need(sha(name) == v['sha256'], 'RUNTIME_INVENTORY_DRIFT')
+    return {'contract': 'TEST_EXISTING_RUNTIME_INVENTORY_V1' if timezone else 'TEST_RUNTIME_INVENTORY_V1',
+            'roots': list(map(str, paths)),
             'entries': entries, 'protected_paths_verified': protected,
             'dependency_closure_proven': False}
 

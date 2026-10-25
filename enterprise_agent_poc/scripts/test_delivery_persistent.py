@@ -29,10 +29,145 @@ SOURCE801 = '801fd27a92f32ecc87e9aec1a8c253a8942d1e92'
 TREE801 = 'c2daa36435c384b4d4836b8e2b3ed65fe3e05f09'
 ARCHIVE801 = '9619fbc84512af93de9735527ccb44be12b00bd135d4da3a5675347b13a7601e'
 MANIFEST801 = '27dcafea650b528ffae020c8a4f8f4f6f00946460be43fb6458fe50de66ab5df'
+REUSE = 'EXISTING_RUNTIME_APPLICATION_UPGRADE_V1'
+FULL_RUNTIME = 'COMPLETE_RUNTIME_ADOPTION_V1'
+EXECUTOR790 = {'source':'79065f64e9f60965f916d209a826a754f690bab2',
+              'tree':'db133561e053918e7d41a2e039122e849c4fbb56'}
+SOURCE33 = '33fc8d4d3482c0a854008a8d7a272b9e3b0537b8'
+TREE33 = 'fd54a444664e967845d77db8848607ca6e9bb6d8'
+RUNTIME = BASE/'runtime'
+TIMEZONE = RUNTIME/'postgresql-16.6/share/timezone'
 ROOT = Path('/private/tmp/ky-web-stage2-readiness.standard-b1-v1')
 UNITS = {r: 'enterprise-agent-standard-test-'+r+'.service' for r in ('api', 'mcp', 'worker')}
 EFFECTS = ('stage', 'stopworker', 'stopapi', 'stopmcp', 'bindapi', 'bindmcp',
            'bindworker', 'reload', 'startmcp', 'startapi', 'startworker', 'health')
+
+
+def runtime_contract(policy):
+    value = policy.get('runtime_contract', FULL_RUNTIME)
+    p.require(value in (FULL_RUNTIME, REUSE), 'RUNTIME_CONTRACT_VERSION')
+    p.require((value == REUSE) == ('runtime_reuse_evidence' in policy), 'RUNTIME_CONTRACT_MIXED')
+    if value == REUSE:
+        p.require('runtime_closure_receipt' not in policy, 'RUNTIME_CONTRACT_MIXED')
+    return value
+
+
+def reuse_scope(policy, request=None):
+    p.require(policy['context'] == CONTEXT and policy['environment'] == 'test'
+        and policy['hostname'] == 'instance-mif0a40l' and policy['units'] == UNITS
+        and socket.gethostname() == policy['hostname']
+        and policy['service_user'] == 'eaw-test', 'RUNTIME_REUSE_CONTEXT')
+    # Bind this successor to the reviewed executor, not a newly invented issuer.
+    p.require(policy['tooling']['git_parents'] == [EXECUTOR790['source']], 'RUNTIME_REUSE_EXECUTOR_PARENT')
+    if request is not None:
+        activate = request['mode'] == 'activate'
+        expected = (SOURCE33, TREE33) if activate else (SOURCE801, TREE801)
+        predecessor = SOURCE801 if activate else SOURCE33
+        p.require((request['candidate']['source'],request['candidate']['tree']) == expected
+            and request['observed_predecessor']['source'] == predecessor,
+            'RUNTIME_REUSE_EXACT_PAIR')
+        if activate:
+            p.require(request['candidate']['git_parents'] == [SOURCE801], 'RUNTIME_REUSE_EXACT_PAIR')
+
+
+def reuse_evidence(policy):
+    reuse_scope(policy)
+    record = p.read(p.trusted(policy['runtime_reuse_evidence']))
+    now = int(time.time())
+    p.require(p.digest(record) == policy['runtime_profile_sha256']
+        and record['contract'] == REUSE
+        and record['status'] == 'OBSERVED_EXISTING_RUNTIME_NOT_FULL_QUALIFICATION'
+        and record['environment'] == 'test' and record['hostname'] == policy['hostname']
+        and record['runtime_root'] == str(RUNTIME) and record['runtime_roots'] == policy['runtime_roots']
+        and str(RUNTIME) in record['runtime_roots']
+        and record['executor_baseline'] == EXECUTOR790 and record['tooling'] == policy['tooling']
+        and record['predecessor'] == {'source':SOURCE801,'tree':TREE801}
+        and record['target'] == {'source':SOURCE33,'tree':TREE33,'git_parents':[SOURCE801]}
+        and record['operator'] == policy['operator'] and record['units'] == UNITS
+        and record['maintenance_exclusion'] == 'NO_CONCURRENT_RUNTIME_OR_UNIT_MAINTENANCE'
+        and record['runtime_mutation_authority'] is False
+        and type(record['issued_at']) is int and type(record['expires_at']) is int
+        and record['issued_at'] <= now < record['expires_at']
+        and 0 < record['expires_at']-record['issued_at'] <= 14400,
+        'RUNTIME_REUSE_EVIDENCE')
+    p.require(record['mountinfo_sha256'] == p.sha('/proc/self/mountinfo'), 'RUNTIME_MOUNT_DRIFT')
+    return record
+
+
+def observe_reused_runtime(policy, record, command=None):
+    """Read actual live executable mappings; no imports/probes as privileged app.
+
+    Root-approved evidence must enumerate the runtime/stdlib roots AND external
+    executable dependencies. Active processes are observations, not qualification.
+    PG/Redis must remain active. API/MCP/Worker may be inactive during recovery.
+    """
+    import pwd
+    import hashlib
+    command = command or systemctl
+    from scripts import test_delivery_adoption as adoption
+    units = {**UNITS, **{r:'enterprise-agent-standard-test-'+r+'.service' for r in ('postgresql','redis')}}
+    p.require(set(record['executables']) == set(units) and record['dependency_files'], 'RUNTIME_DEPENDENCY_SET')
+    launchers = {str(BASE/'repository/enterprise_agent_poc/scripts/test_delivery_fixture.py'),
+                 str(BASE/'tooling/enterprise_agent_poc/scripts/test_delivery_fixture.py')}
+    p.require(set(record['launcher_files']) == launchers
+        and all(name in record['dependency_files'] and record['dependency_files'][name] == pin
+                for name,pin in record['launcher_files'].items())
+        and set(record['persistent_processes']) == {'postgresql','redis'}, 'RUNTIME_LAUNCH_IDENTITY')
+    for name, pin in record['dependency_files'].items():
+        p.require(p.sha(adoption.trust(name)) == pin, 'RUNTIME_DEPENDENCY_DRIFT')
+    for role, unit in units.items():
+        row = command('show', unit)
+        p.require(row['User'] == 'eaw-test', 'RUNTIME_SERVICE_USER')
+        for name in [row['FragmentPath'], *row.get('DropInPaths','').split()]:
+            managed = '/etc/systemd/system/'+unit+'.d/90-standard-test-release.conf'
+            if role in UNITS and name == managed:
+                text = p.trusted(name).read_text()
+                p.require(text in (dropin(role,SOURCE801),dropin(role,SOURCE33)), 'RUNTIME_MANAGED_UNIT')
+            else:
+                p.require(name in policy['service_files']
+                    and p.sha(p.trusted(name)) == policy['service_files'][name], 'RUNTIME_UNIT_DRIFT')
+        if row['ActiveState'] in ('failed','inactive') and role in UNITS:
+            continue
+        p.require(row['ActiveState'] == 'active' and row['MainPID'].isdigit()
+                  and int(row['MainPID']) > 0, 'RUNTIME_SERVICE_NOT_ACTIVE')
+        proc = Path('/proc')/row['MainPID']
+        def started(): return (proc/'stat').read_text().rsplit(')',1)[1].split()[19]
+        before = started()
+        if role in ('postgresql','redis'):
+            p.require(record['persistent_processes'][role] ==
+                {'pid':row['MainPID'], 'start_time':before,
+                 'argv_sha256':hashlib.sha256((proc/'cmdline').read_bytes()).hexdigest()},
+                'PERSISTENT_RUNTIME_PROCESS_DRIFT')
+        p.require(proc.stat().st_uid == pwd.getpwnam('eaw-test').pw_uid, 'RUNTIME_PROCESS_UID')
+        exe = os.readlink(proc/'exe')
+        p.require(exe == record['executables'][role] and Path(exe).is_relative_to(RUNTIME), 'RUNTIME_EXECUTABLE')
+        actual_exe, named_exe = (proc/'exe').stat(), adoption.trust(exe).stat()
+        p.require((actual_exe.st_dev,actual_exe.st_ino) == (named_exe.st_dev,named_exe.st_ino),
+                  'RUNTIME_EXECUTABLE_INODE')
+        loaded = {exe}
+        for line in (proc/'maps').read_text().splitlines():
+            fields = line.split(None,5)
+            if len(fields) == 6 and 'x' in fields[1] and fields[5].startswith('/'):
+                loaded.add(fields[5])
+                mapped = adoption.trust(fields[5]).stat()
+                p.require((os.major(mapped.st_dev),os.minor(mapped.st_dev),mapped.st_ino) ==
+                          (*[int(part,16) for part in fields[3].split(':')],int(fields[4])),
+                          'RUNTIME_MAPPING_INODE')
+        p.require(all(name in record['dependency_files'] for name in loaded), 'RUNTIME_UNPINNED_MAPPING')
+        for name in loaded:
+            p.require(p.sha(adoption.trust(name)) == record['dependency_files'][name], 'RUNTIME_LOADED_DRIFT')
+        p.require(started() == before and command('show',unit) == row, 'RUNTIME_PROCESS_DRIFT')
+
+
+def verify_reused_runtime(policy, *, inventory=True):
+    record = reuse_evidence(policy)
+    if inventory:
+        from scripts import test_delivery_adoption as adoption
+        observed = adoption.runtime_inventory(policy['runtime_roots'], protected=True,
+                                               timezone_hardlinks=str(TIMEZONE))
+        p.require(p.digest(observed) == record['runtime_inventory_sha256'], 'EXISTING_RUNTIME_DRIFT')
+    observe_reused_runtime(policy, record)
+    return record
 
 
 def recovery_evidence(request, policy):
@@ -220,6 +355,8 @@ def validate(request, policy, grant, decision, now):
             and request['observed_predecessor']['source'] == SOURCE801, 'EXACT_PREDECESSOR_REQUIRED')
     p.require(policy['operations_root'] == str(BASE/'operations')
               and policy['repository'] == str(BASE/'repository'), 'FIXED_CONTROLLER_PATHS')
+    if runtime_contract(policy) == REUSE:
+        reuse_scope(policy, request)
 
 
 def dropin(role, source):
@@ -237,8 +374,10 @@ def error_code(exc):
 
 
 def systemctl(action, unit=None):
+    readonly_units = tuple('enterprise-agent-standard-test-'+r+'.service' for r in ('postgresql','redis'))
     p.require(action in ('stop', 'start', 'daemon-reload', 'show') and
-              (unit in UNITS.values() if action != 'daemon-reload' else unit is None), 'FIXED_SERVICE_COMMAND')
+              (unit in (*UNITS.values(), *readonly_units) if action == 'show' else
+               unit in UNITS.values() if action != 'daemon-reload' else unit is None), 'FIXED_SERVICE_COMMAND')
     args = ['/usr/bin/systemctl', action]
     if unit:
         args.append(unit)
@@ -437,6 +576,8 @@ class Callbacks:
         target = str(ROOT/'releases'/self.request['candidate']['source']/'enterprise_agent_poc')
         self.verify_live({r: target for r in UNITS}, after=True)
         self.health_transport()
+        if runtime_contract(self.policy) == REUSE:
+            verify_reused_runtime(self.policy)
 
     def health_transport(self):
         from urllib.request import urlopen
@@ -548,7 +689,6 @@ def execute(request_path, policy_path, grant_path):
               and sys.flags.no_site and sys.dont_write_bytecode, 'PROTECTED_CONTROLLER_REQUIRED')
     request = p.read(p.trusted(request_path)); policy = p.read(p.trusted(policy_path))
     p.require(socket.gethostname() == policy['hostname'], 'HOST_IDENTITY')
-    verify_installation(policy)
     def authority(req):
         current = p.read(p.trusted(policy_path)); grant = p.read(p.trusted(grant_path))
         p.require(current == policy, 'POLICY_DRIFT')
@@ -557,7 +697,12 @@ def execute(request_path, policy_path, grant_path):
         marker = Path(policy['revocation_marker']); p.trusted(marker.parent, directory=True)
         p.require(not marker.exists() and not marker.is_symlink(), 'REVOKED')
         validate(req, policy, grant, p.read(record), int(time.time()))
+        if runtime_contract(policy) == REUSE:
+            # Fresh expiry/dependency checks through stop/start and recovery too.
+            verify_reused_runtime(policy, inventory=False)
     with context.release_lock() as verify_lock:
+        verify_lock()
+        verify_installation(policy)
         def check(req): verify_lock(); authority(req)
         check(request)
         append = p.delivery_journal(policy['operations_root'], request)
@@ -603,6 +748,22 @@ def verify_installation(policy):
     expected = {str(root/name.removeprefix(prefix)):hashlib.sha256(p.git(policy['repository'],
         'show', policy['tooling']['source']+':'+name)).hexdigest() for name in names}
     p.require(actual == expected, 'INSTALL_GIT_BLOB_SET')
+    verify_runtime_installation(policy)
+    for path in (BASE/'operations', BASE/'releases', *(Path('/etc/systemd/system')/(u+'.d') for u in UNITS.values())):
+        p.trusted(path, directory=True)
+    p.require(p.sha(p.trusted(policy['recovery_archive'])) == ARCHIVE801
+              and p.sha(p.trusted(policy['recovery_manifest'])) == MANIFEST801, 'RECOVERY_INSTALL_PINS')
+    return {'status':'INSTALL_BYTES_VERIFIED_NOT_EXECUTION_AUTHORITY', 'tooling':policy['tooling']}
+
+
+def verify_runtime_installation(policy):
+    if runtime_contract(policy) == REUSE:
+        p.require(p.identity(policy['repository'], EXECUTOR790['source']) ==
+            {**EXECUTOR790,'git_parents':['3f683774e412ed405fb321c4b97a0d273d39f2b0']},
+            'RUNTIME_REUSE_EXECUTOR_BASELINE')
+        verify_reused_runtime(policy)
+        return
+    # Original complete-runtime acceptance remains unchanged, including nlink=1.
     from scripts import test_delivery_adoption as adoption
     runtime = adoption.runtime_inventory(policy['runtime_roots'], protected=True)
     closure = p.read(p.trusted(policy['runtime_closure_receipt']))
@@ -610,11 +771,6 @@ def verify_installation(policy):
         and closure['runtime_inventory_sha256'] == p.digest(runtime)
         and closure['status'] == 'PASS' and closure['checks'] == {k:'PASS' for k in
             ('dynamic_loader','python_imports','pgvector_load','redis_start','relocation')}, 'PERSISTENT_RUNTIME_CLOSURE')
-    for path in (BASE/'operations', BASE/'releases', *(Path('/etc/systemd/system')/(u+'.d') for u in UNITS.values())):
-        p.trusted(path, directory=True)
-    p.require(p.sha(p.trusted(policy['recovery_archive'])) == ARCHIVE801
-              and p.sha(p.trusted(policy['recovery_manifest'])) == MANIFEST801, 'RECOVERY_INSTALL_PINS')
-    return {'status':'INSTALL_BYTES_VERIFIED_NOT_EXECUTION_AUTHORITY', 'tooling':policy['tooling']}
 
 
 if __name__ == '__main__':
