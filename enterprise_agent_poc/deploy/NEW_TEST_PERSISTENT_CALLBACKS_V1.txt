@@ -109,8 +109,9 @@ action identifies interruption direction. Never delete staged data to fakePASS.
 Recovery is a SEPARATE authorized operation with mode recover and target EXACT
 801fd27a92f32ecc87e9aec1a8c253a8942d1e92 /treec2daa36435c384b4d4836b8e2b3ed65fe3e05f09.
 Archive and Manifest hashes above are enforced in code, not prefix matching.
-Request failed_operation_id must identify the original preserved activate
-request/failure hashes and its exact candidate as current predecessor. Inactive
+Request failed_operation_id identifies the preserved activate operation (or the
+latest interrupted recover operation), never a reused execution claim. An
+activate operation's exact candidate remains the observed predecessor. Inactive
 services are allowed only in recovery; running roles still require exact CWD,
 user, loaded-unit pins and original bytes. Mixed801/candidate requires an exact
 per-role snapshot and proper original801 recovery archive. Arbitrary third
@@ -126,11 +127,100 @@ existing global flock prevents concurrent operations. Intent is durable BEFORE
 each effect; result records actor, authority hash, source/target, Tooling,
 operation UUID, timestamp, action/result. No DSN, env, argv or credential dump.
 Audit failure before an effect prevents it. Failure after an effect leaves
-UNKNOWN plus preserved request/failure, never 'nothing written'. Failed service,
+UNKNOWN with preserved request/intent; failure.json exists only when the
+controller could durably write it. Never infer 'nothing written'. Failed service,
 audit or health does not silently auto-recover, re-claim or replay the operation.
 Separate recovery must remain authorized for the real recovery window; expiry
 can leave a partially switched Test requiring new recovery authorization. This
 is an explicit operational risk, not a reason to extend or ignore expiry.
+
+P1 SUCCESSOR — TRUSTED_UNFINISHED_INTENT_WITHOUT_FAILURE
+Base3f683774e412ed405fb321c4b97a0d273d39f2b0. No existing record is rewritten.
+SIGKILL, host loss or audit-write interruption can prevent failure.json. Catching
+BaseException is not a durability solution. Missing failure.json is not evidence
+of failure, and a missing PID is not evidence that an effect did not occur.
+
+Both recovery branches still require a NEW independent recovery technical grant,
+the existing global lock, exact801 target/artifact/schema/current-data checks,
+full protected installation pins and fixed command/service identities.
+TRUSTED_FAILURE_RECORD retains the normal recorded-failure recovery path.
+TRUSTED_UNFINISHED_INTENT_WITHOUT_FAILURE additionally requires at least one
+durable intent. Claim/request alone without failure is insufficient.
+
+The new recovery request adds two fields, both covered by its existing request
+hash/technical decision (no new issuer, authorization type or side-channel):
+  recovery_evidence: exact {filename: SHA256(raw bytes)} of the referenced
+    operation directory. Include request, claim, all intent/result records and
+    failure.json if present; never invent or edit a missing record.
+  recovery_observation: exact output of the read-only recovery_observation()
+    using the actual current policy/runtime under the existing trusted executor.
+    Contains classification, per-role state/PID/CWD, fixed managed override
+    source, protected staged-release receipt identities and service-file hashes.
+    No credentials, arbitrary argv, DSN or environment dump.
+These are factual inputs prepared through existing authorized inspection and
+approved in the independent recovery decision; production values must not be
+copied from synthetic tests. Expired historical activation authority is evidence
+only: it is never reused to authorize recovery. Current recovery grant validity
+continues to be checked before/after effects, as does the original lock inode.
+
+Evidence validation before effects:
+- Root-trusted paths, all raw-byte pins and original request/operation identity.
+- Exact claim request digest; a contiguous intent/result prefix in the fixed
+  stage/stop/bind/reload/start/health order. Each record has the correct prior
+  digest, operation/request digest, source/target, actor, executor and authority
+  identity. A failed result cannot be followed by more effects.
+- completion.json always rejects recovery of that operation. A health PASS
+  without completion is an ambiguous terminal and also rejects. Unknown extra
+  records, malformed records, broken chains and gaps reject; no salvage/truncate.
+- A later recovery referencing the same operation blocks bypass/repetition.
+  Inspect and reference that latest recovery instead. Its own durable prefix
+  and current snapshot must pass the same checks, with a fresh operation/grant.
+  A completed no-op recovery is a terminal too; no automatic retry.
+- Fresh running UID, fixed argv, executable digest, pinned loaded unit files,
+  exact live archive bytes and exact staged801/candidate file sets/receipts.
+  Absent staged releases are recorded as absent, not installed. A partial or
+  changed staged release rejects rather than being overwritten. Unknown unit
+  state, inactive service with a live PID, third version or unpinned override
+  rejects. Original801 archive and manifest hashes remain mandatory.
+
+State matrix (the audit prefix constrains what each role could have done):
+1 stage Intent/result, before any stop: roles must retain original state/CWD
+  and original801 configuration. Healthy complete801 => read-only no-op.
+2 stop Intent without PASS: that role may still be original or may be stopped.
+  Stop PASS before start Intent: it must not be running. Other roles must match
+  their own individual prefix; no blanket 'all failed is acceptable' rule.
+3 bind Intent: only that role's original or exact target override is allowed.
+  Bind PASS: exact target override required. Unentered bind cannot have changed.
+4 reload/start: a running restarted role must use the exact target CWD and
+  command. Stopped roles remain UNKNOWN. Never restart based on PID loss alone.
+5 all target processes running without a committed health/success terminal:
+  TARGET_RUNNING_UNKNOWN_NOT_SUCCESS. An independently granted801 recovery may
+  proceed only with the matching current snapshot and all compatibility gates.
+6 complete healthy801 with801 configuration and compatible audit prefix:
+  ALREADY_HEALTHY_801_NO_SERVICE_EFFECT; fresh API/MCP health required. Persist
+  the new read-only observation/completion only; do not stop/start/rebind/stage.
+7 mixed runtime/configuration: accepted only if independently observed AND
+  possible under the per-role prefix; unexplained changes reject. A request
+  cannot authorize a state impossible under its referenced intent sequence.
+8 trusted success terminal/conflicting terminal: reject as a recovery input,
+  even when a new recovery grant exists. Planned downgrade is a different scope.
+
+The new operation writes recovery-observation.json with request hash, original
+operation/audit head, evidence digest, original_status=UNKNOWN and actual state.
+This is not a historical failure receipt. It is exclusive/fsynced; a failed
+write blocks service effects. After staging, re-read original evidence, live
+payload and service state immediately before the first stop; drift blocks.
+Original request, intent, results and failure remain byte-identical.
+If recovery itself is interrupted, the same durable records and optional
+failure remain UNKNOWN; a further NEW independent recovery can reference it.
+No activation/recovery is replayed automatically. The code does not promise an
+atomic multi-service switch or recovery after physical loss of trusted evidence.
+Evidence corruption/loss, terminal ambiguity or external state changes require
+separate investigation, not relaxed guards or fabricated history.
+
+Offline fixture validation does not establish installation authority, actual
+protected lock qualification, real service recovery or Native PASS. Updated
+Tooling source/hash requires independent06 review and a new installation decision.
 
 BOUNDARY
 This task performs offline Fixture/Mock validation only. No SSH, Root install,

@@ -31,6 +31,159 @@ ARCHIVE801 = '9619fbc84512af93de9735527ccb44be12b00bd135d4da3a5675347b13a7601e'
 MANIFEST801 = '27dcafea650b528ffae020c8a4f8f4f6f00946460be43fb6458fe50de66ab5df'
 ROOT = Path('/private/tmp/ky-web-stage2-readiness.standard-b1-v1')
 UNITS = {r: 'enterprise-agent-standard-test-'+r+'.service' for r in ('api', 'mcp', 'worker')}
+EFFECTS = ('stage', 'stopworker', 'stopapi', 'stopmcp', 'bindapi', 'bindmcp',
+           'bindworker', 'reload', 'startmcp', 'startapi', 'startworker', 'health')
+
+
+def recovery_evidence(request, policy):
+    """Read an immutable, independently grant-pinned snapshot; never repair history.
+
+    Root ownership alone is not the evidence binding: the NEW recovery request
+    pins every original record byte, and therefore its independent grant does too.
+    The caller holds the existing global lock throughout this read and execution.
+    """
+    import uuid
+    opid = request['failed_operation_id']
+    p.require(str(uuid.UUID(opid)) == opid and opid != request['operation_id'], 'RECOVERY_OPERATION')
+    directory = p.trusted(Path(policy['operations_root'])/opid, directory=True)
+    pins = request['recovery_evidence']
+    p.require(isinstance(pins, dict) and pins, 'RECOVERY_EVIDENCE_REQUIRED')
+    actual = {f.name: p.sha(p.trusted(f)) for f in directory.iterdir()}
+    p.require(actual == pins, 'RECOVERY_EVIDENCE_DRIFT')
+    p.require('completion.json' not in actual, 'RECOVERY_TERMINAL_PRESENT')
+    original = p.read(directory/'request.json')
+    p.require(original['operation_id'] == opid and original['context'] == CONTEXT
+        and original['environment'] == 'test' and original['action'] == 'test_delivery'
+        and original['calls'] == {'text':0,'image':0,'wechat':0}
+        and original['primary_switch_authority'] is True
+        and original['production_authority'] is False, 'RECOVERY_ORIGINAL_SCOPE')
+    if original['mode'] == 'activate':
+        p.require(original['candidate'] == request['observed_predecessor']
+            and original['candidate']['git_parents'] == [SOURCE801]
+            and original['observed_predecessor']['source'] == SOURCE801
+            and original['observed_predecessor']['tree'] == TREE801
+            and original['artifact'] == request['current_artifact']
+            and original['current_artifact']['archive_sha256'] == ARCHIVE801
+            and original['current_artifact']['manifest_sha256'] == MANIFEST801,
+            'RECOVERY_FAILURE_BINDING')
+    else:
+        # A further independently authorized recovery may reference the last
+        # interrupted recovery. It is NEVER a replay of that operation/claim.
+        p.require(original['mode'] == 'recover' and original['candidate'] == request['candidate']
+            and original['artifact'] == request['artifact']
+            and original['observed_predecessor'] == request['observed_predecessor']
+            and original['current_artifact'] == request['current_artifact']
+            and original['recovery_evidence'], 'RECOVERY_FAILURE_BINDING')
+    # A later attempt is the only permissible next link. Even a failed or
+    # pending sibling must be inspected/referenced, never silently bypassed.
+    for other in directory.parent.iterdir():
+        if other.name in (opid, request['operation_id']):
+            continue
+        p.trusted(other, directory=True)
+        saved = other/'request.json'
+        if saved.exists() or saved.is_symlink():
+            value = p.read(p.trusted(saved))
+            p.require(value.get('failed_operation_id') != opid, 'RECOVERY_ALREADY_REFERENCED')
+    records = ['claim']
+    for action in EFFECTS:
+        records += ['intent:'+action, 'result:'+action]
+    seen = {'request.json'}
+    previous = None
+    identity = None
+    tail = None
+    stopped = False
+    has_intent = False
+    for stage in records:
+        name = stage.replace(':', '-')+'.json'
+        if name not in actual:
+            stopped = True
+            continue
+        p.require(not stopped, 'RECOVERY_AUDIT_GAP')
+        row = p.read(directory/name)
+        p.require(set(row) == {'operation_id','request_sha256','stage','prior_sha256','payload'}
+            and row['operation_id'] == opid and row['request_sha256'] == p.digest(original)
+            and row['stage'] == stage and row['prior_sha256'] == previous, 'RECOVERY_AUDIT_CHAIN')
+        payload = row['payload']
+        if stage == 'claim':
+            p.require(payload == {'request_sha256':p.digest(original)}, 'RECOVERY_CLAIM')
+        else:
+            phase, action = stage.split(':')
+            p.require(set(payload) == {'operation_id','actor','authorization_sha256','source','target',
+                'executor','at','action','result'} and payload['operation_id'] == opid
+                and payload['source'] == original['observed_predecessor']
+                and payload['target'] == original['candidate'] and payload['action'] == action
+                and type(payload['at']) is int and payload['at'] > 0, 'RECOVERY_INTENT_BINDING')
+            current = {k:payload[k] for k in ('actor','authorization_sha256','executor')}
+            p.require(type(current['actor']['uid']) is int and current['actor']['uid'] > 0
+                and type(current['actor']['gid']) is int and current['actor']['gid'] > 0
+                and re.fullmatch('[a-f0-9]{64}', current['authorization_sha256'])
+                and all(re.fullmatch('[a-f0-9]{40}', current['executor'][k]) for k in ('source','tree')),
+                'RECOVERY_AUDIT_IDENTITY')
+            if identity is None: identity = current
+            p.require(current == identity, 'RECOVERY_AUDIT_IDENTITY')
+            if phase == 'intent':
+                p.require(payload['result'] == 'PENDING', 'RECOVERY_INTENT_STATE')
+                has_intent = True
+            else:
+                p.require(payload['result'] == 'PASS' or
+                    re.fullmatch('FAILED_[A-Za-z0-9_:-]{1,120}',payload['result']), 'RECOVERY_RESULT_STATE')
+                if payload['result'] != 'PASS': stopped = True
+                p.require(not (action == 'health' and payload['result'] == 'PASS'),
+                          'RECOVERY_SUCCESS_OR_AMBIGUOUS_TERMINAL')
+        seen.add(name)
+        previous, tail = p.digest(row), stage
+    p.require('claim.json' in seen, 'RECOVERY_CLAIM_REQUIRED')
+    if 'failure.json' in actual:
+        failure = p.read(directory/'failure.json')
+        p.require(failure['request_sha256'] == p.digest(original)
+            and failure['operation_id'] == opid
+            and failure['status'] == 'UNKNOWN_REQUIRES_AUTHORIZED_RECOVERY', 'RECOVERY_FAILURE_BINDING')
+        seen.add('failure.json')
+        kind = 'TRUSTED_FAILURE_RECORD'
+    else:
+        p.require(has_intent, 'RECOVERY_INTENT_REQUIRED')
+        kind = 'TRUSTED_UNFINISHED_INTENT_WITHOUT_FAILURE'
+    if 'recovery-observation.json' in actual:
+        observation = p.read(directory/'recovery-observation.json')
+        p.require(original['mode'] == 'recover'
+            and observation['request_sha256'] == p.digest(original)
+            and observation['observed'] == original['recovery_observation']
+            and observation['provenance']['original_operation_id'] == original['failed_operation_id']
+            and observation['provenance']['evidence_sha256'] == p.digest(original['recovery_evidence']),
+            'RECOVERY_OBSERVATION_BINDING')
+        seen.add('recovery-observation.json')
+    p.require(seen == set(actual), 'RECOVERY_CONFLICTING_RECORDS')
+    return {'kind':kind, 'original_operation_id':opid, 'original_mode':original['mode'],
+            'original_status':'UNKNOWN', 'audit_head':previous, 'last_stage':tail,
+            'evidence_sha256':p.digest(pins)}
+
+
+def recovery_lifecycle(original, pins, directory, observed):
+    """An approved snapshot cannot authorize an impossible audit/runtime pair."""
+    started = {a for a in EFFECTS if 'intent-'+a+'.json' in pins}
+    passed = {a for a in EFFECTS if 'result-'+a+'.json' in pins and
+              p.read(directory/('result-'+a+'.json'))['payload']['result'] == 'PASS'}
+    source = original['candidate']['source']
+    target_cwd = str(ROOT/'releases'/source/'enterprise_agent_poc')
+    for role in UNITS:
+        row = observed['services'][role]
+        if original['mode'] == 'activate':
+            before = {'state':'active','cwd':original['current_cwds'][role]}
+            old_config = {SOURCE801,'ORIGINAL_801_UNIT'}
+        else:
+            before = original['recovery_observation']['services'][role]
+            old_config = {original['recovery_observation']['managed_sources'][role]}
+        stop, start, bind = 'stop'+role, 'start'+role, 'bind'+role
+        if stop not in started:
+            p.require(row['state'] == before['state'] and row['cwd'] == before['cwd'],
+                      'RECOVERY_UNEXPLAINED_SERVICE_STATE')
+        elif start not in started:
+            p.require(row['state'] != 'active' or
+                      (stop not in passed and row['cwd'] == before['cwd']), 'RECOVERY_STOP_STATE_CONFLICT')
+        elif row['state'] == 'active':
+            p.require(row['cwd'] == target_cwd, 'RECOVERY_START_STATE_CONFLICT')
+        allowed_config = {source} if bind in passed else old_config | ({source} if bind in started else set())
+        p.require(observed['managed_sources'][role] in allowed_config, 'RECOVERY_BIND_STATE_CONFLICT')
 
 
 def validate(request, policy, grant, decision, now):
@@ -176,6 +329,89 @@ class Callbacks:
                         p.require(p.sha(root/relative) == hashlib.sha256(tf.extractfile(member).read()).hexdigest(),
                                   'CURRENT_INSTALLED_BYTES_DRIFT')
 
+    def recovery_observation(self):
+        """Fresh read-only state, independently bound by the recovery grant.
+
+        Neither PID disappearance nor an audit tail proves what systemd did.
+        All live processes, on-disk overrides and both possible release payloads
+        are inspected before any recovery effect. No arbitrary third version.
+        """
+        import pwd
+        import tarfile
+        import hashlib
+        req, policy = self.request, self.policy
+        source = req['observed_predecessor']['source']
+        rows, overrides, releases = {}, {}, {}
+        original_cwd = str(ROOT/'candidate/enterprise_agent_poc')
+        old_cwd = str(ROOT/'releases'/SOURCE801/'enterprise_agent_poc')
+        new_cwd = str(ROOT/'releases'/source/'enterprise_agent_poc')
+        for role, unit in UNITS.items():
+            row = self.command('show', unit)
+            p.require(row['User'] == 'eaw-test' and
+                all(name in policy['service_files'] for name in
+                    [row['FragmentPath'], *row.get('DropInPaths','').split()]), 'RECOVERY_LOADED_UNIT_DRIFT')
+            p.require(row['ActiveState'] in ('active','inactive','failed'), 'RECOVERY_TRANSITIONING_SERVICE')
+            pid = int(row['MainPID'])
+            if row['ActiveState'] != 'active':
+                p.require(pid == 0, 'RECOVERY_INACTIVE_PID')
+                cwd = None
+            else:
+                p.require(pid > 0 and os.stat('/proc/'+str(pid)).st_uid == pwd.getpwnam('eaw-test').pw_uid,
+                          'RUNNING_UID_DRIFT')
+                cwd = os.readlink('/proc/'+str(pid)+'/cwd')
+                p.require(cwd in (original_cwd,old_cwd,new_cwd) and cwd == req['current_cwds'][role],
+                          'CURRENT_SOURCE_DRIFT')
+                argv = Path('/proc/'+str(pid)+'/cmdline').read_bytes().rstrip(b'\0').decode().split('\0')
+                expected = dropin(role,source).split('ExecStart=')[-1].strip().split()
+                expected[expected.index('--project')+1] = cwd
+                p.require(argv == expected, 'RUNNING_COMMAND_DRIFT')
+                p.require(p.sha(Path('/proc/'+str(pid)+'/exe')) ==
+                          p.sha(BASE/'runtime/python/bin/python'), 'RUNNING_EXE_DRIFT')
+            rows[role] = {'state':row['ActiveState'], 'pid':pid, 'cwd':cwd}
+            managed = Path('/etc/systemd/system')/(unit+'.d')/'90-standard-test-release.conf'
+            if managed.exists() or managed.is_symlink():
+                text = p.trusted(managed).read_text()
+                matches = [s for s in (SOURCE801,source) if text == dropin(role,s)]
+                p.require(len(matches) == 1, 'RECOVERY_MANAGED_CONFIGURATION_DRIFT')
+                overrides[role] = matches[0]
+            else:
+                overrides[role] = 'ORIGINAL_801_UNIT'
+        for version, archive_name in ((SOURCE801,'recovery_archive'),(source,'current_archive')):
+            destination = BASE/'releases'/version
+            if not destination.exists() and not destination.is_symlink():
+                releases[version] = 'ABSENT'
+                continue
+            p.trusted(destination, directory=True)
+            archive = p.trusted(policy[archive_name])
+            with tarfile.open(archive) as tf:
+                expected = {m.name for m in tf if m.isfile()}
+            actual = {f.relative_to(destination).as_posix() for f in destination.rglob('*') if f.is_file()}
+            p.require(actual == expected | {'installed.json'}, 'RECOVERY_RELEASE_FILE_SET')
+            for f in destination.rglob('*'): p.trusted(f, directory=f.is_dir())
+            with tarfile.open(archive) as tf:
+                for member in tf:
+                    if member.isfile():
+                        p.require(p.sha(destination/member.name) ==
+                            hashlib.sha256(tf.extractfile(member).read()).hexdigest(), 'RECOVERY_RELEASE_BYTES')
+            receipt = p.read(p.trusted(destination/'installed.json'))
+            expected_identity = req['candidate'] if version == SOURCE801 else req['observed_predecessor']
+            expected_artifact = req['artifact'] if version == SOURCE801 else req['current_artifact']
+            p.require(receipt == {'identity':expected_identity,'artifact':expected_artifact}, 'RECOVERY_RELEASE_RECEIPT')
+            releases[version] = p.digest(receipt)
+        all_old = all(r['state'] == 'active' and r['cwd'] in (original_cwd,old_cwd) for r in rows.values())
+        old_config = all(s in (SOURCE801,'ORIGINAL_801_UNIT') for s in overrides.values())
+        if all_old and old_config:
+            self.health_transport()  # unhealthy801 is NOT a no-op success
+            state = 'ALREADY_HEALTHY_801_NO_SERVICE_EFFECT'
+        elif all(r['state'] == 'active' and r['cwd'] == new_cwd for r in rows.values()):
+            state = 'TARGET_RUNNING_UNKNOWN_NOT_SUCCESS'
+        elif any(r['state'] != 'active' for r in rows.values()):
+            state = 'PARTIALLY_OR_FULLY_STOPPED_UNKNOWN'
+        else:
+            state = 'MIXED_RUNTIME_OR_CONFIGURATION_UNKNOWN'
+        return {'classification':state, 'services':rows, 'managed_sources':overrides, 'releases':releases,
+                'service_files':{name:p.sha(p.trusted(name)) for name in policy['service_files']}}
+
     def switch(self):
         source = self.request['candidate']['source']
         for role in ('worker', 'api', 'mcp'):
@@ -200,6 +436,9 @@ class Callbacks:
     def health(self):
         target = str(ROOT/'releases'/self.request['candidate']['source']/'enterprise_agent_poc')
         self.verify_live({r: target for r in UNITS}, after=True)
+        self.health_transport()
+
+    def health_transport(self):
         from urllib.request import urlopen
         import json
         deadline = time.monotonic()+60
@@ -224,15 +463,8 @@ class Callbacks:
         if req['mode'] == 'recover':
             allowed.add(str(ROOT/'releases'/SOURCE801/'enterprise_agent_poc'))
         p.require(all(cwd in allowed for cwd in req['current_cwds'].values()), 'CURRENT_CWD_BINDING')
-        if req['mode'] == 'recover':
-            import uuid
-            failed_id = req['failed_operation_id']
-            p.require(str(uuid.UUID(failed_id)) == failed_id and failed_id != req['operation_id'], 'RECOVERY_OPERATION')
-            failed = Path(policy['operations_root'])/failed_id
-            original = p.read(p.trusted(failed/'request.json'))
-            p.require(p.read(p.trusted(failed/'failure.json'))['request_sha256'] == p.digest(original)
-                and original['candidate'] == req['observed_predecessor']
-                and original['mode'] == 'activate', 'RECOVERY_FAILURE_BINDING')
+        self.authority(req)
+        evidence = recovery_evidence(req, policy) if req['mode'] == 'recover' else None
         self.verify_live(req['current_cwds'], inactive=req['mode'] == 'recover')
         for name, pin in policy['service_files'].items():
             p.require(name.startswith('/etc/systemd/system/enterprise-agent-standard-test-')
@@ -250,6 +482,22 @@ class Callbacks:
             and proof['request_sha256'] == p.digest(req) and proof['target'] == ident
             and proof['status'] == 'PASS' and proof['backup_restore_verified'] is True
             and proof['current_data_compatible'] is True, 'DATA_RECOVERY_PROOF_REQUIRED')
+        if evidence:
+            p.require(p.sha(p.trusted(policy['recovery_archive'])) == ARCHIVE801
+                and p.sha(p.trusted(policy['recovery_manifest'])) == MANIFEST801, 'ORIGINAL_801_DRIFT')
+            observed = self.recovery_observation()
+            p.require(observed == req['recovery_observation'], 'RECOVERY_OBSERVATION_DRIFT')
+            original_directory = Path(policy['operations_root'])/req['failed_operation_id']
+            recovery_lifecycle(p.read(p.trusted(original_directory/'request.json')),
+                               req['recovery_evidence'], original_directory, observed)
+            self.authority(req)
+            # This is a NEW observation in the NEW operation, not a fabricated
+            # historical failure or a relabeling of UNKNOWN as failure.
+            p.exclusive(Path(policy['operations_root'])/req['operation_id']/'recovery-observation.json',
+                        {'request_sha256':p.digest(req), 'provenance':evidence, 'observed':observed})
+            if observed['classification'] == 'ALREADY_HEALTHY_801_NO_SERVICE_EFFECT':
+                return {'status':'ALREADY_HEALTHY_801_NO_SERVICE_EFFECT', 'operation_id':req['operation_id'],
+                        'target':ident, 'mode':'recover', 'recovery':evidence, 'provider_calls':0}
         def stage():
             # Reuse existing checked extraction, never execute candidate code as Root.
             module = runpy.run_path(str(PROJECT/'scripts/test_delivery_native.py'))
@@ -277,10 +525,20 @@ class Callbacks:
                         p.require(p.sha(p.trusted(destination/member.name)) ==
                             hashlib.sha256(tf.extractfile(member).read()).hexdigest(), 'INSTALLED_BYTES_DRIFT')
         self.effect('stage', stage)
+        if evidence:
+            # Staging may add the801 release, but must not alter any live unit
+            # or process. Recheck immediately before the first service effect.
+            p.require(recovery_evidence(req,policy) == evidence, 'RECOVERY_EVIDENCE_DRIFT')
+            self.verify_live(req['current_cwds'], inactive=True)
+            self.verify_current_bytes()
+            fresh = self.recovery_observation()
+            p.require({k:v for k,v in fresh.items() if k != 'releases'} ==
+                      {k:v for k,v in observed.items() if k != 'releases'}, 'RECOVERY_PRESTOP_DRIFT')
         self.switch()
         self.effect('health', self.health)
         return {'status':'CALLBACKS_COMPLETED_PENDING_FRESH_ACCEPTANCE', 'operation_id':req['operation_id'],
-                'target':ident, 'mode':req['mode'], 'test_native':'NOT_QUALIFIED_BY_CALLBACKS', 'provider_calls':0}
+                'target':ident, 'mode':req['mode'], 'recovery':evidence,
+                'test_native':'NOT_QUALIFIED_BY_CALLBACKS', 'provider_calls':0}
 
 
 def execute(request_path, policy_path, grant_path):
